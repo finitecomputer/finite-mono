@@ -16,9 +16,10 @@ Quitting the TUI or pressing Ctrl-C should shut down the stack. Use
 From the monorepo root:
 
 ```sh
-just dev-up
-just dev-up --headless
-just dev-cleanup
+just dev up
+just dev up --headless
+just dev status
+just dev cleanup
 ```
 
 The equivalent direct commands are:
@@ -26,13 +27,20 @@ The equivalent direct commands are:
 ```sh
 cargo run -p devfinity -- up
 cargo run -p devfinity -- up --headless
+cargo run -p devfinity -- status
 cargo run -p devfinity -- cleanup
 ```
 
+`status` is read-only. It prints the generated state paths, process-compose
+socket state, devfinity pid-file process states, the local Postgres container
+state, and short TCP/HTTP checks for the configured services.
+
 `cleanup` is a recovery command, not the normal shutdown path. It asks
 process-compose to stop the generated stack if the local Unix socket is still
-present, removes the named `devfinity-postgres` container, and removes stale
-control files. It intentionally avoids broad port-based process killing.
+present, then checks devfinity pid files for any remaining managed process
+trees, removes devfinity-labeled Docker containers, removes Docker containers
+publishing devfinity's Postgres port, and removes stale control files. It
+intentionally avoids broad host process killing.
 
 ## Initial Stack
 

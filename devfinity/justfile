@@ -1,0 +1,11 @@
+# `just dev up` or `just dev up --headless`
+up *args:
+    cd .. && cargo run -p devfinity -- up {{ args }}
+
+# Prints running devfinity infra status
+status:
+    cd .. && cargo run -p devfinity -- status
+
+# Kills running devfinity processes
+cleanup:
+    cd .. && cargo run -p devfinity -- cleanup

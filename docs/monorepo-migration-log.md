@@ -374,7 +374,8 @@ Changes:
   - Local `finitechat-server`.
   - Local `finitesitesd`.
   - Dashboard dev server.
-- Added root wrappers: `just dev-up` and `dev-cleanup`.
+- Added `just dev` module wrappers: `just dev up`, `just dev status`, and
+  `just dev cleanup`.
 - Added `docs/local-integration-harness.md`.
 
 Notes:
@@ -383,7 +384,8 @@ Notes:
   the Finite-aware config generator.
 - Normal shutdown is foreground lifecycle shutdown: quit the process-compose TUI
   or press Ctrl-C. `devfinity cleanup` is a recovery command for orphaned
-  state/processes.
+  state/processes, including devfinity-managed process trees recorded in pid
+  files.
 - The richer local create-agent canary remains in
   `finitecomputer-v2/scripts/local_create_agent_canary.sh`; moving that into
   `devfinity` should be a later profile after the base stack is stable.
@@ -398,11 +400,12 @@ Validation:
 - `just check`
 - `just test`
 - `cargo test -p devfinity --locked`
-- `just dev-cleanup`
+- `just dev status`
+- `just dev cleanup`
 - `cargo fmt --all -- --check`
 - `just --unstable --fmt --check`
 
 Not run:
 
-- `just dev-up` without `--dry-run`; it starts the long-running local stack
+- `just dev up` without `--dry-run`; it starts the long-running local stack
   and depends on local Docker and dashboard Node/npm readiness.

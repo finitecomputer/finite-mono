@@ -332,7 +332,7 @@ Initial structure:
 - Keep process-compose YAML generated under `.local-state/devfinity/` so the
   committed repo does not hard-code machine-local state paths.
 - Add `docs/local-integration-harness.md` for operator/developer usage.
-- Add only thin root `just dev-*` wrappers around `devfinity`.
+- Add only thin `just dev` module wrappers around `devfinity`.
 
 Initial runtime shape:
 
@@ -341,7 +341,10 @@ Initial runtime shape:
   Ctrl-C is the normal shutdown path.
 - `devfinity up --headless`: run the same stack with `process-compose -t=false`.
 - `devfinity cleanup`: best-effort recovery for orphaned process-compose
-  processes, stale control files, and the named local Postgres container.
+  processes, devfinity-managed process trees, stale control files, and the
+  local Postgres container.
+- `devfinity status`: read-only status for process-compose, devfinity pid
+  files, local Docker containers, and configured service endpoints.
 
 Initial process-compose services:
 
@@ -371,8 +374,9 @@ Tasks:
 - [x] Add `devfinity up`, `up --headless`, and `cleanup`.
 - [x] Generate process-compose YAML into `.local-state/devfinity/`.
 - [x] Add local state layout under `.local-state/` or another ignored root.
-- [x] Add a minimal `just dev-up` command only after the harness exists.
-- [x] Add `just dev-up --headless` and `dev-cleanup` wrappers.
+- [x] Add a minimal `just dev up` command only after the harness exists.
+- [x] Add `just dev up --headless` and `dev cleanup` wrappers.
+- [x] Add `just dev status` for read-only local stack status.
 - [x] Add log collection for failed local runs.
 - [x] Document the harness in `docs/local-integration-harness.md`.
 

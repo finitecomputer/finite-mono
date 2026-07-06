@@ -24,6 +24,8 @@ struct Cli {
 enum Command {
     /// Generate config and run the local stack through process-compose.
     Up(UpArgs),
+    /// Print the current devfinity process, container, and service status.
+    Status,
     /// Best-effort cleanup for orphaned devfinity processes.
     Cleanup,
 }
@@ -64,6 +66,7 @@ fn run() -> anyhow::Result<ExitCode> {
             };
             stack.run_process_compose_up(mode, args.dry_run)
         }
+        Command::Status => stack.status(),
         Command::Cleanup => stack.cleanup(),
     }
 }

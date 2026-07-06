@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -11,12 +14,54 @@ pub enum ProcessComposeMode {
     Headless,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedProcess {
+    ProcessCompose,
+    RustBuild,
+    Postgres,
+    Core,
+    FiniteChat,
+    FiniteSites,
+    Dashboard,
+}
+
+impl ManagedProcess {
+    const ALL: [Self; 7] = [
+        Self::ProcessCompose,
+        Self::RustBuild,
+        Self::Postgres,
+        Self::Core,
+        Self::FiniteChat,
+        Self::FiniteSites,
+        Self::Dashboard,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessCompose => "process-compose",
+            Self::RustBuild => "rust-build",
+            Self::Postgres => "postgres",
+            Self::Core => "core",
+            Self::FiniteChat => "finitechat",
+            Self::FiniteSites => "finitesites",
+            Self::Dashboard => "dashboard",
+        }
+    }
+}
+
+impl std::fmt::Display for ManagedProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Stack {
     repo_root: PathBuf,
     state_dir: PathBuf,
     run_dir: PathBuf,
     logs_dir: PathBuf,
+    pids_dir: PathBuf,
     process_compose_file: PathBuf,
     process_compose_socket: PathBuf,
     postgres_container: String,
@@ -39,6 +84,7 @@ impl Stack {
         let state_dir = absolute_path(&repo_root, &state_dir);
         let run_dir = state_dir.join("runs").join("default");
         let logs_dir = run_dir.join("logs");
+        let pids_dir = run_dir.join("pids");
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
@@ -46,6 +92,7 @@ impl Stack {
             state_dir,
             run_dir,
             logs_dir,
+            pids_dir,
             postgres_container: "devfinity-postgres".to_string(),
             ports: Ports {
                 core: 14200,
@@ -63,6 +110,7 @@ impl Stack {
             &self.state_dir,
             &self.run_dir,
             &self.logs_dir,
+            &self.pids_dir,
             &self.postgres_dir(),
             &self.core_dir(),
             &self.dashboard_dir(),
@@ -129,6 +177,7 @@ impl Stack {
                 self.process_compose_socket.display().to_string(),
             ),
             ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
+            ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
             ("FC_CORE_URL", self.core_url()),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_CORE_API_TOKEN", self.core_token.clone()),
@@ -153,7 +202,7 @@ impl Stack {
         dry_run: bool,
     ) -> Result<ExitCode> {
         self.ensure_process_compose_available()?;
-        let mut command = self.process_compose_command();
+        let mut command = self.process_compose_up_command();
         if matches!(mode, ProcessComposeMode::Headless) {
             command.arg("--tui=false");
         }
@@ -161,13 +210,13 @@ impl Stack {
             command.arg("--dry-run");
         }
         command.arg("up");
-        run_status(command)
+        run_status_with_pid_file(command, &self.pid_file(ManagedProcess::ProcessCompose))
     }
 
     pub fn cleanup(&self) -> Result<ExitCode> {
         if self.process_compose_socket.exists() && self.process_compose_file.exists() {
             if self.process_compose_available() {
-                let mut command = self.process_compose_command();
+                let mut command = self.process_compose_control_command();
                 command.arg("down");
                 match command.status() {
                     Ok(status) if status.success() => {
@@ -189,15 +238,12 @@ impl Stack {
             println!("no devfinity process-compose socket found");
         }
 
-        run_best_effort(
-            Command::new("sh").arg("-c").arg(format!(
-                "docker rm -f {} >/dev/null 2>&1 || true",
-                self.postgres_container
-            )),
-            "remove devfinity Postgres container",
-        );
+        self.cleanup_managed_processes();
 
-        for path in [&self.process_compose_socket] {
+        self.cleanup_docker_containers();
+
+        let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
+        for path in [&self.process_compose_socket, &process_compose_pid_file] {
             if path.exists() {
                 if let Err(error) = fs::remove_file(path) {
                     eprintln!("failed to remove {}: {error}", path.display());
@@ -206,6 +252,58 @@ impl Stack {
         }
 
         println!("devfinity cleanup complete");
+        Ok(ExitCode::SUCCESS)
+    }
+
+    pub fn status(&self) -> Result<ExitCode> {
+        println!("devfinity status");
+        println!("  state:  {}", self.run_dir.display());
+        println!("  logs:   {}", self.logs_dir.display());
+        println!("  config: {}", self.process_compose_file.display());
+        println!(
+            "  socket: {} ({})",
+            self.process_compose_socket.display(),
+            if self.process_compose_socket.exists() {
+                "present"
+            } else {
+                "missing"
+            }
+        );
+        println!();
+
+        let table = match process_table() {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("failed to inspect process table: {error}");
+                Vec::new()
+            }
+        };
+
+        println!("processes:");
+        for status in self.managed_process_statuses(&table) {
+            println!(
+                "  {:<16} {:<10} {}",
+                status.process, status.state, status.detail
+            );
+        }
+        println!();
+
+        println!("containers:");
+        println!(
+            "  {:<24} {}",
+            self.postgres_container,
+            self.docker_container_status(&self.postgres_container)
+        );
+        println!();
+
+        println!("services:");
+        for check in self.service_checks() {
+            println!(
+                "  {:<16} {:<9} {}",
+                check.process, check.state, check.detail
+            );
+        }
+
         Ok(ExitCode::SUCCESS)
     }
 
@@ -235,42 +333,49 @@ impl Stack {
     }
 
     fn write_rust_build(&self, yaml: &mut String) {
-        let _ = writeln!(yaml, "  rust-build:");
+        let process = ManagedProcess::RustBuild;
+        let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
             "Build Rust service binaries",
             &self.repo_root,
-            "rust-build",
+            process,
         );
-        let _ = writeln!(
+        self.write_managed_command(
             yaml,
-            "    command: \"cargo build -p finite-saas-core -p finitechat-server -p finitesitesd\""
+            process,
+            &[String::from(
+                "exec cargo build -p finite-saas-core -p finitechat-server -p finitesitesd",
+            )],
+            &[],
         );
         let _ = writeln!(yaml, "    availability:");
         let _ = writeln!(yaml, "      restart: exit_on_failure");
     }
 
     fn write_postgres(&self, yaml: &mut String) {
+        let process = ManagedProcess::Postgres;
         let password = "finite-local";
-        let _ = writeln!(yaml, "  postgres:");
+        let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
             "Local Postgres for finite-saas-core",
             &self.repo_root,
-            "postgres",
+            process,
         );
-        let _ = writeln!(yaml, "    command: |");
-        let _ = writeln!(
+        self.write_managed_command(
             yaml,
-            "      docker rm -f {} >/dev/null 2>&1 || true",
-            self.postgres_container
-        );
-        let _ = writeln!(
-            yaml,
-            "      exec docker run --rm --name {} -e POSTGRES_PASSWORD={} -e POSTGRES_DB=finite_saas_core -p 127.0.0.1:{}:5432 postgres:16-alpine",
-            self.postgres_container,
-            shell_quote(password),
-            self.ports.postgres
+            process,
+            &[
+                self.remove_postgres_containers_shell(),
+                format!(
+                    "exec docker run --rm --name {} --label com.finite.devfinity=true --label com.finite.devfinity.run=default -e POSTGRES_PASSWORD={} -e POSTGRES_DB=finite_saas_core -p 127.0.0.1:{}:5432 postgres:16-alpine",
+                    self.postgres_container,
+                    shell_quote(password),
+                    self.ports.postgres
+                ),
+            ],
+            &[self.remove_postgres_containers_shell()],
         );
         let _ = writeln!(yaml, "    readiness_probe:");
         let _ = writeln!(yaml, "      exec:");
@@ -283,23 +388,26 @@ impl Stack {
         let _ = writeln!(yaml, "    shutdown:");
         let _ = writeln!(
             yaml,
-            "      command: \"docker stop {} >/dev/null 2>&1 || true\"",
+            "      command: \"docker rm -f {} >/dev/null 2>&1 || true\"",
             self.postgres_container
         );
         let _ = writeln!(yaml, "      timeout_seconds: 10");
     }
 
     fn write_core(&self, yaml: &mut String) {
-        let _ = writeln!(yaml, "  core:");
-        self.write_process_header(yaml, "Finite SaaS Core API", &self.repo_root, "core");
-        let _ = writeln!(
+        let process = ManagedProcess::Core;
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(yaml, "Finite SaaS Core API", &self.repo_root, process);
+        self.write_managed_command(
             yaml,
-            "    command: \"cargo run -p finite-saas-core -- serve\""
+            process,
+            &[String::from("exec cargo run -p finite-saas-core -- serve")],
+            &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      rust-build:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        let _ = writeln!(yaml, "      postgres:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Postgres);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -313,27 +421,29 @@ impl Stack {
     }
 
     fn write_finitechat(&self, yaml: &mut String) {
+        let process = ManagedProcess::FiniteChat;
         let sqlite = self.finitechat_dir().join("server.sqlite3");
         let command = format!(
             "cargo run -p finitechat-server -- serve 127.0.0.1:{} --sqlite {}",
             self.ports.finitechat,
             shell_quote(&sqlite.display().to_string())
         );
-        let _ = writeln!(yaml, "  finitechat:");
+        let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
             "Local Finite Chat delivery server",
             &self.repo_root,
-            "finitechat",
+            process,
         );
-        let _ = writeln!(yaml, "    command: {}", yaml_string(&command));
+        self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      rust-build:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe(yaml, "/health", self.ports.finitechat, 1, 2, 3, 45);
     }
 
     fn write_finitesites(&self, yaml: &mut String) {
+        let process = ManagedProcess::FiniteSites;
         let data = self.finitesites_dir();
         let command = format!(
             concat!(
@@ -353,36 +463,31 @@ impl Stack {
             self.ports.finitesites,
             self.ports.finitesites
         );
-        let _ = writeln!(yaml, "  finitesites:");
-        self.write_process_header(
-            yaml,
-            "Local Finite Sites server",
-            &self.repo_root,
-            "finitesites",
-        );
-        let _ = writeln!(yaml, "    command: {}", yaml_string(&command));
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(yaml, "Local Finite Sites server", &self.repo_root, process);
+        self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      rust-build:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe(yaml, "/api/v1/healthz", self.ports.finitesites, 1, 2, 3, 45);
     }
 
     fn write_dashboard(&self, yaml: &mut String) {
+        let process = ManagedProcess::Dashboard;
         let dashboard_dir = self.repo_root.join("finitecomputer-v2/apps/dashboard");
-        let _ = writeln!(yaml, "  dashboard:");
-        self.write_process_header(
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(yaml, "Finite dashboard dev server", &dashboard_dir, process);
+        self.write_managed_command(
             yaml,
-            "Finite dashboard dev server",
-            &dashboard_dir,
-            "dashboard",
-        );
-        let _ = writeln!(
-            yaml,
-            "    command: \"npm run dev -- --hostname 127.0.0.1 --port {}\"",
-            self.ports.dashboard
+            process,
+            &[format!(
+                "exec npm run dev -- --hostname 127.0.0.1 --port {}",
+                self.ports.dashboard
+            )],
+            &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      core:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -413,7 +518,7 @@ impl Stack {
         yaml: &mut String,
         description: &str,
         working_dir: &Path,
-        log_name: &str,
+        process: ManagedProcess,
     ) {
         let _ = writeln!(yaml, "    description: {}", yaml_string(description));
         let _ = writeln!(
@@ -427,11 +532,78 @@ impl Stack {
             yaml_string(
                 &self
                     .logs_dir
-                    .join(format!("{log_name}.log"))
+                    .join(format!("{process}.log"))
                     .display()
                     .to_string()
             )
         );
+    }
+
+    fn write_managed_command(
+        &self,
+        yaml: &mut String,
+        process: ManagedProcess,
+        command_lines: &[String],
+        teardown_lines: &[String],
+    ) {
+        let pid_file = self.pid_file(process);
+        let _ = writeln!(yaml, "    command: |");
+        let _ = writeln!(yaml, "      set -eu");
+        let _ = writeln!(
+            yaml,
+            "      mkdir -p {}",
+            shell_quote(&self.pids_dir.display().to_string())
+        );
+        let _ = writeln!(yaml, "      export DEVFINITY_MANAGED_PROCESS=1");
+        let _ = writeln!(
+            yaml,
+            "      export DEVFINITY_PROCESS={}",
+            shell_quote(process.as_str())
+        );
+        let _ = writeln!(
+            yaml,
+            "      export DEVFINITY_RUN_DIR={}",
+            shell_quote(&self.run_dir.display().to_string())
+        );
+        let _ = writeln!(yaml, "      (");
+        for line in command_lines {
+            let _ = writeln!(yaml, "        {line}");
+        }
+        let _ = writeln!(yaml, "      ) &");
+        let _ = writeln!(yaml, "      child=$!");
+        let _ = writeln!(
+            yaml,
+            "      printf '%s\\n' \"$child\" > {}",
+            shell_quote(&pid_file.display().to_string())
+        );
+        let _ = writeln!(yaml, "      teardown() {{");
+        let _ = writeln!(yaml, "        set +e");
+        for line in teardown_lines {
+            let _ = writeln!(yaml, "        {line}");
+        }
+        let _ = writeln!(yaml, "      }}");
+        let _ = writeln!(yaml, "      cleanup() {{");
+        let _ = writeln!(yaml, "        teardown");
+        let _ = writeln!(yaml, "        kill \"$child\" >/dev/null 2>&1 || true");
+        let _ = writeln!(yaml, "        wait \"$child\" >/dev/null 2>&1 || true");
+        let _ = writeln!(
+            yaml,
+            "        rm -f {}",
+            shell_quote(&pid_file.display().to_string())
+        );
+        let _ = writeln!(yaml, "        exit 143");
+        let _ = writeln!(yaml, "      }}");
+        let _ = writeln!(yaml, "      trap cleanup INT TERM");
+        let _ = writeln!(yaml, "      set +e");
+        let _ = writeln!(yaml, "      wait \"$child\"");
+        let _ = writeln!(yaml, "      status=$?");
+        let _ = writeln!(yaml, "      teardown");
+        let _ = writeln!(
+            yaml,
+            "      rm -f {}",
+            shell_quote(&pid_file.display().to_string())
+        );
+        let _ = writeln!(yaml, "      exit \"$status\"");
     }
 
     fn write_environment(&self, yaml: &mut String, env: &[(&str, String)]) {
@@ -474,18 +646,32 @@ impl Stack {
         let _ = writeln!(yaml, "      failure_threshold: {failures}");
     }
 
-    fn process_compose_command(&self) -> Command {
+    fn process_compose_up_command(&self) -> Command {
         let mut command = Command::new("process-compose");
         command
             .arg("--config")
             .arg(&self.process_compose_file)
-            .arg("--use-uds")
-            .arg("--unix-socket")
-            .arg(&self.process_compose_socket)
-            .arg("--ordered-shutdown")
-            .arg("--log-file")
-            .arg(self.logs_dir.join("process-compose-supervisor.log"));
+            .args(self.process_compose_control_args());
         command
+    }
+
+    fn process_compose_control_command(&self) -> Command {
+        let mut command = Command::new("process-compose");
+        command.args(self.process_compose_control_args());
+        command
+    }
+
+    fn process_compose_control_args(&self) -> Vec<std::ffi::OsString> {
+        vec![
+            "--use-uds".into(),
+            "--unix-socket".into(),
+            self.process_compose_socket.clone().into_os_string(),
+            "--ordered-shutdown".into(),
+            "--log-file".into(),
+            self.logs_dir
+                .join("process-compose-supervisor.log")
+                .into_os_string(),
+        ]
     }
 
     fn ensure_process_compose_available(&self) -> Result<()> {
@@ -502,6 +688,236 @@ impl Stack {
             .stderr(Stdio::null())
             .status();
         matches!(status, Ok(status) if status.success())
+    }
+
+    fn cleanup_managed_processes(&self) {
+        let table = match process_table() {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("failed to inspect process table: {error}");
+                return;
+            }
+        };
+
+        for spec in self.managed_process_specs() {
+            self.cleanup_pid_file(&spec, &table);
+        }
+    }
+
+    fn cleanup_pid_file(&self, spec: &ManagedProcessSpec, table: &[ProcessInfo]) {
+        let pid = match read_pid_file(&spec.pid_file) {
+            Ok(Some(pid)) => pid,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("failed to read {}: {error}", spec.pid_file.display());
+                return;
+            }
+        };
+
+        let Some(root) = table.iter().find(|process| process.pid == pid) else {
+            remove_file_best_effort(&spec.pid_file);
+            return;
+        };
+
+        if !process_matches(root, &spec.expected_fragments) {
+            eprintln!(
+                "not killing pid {} from {} because it no longer looks like devfinity {}: {}",
+                pid,
+                spec.pid_file.display(),
+                spec.process,
+                root.command
+            );
+            return;
+        }
+
+        let mut pids = descendant_pids(table, pid);
+        pids.push(pid);
+        pids.sort_unstable();
+        pids.dedup();
+        pids.retain(|candidate| *candidate != std::process::id());
+
+        if pids.is_empty() {
+            remove_file_best_effort(&spec.pid_file);
+            return;
+        }
+
+        pids.reverse();
+        println!(
+            "stopping devfinity {} process tree: {:?}",
+            spec.process, pids
+        );
+        terminate_processes(&pids);
+        remove_file_best_effort(&spec.pid_file);
+    }
+
+    fn managed_process_statuses(&self, table: &[ProcessInfo]) -> Vec<ManagedProcessRuntimeStatus> {
+        self.managed_process_specs()
+            .into_iter()
+            .map(|spec| {
+                let pid = match read_pid_file(&spec.pid_file) {
+                    Ok(Some(pid)) => pid,
+                    Ok(None) => {
+                        return ManagedProcessRuntimeStatus::new(
+                            spec.process,
+                            "stopped",
+                            format!("no pid file ({})", spec.pid_file.display()),
+                        );
+                    }
+                    Err(error) => {
+                        return ManagedProcessRuntimeStatus::new(
+                            spec.process,
+                            "unknown",
+                            format!("invalid pid file {}: {error}", spec.pid_file.display()),
+                        );
+                    }
+                };
+
+                let Some(process) = table.iter().find(|process| process.pid == pid) else {
+                    return ManagedProcessRuntimeStatus::new(
+                        spec.process,
+                        "stale",
+                        format!("pid {pid} is not running"),
+                    );
+                };
+
+                if process_matches(process, &spec.expected_fragments) {
+                    ManagedProcessRuntimeStatus::new(
+                        spec.process,
+                        "running",
+                        format!("pid {pid}: {}", process.command),
+                    )
+                } else {
+                    ManagedProcessRuntimeStatus::new(
+                        spec.process,
+                        "mismatch",
+                        format!("pid {pid}: {}", process.command),
+                    )
+                }
+            })
+            .collect()
+    }
+
+    fn managed_process_specs(&self) -> Vec<ManagedProcessSpec> {
+        ManagedProcess::ALL
+            .into_iter()
+            .map(|process| {
+                let expected_fragments = match process {
+                    ManagedProcess::ProcessCompose => vec![
+                        ManagedProcess::ProcessCompose.as_str().to_string(),
+                        self.process_compose_file.display().to_string(),
+                    ],
+                    ManagedProcess::RustBuild => vec![String::from("cargo"), String::from("build")],
+                    ManagedProcess::Postgres => vec![
+                        String::from("docker"),
+                        String::from("run"),
+                        self.postgres_container.clone(),
+                    ],
+                    ManagedProcess::Core => vec![
+                        String::from("cargo"),
+                        String::from("finite-saas-core"),
+                        String::from("serve"),
+                    ],
+                    ManagedProcess::FiniteChat => vec![
+                        String::from("finitechat-server"),
+                        self.finitechat_dir().display().to_string(),
+                    ],
+                    ManagedProcess::FiniteSites => vec![
+                        String::from("finitesitesd"),
+                        self.finitesites_dir().display().to_string(),
+                    ],
+                    ManagedProcess::Dashboard => vec![
+                        String::from("npm"),
+                        String::from("run"),
+                        String::from("dev"),
+                        self.ports.dashboard.to_string(),
+                    ],
+                };
+                ManagedProcessSpec::new(process, self.pid_file(process), expected_fragments)
+            })
+            .collect()
+    }
+
+    fn cleanup_docker_containers(&self) {
+        let command = format!(
+            "for id in $(docker ps -aq --filter label=com.finite.devfinity=true 2>/dev/null); do docker rm -f \"$id\" >/dev/null 2>&1 || true; done; {};",
+            self.remove_postgres_containers_shell()
+        );
+        run_best_effort(
+            Command::new("sh").arg("-c").arg(command),
+            "remove devfinity Docker containers and Postgres port owners",
+        );
+    }
+
+    fn remove_postgres_containers_shell(&self) -> String {
+        format!(
+            "for id in $(docker ps -aq --filter publish={} 2>/dev/null); do docker rm -f \"$id\" >/dev/null 2>&1 || true; done; docker rm -f {} >/dev/null 2>&1 || true",
+            self.ports.postgres,
+            shell_quote(&self.postgres_container)
+        )
+    }
+
+    fn docker_container_status(&self, container: &str) -> String {
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &format!("name=^/{container}$"),
+                "--format",
+                "{{.Names}}\t{{.Status}}",
+            ])
+            .output();
+
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => return format!("unavailable: {error}"),
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.lines().next().unwrap_or("docker ps failed").trim();
+            return format!("unavailable: {detail}");
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        match stdout
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            Some(line) => line.replace('\t', " - "),
+            None => "not found".to_string(),
+        }
+    }
+
+    fn service_checks(&self) -> Vec<ServiceCheck> {
+        vec![
+            check_tcp_service(ManagedProcess::Postgres, "127.0.0.1", self.ports.postgres),
+            check_http_service(
+                ManagedProcess::Core,
+                "127.0.0.1",
+                self.ports.core,
+                "/healthz",
+            ),
+            check_http_service(
+                ManagedProcess::FiniteChat,
+                "127.0.0.1",
+                self.ports.finitechat,
+                "/health",
+            ),
+            check_http_service(
+                ManagedProcess::FiniteSites,
+                "127.0.0.1",
+                self.ports.finitesites,
+                "/api/v1/healthz",
+            ),
+            check_http_service(
+                ManagedProcess::Dashboard,
+                "127.0.0.1",
+                self.ports.dashboard,
+                "/dashboard",
+            ),
+        ]
     }
 
     fn urls_text(&self) -> String {
@@ -545,28 +961,262 @@ impl Stack {
     }
 
     fn postgres_dir(&self) -> PathBuf {
-        self.run_dir.join("postgres")
+        self.process_state_dir(ManagedProcess::Postgres)
     }
 
     fn core_dir(&self) -> PathBuf {
-        self.run_dir.join("core")
+        self.process_state_dir(ManagedProcess::Core)
     }
 
     fn dashboard_dir(&self) -> PathBuf {
-        self.run_dir.join("dashboard")
+        self.process_state_dir(ManagedProcess::Dashboard)
     }
 
     fn finitechat_dir(&self) -> PathBuf {
-        self.run_dir.join("finitechat")
+        self.process_state_dir(ManagedProcess::FiniteChat)
     }
 
     fn finitesites_dir(&self) -> PathBuf {
-        self.run_dir.join("finitesites")
+        self.process_state_dir(ManagedProcess::FiniteSites)
     }
 
     fn finite_home_dir(&self) -> PathBuf {
         self.run_dir.join("finite-home")
     }
+
+    fn process_state_dir(&self, process: ManagedProcess) -> PathBuf {
+        self.run_dir.join(process.as_str())
+    }
+
+    fn pid_file(&self, process: ManagedProcess) -> PathBuf {
+        self.pids_dir.join(format!("{process}.pid"))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManagedProcessSpec {
+    process: ManagedProcess,
+    pid_file: PathBuf,
+    expected_fragments: Vec<String>,
+}
+
+impl ManagedProcessSpec {
+    fn new(process: ManagedProcess, pid_file: PathBuf, expected_fragments: Vec<String>) -> Self {
+        Self {
+            process,
+            pid_file,
+            expected_fragments,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManagedProcessRuntimeStatus {
+    process: ManagedProcess,
+    state: &'static str,
+    detail: String,
+}
+
+impl ManagedProcessRuntimeStatus {
+    fn new(process: ManagedProcess, state: &'static str, detail: String) -> Self {
+        Self {
+            process,
+            state,
+            detail,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ServiceCheck {
+    process: ManagedProcess,
+    state: &'static str,
+    detail: String,
+}
+
+impl ServiceCheck {
+    fn new(process: ManagedProcess, state: &'static str, detail: String) -> Self {
+        Self {
+            process,
+            state,
+            detail,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProcessInfo {
+    pid: u32,
+    ppid: u32,
+    command: String,
+}
+
+fn process_table() -> Result<Vec<ProcessInfo>> {
+    let output = Command::new("ps")
+        .args(["axww", "-o", "pid=", "-o", "ppid=", "-o", "command="])
+        .output()
+        .context("failed to run ps")?;
+    if !output.status.success() {
+        bail!("ps exited with {}", output.status);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(pid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(ppid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let command = parts.collect::<Vec<_>>().join(" ");
+        processes.push(ProcessInfo { pid, ppid, command });
+    }
+    Ok(processes)
+}
+
+fn read_pid_file(path: &Path) -> Result<Option<u32>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .with_context(|| format!("invalid pid in {}", path.display()))
+}
+
+fn process_matches(process: &ProcessInfo, expected_fragments: &[String]) -> bool {
+    expected_fragments
+        .iter()
+        .all(|fragment| process.command.contains(fragment))
+}
+
+fn descendant_pids(table: &[ProcessInfo], root_pid: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(parent) = stack.pop() {
+        for process in table.iter().filter(|process| process.ppid == parent) {
+            descendants.push(process.pid);
+            stack.push(process.pid);
+        }
+    }
+    descendants
+}
+
+fn terminate_processes(pids: &[u32]) {
+    signal_processes(pids, "TERM");
+    std::thread::sleep(std::time::Duration::from_millis(750));
+
+    let alive: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| process_alive(*pid))
+        .collect();
+    if !alive.is_empty() {
+        signal_processes(&alive, "KILL");
+    }
+}
+
+fn signal_processes(pids: &[u32], signal: &str) {
+    for pid in pids {
+        let status = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(pid.to_string())
+            .status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!("kill -{signal} {pid} exited with {status}"),
+            Err(error) => eprintln!("failed to run kill -{signal} {pid}: {error}"),
+        }
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    let status = Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    matches!(status, Ok(status) if status.success())
+}
+
+fn remove_file_best_effort(path: &Path) {
+    if path.exists() {
+        if let Err(error) = fs::remove_file(path) {
+            eprintln!("failed to remove {}: {error}", path.display());
+        }
+    }
+}
+
+fn check_tcp_service(process: ManagedProcess, host: &str, port: u16) -> ServiceCheck {
+    match connect_tcp(host, port) {
+        Ok(_) => ServiceCheck::new(process, "open", format!("tcp {host}:{port} accepted")),
+        Err(error) => ServiceCheck::new(process, "down", format!("tcp {host}:{port}: {error}")),
+    }
+}
+
+fn check_http_service(process: ManagedProcess, host: &str, port: u16, path: &str) -> ServiceCheck {
+    match http_status_line(host, port, path) {
+        Ok(status_line) => {
+            let state = if http_status_is_ok(&status_line) {
+                "healthy"
+            } else {
+                "unhealthy"
+            };
+            ServiceCheck::new(
+                process,
+                state,
+                format!("http://{host}:{port}{path} {status_line}"),
+            )
+        }
+        Err(error) => ServiceCheck::new(
+            process,
+            "down",
+            format!("http://{host}:{port}{path}: {error}"),
+        ),
+    }
+}
+
+fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{error}"))
+    })?;
+    TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+}
+
+fn http_status_line(host: &str, port: u16, path: &str) -> std::io::Result<String> {
+    let mut stream = connect_tcp(host, port)?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response
+        .lines()
+        .next()
+        .unwrap_or("no HTTP status line")
+        .trim()
+        .to_string())
+}
+
+fn http_status_is_ok(status_line: &str) -> bool {
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (200..400).contains(&code))
 }
 
 fn absolute_path(root: &Path, path: &Path) -> PathBuf {
@@ -577,14 +1227,32 @@ fn absolute_path(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn run_status(mut command: Command) -> Result<ExitCode> {
-    let status = command
-        .status()
+fn run_status_with_pid_file(mut command: Command, pid_file: &Path) -> Result<ExitCode> {
+    if let Some(parent) = pid_file.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut child = command
+        .spawn()
         .with_context(|| format!("failed to run {:?}", command))?;
-    Ok(match status.code() {
+    if let Err(error) = fs::write(pid_file, format!("{}\n", child.id())) {
+        let _ = child.kill();
+        bail!("failed to write {}: {error}", pid_file.display());
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for {:?}", command))?;
+    remove_file_best_effort(pid_file);
+    Ok(status_to_exit_code(status))
+}
+
+fn status_to_exit_code(status: std::process::ExitStatus) -> ExitCode {
+    match status.code() {
         Some(code) if (0..=255).contains(&code) => ExitCode::from(code as u8),
         _ => ExitCode::FAILURE,
-    })
+    }
 }
 
 fn run_best_effort(command: &mut Command, label: &str) {
@@ -631,6 +1299,11 @@ mod tests {
     }
 
     #[test]
+    fn managed_process_display_respects_format_width() {
+        assert_eq!(format!("{:<16}", ManagedProcess::Core), "core            ");
+    }
+
+    #[test]
     fn generated_yaml_contains_core_services() {
         let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
         let yaml = stack.process_compose_yaml();
@@ -642,5 +1315,74 @@ mod tests {
         assert!(yaml.contains("dashboard:"));
         assert!(yaml.contains("process_completed_successfully"));
         assert!(yaml.contains("process_healthy"));
+        assert!(yaml.contains("DEVFINITY_MANAGED_PROCESS=1"));
+        assert!(yaml.contains("pids/core.pid"));
+        assert!(yaml.contains("--label com.finite.devfinity=true"));
+    }
+
+    #[test]
+    fn process_matching_requires_all_expected_fragments() {
+        let process = ProcessInfo {
+            pid: 1,
+            ppid: 0,
+            command: "cargo run -p finite-saas-core -- serve".to_string(),
+        };
+
+        assert!(process_matches(
+            &process,
+            &[
+                "cargo".to_string(),
+                "finite-saas-core".to_string(),
+                "serve".to_string()
+            ],
+        ));
+        assert!(!process_matches(
+            &process,
+            &["cargo".to_string(), "finitesitesd".to_string()],
+        ));
+    }
+
+    #[test]
+    fn descendant_pids_are_recursive() {
+        let table = vec![
+            ProcessInfo {
+                pid: 10,
+                ppid: 1,
+                command: "parent".to_string(),
+            },
+            ProcessInfo {
+                pid: 11,
+                ppid: 10,
+                command: "child".to_string(),
+            },
+            ProcessInfo {
+                pid: 12,
+                ppid: 11,
+                command: "grandchild".to_string(),
+            },
+            ProcessInfo {
+                pid: 20,
+                ppid: 1,
+                command: "unrelated".to_string(),
+            },
+        ];
+
+        let mut descendants = descendant_pids(&table, 10);
+        descendants.sort_unstable();
+        assert_eq!(descendants, vec![11, 12]);
+    }
+
+    #[test]
+    fn process_compose_control_args_do_not_include_config() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        let args = stack
+            .process_compose_control_args()
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--use-uds".to_string()));
+        assert!(args.contains(&"--unix-socket".to_string()));
+        assert!(!args.contains(&"--config".to_string()));
     }
 }
