@@ -32,29 +32,29 @@ form.
 - [x] Destination repository is `finite-mono`.
 - [x] Do not preserve git history.
 - [x] Do not use `git subtree`, `git filter-repo`, or other history-preserving
-  import commands.
+      import commands.
 - [x] Copy files directly from the source repos.
 - [x] Record source commit SHAs in the migration note.
 - [x] Do not modify, archive, or delete the existing repos during migration.
 - [x] Do not spend time on rollback plans.
 - [x] Keep `finitecomputer-v2`, `finitechat`, and `finite-sites` as top-level
-  folders at first.
+      folders at first.
 - [x] Do not create root-level service or app folders during the initial
-  migration.
+      migration.
 - [x] Do not create a separate integration area during the initial migration.
-  Integration ownership can stay with the finitecomputer domain for now.
+      Integration ownership can stay with the finitecomputer domain for now.
 - [x] Keep the root `justfile` simple. Do not adopt Flakebox just generation.
 - [x] Allow a root `scripts/` directory, but keep it shallow until there is real
-  pressure for more structure.
+      pressure for more structure.
 - [x] Treat the local integration harness as a separate phase after basic
-  monorepo import.
+      monorepo import.
 - [x] Treat CI as a separate phase after local commands work.
 - [x] Treat quality gates as a separate phase after the first import stabilizes.
 - [x] Do not build a Nix system for non-Rust artifacts at the start.
 - [x] Repurpose `finite-eng-docs` into the monorepo's normal `docs/` role, but
-  do not blindly copy stale docs as authoritative truth.
+      do not blindly copy stale docs as authoritative truth.
 - [x] Defer broad stale-doc cleanup until after the first imported repos are
-  working from the monorepo.
+      working from the monorepo.
 
 ## Target Shape
 
@@ -103,7 +103,7 @@ move.
 - [x] Record the source commit SHA for `finite-sites`.
 - [x] Add `docs/monorepo-migration-log.md`.
 - [x] Write the source repo paths and source commit SHAs into the migration
-  log.
+      log.
 - [x] Note that the import is a snapshot copy, not a history-preserving import.
 
 Exit criterion: `finite-mono` exists and the source commit SHAs are recorded in
@@ -115,7 +115,7 @@ Goal: create only the root files needed to orient the copied repos.
 
 - [x] Create root `README.md` explaining that this is the Finite monorepo.
 - [x] Create root `AGENTS.md` with high-level repo navigation and editing
-  rules.
+      rules.
 - [x] Create root `docs/`.
 - [x] Create root `scripts/`.
 - [x] Create a minimal root `justfile`.
@@ -124,7 +124,7 @@ Goal: create only the root files needed to orient the copied repos.
 - [x] Generate root `flake.lock`.
 - [x] Add this plan at `docs/monorepo-plan.md`.
 - [x] Add the Fedimint analysis at
-  `docs/fedimint-monorepo-structure-analysis.md`.
+      `docs/fedimint-monorepo-structure-analysis.md`.
 
 Initial root `justfile` should stay small:
 
@@ -148,13 +148,13 @@ Tasks:
 
 - [x] Copy `finitecomputer-v2` into `finite-mono/finitecomputer-v2`.
 - [x] Exclude generated or machine-local directories such as `target/`,
-  `node_modules/`, `.next/`, and `.local-state/`.
+      `node_modules/`, `.next/`, and `.local-state/`.
 - [x] Keep the repo's internal folder structure intact.
 - [x] Run the old Rust check from `finite-mono/finitecomputer-v2`.
 - [x] Run the old dashboard install/test command from the copied
-  `finitecomputer-v2` tree.
+      `finitecomputer-v2` tree.
 - [x] Record copied commit SHA, ignored local files, validation commands, and
-  failures in `docs/monorepo-migration-log.md`.
+      failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finitecomputer-v2` works from its copied folder using the same
 commands it used before migration.
@@ -168,15 +168,15 @@ Tasks:
 
 - [x] Copy `finitechat` into `finite-mono/finitechat`.
 - [x] Exclude generated or machine-local directories such as `target/`,
-  `.finitechat/`, `.state/`, iOS build products, and script caches.
+      `.finitechat/`, `.state/`, iOS build products, and script caches.
 - [x] Keep the repo's internal folder structure intact.
 - [x] Run the old Rust checks from `finite-mono/finitechat`.
 - [x] Run the old Python smoke tests from `finite-mono/finitechat` if they are
-  still expected to pass locally.
+      still expected to pass locally.
 - [x] Run the minimum iOS or bindgen smoke that currently exists, if it is
-  practical locally.
+      practical locally.
 - [x] Record copied commit SHA, ignored local files, validation commands, and
-  failures in `docs/monorepo-migration-log.md`.
+      failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finitechat` works from its copied folder using the same
 commands it used before migration, or any non-portable local checks are
@@ -191,12 +191,12 @@ Tasks:
 
 - [x] Copy `finite-sites` into `finite-mono/finite-sites`.
 - [x] Exclude generated or machine-local directories such as `target/` and
-  `.dev-data/`.
+      `.dev-data/`.
 - [x] Keep the repo's internal folder structure intact.
 - [x] Run the old Rust checks from `finite-mono/finite-sites`.
 - [x] Run the old local dev smoke if it is quick and deterministic.
 - [x] Record copied commit SHA, ignored local files, validation commands, and
-  failures in `docs/monorepo-migration-log.md`.
+      failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finite-sites` works from its copied folder using the same
 commands it used before migration.
@@ -212,7 +212,7 @@ or move app/service folders in this phase.
 Tasks:
 
 - [x] Check Fedimint's root `Cargo.toml` and workspace dependency pattern
-  before writing the Finite root workspace.
+      before writing the Finite root workspace.
 - [x] Confirm root `Cargo.toml` still has one `[workspace]`.
 - [x] Add `finitecomputer-v2/crates/*` members explicitly.
 - [x] Add `finitechat/crates/*` members explicitly.
@@ -220,7 +220,7 @@ Tasks:
 - [x] Add `finite-sites/crates/*` members explicitly.
 - [x] Decide whether to use a root `[workspace.package]` immediately or later.
 - [x] Decide whether to merge `[workspace.dependencies]` immediately or keep
-  dependency declarations in member crates temporarily.
+      dependency declarations in member crates temporarily.
 - [x] Generate one root `Cargo.lock`.
 - [x] Verify the root lockfile before removing nested `Cargo.lock` files.
 - [x] Fix path dependencies that break from the new root workspace.
@@ -229,7 +229,7 @@ Tasks:
 - [x] Run `cargo check --workspace` from `finite-mono`.
 - [x] Run `cargo test --workspace` from `finite-mono`.
 - [x] Remove nested `Cargo.lock` files only after the root lockfile is working
-  and copied repo Cargo commands resolve through the root workspace.
+      and copied repo Cargo commands resolve through the root workspace.
 
 Exit criterion: root `cargo check --workspace` and `cargo test --workspace`
 cover all imported Rust crates that are expected to pass locally.
@@ -243,19 +243,19 @@ Keep this intentionally smaller than Fedimint's command set.
 Tasks:
 
 - [x] Check Fedimint's split between generated root `justfile` and custom
-  project justfile before finalizing the Finite root `justfile`.
+      project justfile before finalizing the Finite root `justfile`.
 - [x] Keep `just default` as a discoverable command list.
 - [x] Add `just metadata` for root Cargo workspace metadata checks.
 - [x] Add `just check` for root Rust workspace checks.
 - [x] Add `just test` for root Rust workspace tests.
 - [x] Use `just` modules for repo-local command surfaces that should stay
-  nested.
+      nested.
 - [x] Add `just sites ...` as a module backed by `finite-sites/justfile`.
-- [ ] Add `just fmt` for Rust formatting only if it is already low-friction.
+- [x] Add `just fmt` for Rust formatting only if it is already low-friction.
 - [x] Avoid adding dashboard, chat, sites, CI, release, and deploy commands as
-  root recipes in this phase unless they are repeatedly needed.
+      root recipes in this phase unless they are repeatedly needed.
 - [x] Move any multi-line logic into root `scripts/` instead of growing the
-  `justfile`.
+      `justfile`.
 
 Exit criterion: root commands are discoverable without becoming a second build
 system.
@@ -268,15 +268,15 @@ pretending stale imported docs are current.
 Tasks:
 
 - [ ] Check Fedimint's `docs/` structure before finalizing root docs
-  navigation.
+      navigation.
 - [ ] Move this plan to `docs/monorepo-plan.md`.
 - [ ] Move the Fedimint analysis to
-  `docs/fedimint-monorepo-structure-analysis.md`.
+      `docs/fedimint-monorepo-structure-analysis.md`.
 - [ ] Move useful `finite-eng-docs` orientation content into root docs, updating
-  language from "cross-repo" to "monorepo".
+      language from "cross-repo" to "monorepo".
 - [ ] Keep copied repo docs inside their source repo folders at first.
 - [ ] Add a root `docs/README.md` that distinguishes current root docs from
-  imported repo-local docs.
+      imported repo-local docs.
 - [ ] Mark stale or unreviewed docs clearly before linking them as canonical.
 - [ ] Maintain `docs/monorepo-migration-log.md` until migration is done.
 
@@ -295,15 +295,29 @@ Tasks:
 - [ ] Update root `README.md` to link to each source repo folder.
 - [ ] Remove only duplicated docs or scripts that are actively confusing.
 - [ ] Keep dashboard, iOS, deploy files, and integration code inside their
-  copied source repo folders unless there is a concrete reason to move them.
+      copied source repo folders unless there is a concrete reason to move them.
 
 Exit criterion: a new engineer can start from the root README and find the
 right copied repo folder and commands.
 
 ## Phase 9: Local Integration Harness
 
-Goal: build a Finite equivalent of Fedimint's `devimint`, but only after the
-monorepo can build the pieces independently.
+Goal: build a Finite equivalent of Fedimint's `devimint`, named `devfinity`,
+but only after the monorepo can build the pieces independently. Before working
+on this harness, use Fedimint's `devimint` crate and `scripts/dev/mprocs`
+workflow as the reference point: copy the durable contract, not the product
+specific complexity.
+
+`devfinity` should be the Finite-aware launcher and smoke tool. It should own
+state layout, generated environment variables, process-compose config
+generation, and cross-service smoke checks. It should not hand-roll process
+supervision.
+
+Use `process-compose` as the default local process runtime. The default
+developer path should show the process-compose TUI so developers can see which
+services are running, their health, and their logs. A `--headless` path should
+run the same process-compose config with the TUI disabled for automation or
+non-interactive terminals.
 
 Initial harness scope should be narrow:
 
@@ -313,17 +327,57 @@ Initial harness scope should be narrow:
 - Create deterministic local state.
 - Print the URLs and credentials needed for manual smoke testing.
 
+Initial structure:
+
+- Add a top-level `devfinity/` Rust workspace crate.
+- Keep process-compose YAML generated under `.local-state/devfinity/` so the
+  committed repo does not hard-code machine-local state paths.
+- Add `docs/local-integration-harness.md` for operator/developer usage.
+- Add only thin root `just stack-*` wrappers around `devfinity`.
+
+Initial runtime shape:
+
+- `devfinity up`: create state, write env, generate process-compose YAML, then
+  run `process-compose` with the TUI enabled.
+- `devfinity up --headless`: run the same stack with `process-compose -t=false`.
+- `devfinity attach`: attach a TUI to an already-running process-compose
+  instance when the stack is running headless or detached.
+- `devfinity down`: stop the process-compose stack if it is running.
+- `devfinity status`: list known service URLs, state paths, and process-compose
+  control paths.
+- `devfinity smoke health`: probe the first useful service health endpoints.
+
+Initial process-compose services:
+
+- Local Postgres for `finite-saas-core`.
+- `finite-saas-core` on a deterministic local port.
+- Dashboard dev server with development auth enabled.
+- Local `finitechat-server` backed by SQLite state.
+- Local `finitesitesd` with its data dir under `.local-state/devfinity/`.
+
+Use a Unix socket under `.local-state/devfinity/` for the process-compose
+control API by default. Avoid the default TCP control port unless a later
+remote-control use case requires it.
+
 Tasks:
 
-- [ ] Check Fedimint's `devimint` crate, `just mprocs`, and test harness
-  structure before designing the Finite harness.
-- [ ] Decide whether the harness should be Rust, shell, or a small mixed
-  wrapper.
+- [x] Check Fedimint's `devimint` crate, `just mprocs`, and test harness
+      structure before designing the Finite harness.
+- [x] Decide whether the harness should be Rust, shell, or a small mixed
+      wrapper: `devfinity` is a Rust generator/smoke tool, and process-compose
+      owns process supervision and visualization.
 - [ ] Define the first smoke scenario.
-- [ ] Decide where the harness should live in `finite-mono`.
+- [x] Decide where the harness should live in `finite-mono`: a top-level
+      `devfinity/` workspace crate.
+- [ ] Add `process-compose` to the Nix development shell.
+- [ ] Add `devfinity up`, `up --headless`, `attach`, `down`, `status`, and
+      `smoke health`.
+- [ ] Generate process-compose YAML into `.local-state/devfinity/`.
 - [ ] Add local state layout under `.local-state/` or another ignored root.
 - [ ] Add a minimal `just stack-up` command only after the harness exists.
-- [ ] Add a minimal `just stack-down` command if needed.
+- [ ] Add `just stack-up --headless`, `stack-attach`, `stack-down`,
+      `stack-status`, and `stack-smoke` wrappers if the matching harness
+      commands exist.
 - [ ] Add log collection for failed local runs.
 - [ ] Document the harness in `docs/local-integration-harness.md`.
 
@@ -363,11 +417,11 @@ every day.
 Tasks:
 
 - [ ] Check Fedimint's formatting, Clippy, typos, and pre-commit setup before
-  choosing Finite gates.
+      choosing Finite gates.
 - [ ] Choose root Rust formatting policy.
 - [ ] Choose root Clippy strictness.
 - [ ] Decide whether `cargo fmt --all -- --check` is required locally, in CI, or
-  both.
+      both.
 - [ ] Decide whether Clippy warnings are denied immediately or phased in.
 - [ ] Decide whether TypeScript linting is enforced at root.
 - [ ] Decide whether Python checks are enforced at root.
@@ -385,7 +439,7 @@ only when useful.
 Initial Nix scope:
 
 - [ ] Check Fedimint's `flake.nix`, dev shell, and package outputs before
-  designing the Finite flake.
+      designing the Finite flake.
 - [ ] Root dev shell for Rust toolchain and common native dependencies.
 - [ ] Optional Cachix/substituter policy if build times justify it.
 - [ ] Rust package builds for key binaries.
@@ -415,22 +469,22 @@ canonical guidance without review.
 Tasks:
 
 - [ ] Confirm the first monorepo milestone is working before changing or
-  deleting broad documentation.
+      deleting broad documentation.
 - [ ] Check Fedimint's docs layout and ownership boundaries before deciding
-  which Finite docs should become canonical root docs.
+      which Finite docs should become canonical root docs.
 - [ ] Inventory docs across root `docs/`, copied repo `docs/` folders, root and
-  repo-local READMEs, app READMEs, deployment READMEs, and crate-local docs.
+      repo-local READMEs, app READMEs, deployment READMEs, and crate-local docs.
 - [ ] Classify each doc as keep current, update, delete, or leave repo-local
-  but marked unreviewed.
+      but marked unreviewed.
 - [ ] Prefer a small set of current root docs over many stale copied docs.
 - [ ] Update canonical docs to use monorepo paths and root commands.
 - [ ] Remove docs that describe obsolete repos, commands, deployment paths, or
-  architecture only after checking for current links and operational use.
+      architecture only after checking for current links and operational use.
 - [ ] Preserve operational runbooks only when they still map to live systems or
-  clearly mark them as needing review.
+      clearly mark them as needing review.
 - [ ] Search for broken links and stale references after removals.
 - [ ] Record major doc removals or retitles in
-  `docs/monorepo-migration-log.md`.
+      `docs/monorepo-migration-log.md`.
 
 Exit criterion: root docs are intentionally small and current, stale copied docs
 are removed or clearly marked, and no current docs link readers into known-bad
@@ -465,20 +519,20 @@ For each later import:
 The first successful monorepo milestone is intentionally modest:
 
 - [x] `finitecomputer-v2`, `finitechat`, and `finite-sites` are present in
-  `finite-mono` as top-level copied folders.
+      `finite-mono` as top-level copied folders.
 - [x] Source commit SHAs are recorded.
 - [x] Existing repos are untouched.
 - [ ] Root `docs/README.md` exists.
 - [x] Root `docs/monorepo-migration-log.md` exists.
 - [x] Rust crates from all three copied repos are members of one root Cargo
-  workspace.
+      workspace.
 - [x] One root `Cargo.lock` exists and is verified.
 - [x] The dashboard still installs and runs from the copied
-  `finitecomputer-v2` tree.
+      `finitecomputer-v2` tree.
 - [x] Finite Chat core checks still run from `finitechat`.
 - [x] Finite Sites checks still run from `finite-sites`.
 - [x] Root `just check` works.
 - [x] Root `just test` works, or documented exclusions exist for tests that
-  need services not yet covered by the harness.
+      need services not yet covered by the harness.
 - [ ] Docs have a current root starting point and copied stale docs are labeled
-  where linked.
+      where linked.

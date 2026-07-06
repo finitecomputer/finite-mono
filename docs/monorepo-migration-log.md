@@ -320,6 +320,7 @@ Changes:
   `just --list-submodules --list` so nested commands are visible.
 - Added `just metadata` for root Cargo workspace metadata validation.
 - Added `just check` for `cargo check --workspace --locked`.
+- Added `just fmt` for `cargo fmt --all`.
 - Added `just test` for `cargo test --workspace --locked`.
 - Added `mod sites 'finite-sites/justfile'`, making commands such as
   `just sites build` available from the monorepo root.
@@ -335,6 +336,8 @@ Validation:
 - `just --list-submodules --list`
 - `just metadata`
 - `just check`
+- `cargo fmt --all -- --check`
+- `just fmt`
 - `just test`
 - `just sites build`
 - `just sites test`

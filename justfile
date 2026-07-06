@@ -9,5 +9,8 @@ metadata:
 check:
     cargo check --workspace --locked
 
+fmt:
+    cargo fmt --all
+
 test:
     cargo test --workspace --locked

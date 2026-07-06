@@ -24,6 +24,7 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just`: show available root commands and repo modules.
 - `just metadata`: verify the root Cargo workspace shape.
 - `just check`: check imported Rust workspace crates.
+- `just fmt`: format Rust code across the root workspace.
 - `just test`: test imported Rust workspace crates.
 - `just sites build`: build the Finite Sites packages.
 - `just sites test`: test the Finite Sites packages.
