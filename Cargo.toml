@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/finitecomputer/finite-mono"
+rust-version = "1.88"
+

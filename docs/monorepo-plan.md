@@ -63,6 +63,9 @@ finite-mono/
   README.md
   AGENTS.md
   justfile
+  Cargo.toml
+  flake.nix
+  flake.lock
   scripts/
   docs/
   finitecomputer-v2/
@@ -70,17 +73,13 @@ finite-mono/
   finite-sites/
 ```
 
-After the first import is working, add the shared Rust workspace files:
-
-```text
-finite-mono/
-  Cargo.toml
-  Cargo.lock
-```
-
 The source repo folders should initially retain their existing internal
 structure. Do not split dashboards, mobile code, deployment files, integration
 code, or service wiring into new root folders during the first copy.
+
+Root `Cargo.toml`, `flake.nix`, and `flake.lock` exist from the skeleton phase.
+The Cargo workspace starts empty and gets populated only after the source repos
+are copied.
 
 The important early boundary is not final folder taxonomy. It is that all three
 repos can live in one checkout, keep their current commands working, and then
@@ -112,14 +111,17 @@ the migration log.
 
 Goal: create only the root files needed to orient the copied repos.
 
-- [ ] Create root `README.md` explaining that this is the Finite monorepo.
-- [ ] Create root `AGENTS.md` with high-level repo navigation and editing
+- [x] Create root `README.md` explaining that this is the Finite monorepo.
+- [x] Create root `AGENTS.md` with high-level repo navigation and editing
   rules.
-- [ ] Create root `docs/`.
-- [ ] Create root `scripts/`.
-- [ ] Create a minimal root `justfile`.
-- [ ] Add this plan at `docs/monorepo-plan.md`.
-- [ ] Add the Fedimint analysis at
+- [x] Create root `docs/`.
+- [x] Create root `scripts/`.
+- [x] Create a minimal root `justfile`.
+- [x] Create root `Cargo.toml` for the initial Rust workspace.
+- [x] Create root `flake.nix` to pin the Rust development shell.
+- [x] Generate root `flake.lock`.
+- [x] Add this plan at `docs/monorepo-plan.md`.
+- [x] Add the Fedimint analysis at
   `docs/fedimint-monorepo-structure-analysis.md`.
 
 Initial root `justfile` should stay small:
@@ -129,7 +131,8 @@ default:
     just --list
 ```
 
-Do not add root Cargo commands until the root Cargo workspace exists.
+Do not add root Cargo commands to the `justfile` until source repo crates are
+copied and added as workspace members.
 
 Exit criterion: the empty `finite-mono` skeleton exists and clearly says that
 source repos will be copied intact first.
@@ -196,10 +199,10 @@ Tasks:
 Exit criterion: `finite-sites` works from its copied folder using the same
 commands it used before migration.
 
-## Phase 5: Root Cargo Workspace
+## Phase 5: Populate Root Cargo Workspace
 
-Goal: add one root Cargo workspace that points at the copied repos' existing
-crate paths.
+Goal: populate the root Cargo workspace with the copied repos' existing crate
+paths.
 
 Do this only after the copied repos work independently. Do not flatten crates
 or move app/service folders in this phase.
@@ -208,7 +211,7 @@ Tasks:
 
 - [ ] Check Fedimint's root `Cargo.toml` and workspace dependency pattern
   before writing the Finite root workspace.
-- [ ] Create root `Cargo.toml` with one `[workspace]`.
+- [ ] Confirm root `Cargo.toml` still has one `[workspace]`.
 - [ ] Add `finitecomputer-v2/crates/*` members explicitly.
 - [ ] Add `finitechat/crates/*` members explicitly.
 - [ ] Add `finitechat/uniffi-bindgen` if it should remain a workspace member.

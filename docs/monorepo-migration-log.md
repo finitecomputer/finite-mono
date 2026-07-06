@@ -33,3 +33,53 @@ Notes:
 - These SHAs identify the source commits used for the first planned copy.
 - The copied tree will be a snapshot, not a history-preserving import.
 
+## Phase 1: Monorepo Skeleton
+
+Date: 2026-07-06
+
+Created root skeleton files:
+
+- `README.md`
+- `AGENTS.md`
+- `justfile`
+- `scripts/.gitkeep`
+- `Cargo.toml`
+- `flake.nix`
+- `flake.lock`
+
+Created or retained root docs:
+
+- `docs/monorepo-plan.md`
+- `docs/fedimint-monorepo-structure-analysis.md`
+- `docs/monorepo-migration-log.md`
+
+Rust workspace setup:
+
+- Root `Cargo.toml` is an empty virtual workspace for now.
+- Workspace members will be added after source repos are copied.
+- Workspace resolver is `2`.
+- Workspace package defaults set edition `2024`, license `MIT`, repository
+  `https://github.com/finitecomputer/finite-mono`, and `rust-version` `1.88`.
+
+Nix setup:
+
+- Root `flake.nix` uses a pinned `nixpkgs` input and `flake-utils`.
+- Root `flake.lock` pins:
+  - `nixpkgs` to `b6018f87da91d19d0ab4cf979885689b469cdd41`.
+  - `flake-utils` to `11707dc2f618dd54ca8739b309ec4fc024de578b`.
+- The default dev shell is intentionally minimal. It includes
+  Rust/Cargo/rustfmt/Clippy/rust-analyzer, `just`, `pkg-config`, and OpenSSL.
+  Add native dependencies such as protobuf or SQLite only when copied crates
+  require them.
+- `nix develop -c rustc --version` reported
+  `rustc 1.91.1 (ed61e7d7e 2025-11-07)`.
+- `nix develop -c cargo --version` reported
+  `cargo 1.91.0 (ea2d97820 2025-10-10)`.
+
+Validation run:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `just --list`
+- `nix flake show --all-systems`
+- `nix develop -c rustc --version`
+- `nix develop -c cargo --version`
