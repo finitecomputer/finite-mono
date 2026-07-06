@@ -25,3 +25,9 @@ pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 - Update `docs/monorepo-migration-log.md` when recording migration facts.
 - Update checkboxes in `docs/monorepo-plan.md` as phases progress.
 
+## Development Environment
+
+- Prefer root `just` commands for repo workflows; `just` recipes use
+  `scripts/dev-shell` to enter the pinned development environment when needed.
+- For direct commands that are not in a `justfile`, run them through
+  `scripts/with-dev-env` unless `IN_NIX_SHELL` is already set.

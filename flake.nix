@@ -23,6 +23,7 @@
             cargo
             clippy
             just
+            nodejs_24
             openssl
             pkg-config
             process-compose

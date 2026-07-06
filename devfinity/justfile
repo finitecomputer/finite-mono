@@ -1,4 +1,6 @@
-# `just dev up` or `just dev up --headless`
+set shell := ["../scripts/dev-shell", "-cu"]
+
+# Starts devfinity harness. `just dev up` or `just dev up --headless`
 up *args:
     cd .. && cargo run -p devfinity -- up {{ args }}
 

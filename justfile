@@ -1,3 +1,5 @@
+set shell := ["scripts/dev-shell", "-cu"]
+
 # Commands for controlling devfinity (local dev harness)
 mod dev 'devfinity/justfile'
 # Commands for controlling finite sites

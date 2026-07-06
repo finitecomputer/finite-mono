@@ -22,17 +22,19 @@ enum ManagedProcess {
     Core,
     FiniteChat,
     FiniteSites,
+    DashboardDeps,
     Dashboard,
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::ProcessCompose,
         Self::RustBuild,
         Self::Postgres,
         Self::Core,
         Self::FiniteChat,
         Self::FiniteSites,
+        Self::DashboardDeps,
         Self::Dashboard,
     ];
 
@@ -44,6 +46,7 @@ impl ManagedProcess {
             Self::Core => "core",
             Self::FiniteChat => "finitechat",
             Self::FiniteSites => "finitesites",
+            Self::DashboardDeps => "dashboard-deps",
             Self::Dashboard => "dashboard",
         }
     }
@@ -328,6 +331,7 @@ impl Stack {
         self.write_core(&mut yaml);
         self.write_finitechat(&mut yaml);
         self.write_finitesites(&mut yaml);
+        self.write_dashboard_deps(&mut yaml);
         self.write_dashboard(&mut yaml);
         yaml
     }
@@ -487,6 +491,8 @@ impl Stack {
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::DashboardDeps);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
@@ -511,6 +517,34 @@ impl Stack {
             ],
         );
         self.write_http_probe(yaml, "/dashboard", self.ports.dashboard, 5, 5, 5, 120);
+    }
+
+    fn write_dashboard_deps(&self, yaml: &mut String) {
+        let process = ManagedProcess::DashboardDeps;
+        let dashboard_dir = self.repo_root.join("finitecomputer-v2/apps/dashboard");
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Install dashboard npm dependencies",
+            &dashboard_dir,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[
+                String::from(
+                    "if [ ! -x node_modules/.bin/next ] || [ ! -f node_modules/.package-lock.json ] || find package.json package-lock.json -newer node_modules/.package-lock.json -print -quit | grep -q .; then",
+                ),
+                String::from("  npm ci"),
+                String::from("else"),
+                String::from("  echo \"dashboard dependencies already installed\""),
+                String::from("fi"),
+            ],
+            &[],
+        );
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: exit_on_failure");
     }
 
     fn write_process_header(
@@ -825,6 +859,7 @@ impl Stack {
                         String::from("finitesitesd"),
                         self.finitesites_dir().display().to_string(),
                     ],
+                    ManagedProcess::DashboardDeps => vec![String::from("npm"), String::from("ci")],
                     ManagedProcess::Dashboard => vec![
                         String::from("npm"),
                         String::from("run"),
@@ -1312,7 +1347,12 @@ mod tests {
         assert!(yaml.contains("core:"));
         assert!(yaml.contains("finitechat:"));
         assert!(yaml.contains("finitesites:"));
+        assert!(yaml.contains("dashboard-deps:"));
         assert!(yaml.contains("dashboard:"));
+        assert!(yaml.contains("npm ci"));
+        assert!(
+            yaml.contains("dashboard-deps:\n        condition: process_completed_successfully")
+        );
         assert!(yaml.contains("process_completed_successfully"));
         assert!(yaml.contains("process_healthy"));
         assert!(yaml.contains("DEVFINITY_MANAGED_PROCESS=1"));

@@ -1,3 +1,5 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
 sites_packages := "-p finitesites-proto -p finitesites-blob -p finitesites-store -p finitesites-engine -p finitesitesd -p fsite-cli"
 
 default: test

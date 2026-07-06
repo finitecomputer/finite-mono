@@ -34,4 +34,8 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just dev up --headless`: start the same local stack without the TUI.
 - `just dev status`: print devfinity process, container, and service status.
 - `just dev cleanup`: best-effort cleanup for orphaned local stack processes.
-- `nix develop`: enter the pinned Rust development shell.
+- `nix develop`: enter the pinned development shell.
+- `scripts/dev-shell`: internal `just` shell that enters direnv/Nix
+  automatically for recipes.
+- `scripts/with-dev-env <command>`: run a command in the pinned shell through
+  direnv, with a `nix develop` fallback.

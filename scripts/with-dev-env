@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -n "${IN_NIX_SHELL:-}" || "${FINITE_MONO_DEV_ENV_ACTIVE:-}" == "1" ]]; then
+  exec "$@"
+fi
+
+if command -v direnv >/dev/null 2>&1 && [[ -f "$repo_root/.envrc" ]]; then
+  exec env FINITE_MONO_DEV_ENV_ACTIVE=1 direnv exec "$repo_root" "$@"
+fi
+
+if command -v nix >/dev/null 2>&1 && [[ -f "$repo_root/flake.nix" ]]; then
+  exec env FINITE_MONO_DEV_ENV_ACTIVE=1 nix develop "$repo_root" -c "$@"
+fi
+
+cat >&2 <<MSG
+finite-mono development environment is not active.
+
+Install direnv and run:
+  direnv allow $repo_root
+
+Or install Nix so this wrapper can fall back to:
+  nix develop
+MSG
+exit 127
