@@ -14,3 +14,10 @@ fmt:
 
 test:
     cargo test --workspace --locked
+
+# `just dev-up` or `just dev-up --headless`
+dev-up *args:
+    cargo run -p devfinity -- up {{ args }}
+
+dev-cleanup:
+    cargo run -p devfinity -- cleanup

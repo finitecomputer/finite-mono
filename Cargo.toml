@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "devfinity",
     "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",
@@ -34,10 +35,11 @@ repository = "https://github.com/finitecomputer/finite-mono"
 rust-version = "1.88"
 
 [workspace.dependencies]
+anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
 bech32 = "0.11"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 finite-identity = { git = "https://github.com/finitecomputer/finite-identity", rev = "54a6936b5d7a0e8dc79018a30d9c794b10d25307" }
 finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }

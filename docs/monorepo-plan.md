@@ -308,10 +308,9 @@ on this harness, use Fedimint's `devimint` crate and `scripts/dev/mprocs`
 workflow as the reference point: copy the durable contract, not the product
 specific complexity.
 
-`devfinity` should be the Finite-aware launcher and smoke tool. It should own
-state layout, generated environment variables, process-compose config
-generation, and cross-service smoke checks. It should not hand-roll process
-supervision.
+`devfinity` should be the Finite-aware launcher. It should own state layout,
+generated environment variables, and process-compose config generation. It
+should not hand-roll process supervision.
 
 Use `process-compose` as the default local process runtime. The default
 developer path should show the process-compose TUI so developers can see which
@@ -333,19 +332,16 @@ Initial structure:
 - Keep process-compose YAML generated under `.local-state/devfinity/` so the
   committed repo does not hard-code machine-local state paths.
 - Add `docs/local-integration-harness.md` for operator/developer usage.
-- Add only thin root `just stack-*` wrappers around `devfinity`.
+- Add only thin root `just dev-*` wrappers around `devfinity`.
 
 Initial runtime shape:
 
 - `devfinity up`: create state, write env, generate process-compose YAML, then
-  run `process-compose` with the TUI enabled.
+  run `process-compose` with the TUI enabled. Quitting the TUI or pressing
+  Ctrl-C is the normal shutdown path.
 - `devfinity up --headless`: run the same stack with `process-compose -t=false`.
-- `devfinity attach`: attach a TUI to an already-running process-compose
-  instance when the stack is running headless or detached.
-- `devfinity down`: stop the process-compose stack if it is running.
-- `devfinity status`: list known service URLs, state paths, and process-compose
-  control paths.
-- `devfinity smoke health`: probe the first useful service health endpoints.
+- `devfinity cleanup`: best-effort recovery for orphaned process-compose
+  processes, stale control files, and the named local Postgres container.
 
 Initial process-compose services:
 
@@ -364,22 +360,21 @@ Tasks:
 - [x] Check Fedimint's `devimint` crate, `just mprocs`, and test harness
       structure before designing the Finite harness.
 - [x] Decide whether the harness should be Rust, shell, or a small mixed
-      wrapper: `devfinity` is a Rust generator/smoke tool, and process-compose
+      wrapper: `devfinity` is a Rust generator, and process-compose
       owns process supervision and visualization.
-- [ ] Define the first smoke scenario.
+- [x] Define the first smoke scenario: process-compose readiness probes cover
+      Core `/healthz`, Finite Chat `/health`, Finite Sites `/api/v1/healthz`,
+      and dashboard `/dashboard`.
 - [x] Decide where the harness should live in `finite-mono`: a top-level
       `devfinity/` workspace crate.
-- [ ] Add `process-compose` to the Nix development shell.
-- [ ] Add `devfinity up`, `up --headless`, `attach`, `down`, `status`, and
-      `smoke health`.
-- [ ] Generate process-compose YAML into `.local-state/devfinity/`.
-- [ ] Add local state layout under `.local-state/` or another ignored root.
-- [ ] Add a minimal `just stack-up` command only after the harness exists.
-- [ ] Add `just stack-up --headless`, `stack-attach`, `stack-down`,
-      `stack-status`, and `stack-smoke` wrappers if the matching harness
-      commands exist.
-- [ ] Add log collection for failed local runs.
-- [ ] Document the harness in `docs/local-integration-harness.md`.
+- [x] Add `process-compose` to the Nix development shell.
+- [x] Add `devfinity up`, `up --headless`, and `cleanup`.
+- [x] Generate process-compose YAML into `.local-state/devfinity/`.
+- [x] Add local state layout under `.local-state/` or another ignored root.
+- [x] Add a minimal `just dev-up` command only after the harness exists.
+- [x] Add `just dev-up --headless` and `dev-cleanup` wrappers.
+- [x] Add log collection for failed local runs.
+- [x] Document the harness in `docs/local-integration-harness.md`.
 
 Exit criterion: one command can start the first useful local Finite stack smoke
 without requiring the old standalone repo layout.

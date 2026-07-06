@@ -423,7 +423,7 @@ define these primitives explicitly:
 - Nix contract: dev shells, build packages, container outputs, deployment
   artifacts, formatter/linter tools, Cachix policy, and CI output names.
 - Command contract: `just build`, `just check`, `just test`, `just lint`,
-  `just dev`, `just stack-up`, `just final-check`, and service-specific
+  `just dev`, `just dev-up`, `just final-check`, and service-specific
   commands.
 - Integration harness: a Finite equivalent of `devimint` that can start local
   Core, runner/runtime, Hermes, chat, sites/brain/search dependencies, and
@@ -446,4 +446,3 @@ define these primitives explicitly:
   hosted deployment manifests?
 - Which packages, if any, are intended for public publication versus private
   monorepo use?
-

@@ -29,4 +29,8 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just sites build`: build the Finite Sites packages.
 - `just sites test`: test the Finite Sites packages.
 - `just sites lint`: run Finite Sites formatting and Clippy checks.
+- `just dev-up`: start the initial local stack with `devfinity` and the
+  process-compose TUI.
+- `just dev-up --headless`: start the same local stack without the TUI.
+- `just dev-cleanup`: best-effort cleanup for orphaned local stack processes.
 - `nix develop`: enter the pinned Rust development shell.

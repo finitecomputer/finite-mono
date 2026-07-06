@@ -25,6 +25,7 @@
             just
             openssl
             pkg-config
+            process-compose
             rust-analyzer
             rustPlatform.rustLibSrc
             rustc

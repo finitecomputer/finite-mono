@@ -342,3 +342,67 @@ Validation:
 - `just sites build`
 - `just sites test`
 - `just sites lint`
+
+## Phase 9: Initial Local Integration Harness
+
+Date: 2026-07-06
+
+Fedimint reference checked:
+
+- Fedimint's `devimint` is a top-level Rust crate that owns local integration
+  environment setup, generated env files, ready state, logs, and process
+  orchestration.
+- Fedimint uses thin scripts around the harness for interactive developer
+  flows, including an `mprocs` view over running service logs.
+- Finite copied the durable shape but uses `process-compose` as the process
+  runtime/TUI instead of implementing supervision directly in Rust.
+
+Changes:
+
+- Added top-level workspace crate `devfinity`.
+- Added `process-compose` to the Nix development shell.
+- Added `devfinity up`, `up --headless`, and `cleanup`.
+- `devfinity` writes deterministic generated state under
+  `.local-state/devfinity/runs/default/`.
+- `devfinity` generates `process-compose.yaml`, `env`, `urls.txt`, logs
+  directories, and a Unix socket path for process-compose control.
+- The initial generated process-compose stack includes:
+  - Rust build preflight for `finite-saas-core`, `finitechat-server`, and
+    `finitesitesd`.
+  - Local Postgres for `finite-saas-core`.
+  - `finite-saas-core`.
+  - Local `finitechat-server`.
+  - Local `finitesitesd`.
+  - Dashboard dev server.
+- Added root wrappers: `just dev-up` and `dev-cleanup`.
+- Added `docs/local-integration-harness.md`.
+
+Notes:
+
+- `process-compose` is the supervision and visualization layer. `devfinity` is
+  the Finite-aware config generator.
+- Normal shutdown is foreground lifecycle shutdown: quit the process-compose TUI
+  or press Ctrl-C. `devfinity cleanup` is a recovery command for orphaned
+  state/processes.
+- The richer local create-agent canary remains in
+  `finitecomputer-v2/scripts/local_create_agent_canary.sh`; moving that into
+  `devfinity` should be a later profile after the base stack is stable.
+
+Validation:
+
+- `nix develop -c process-compose version`
+  - Result: passed with process-compose v1.78.0 from the pinned Nix shell.
+- `nix develop -c cargo run -p devfinity --locked -- up --dry-run --headless`
+  - Result: passed and process-compose validated the generated config.
+- `just metadata`
+- `just check`
+- `just test`
+- `cargo test -p devfinity --locked`
+- `just dev-cleanup`
+- `cargo fmt --all -- --check`
+- `just --unstable --fmt --check`
+
+Not run:
+
+- `just dev-up` without `--dry-run`; it starts the long-running local stack
+  and depends on local Docker and dashboard Node/npm readiness.
