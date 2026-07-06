@@ -96,14 +96,14 @@ move.
 - [x] Do not preserve git history.
 - [x] Leave all existing source repos untouched.
 - [x] Skip rollback-plan work.
-- [ ] Create `finite-mono`.
-- [ ] Record the source commit SHA for `finitecomputer-v2`.
-- [ ] Record the source commit SHA for `finitechat`.
-- [ ] Record the source commit SHA for `finite-sites`.
-- [ ] Add `docs/monorepo-migration-log.md`.
-- [ ] Write the source repo paths and source commit SHAs into the migration
+- [x] Create `finite-mono`.
+- [x] Record the source commit SHA for `finitecomputer-v2`.
+- [x] Record the source commit SHA for `finitechat`.
+- [x] Record the source commit SHA for `finite-sites`.
+- [x] Add `docs/monorepo-migration-log.md`.
+- [x] Write the source repo paths and source commit SHAs into the migration
   log.
-- [ ] Note that the import is a snapshot copy, not a history-preserving import.
+- [x] Note that the import is a snapshot copy, not a history-preserving import.
 
 Exit criterion: `finite-mono` exists and the source commit SHAs are recorded in
 the migration log.
