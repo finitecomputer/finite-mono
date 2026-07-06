@@ -18,6 +18,8 @@ From the monorepo root:
 ```sh
 just dev up
 just dev up --headless
+just dev up --headless -- scripts/devfinity-smoke
+just dev smoke
 just dev status
 just dev cleanup
 ```
@@ -27,9 +29,20 @@ The equivalent direct commands are:
 ```sh
 cargo run -p devfinity -- up
 cargo run -p devfinity -- up --headless
+cargo run -p devfinity -- up --headless -- scripts/devfinity-smoke
 cargo run -p devfinity -- status
 cargo run -p devfinity -- cleanup
 ```
+
+When a command is passed after `--`, `devfinity up` starts the stack in
+headless mode, waits for the configured services to become ready, runs the
+command with the generated devfinity environment variables, and tears the stack
+down afterward. This is the automation path for local integration tests.
+
+`just dev smoke` is intentionally more than a health check. It verifies service
+readiness, then submits the dashboard create-agent form, lets the dashboard call
+Core, and confirms through Core's `/api/core/v1/me` response that the agent
+creation request and project were persisted in Postgres for the dev account.
 
 `status` is read-only. It prints the generated state paths, process-compose
 socket state, devfinity pid-file process states, the local Postgres container
@@ -83,6 +96,7 @@ Run from `nix develop` or otherwise provide:
 - `process-compose`.
 - Docker, for local Postgres.
 - Node/npm, for the dashboard dev server.
+- `curl`, for the smoke script.
 
 The harness generates the process-compose config before starting services, so
 `cargo run -p devfinity -- up --dry-run` is useful for checking config shape

@@ -3,8 +3,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -169,31 +169,8 @@ impl Stack {
     }
 
     pub fn env_exports(&self) -> String {
-        let env = [
-            ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
-            (
-                "DEVFINITY_PROCESS_COMPOSE_FILE",
-                self.process_compose_file.display().to_string(),
-            ),
-            (
-                "DEVFINITY_PROCESS_COMPOSE_SOCKET",
-                self.process_compose_socket.display().to_string(),
-            ),
-            ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
-            ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
-            ("FC_CORE_URL", self.core_url()),
-            ("FC_CORE_BASE_URL", self.core_url()),
-            ("FC_CORE_API_TOKEN", self.core_token.clone()),
-            ("FC_CORE_DATABASE_URL", self.database_url()),
-            ("FC_DASHBOARD_URL", self.dashboard_url()),
-            ("FINITECHAT_SERVER_URL", self.finitechat_url()),
-            ("FC_RUNNER_FINITECHAT_SERVER_URL", self.finitechat_url()),
-            ("FINITE_SITES_API", self.finitesites_api_url()),
-            ("FINITE_HOME", self.finite_home_dir().display().to_string()),
-        ];
-
         let mut out = String::new();
-        for (key, value) in env {
+        for (key, value) in self.env_values() {
             let _ = writeln!(out, "export {key}={}", shell_quote(&value));
         }
         out
@@ -214,6 +191,24 @@ impl Stack {
         }
         command.arg("up");
         run_status_with_pid_file(command, &self.pid_file(ManagedProcess::ProcessCompose))
+    }
+
+    pub fn run_wrapped_command(&self, command: &[String]) -> Result<ExitCode> {
+        if command.is_empty() {
+            bail!("wrapped command cannot be empty");
+        }
+
+        let mut guard = self.start_process_compose_headless()?;
+        let outcome = match self.wait_for_services_ready(Duration::from_secs(180), &mut guard) {
+            Ok(()) => self.run_stack_command(command),
+            Err(error) => Err(error),
+        };
+
+        if let Err(error) = guard.shutdown() {
+            eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
+        }
+
+        outcome
     }
 
     pub fn cleanup(&self) -> Result<ExitCode> {
@@ -724,6 +719,89 @@ impl Stack {
         matches!(status, Ok(status) if status.success())
     }
 
+    fn start_process_compose_headless(&self) -> Result<ProcessComposeGuard<'_>> {
+        self.ensure_process_compose_available()?;
+        let mut command = self.process_compose_up_command();
+        command.arg("--tui=false");
+        command.arg("up");
+
+        let pid_file = self.pid_file(ManagedProcess::ProcessCompose);
+        if let Some(parent) = pid_file.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        println!("starting devfinity stack in headless mode");
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to run {:?}", command))?;
+        if let Err(error) = fs::write(&pid_file, format!("{}\n", child.id())) {
+            let _ = child.kill();
+            bail!("failed to write {}: {error}", pid_file.display());
+        }
+
+        Ok(ProcessComposeGuard {
+            stack: self,
+            child,
+            pid_file,
+            shutdown_complete: false,
+        })
+    }
+
+    fn wait_for_services_ready(
+        &self,
+        timeout: Duration,
+        guard: &mut ProcessComposeGuard<'_>,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut last_report = Instant::now() - Duration::from_secs(5);
+        loop {
+            if let Some(status) = guard
+                .child
+                .try_wait()
+                .context("failed to check process-compose status")?
+            {
+                bail!("process-compose exited before devfinity became ready: {status}");
+            }
+
+            let checks = self.service_checks();
+            let pending = pending_service_checks(&checks);
+            if pending.is_empty() {
+                println!("devfinity stack is ready");
+                return Ok(());
+            }
+
+            if started.elapsed() >= timeout {
+                bail!(
+                    "devfinity stack did not become ready within {}s: {}",
+                    timeout.as_secs(),
+                    pending.join(", ")
+                );
+            }
+
+            if last_report.elapsed() >= Duration::from_secs(5) {
+                println!("waiting for devfinity stack: {}", pending.join(", "));
+                last_report = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(750));
+        }
+    }
+
+    fn run_stack_command(&self, command: &[String]) -> Result<ExitCode> {
+        let program = &command[0];
+        let args = &command[1..];
+        println!("running devfinity command: {}", shell_words(command));
+        let status = Command::new(program)
+            .args(args)
+            .current_dir(&self.repo_root)
+            .envs(self.env_values())
+            .status()
+            .with_context(|| {
+                format!("failed to run devfinity command `{}`", shell_words(command))
+            })?;
+        Ok(status_to_exit_code(status))
+    }
+
     fn cleanup_managed_processes(&self) {
         let table = match process_table() {
             Ok(table) => table,
@@ -1026,6 +1104,84 @@ impl Stack {
     fn pid_file(&self, process: ManagedProcess) -> PathBuf {
         self.pids_dir.join(format!("{process}.pid"))
     }
+
+    fn env_values(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
+            (
+                "DEVFINITY_PROCESS_COMPOSE_FILE",
+                self.process_compose_file.display().to_string(),
+            ),
+            (
+                "DEVFINITY_PROCESS_COMPOSE_SOCKET",
+                self.process_compose_socket.display().to_string(),
+            ),
+            ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
+            ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
+            ("DEVFINITY_POSTGRES_PORT", self.ports.postgres.to_string()),
+            ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
+            ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
+            (
+                "FC_DASHBOARD_DEV_EMAIL",
+                "devfinity@finite.computer".to_string(),
+            ),
+            (
+                "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+                "user_devfinity".to_string(),
+            ),
+            ("FC_CORE_URL", self.core_url()),
+            ("FC_CORE_BASE_URL", self.core_url()),
+            ("FC_CORE_API_TOKEN", self.core_token.clone()),
+            ("FC_CORE_DATABASE_URL", self.database_url()),
+            ("FC_DASHBOARD_URL", self.dashboard_url()),
+            ("FINITECHAT_SERVER_URL", self.finitechat_url()),
+            ("FC_RUNNER_FINITECHAT_SERVER_URL", self.finitechat_url()),
+            ("FINITE_SITES_API", self.finitesites_api_url()),
+            ("FINITE_HOME", self.finite_home_dir().display().to_string()),
+        ]
+    }
+}
+
+struct ProcessComposeGuard<'a> {
+    stack: &'a Stack,
+    child: Child,
+    pid_file: PathBuf,
+    shutdown_complete: bool,
+}
+
+impl ProcessComposeGuard<'_> {
+    fn shutdown(&mut self) -> Result<()> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.shutdown_complete = true;
+
+        if self.stack.process_compose_socket.exists() && self.stack.process_compose_available() {
+            let mut command = self.stack.process_compose_control_command();
+            command.arg("down");
+            run_best_effort(&mut command, "stop devfinity process-compose stack");
+        }
+
+        if wait_child_exit(&mut self.child, Duration::from_secs(10))?.is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        self.stack.cleanup_managed_processes();
+        self.stack.cleanup_docker_containers();
+        remove_file_best_effort(&self.stack.process_compose_socket);
+        remove_file_best_effort(&self.pid_file);
+        Ok(())
+    }
+}
+
+impl Drop for ProcessComposeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.shutdown_complete {
+            if let Err(error) = self.shutdown() {
+                eprintln!("failed to shut down devfinity process-compose: {error:#}");
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1076,6 +1232,10 @@ impl ServiceCheck {
             state,
             detail,
         }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.state, "open" | "healthy")
     }
 }
 
@@ -1254,6 +1414,14 @@ fn http_status_is_ok(status_line: &str) -> bool {
         .is_some_and(|code| (200..400).contains(&code))
 }
 
+fn pending_service_checks(checks: &[ServiceCheck]) -> Vec<String> {
+    checks
+        .iter()
+        .filter(|check| !check.is_ready())
+        .map(|check| format!("{} {}", check.process, check.state))
+        .collect()
+}
+
 fn absolute_path(root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -1290,12 +1458,36 @@ fn status_to_exit_code(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
+fn wait_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for child process")?
+        {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn run_best_effort(command: &mut Command, label: &str) {
     match command.status() {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!("{label} exited with {status}"),
         Err(error) => eprintln!("failed to {label}: {error}"),
     }
+}
+
+fn shell_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_quote(value: &str) -> String {

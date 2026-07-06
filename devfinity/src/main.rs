@@ -39,6 +39,10 @@ struct UpArgs {
     /// Validate the generated process-compose config without starting services.
     #[arg(long)]
     dry_run: bool,
+
+    /// Command to run after the headless stack is ready. Pass after `--`.
+    #[arg(last = true)]
+    command: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -59,6 +63,12 @@ fn run() -> anyhow::Result<ExitCode> {
         Command::Up(args) => {
             stack.write_files()?;
             stack.print_summary();
+            if !args.command.is_empty() {
+                if args.dry_run {
+                    anyhow::bail!("`devfinity up -- <command>` cannot be combined with --dry-run");
+                }
+                return stack.run_wrapped_command(&args.command);
+            }
             let mode = if args.headless {
                 ProcessComposeMode::Headless
             } else {

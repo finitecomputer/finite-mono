@@ -377,6 +377,10 @@ Tasks:
 - [x] Add a minimal `just dev up` command only after the harness exists.
 - [x] Add `just dev up --headless` and `dev cleanup` wrappers.
 - [x] Add `just dev status` for read-only local stack status.
+- [x] Add `devfinity up --headless -- <command>` for devimint-style wrapped
+      integration commands.
+- [x] Add `just dev smoke` using the wrapped-command path against real local
+      Core, Finite Chat, Finite Sites, Dashboard, and Postgres infrastructure.
 - [x] Add log collection for failed local runs.
 - [x] Document the harness in `docs/local-integration-harness.md`.
 

@@ -22,7 +22,6 @@ repos work in one checkout, then add shared workspace structure around them.
 ## Current Root Tools
 
 - `just`: show available root commands and repo modules.
-- `just metadata`: verify the root Cargo workspace shape.
 - `just check`: check imported Rust workspace crates.
 - `just fmt`: format Rust code across the root workspace.
 - `just test`: test imported Rust workspace crates.
@@ -32,10 +31,7 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just dev up`: start the initial local stack with `devfinity` and the
   process-compose TUI.
 - `just dev up --headless`: start the same local stack without the TUI.
+- `just dev smoke`: start the headless stack, run the integration smoke test,
+  and tear it down.
 - `just dev status`: print devfinity process, container, and service status.
 - `just dev cleanup`: best-effort cleanup for orphaned local stack processes.
-- `nix develop`: enter the pinned development shell.
-- `scripts/dev-shell`: internal `just` shell that enters direnv/Nix
-  automatically for recipes.
-- `scripts/with-dev-env <command>`: run a command in the pinned shell through
-  direnv, with a `nix develop` fallback.

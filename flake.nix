@@ -22,6 +22,7 @@
           packages = with pkgs; [
             cargo
             clippy
+            curl
             just
             nodejs_24
             openssl

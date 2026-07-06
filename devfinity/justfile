@@ -4,6 +4,10 @@ set shell := ["../scripts/dev-shell", "-cu"]
 up *args:
     cd .. && cargo run -p devfinity -- up {{ args }}
 
+# Starts the headless stack, runs the smoke test, and tears the stack down
+smoke:
+    cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-smoke
+
 # Prints running devfinity infra status
 status:
     cd .. && cargo run -p devfinity -- status
