@@ -1,10 +1,15 @@
 [workspace]
 resolver = "2"
-members = []
+members = [
+    "finitecomputer-v2/crates/finite-core",
+    "finitecomputer-v2/crates/finite-private-limiter",
+    "finitecomputer-v2/crates/finite-saas-core",
+    "finitecomputer-v2/crates/finite-saas-local",
+    "finitecomputer-v2/crates/finite-saas-runner",
+]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/finitecomputer/finite-mono"
 rust-version = "1.88"
-

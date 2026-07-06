@@ -1,0 +1,9 @@
+{
+  "provider": "openai-codex",
+  "model": "gpt-5.5",
+  "base_url": "",
+  "api_key": "",
+  "max_iterations": 50,
+  "preferred_auth_flow": "dashboard_codex_device_auth",
+  "fallback_login_command": "hermes login --provider openai-codex"
+}

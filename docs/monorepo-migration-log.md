@@ -83,3 +83,114 @@ Validation run:
 - `nix flake show --all-systems`
 - `nix develop -c rustc --version`
 - `nix develop -c cargo --version`
+
+## Phase 2: Copy `finitecomputer-v2`
+
+Date: 2026-07-06
+
+Copied source:
+
+- From `/Users/alex/Projects/finite/finitecomputer-v2`
+- To `/Users/alex/Projects/finite/finite-mono/finitecomputer-v2`
+- Source commit SHA: `862e6bf11ec2c8e8c0e6b3d85471a39257bb7e21`
+
+Copy method:
+
+- Direct `rsync` file copy.
+- Excluded `.git/`.
+- Excluded generated or machine-local directories:
+  - `target/`
+  - `apps/dashboard/node_modules/`
+  - `apps/dashboard/.next/`
+  - `.local-state/`
+
+Validation run from copied tree:
+
+- `cargo check --workspace`
+  - Result: passed.
+- `npm ci` from `finitecomputer-v2/apps/dashboard`
+  - Result: passed under system Node `v18.16.0`, but emitted engine warnings
+    because dashboard dependencies require newer Node versions.
+- `npm test` from `finitecomputer-v2/apps/dashboard` under system Node
+  `v18.16.0`
+  - Result: failed with `node: bad option: --import`.
+  - Cause: system Node is too old for the dashboard test command.
+- `nix shell nixpkgs#nodejs_24 -c npm ci` from
+  `finitecomputer-v2/apps/dashboard`
+  - Result: passed.
+- `nix shell nixpkgs#nodejs_24 -c npm test` from
+  `finitecomputer-v2/apps/dashboard`
+  - Result: passed, 100 tests.
+
+Notes:
+
+- The copied repo's internal folder structure was left intact.
+- The root flake was not expanded to include Node. Node 24 was used through a
+  transient Nix shell for validation only.
+- Generated validation artifacts were removed after checks:
+  `finitecomputer-v2/target` and
+  `finitecomputer-v2/apps/dashboard/node_modules`.
+
+## Phase 5: Root Cargo Workspace for `finitecomputer-v2`
+
+Date: 2026-07-06
+
+Fedimint reference checked:
+
+- Fedimint uses one explicit root Cargo workspace and one root `Cargo.lock`.
+- The Finite root workspace follows that shape for the imported
+  `finitecomputer-v2` Rust crates.
+
+Changes:
+
+- Added the five `finitecomputer-v2/crates/*` packages as explicit root
+  workspace members.
+- Moved `finitecomputer-v2/Cargo.lock` to the monorepo root as `Cargo.lock`.
+- Removed `finitecomputer-v2/Cargo.toml` so Cargo commands from inside
+  `finitecomputer-v2` resolve upward to the monorepo workspace instead of
+  recreating a nested lockfile.
+- Added a root `.gitignore` for generated files including root `target/`.
+- Kept dependency declarations in the member crate manifests for now instead of
+  introducing a root `[workspace.dependencies]` table immediately.
+
+Validation:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo check --workspace --locked`
+- `cargo test --workspace --locked`
+- `find . -name Cargo.lock -o -name Cargo.toml | sort`
+- `cargo metadata --format-version 1 --no-deps` from
+  `finitecomputer-v2/`
+
+Result:
+
+- The root workspace owns the imported Rust crates.
+- Only one Cargo lockfile exists: `Cargo.lock` at the monorepo root.
+- Root Cargo check and test both passed.
+
+## Phase 6: Minimal Root Commands
+
+Date: 2026-07-06
+
+Fedimint reference checked:
+
+- Fedimint's root `justfile` is generated from flakebox and includes a broad
+  command surface for build, check, format, lint, test, watch, Clippy, Semgrep,
+  and typos.
+- Finite is intentionally using a small handwritten root `justfile` for now.
+
+Changes:
+
+- Kept `just default` as `just --list`.
+- Added `just metadata` for root Cargo workspace metadata validation.
+- Added `just check` for `cargo check --workspace --locked`.
+- Added `just test` for `cargo test --workspace --locked`.
+- Left dashboard, chat, sites, CI, release, deploy, and formatter commands out
+  of the root command surface for now.
+
+Validation:
+
+- `just --list`
+- `just metadata`
+- `just check`
+- `just test`

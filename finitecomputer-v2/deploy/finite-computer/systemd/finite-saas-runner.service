@@ -1,0 +1,13 @@
+[Unit]
+Description=Finite agent creation runner
+Wants=network-online.target
+After=network-online.target k3s.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+KillMode=process
+EnvironmentFile=/etc/finite-computer/runner.env
+WorkingDirectory=/opt/finite/finitecomputer-v2
+ExecStart=/opt/finite/finitecomputer-v2/target/release/finite-saas-runner run-once

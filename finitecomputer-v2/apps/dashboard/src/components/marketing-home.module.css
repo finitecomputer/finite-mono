@@ -1,0 +1,145 @@
+.scene {
+  position: relative;
+  min-height: 100dvh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #d8ded2;
+  color: #090909;
+  font-family: var(--font-funnel-sans), system-ui, sans-serif;
+}
+
+.background {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: url("/marketing/finite-meadow.webp");
+  background-position: center 30%;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.background::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 40%, rgb(20 12 5 / 0.35) 100%);
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  width: min(480px, calc(100vw - 2rem));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 2.5rem;
+  border: 1px solid rgb(255 255 255 / 0.6);
+  border-radius: 28px;
+  background: rgb(255 255 255 / 0.72);
+  box-shadow:
+    0 4px 6px rgb(0 0 0 / 0.04),
+    0 12px 40px rgb(0 0 0 / 0.12),
+    0 32px 80px rgb(0 0 0 / 0.08),
+    inset 0 1px 0 rgb(255 255 255 / 0.9);
+  backdrop-filter: blur(28px) saturate(1.4);
+  text-align: center;
+  animation: cardIn 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.logo {
+  width: 88px;
+  height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.logoMark {
+  width: 72px;
+  height: 72px;
+  display: block;
+  filter: brightness(0) saturate(100%);
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.2rem;
+}
+
+.headline {
+  margin: 0;
+  max-width: 36ch;
+  color: rgb(0 0 0 / 0.82);
+  font-size: clamp(1.125rem, 1rem + 0.75vw, 1.5rem);
+  line-height: 1.45;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.button {
+  display: inline-flex;
+  gap: 0.5rem;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.82);
+  color: #ffffff;
+  padding: 0.75rem 1.5rem;
+  font-size: clamp(0.875rem, 0.8rem + 0.35vw, 1rem);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+  text-decoration: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease;
+}
+
+.button:hover {
+  transform: translateY(-1px);
+  background: rgb(0 0 0 / 0.95);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.28);
+}
+
+.button:focus-visible {
+  outline: 3px solid rgb(15 15 15 / 0.25);
+  outline-offset: 4px;
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 560px) {
+  .card {
+    padding: 2rem;
+    border-radius: 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+
+  .button {
+    transition: none;
+  }
+}

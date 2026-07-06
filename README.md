@@ -22,9 +22,7 @@ repos work in one checkout, then add shared workspace structure around them.
 ## Current Root Tools
 
 - `just --list`: show available root commands.
+- `just metadata`: verify the root Cargo workspace shape.
+- `just check`: check imported Rust workspace crates.
+- `just test`: test imported Rust workspace crates.
 - `nix develop`: enter the pinned Rust development shell.
-- `cargo metadata --no-deps`: verify the root Cargo workspace shape.
-
-Root Cargo commands are intentionally minimal until the source repos are copied
-and added as workspace members.
-

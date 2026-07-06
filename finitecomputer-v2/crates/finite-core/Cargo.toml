@@ -1,0 +1,25 @@
+[package]
+name = "finite-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+finitechat-blob = { git = "https://github.com/finitecomputer/finitechat.git", rev = "e303e205b9817f806559843074dcd99130544eea" }
+finitechat-engine = { git = "https://github.com/finitecomputer/finitechat.git", rev = "e303e205b9817f806559843074dcd99130544eea" }
+finitechat-proto = { git = "https://github.com/finitecomputer/finitechat.git", rev = "e303e205b9817f806559843074dcd99130544eea" }
+finitechat-store = { git = "https://github.com/finitecomputer/finitechat.git", rev = "e303e205b9817f806559843074dcd99130544eea" }
+hex = "0.4"
+rand = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+ureq = { version = "2.12", features = ["json"] }
+urlencoding = "2.1"
+which = "8.0"
+
+[dev-dependencies]
+tempfile = "3.20"

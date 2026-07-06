@@ -1,0 +1,16 @@
+.DS_Store
+target/
+node_modules/
+.next/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+secrets/
+.local-state/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+__pycache__/

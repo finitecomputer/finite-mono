@@ -1,0 +1,11 @@
+{
+  "runtime_home": "/home/node",
+  "workspace_dir": "/home/node/workspace",
+  "dev_dir": "/home/node/dev",
+  "uploads_dir": "/home/node/uploads",
+  "hermes_dir": "/home/node/.hermes",
+  "codex_dir": "/home/node/.codex",
+  "opencode_default_project_dir": "/home/node/.hermes",
+  "platform_mount_dir": "/platform",
+  "finite_contract_path": "/platform/FINITE.md"
+}

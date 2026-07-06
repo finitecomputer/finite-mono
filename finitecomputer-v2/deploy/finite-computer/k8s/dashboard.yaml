@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: finite-dashboard
+  namespace: finite-system
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: finite-dashboard
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      nodePort: 30080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finite-dashboard
+  namespace: finite-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: finite-dashboard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: finite-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: localhost/finite-dashboard:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: finite-computer-config
+          env:
+            - name: FC_CORE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_CORE_API_TOKEN
+            - name: WORKOS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: WORKOS_API_KEY
+            - name: WORKOS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: WORKOS_CLIENT_ID
+            - name: WORKOS_COOKIE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: WORKOS_COOKIE_PASSWORD
+            - name: FC_RELAY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_RELAY_ADMIN_TOKEN
+                  optional: true
+            - name: FC_RELAY_HOST_ENDPOINTS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_RELAY_HOST_ENDPOINTS_JSON
+                  optional: true
+            - name: GOOGLE_WORKSPACE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: GOOGLE_WORKSPACE_CLIENT_ID
+                  optional: true
+            - name: GOOGLE_WORKSPACE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: GOOGLE_WORKSPACE_CLIENT_SECRET
+                  optional: true
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: STRIPE_SECRET_KEY
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: STRIPE_WEBHOOK_SECRET
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30

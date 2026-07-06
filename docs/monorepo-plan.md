@@ -53,6 +53,8 @@ form.
 - [x] Do not build a Nix system for non-Rust artifacts at the start.
 - [x] Repurpose `finite-eng-docs` into the monorepo's normal `docs/` role, but
   do not blindly copy stale docs as authoritative truth.
+- [x] Defer broad stale-doc cleanup until after the first imported repos are
+  working from the monorepo.
 
 ## Target Shape
 
@@ -144,14 +146,14 @@ changing behavior.
 
 Tasks:
 
-- [ ] Copy `finitecomputer-v2` into `finite-mono/finitecomputer-v2`.
-- [ ] Exclude generated or machine-local directories such as `target/`,
+- [x] Copy `finitecomputer-v2` into `finite-mono/finitecomputer-v2`.
+- [x] Exclude generated or machine-local directories such as `target/`,
   `node_modules/`, `.next/`, and `.local-state/`.
-- [ ] Keep the repo's internal folder structure intact.
-- [ ] Run the old Rust check from `finite-mono/finitecomputer-v2`.
-- [ ] Run the old dashboard install/test command from the copied
+- [x] Keep the repo's internal folder structure intact.
+- [x] Run the old Rust check from `finite-mono/finitecomputer-v2`.
+- [x] Run the old dashboard install/test command from the copied
   `finitecomputer-v2` tree.
-- [ ] Record copied commit SHA, ignored local files, validation commands, and
+- [x] Record copied commit SHA, ignored local files, validation commands, and
   failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finitecomputer-v2` works from its copied folder using the same
@@ -202,32 +204,32 @@ commands it used before migration.
 ## Phase 5: Populate Root Cargo Workspace
 
 Goal: populate the root Cargo workspace with the copied repos' existing crate
-paths.
+paths and keep Rust dependency locking at the monorepo root.
 
 Do this only after the copied repos work independently. Do not flatten crates
 or move app/service folders in this phase.
 
 Tasks:
 
-- [ ] Check Fedimint's root `Cargo.toml` and workspace dependency pattern
+- [x] Check Fedimint's root `Cargo.toml` and workspace dependency pattern
   before writing the Finite root workspace.
-- [ ] Confirm root `Cargo.toml` still has one `[workspace]`.
-- [ ] Add `finitecomputer-v2/crates/*` members explicitly.
+- [x] Confirm root `Cargo.toml` still has one `[workspace]`.
+- [x] Add `finitecomputer-v2/crates/*` members explicitly.
 - [ ] Add `finitechat/crates/*` members explicitly.
 - [ ] Add `finitechat/uniffi-bindgen` if it should remain a workspace member.
 - [ ] Add `finite-sites/crates/*` members explicitly.
-- [ ] Decide whether to use a root `[workspace.package]` immediately or later.
-- [ ] Decide whether to merge `[workspace.dependencies]` immediately or keep
-  repo-local workspace dependency tables temporarily.
-- [ ] Generate one root `Cargo.lock`.
-- [ ] Keep nested `Cargo.lock` files until the root lockfile is verified.
-- [ ] Fix path dependencies that break from the new root workspace.
+- [x] Decide whether to use a root `[workspace.package]` immediately or later.
+- [x] Decide whether to merge `[workspace.dependencies]` immediately or keep
+  dependency declarations in member crates temporarily.
+- [x] Generate one root `Cargo.lock`.
+- [x] Verify the root lockfile before removing nested `Cargo.lock` files.
+- [x] Fix path dependencies that break from the new root workspace.
 - [ ] Resolve duplicate crate names or binary names.
-- [ ] Resolve dependency version conflicts only when required for the build.
-- [ ] Run `cargo check --workspace` from `finite-mono`.
-- [ ] Run `cargo test --workspace` from `finite-mono`.
-- [ ] Remove nested `Cargo.lock` files only after the root lockfile is working
-  and the old per-repo commands no longer need them.
+- [x] Resolve dependency version conflicts only when required for the build.
+- [x] Run `cargo check --workspace` from `finite-mono`.
+- [x] Run `cargo test --workspace` from `finite-mono`.
+- [x] Remove nested `Cargo.lock` files only after the root lockfile is working
+  and copied repo Cargo commands resolve through the root workspace.
 
 Exit criterion: root `cargo check --workspace` and `cargo test --workspace`
 cover all imported Rust crates that are expected to pass locally.
@@ -240,29 +242,17 @@ Keep this intentionally smaller than Fedimint's command set.
 
 Tasks:
 
-- [ ] Check Fedimint's split between generated root `justfile` and custom
+- [x] Check Fedimint's split between generated root `justfile` and custom
   project justfile before finalizing the Finite root `justfile`.
-- [ ] Keep `just default` as `just --list`.
-- [ ] Add `just check` for root Rust workspace checks.
-- [ ] Add `just test` for root Rust workspace tests.
+- [x] Keep `just default` as `just --list`.
+- [x] Add `just metadata` for root Cargo workspace metadata checks.
+- [x] Add `just check` for root Rust workspace checks.
+- [x] Add `just test` for root Rust workspace tests.
 - [ ] Add `just fmt` for Rust formatting only if it is already low-friction.
-- [ ] Avoid dashboard, chat, sites, CI, release, and deploy commands in this
+- [x] Avoid dashboard, chat, sites, CI, release, and deploy commands in this
   phase unless they are repeatedly needed.
-- [ ] Move any multi-line logic into root `scripts/` instead of growing the
+- [x] Move any multi-line logic into root `scripts/` instead of growing the
   `justfile`.
-
-Suggested root `justfile` after the workspace exists:
-
-```just
-default:
-    just --list
-
-check:
-    cargo check --workspace
-
-test:
-    cargo test --workspace
-```
 
 Exit criterion: root commands are discoverable without becoming a second build
 system.
@@ -407,6 +397,41 @@ Deferred Nix scope:
 
 Exit criterion: Nix helps local development or release confidence without
 becoming mandatory for every non-Rust path too early.
+
+## Phase 13: Stale Docs Audit and Purge
+
+Goal: after the first monorepo milestone is working, comb through all imported
+folders and remove or update docs that are stale, misleading, or tied to the
+old multi-repo layout.
+
+Do not start this phase until the copied repos build and test from the monorepo.
+Expect that many imported docs may be deleted. Until then, stale docs are
+acceptable as copied historical context, but they should not be linked as
+canonical guidance without review.
+
+Tasks:
+
+- [ ] Confirm the first monorepo milestone is working before changing or
+  deleting broad documentation.
+- [ ] Check Fedimint's docs layout and ownership boundaries before deciding
+  which Finite docs should become canonical root docs.
+- [ ] Inventory docs across root `docs/`, copied repo `docs/` folders, root and
+  repo-local READMEs, app READMEs, deployment READMEs, and crate-local docs.
+- [ ] Classify each doc as keep current, update, delete, or leave repo-local
+  but marked unreviewed.
+- [ ] Prefer a small set of current root docs over many stale copied docs.
+- [ ] Update canonical docs to use monorepo paths and root commands.
+- [ ] Remove docs that describe obsolete repos, commands, deployment paths, or
+  architecture only after checking for current links and operational use.
+- [ ] Preserve operational runbooks only when they still map to live systems or
+  clearly mark them as needing review.
+- [ ] Search for broken links and stale references after removals.
+- [ ] Record major doc removals or retitles in
+  `docs/monorepo-migration-log.md`.
+
+Exit criterion: root docs are intentionally small and current, stale copied docs
+are removed or clearly marked, and no current docs link readers into known-bad
+instructions.
 
 ## Later Repo Imports
 

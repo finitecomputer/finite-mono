@@ -1,0 +1,27 @@
+[package]
+name = "finite-saas-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+finite-core = { path = "../finite-core" }
+futures-util = "0.3"
+getrandom = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+tower = "0.5"

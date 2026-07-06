@@ -1,0 +1,1146 @@
+import { createHash } from "node:crypto";
+
+import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
+import {
+  invalidateServerSwrCache,
+  readThroughServerSwr,
+} from "@/lib/server-swr-cache";
+
+export type CoreBridgeStatus = {
+  configured: boolean;
+  missing: string[];
+};
+
+export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
+
+export type CoreProjectImportCandidate = {
+  id: string;
+  source_host_id: string;
+  source_machine_id: string;
+  source_import_key: string;
+  owner_email: string;
+  latest_host_owner_email?: string | null;
+  status: "pending" | "claimed" | "admin_review";
+  host_facts: CoreHostOwnedRuntimeFacts;
+  known_external_channel_participants: CoreKnownExternalChannelParticipant[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreKnownExternalChannelParticipant = {
+  channel: string;
+  external_user_id?: string | null;
+  username?: string | null;
+  display_name?: string | null;
+};
+
+export type CoreHostOwnedRuntimeFacts = {
+  display_name: string;
+  hostname?: string | null;
+  runtime_host: string;
+  runtime_status: CoreRuntimeStatus;
+  active_inference_profile?: string | null;
+  hermes_available?: boolean | null;
+  published_app_urls: string[];
+};
+
+export type CoreProject = {
+  id: string;
+  customer_org_id: string;
+  owner_user_id: string;
+  display_name: string;
+  import_candidate_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreAgentRuntime = {
+  id: string;
+  project_id: string;
+  source_host_id: string;
+  source_machine_id: string;
+  source_import_key: string;
+  runtime_artifact_id?: string | null;
+  state_schema_version?: string | null;
+  host_facts: CoreHostOwnedRuntimeFacts;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreVisibleProject = {
+  project: CoreProject;
+  runtime?: CoreAgentRuntime | null;
+};
+
+export type CoreAgentCreationRequest = {
+  id: string;
+  customer_org_id: string;
+  owner_user_id: string;
+  project_id: string;
+  idempotency_key: string;
+  display_name: string;
+  status: "requested" | "launching" | "running" | "failed" | "cancelled";
+  requested_launch_code?: string | null;
+  agent_runtime_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreAgentCreationRequestSummary = {
+  id: string;
+  project_id: string;
+  display_name: string;
+  status: "requested" | "launching" | "running" | "failed" | "cancelled";
+  agent_runtime_id?: string | null;
+  failure_message?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreAgentCreationResult = {
+  project: CoreProject;
+  request: CoreAgentCreationRequest;
+  reused: boolean;
+};
+
+export type CoreRuntimeControlRequest = {
+  id: string;
+  project_id: string;
+  agent_runtime_id: string;
+  source_host_id: string;
+  source_machine_id: string;
+  requested_by_user_id: string;
+  kind: "restart" | "recover_known_good_chat_runtime" | "stop" | "destroy";
+  status: "requested" | "running" | "succeeded" | "failed";
+  failure_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+};
+
+export type CoreSourceHostRelayEndpoint = {
+  source_host_id: string;
+  url: string;
+  admin_token: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreFinitePrivateGrant = {
+  id: string;
+  user_id: string;
+  limit_profile_id: string;
+  status: "active" | "revoked";
+  current_window_started_at?: string | null;
+  current_window_used_units: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreFinitePrivateApiKey = {
+  id: string;
+  grant_id: string;
+  project_id?: string | null;
+  agent_runtime_id?: string | null;
+  key_hash: string;
+  status: "active" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreFinitePrivateAdminAuditEvent = {
+  id: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  grant_id?: string | null;
+  api_key_id?: string | null;
+  actor: string;
+  metadata: unknown;
+  created_at: string;
+};
+
+export type CoreFinitePrivateAdminState = {
+  grants: CoreFinitePrivateGrant[];
+  apiKeys: CoreFinitePrivateApiKey[];
+  adminAuditEvents: CoreFinitePrivateAdminAuditEvent[];
+};
+
+export type CoreFinitePrivateAdminStateResult = CoreBridgeStatus & {
+  state: CoreFinitePrivateAdminState | null;
+  error: string | null;
+};
+
+export type CoreAdminRuntimeOverview = {
+  project_id: string;
+  project_display_name: string;
+  owner_email?: string | null;
+  agent_runtime_id: string;
+  source_host_id: string;
+  source_machine_id: string;
+  runtime_artifact_id?: string | null;
+  runtime_artifact_version_label?: string | null;
+  runtime_status: CoreRuntimeStatus;
+  last_heartbeat_at?: string | null;
+  status_updated_at?: string | null;
+  runtime_updated_at: string;
+  hermes_available?: boolean | null;
+  published_app_urls: string[];
+  active_finite_private_key_count: number;
+  runtime_link_active: boolean;
+  supports_runtime_control: boolean;
+};
+
+export type CoreAdminRuntimesResult = CoreBridgeStatus & {
+  runtimes: CoreAdminRuntimeOverview[] | null;
+  error: string | null;
+};
+
+/** Raw key is present exactly once in this response and is never persisted. */
+export type CoreAdminIssuedFinitePrivateKey = {
+  grant?: CoreFinitePrivateGrant | null;
+  api_key: CoreFinitePrivateApiKey;
+  raw_api_key: string;
+  raw_api_key_note: string;
+};
+
+export type CoreBillingSubscriptionStatus =
+  | "incomplete"
+  | "incomplete_expired"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "canceled"
+  | "unpaid"
+  | "paused";
+
+export type CoreCustomerOrganization = {
+  id: string;
+  owner_user_id: string;
+  name: string;
+  billing_class: "grandfathered" | "off2026" | "standard";
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreCustomerBillingAccount = {
+  customer_org_id: string;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  stripe_price_id?: string | null;
+  subscription_status?: CoreBillingSubscriptionStatus | null;
+  current_period_end?: string | null;
+  cancel_at_period_end: boolean;
+  last_stripe_event_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreAgentCreationEntitlement = {
+  id: string;
+  customer_org_id: string;
+  allowed_new_agent_runtimes: number;
+  launch_code?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoreBillingOverview = {
+  customer_org: CoreCustomerOrganization;
+  billing_account?: CoreCustomerBillingAccount | null;
+  agent_creation_entitlement?: CoreAgentCreationEntitlement | null;
+  can_create_agent: boolean;
+  requires_billing: boolean;
+};
+
+export type CoreBillingOverviewResult = CoreBridgeStatus & {
+  account: AccountAuthContext;
+  billing: CoreBillingOverview | null;
+  error: string | null;
+};
+
+export type CoreMe = {
+  email: string;
+  workos_user_id: string;
+  claimable_candidates: CoreProjectImportCandidate[];
+  projects: CoreVisibleProject[];
+  agent_creation_requests: CoreAgentCreationRequestSummary[];
+};
+
+export type CoreMeResult = {
+  configured: boolean;
+  missing: string[];
+  account: AccountAuthContext;
+  me: CoreMe | null;
+  error: string | null;
+};
+
+const REQUIRED_CORE_ENV = ["FC_CORE_BASE_URL", "FC_CORE_API_TOKEN"] as const;
+const CORE_CACHE_PREFIX = "core:";
+const CORE_ME_FRESH_MS = 5_000;
+const CORE_ME_STALE_MS = 30_000;
+const CORE_SERVICE_FRESH_MS = 10_000;
+const CORE_SERVICE_STALE_MS = 60_000;
+
+type EnvSource = Record<string, string | undefined>;
+export type CoreReadCacheMode = "fresh" | "swr";
+export type CoreReadOptions = {
+  cacheMode?: CoreReadCacheMode;
+};
+
+export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
+  const missing = REQUIRED_CORE_ENV.filter((name) => !env[name]?.trim());
+  return {
+    configured: missing.length === 0,
+    missing,
+  };
+}
+
+export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeResult> {
+  const status = coreBridgeStatus();
+  const account = await getAccountAuthContext();
+  if (!status.configured) {
+    return {
+      ...status,
+      account,
+      me: null,
+      error: null,
+    };
+  }
+
+  if (!coreAccountReady(account)) {
+    return {
+      ...status,
+      account,
+      me: null,
+      error: "A verified WorkOS account is required for Core project imports.",
+    };
+  }
+
+  try {
+    const load = () => coreFetch<CoreMe>("/api/core/v1/me", account);
+    return {
+      ...status,
+      account,
+      me:
+        options.cacheMode === "swr"
+          ? await readThroughServerSwr(
+              `${CORE_CACHE_PREFIX}me:${coreCacheFingerprint(accountCacheParts(account))}`,
+              { freshMs: CORE_ME_FRESH_MS, staleMs: CORE_ME_STALE_MS },
+              load
+            )
+          : await load(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      account,
+      me: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function loadCoreBillingOverview(
+  options: CoreReadOptions = {}
+): Promise<CoreBillingOverviewResult> {
+  const status = coreBridgeStatus();
+  const account = await getAccountAuthContext();
+  if (!status.configured) {
+    return {
+      ...status,
+      account,
+      billing: null,
+      error: null,
+    };
+  }
+
+  if (!coreAccountReady(account)) {
+    return {
+      ...status,
+      account,
+      billing: null,
+      error: "A verified WorkOS account is required for billing.",
+    };
+  }
+
+  try {
+    const load = () => coreFetch<CoreBillingOverview>("/api/core/v1/me/billing", account);
+    return {
+      ...status,
+      account,
+      billing:
+        options.cacheMode === "swr"
+          ? await readThroughServerSwr(
+              `${CORE_CACHE_PREFIX}billing:${coreCacheFingerprint(accountCacheParts(account))}`,
+              { freshMs: CORE_ME_FRESH_MS, staleMs: CORE_ME_STALE_MS },
+              load
+            )
+          : await load(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      account,
+      billing: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function claimCoreImportCandidates(selectedCandidateIds: string[]) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to claim imported bots.");
+  }
+  const cleanIds = selectedCandidateIds.map((id) => id.trim()).filter(Boolean);
+  if (cleanIds.length === 0) {
+    throw new Error("Select at least one bot to import.");
+  }
+
+  const result = await coreFetch<{
+    claimed_project_ids: string[];
+    already_claimed_project_ids: string[];
+    denied_candidate_ids: string[];
+  }>("/api/core/v1/me/import-candidates/claim", account, {
+    method: "POST",
+    body: JSON.stringify({
+      selectedCandidateIds: cleanIds,
+    }),
+  });
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function requestCoreAgentCreation(input: {
+  displayName: string;
+  launchCode: string;
+  idempotencyKey: string;
+}) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to create an agent.");
+  }
+
+  const result = await coreFetch<CoreAgentCreationResult>(
+    "/api/core/v1/me/agent-creation-requests",
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function linkCoreStripeCustomer(stripeCustomerId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required for billing.");
+  }
+  const result = await coreFetch<CoreCustomerBillingAccount>(
+    "/api/core/v1/me/billing/stripe-customer",
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        stripeCustomerId: requiredString(stripeCustomerId, "Stripe customer id is required."),
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function syncCoreStripeSubscription(input: {
+  customerOrgId?: string | null;
+  stripeCustomerId: string;
+  stripeSubscriptionId: string;
+  stripePriceId?: string | null;
+  subscriptionStatus: CoreBillingSubscriptionStatus;
+  currentPeriodEnd?: string | null;
+  cancelAtPeriodEnd: boolean;
+  stripeEventId?: string | null;
+  stripeEventCreated?: number | null;
+}) {
+  const result = await coreServiceFetch<CoreCustomerBillingAccount>(
+    "/api/core/v1/billing/stripe/subscription",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        customerOrgId: optionalString(input.customerOrgId),
+        stripeCustomerId: requiredString(input.stripeCustomerId, "Stripe customer id is required."),
+        stripeSubscriptionId: requiredString(
+          input.stripeSubscriptionId,
+          "Stripe subscription id is required."
+        ),
+        stripePriceId: optionalString(input.stripePriceId),
+        subscriptionStatus: input.subscriptionStatus,
+        currentPeriodEnd: optionalString(input.currentPeriodEnd),
+        cancelAtPeriodEnd: input.cancelAtPeriodEnd,
+        stripeEventId: optionalString(input.stripeEventId),
+        stripeEventCreated: input.stripeEventCreated ?? null,
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function requestCoreRuntimeRestart(projectId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to restart hosted agents.");
+  }
+
+  const result = await coreFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/me/projects/${encodeURIComponent(projectId)}/runtime/restart`,
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function requestCoreRuntimeRecoverKnownGoodChat(projectId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to recover hosted agents.");
+  }
+
+  const result = await coreFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/me/projects/${encodeURIComponent(projectId)}/runtime/recover-known-good-chat`,
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function requestCoreRuntimeStop(projectId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to stop hosted agents.");
+  }
+
+  const result = await coreFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/me/projects/${encodeURIComponent(projectId)}/runtime/stop`,
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function requestCoreRuntimeDestroy(projectId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required to destroy hosted agents.");
+  }
+
+  const result = await coreFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/me/projects/${encodeURIComponent(projectId)}/runtime/destroy`,
+    account,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function cancelFailedCoreAgentCreationRequest(requestId: string) {
+  const trimmed = requestId.trim();
+  if (!trimmed) {
+    throw new Error("Missing agent creation request id.");
+  }
+
+  const result = await coreServiceFetch<CoreAgentCreationRequest>(
+    `/api/core/v1/agent-creation-requests/${encodeURIComponent(trimmed)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function findCoreProjectByMachineId(
+  machineId: string,
+  options: CoreReadOptions = {}
+) {
+  const result = await loadCoreMe(options);
+  if (!result.me) {
+    return null;
+  }
+  return (
+    result.me.projects.find(
+      (project) => project.runtime?.source_machine_id === machineId
+    ) ?? null
+  );
+}
+
+export async function loadCoreSourceHostRelayEndpoint(
+  sourceHostId: string,
+  options: CoreReadOptions = {}
+) {
+  const hostId = sourceHostId.trim().toLowerCase();
+  if (!hostId) {
+    return null;
+  }
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    return null;
+  }
+
+  try {
+    const pathname = `/api/core/v1/source-host-relays/${encodeURIComponent(hostId)}`;
+    const load = () => coreServiceFetch<CoreSourceHostRelayEndpoint>(pathname);
+    return options.cacheMode === "swr"
+      ? await readThroughServerSwr(
+          `${CORE_CACHE_PREFIX}source-host-relay:${coreCacheFingerprint(coreServiceCacheParts(hostId))}`,
+          { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
+          load
+        )
+      : await load();
+  } catch (error) {
+    if (error instanceof CoreFetchError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function loadCoreFinitePrivateAdminState(
+  options: CoreReadOptions = {}
+): Promise<CoreFinitePrivateAdminStateResult> {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    return {
+      ...status,
+      state: null,
+      error: null,
+    };
+  }
+
+  try {
+    const load = () =>
+      coreServiceFetch<CoreFinitePrivateAdminState>(
+        "/api/core/v1/finite-private/admin-state"
+      );
+    return {
+      ...status,
+      state:
+        options.cacheMode === "swr"
+          ? await readThroughServerSwr(
+              `${CORE_CACHE_PREFIX}finite-private-admin:${coreCacheFingerprint(coreServiceCacheParts())}`,
+              { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
+              load
+            )
+          : await load(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      state: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function approveCoreFinitePrivateGrant(input: {
+  verifiedEmail: string;
+  workosUserId?: string | null;
+  limitProfileId?: string | null;
+}) {
+  const result = await coreServiceFetch<CoreFinitePrivateGrant>("/api/core/v1/finite-private/grants", {
+    method: "POST",
+    body: JSON.stringify({
+      verifiedEmail: requiredString(input.verifiedEmail, "Verified email is required."),
+      workosUserId: optionalString(input.workosUserId),
+      limitProfileId: optionalString(input.limitProfileId),
+    }),
+  });
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function issueCoreFinitePrivateApiKey(input: {
+  grantId: string;
+  rawKey: string;
+  projectId?: string | null;
+  agentRuntimeId?: string | null;
+}) {
+  const grantId = requiredString(input.grantId, "Grant id is required.");
+  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+    `/api/core/v1/finite-private/grants/${encodeURIComponent(grantId)}/api-keys`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        rawKey: requiredString(input.rawKey, "Raw Finite Private key is required."),
+        projectId: optionalString(input.projectId),
+        agentRuntimeId: optionalString(input.agentRuntimeId),
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function resetCoreFinitePrivateGrant(grantId: string) {
+  const result = await coreServiceFetch<CoreFinitePrivateGrant>(
+    `/api/core/v1/finite-private/grants/${encodeURIComponent(
+      requiredString(grantId, "Grant id is required.")
+    )}/reset`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function revokeCoreFinitePrivateGrant(grantId: string) {
+  const result = await coreServiceFetch<CoreFinitePrivateGrant>(
+    `/api/core/v1/finite-private/grants/${encodeURIComponent(
+      requiredString(grantId, "Grant id is required.")
+    )}/revoke`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function rotateCoreFinitePrivateApiKey(input: {
+  keyId: string;
+  rawKey: string;
+}) {
+  const keyId = requiredString(input.keyId, "API key id is required.");
+  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+    `/api/core/v1/finite-private/api-keys/${encodeURIComponent(keyId)}/rotate`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        rawKey: requiredString(input.rawKey, "Replacement raw Finite Private key is required."),
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function revokeCoreFinitePrivateApiKey(keyId: string) {
+  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+    `/api/core/v1/finite-private/api-keys/${encodeURIComponent(
+      requiredString(keyId, "API key id is required.")
+    )}/revoke`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+// --- Admin Ops (Core-enforced via FC_CORE_ADMIN_EMAILS) ---
+//
+// These calls send the signed-in admin's verified identity headers; Core
+// authorizes them against its own allowlist. The dashboard isAdmin gate is
+// only a UI convenience.
+
+async function coreAdminFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  return coreFetch<T>(pathname, account, init);
+}
+
+export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    return { ...status, runtimes: null, error: null };
+  }
+
+  try {
+    return {
+      ...status,
+      runtimes: await coreAdminFetch<CoreAdminRuntimeOverview[]>(
+        "/api/core/v1/admin/runtimes"
+      ),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      runtimes: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function adminRestartCoreRuntime(projectId: string) {
+  const result = await coreAdminFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/admin/projects/${encodeURIComponent(
+      requiredString(projectId, "Project id is required.")
+    )}/runtime/restart`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminRecoverCoreRuntime(projectId: string) {
+  const result = await coreAdminFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/admin/projects/${encodeURIComponent(
+      requiredString(projectId, "Project id is required.")
+    )}/runtime/recover-known-good-chat`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminIssueCoreFinitePrivateFriendKey(input: {
+  email: string;
+  limitProfileId?: string | null;
+}) {
+  const result = await coreAdminFetch<CoreAdminIssuedFinitePrivateKey>(
+    "/api/core/v1/admin/finite-private/friend-keys",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        email: requiredString(input.email, "Friend email is required."),
+        limitProfileId: optionalString(input.limitProfileId),
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminRotateCoreFinitePrivateApiKey(keyId: string) {
+  const result = await coreAdminFetch<CoreAdminIssuedFinitePrivateKey>(
+    `/api/core/v1/admin/finite-private/keys/${encodeURIComponent(
+      requiredString(keyId, "API key id is required.")
+    )}/rotate`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminRevokeCoreFinitePrivateApiKey(keyId: string) {
+  const result = await coreAdminFetch<CoreFinitePrivateApiKey>(
+    `/api/core/v1/admin/finite-private/keys/${encodeURIComponent(
+      requiredString(keyId, "API key id is required.")
+    )}/revoke`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminResetCoreFinitePrivateWindow(grantId: string) {
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>(
+    `/api/core/v1/admin/finite-private/grants/${encodeURIComponent(
+      requiredString(grantId, "Grant id is required.")
+    )}/window-reset`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export function coreProjectMachineId(project: CoreVisibleProject) {
+  return project.runtime?.source_machine_id?.trim() || null;
+}
+
+export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {
+  return Boolean(project.runtime?.runtime_artifact_id?.trim());
+}
+
+export const coreProjectSupportsHostedRestart = coreProjectSupportsHostedRuntimeControl;
+
+export function coreProjectLabel(project: CoreVisibleProject) {
+  return (
+    project.project.display_name.trim() ||
+    project.runtime?.host_facts.display_name.trim() ||
+    project.runtime?.source_machine_id ||
+    "Imported bot"
+  );
+}
+
+export function coreProjectPrimaryUrl(project: CoreVisibleProject) {
+  const urls = project.runtime?.host_facts.published_app_urls ?? [];
+  return urls.find((url) => safeHttpUrl(url)) ?? null;
+}
+
+export function coreAgentCreationRequestForProject(
+  project: CoreVisibleProject,
+  requests: CoreAgentCreationRequestSummary[]
+) {
+  return (
+    requests.find((request) => request.project_id === project.project.id) ?? null
+  );
+}
+
+export function coreProjectLaunchStatusLabel(
+  project: CoreVisibleProject,
+  request: CoreAgentCreationRequestSummary | null
+) {
+  const runtimeStatus = project.runtime?.host_facts.runtime_status;
+  if (runtimeStatus === "online") {
+    return "Online";
+  }
+  if (runtimeStatus === "offline") {
+    return "Offline";
+  }
+  if (runtimeStatus === "stale") {
+    return "Needs attention";
+  }
+  if (request?.status === "requested") {
+    return "Queued";
+  }
+  if (request?.status === "launching") {
+    return "Starting";
+  }
+  if (request?.status === "failed") {
+    return "Launch failed";
+  }
+  return null;
+}
+
+export function coreProjectLocationLabel(
+  project: CoreVisibleProject,
+  request: CoreAgentCreationRequestSummary | null
+) {
+  if (project.runtime) {
+    return `${project.runtime.source_host_id} / ${project.runtime.source_machine_id}`;
+  }
+  if (request?.status === "requested") {
+    return "Waiting for launch";
+  }
+  if (request?.status === "launching") {
+    return "Starting your bot";
+  }
+  if (request?.status === "failed") {
+    return "Launch failed";
+  }
+  return "Waiting for launch";
+}
+
+export function coreIdentityHeaders(account: AccountAuthContext, token: string) {
+  if (!coreAccountReady(account)) {
+    throw new Error("A verified WorkOS account is required for Finite Core.");
+  }
+
+  return {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "x-finite-workos-user-id": account.workosUserId,
+    "x-finite-workos-email": account.email,
+    "x-finite-workos-email-verified": account.emailVerified ? "true" : "false",
+  };
+}
+
+function coreAccountReady(
+  account: AccountAuthContext
+): account is AccountAuthContext & {
+  email: string;
+  workosUserId: string;
+  emailVerified: true;
+} {
+  const devAccountAllowed = process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH === "1";
+  return Boolean(
+    account.email &&
+      account.workosUserId &&
+      account.emailVerified &&
+      (account.source === "workos" || (account.source === "dev" && devAccountAllowed))
+  );
+}
+
+async function coreFetch<T>(
+  pathname: string,
+  account: AccountAuthContext,
+  init: RequestInit = {}
+): Promise<T> {
+  const baseUrl = process.env.FC_CORE_BASE_URL?.trim();
+  const token = process.env.FC_CORE_API_TOKEN?.trim();
+  if (!baseUrl || !token) {
+    throw new Error("Finite Core is not configured.");
+  }
+
+  const response = await fetch(new URL(pathname, baseUrl), {
+    ...init,
+    cache: "no-store",
+    headers: {
+      ...coreIdentityHeaders(account, token),
+      ...headersRecord(init.headers),
+    },
+  });
+  const text = await response.text();
+  const parsed = parseCoreResponseText(text, response.ok, response.status);
+  if (!response.ok) {
+    const message =
+      parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string"
+        ? parsed.error
+        : `Finite Core returned ${response.status}`;
+    throw new Error(message);
+  }
+  return parsed as T;
+}
+
+class CoreFetchError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "CoreFetchError";
+  }
+}
+
+async function coreServiceFetch<T>(
+  pathname: string,
+  init: RequestInit = {}
+): Promise<T> {
+  const baseUrl = process.env.FC_CORE_BASE_URL?.trim();
+  const token = process.env.FC_CORE_API_TOKEN?.trim();
+  if (!baseUrl || !token) {
+    throw new Error("Finite Core is not configured.");
+  }
+
+  const response = await fetch(new URL(pathname, baseUrl), {
+    ...init,
+    cache: "no-store",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      ...headersRecord(init.headers),
+    },
+  });
+  const text = await response.text();
+  const parsed = parseCoreResponseText(text, response.ok, response.status);
+  if (!response.ok) {
+    const message =
+      parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string"
+        ? parsed.error
+        : `Finite Core returned ${response.status}`;
+    throw new CoreFetchError(message, response.status);
+  }
+  return parsed as T;
+}
+
+function parseCoreResponseText(text: string, ok: boolean, status: number) {
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    if (!ok) {
+      throw new Error(text ? `${text.trim().slice(0, 500)} (${status})` : `Finite Core returned ${status}`);
+    }
+    throw new Error(`Finite Core returned non-JSON response (${status})`);
+  }
+}
+
+function headersRecord(headers: HeadersInit | undefined) {
+  if (!headers) {
+    return {};
+  }
+  return Object.fromEntries(new Headers(headers).entries());
+}
+
+function requiredString(value: string | null | undefined, message: string) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    throw new Error(message);
+  }
+  return trimmed;
+}
+
+function optionalString(value: string | null | undefined) {
+  const trimmed = value?.trim() ?? "";
+  return trimmed || null;
+}
+
+export function invalidateCoreReadCache() {
+  invalidateServerSwrCache(CORE_CACHE_PREFIX);
+}
+
+function accountCacheParts(account: AccountAuthContext) {
+  return [
+    process.env.FC_CORE_BASE_URL?.trim() ?? "",
+    process.env.FC_CORE_API_TOKEN?.trim() ?? "",
+    account.source,
+    account.workosUserId ?? "",
+    account.email ?? "",
+    account.emailVerified ? "verified" : "unverified",
+  ];
+}
+
+function coreServiceCacheParts(...parts: string[]) {
+  return [
+    process.env.FC_CORE_BASE_URL?.trim() ?? "",
+    process.env.FC_CORE_API_TOKEN?.trim() ?? "",
+    ...parts,
+  ];
+}
+
+function coreCacheFingerprint(parts: string[]) {
+  return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
+}
+
+function safeHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}

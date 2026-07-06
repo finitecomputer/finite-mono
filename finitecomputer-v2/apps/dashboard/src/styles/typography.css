@@ -1,0 +1,206 @@
+/*
+ * Finite dashboard typography - Funnel Sans + JetBrains Mono.
+ * Base UI size matches the Ocean shell.
+ */
+
+:root {
+  --type-display-size: 2rem;
+  --type-display-line: 1.1;
+  --type-display-weight: 600;
+  --type-display-tracking: 0;
+
+  --type-title-1-size: 1.75rem;
+  --type-title-1-size-md: 2rem;
+  --type-title-1-line: 1.15;
+  --type-title-1-weight: 600;
+  --type-title-1-tracking: 0;
+
+  --type-title-2-size: 1.375rem;
+  --type-title-2-line: 1.2;
+  --type-title-2-weight: 600;
+  --type-title-2-tracking: 0;
+
+  --type-title-3-size: 1.125rem;
+  --type-title-3-line: 1.25;
+  --type-title-3-weight: 600;
+  --type-title-3-tracking: 0;
+
+  --type-body-lg-size: 0.9375rem;
+  --type-body-lg-line: 1.45;
+  --type-body-lg-weight: 400;
+  --type-body-lg-tracking: 0;
+
+  --type-body-size: 0.875rem;
+  --type-body-line: 1.45;
+  --type-body-weight: 400;
+  --type-body-tracking: 0;
+
+  --type-body-sm-size: 0.8125rem;
+  --type-body-sm-line: 1.4;
+  --type-body-sm-weight: 400;
+  --type-body-sm-tracking: 0;
+
+  --type-caption-size: 0.75rem;
+  --type-caption-line: 1.35;
+  --type-caption-weight: 500;
+  --type-caption-tracking: 0;
+
+  --type-label-size: 0.6875rem;
+  --type-label-line: 1.2;
+  --type-label-weight: 600;
+  --type-label-tracking: 0;
+
+  --type-mono-size: 0.8125rem;
+  --type-mono-line: 1.45;
+  --type-mono-weight: 400;
+  --type-mono-tracking: 0;
+
+  --type-mono-sm-size: 0.75rem;
+  --type-mono-sm-line: 1.4;
+  --type-mono-sm-weight: 400;
+  --type-mono-sm-tracking: 0;
+}
+
+@theme inline {
+  --text-display: var(--type-display-size);
+  --text-display--line-height: var(--type-display-line);
+  --text-display--font-weight: var(--type-display-weight);
+  --text-display--letter-spacing: var(--type-display-tracking);
+
+  --text-title-1: var(--type-title-1-size);
+  --text-title-1--line-height: var(--type-title-1-line);
+  --text-title-1--font-weight: var(--type-title-1-weight);
+  --text-title-1--letter-spacing: var(--type-title-1-tracking);
+
+  --text-title-2: var(--type-title-2-size);
+  --text-title-2--line-height: var(--type-title-2-line);
+  --text-title-2--font-weight: var(--type-title-2-weight);
+  --text-title-2--letter-spacing: var(--type-title-2-tracking);
+
+  --text-title-3: var(--type-title-3-size);
+  --text-title-3--line-height: var(--type-title-3-line);
+  --text-title-3--font-weight: var(--type-title-3-weight);
+  --text-title-3--letter-spacing: var(--type-title-3-tracking);
+
+  --text-body-lg: var(--type-body-lg-size);
+  --text-body-lg--line-height: var(--type-body-lg-line);
+  --text-body-lg--font-weight: var(--type-body-lg-weight);
+
+  --text-body: var(--type-body-size);
+  --text-body--line-height: var(--type-body-line);
+  --text-body--font-weight: var(--type-body-weight);
+
+  --text-body-sm: var(--type-body-sm-size);
+  --text-body-sm--line-height: var(--type-body-sm-line);
+  --text-body-sm--font-weight: var(--type-body-sm-weight);
+
+  --text-caption: var(--type-caption-size);
+  --text-caption--line-height: var(--type-caption-line);
+  --text-caption--font-weight: var(--type-caption-weight);
+
+  --text-label: var(--type-label-size);
+  --text-label--line-height: var(--type-label-line);
+  --text-label--font-weight: var(--type-label-weight);
+  --text-label--letter-spacing: var(--type-label-tracking);
+
+  --text-mono: var(--type-mono-size);
+  --text-mono--line-height: var(--type-mono-line);
+
+  --text-mono-sm: var(--type-mono-sm-size);
+  --text-mono-sm--line-height: var(--type-mono-sm-line);
+}
+
+@utility type-display {
+  font-family: var(--font-sans);
+  font-size: var(--type-display-size);
+  line-height: var(--type-display-line);
+  font-weight: var(--type-display-weight);
+  letter-spacing: var(--type-display-tracking);
+}
+
+@utility type-title-1 {
+  font-family: var(--font-sans);
+  font-size: var(--type-title-1-size);
+  line-height: var(--type-title-1-line);
+  font-weight: var(--type-title-1-weight);
+  letter-spacing: var(--type-title-1-tracking);
+
+  @media (min-width: 48rem) {
+    font-size: var(--type-title-1-size-md);
+  }
+}
+
+@utility type-title-2 {
+  font-family: var(--font-sans);
+  font-size: var(--type-title-2-size);
+  line-height: var(--type-title-2-line);
+  font-weight: var(--type-title-2-weight);
+  letter-spacing: var(--type-title-2-tracking);
+}
+
+@utility type-title-3 {
+  font-family: var(--font-sans);
+  font-size: var(--type-title-3-size);
+  line-height: var(--type-title-3-line);
+  font-weight: var(--type-title-3-weight);
+  letter-spacing: var(--type-title-3-tracking);
+}
+
+@utility type-body-lg {
+  font-family: var(--font-sans);
+  font-size: var(--type-body-lg-size);
+  line-height: var(--type-body-lg-line);
+  font-weight: var(--type-body-lg-weight);
+  letter-spacing: var(--type-body-lg-tracking);
+}
+
+@utility type-body {
+  font-family: var(--font-sans);
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-line);
+  font-weight: var(--type-body-weight);
+  letter-spacing: var(--type-body-tracking);
+}
+
+@utility type-body-sm {
+  font-family: var(--font-sans);
+  font-size: var(--type-body-sm-size);
+  line-height: var(--type-body-sm-line);
+  font-weight: var(--type-body-sm-weight);
+  letter-spacing: var(--type-body-sm-tracking);
+}
+
+@utility type-caption {
+  font-family: var(--font-sans);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-caption-line);
+  font-weight: var(--type-caption-weight);
+  letter-spacing: var(--type-caption-tracking);
+}
+
+@utility type-label {
+  font-family: var(--font-sans);
+  font-size: var(--type-label-size);
+  line-height: var(--type-label-line);
+  font-weight: var(--type-label-weight);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: uppercase;
+}
+
+@utility type-mono {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-size);
+  line-height: var(--type-mono-line);
+  font-weight: var(--type-mono-weight);
+  letter-spacing: var(--type-mono-tracking);
+  font-variant-ligatures: none;
+}
+
+@utility type-mono-sm {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm-size);
+  line-height: var(--type-mono-sm-line);
+  font-weight: var(--type-mono-sm-weight);
+  letter-spacing: var(--type-mono-sm-tracking);
+  font-variant-ligatures: none;
+}
