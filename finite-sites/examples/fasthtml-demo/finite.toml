@@ -1,0 +1,10 @@
+[project]
+slug = "finite-fasthtml-demo"
+
+[outputs.web]
+kind = "app"
+site_name = "finite-fasthtml-demo"
+branch = "main"
+path = "."
+start = "uv run app.py"
+

@@ -1,0 +1,10 @@
+[project]
+slug = "finite-react-bun-spa"
+
+[outputs.site]
+kind = "site"
+site_name = "finite-react-bun-spa"
+branch = "main"
+path = "dist"
+spa = true
+

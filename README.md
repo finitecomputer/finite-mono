@@ -21,8 +21,11 @@ repos work in one checkout, then add shared workspace structure around them.
 
 ## Current Root Tools
 
-- `just --list`: show available root commands.
+- `just`: show available root commands and repo modules.
 - `just metadata`: verify the root Cargo workspace shape.
 - `just check`: check imported Rust workspace crates.
 - `just test`: test imported Rust workspace crates.
+- `just sites build`: build the Finite Sites packages.
+- `just sites test`: test the Finite Sites packages.
+- `just sites lint`: run Finite Sites formatting and Clippy checks.
 - `nix develop`: enter the pinned Rust development shell.

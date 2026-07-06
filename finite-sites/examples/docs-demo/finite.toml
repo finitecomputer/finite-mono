@@ -1,0 +1,10 @@
+[project]
+slug = "finite-docs-demo"
+
+[outputs.doc]
+kind = "document"
+document_name = "finite-docs-demo"
+branch = "main"
+path = "docs"
+entry = "index.md"
+

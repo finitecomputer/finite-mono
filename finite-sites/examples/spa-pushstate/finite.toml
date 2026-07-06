@@ -1,0 +1,10 @@
+[project]
+slug = "finite-spa-pushstate"
+
+[outputs.site]
+kind = "site"
+site_name = "finite-spa-pushstate"
+branch = "main"
+path = "."
+spa = true
+

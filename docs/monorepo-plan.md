@@ -189,13 +189,13 @@ behavior.
 
 Tasks:
 
-- [ ] Copy `finite-sites` into `finite-mono/finite-sites`.
-- [ ] Exclude generated or machine-local directories such as `target/` and
+- [x] Copy `finite-sites` into `finite-mono/finite-sites`.
+- [x] Exclude generated or machine-local directories such as `target/` and
   `.dev-data/`.
-- [ ] Keep the repo's internal folder structure intact.
-- [ ] Run the old Rust checks from `finite-mono/finite-sites`.
-- [ ] Run the old local dev smoke if it is quick and deterministic.
-- [ ] Record copied commit SHA, ignored local files, validation commands, and
+- [x] Keep the repo's internal folder structure intact.
+- [x] Run the old Rust checks from `finite-mono/finite-sites`.
+- [x] Run the old local dev smoke if it is quick and deterministic.
+- [x] Record copied commit SHA, ignored local files, validation commands, and
   failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finite-sites` works from its copied folder using the same
@@ -217,14 +217,14 @@ Tasks:
 - [x] Add `finitecomputer-v2/crates/*` members explicitly.
 - [x] Add `finitechat/crates/*` members explicitly.
 - [x] Add `finitechat/uniffi-bindgen` if it should remain a workspace member.
-- [ ] Add `finite-sites/crates/*` members explicitly.
+- [x] Add `finite-sites/crates/*` members explicitly.
 - [x] Decide whether to use a root `[workspace.package]` immediately or later.
 - [x] Decide whether to merge `[workspace.dependencies]` immediately or keep
   dependency declarations in member crates temporarily.
 - [x] Generate one root `Cargo.lock`.
 - [x] Verify the root lockfile before removing nested `Cargo.lock` files.
 - [x] Fix path dependencies that break from the new root workspace.
-- [ ] Resolve duplicate crate names or binary names.
+- [x] Resolve duplicate crate names or binary names.
 - [x] Resolve dependency version conflicts only when required for the build.
 - [x] Run `cargo check --workspace` from `finite-mono`.
 - [x] Run `cargo test --workspace` from `finite-mono`.
@@ -244,13 +244,16 @@ Tasks:
 
 - [x] Check Fedimint's split between generated root `justfile` and custom
   project justfile before finalizing the Finite root `justfile`.
-- [x] Keep `just default` as `just --list`.
+- [x] Keep `just default` as a discoverable command list.
 - [x] Add `just metadata` for root Cargo workspace metadata checks.
 - [x] Add `just check` for root Rust workspace checks.
 - [x] Add `just test` for root Rust workspace tests.
+- [x] Use `just` modules for repo-local command surfaces that should stay
+  nested.
+- [x] Add `just sites ...` as a module backed by `finite-sites/justfile`.
 - [ ] Add `just fmt` for Rust formatting only if it is already low-friction.
-- [x] Avoid dashboard, chat, sites, CI, release, and deploy commands in this
-  phase unless they are repeatedly needed.
+- [x] Avoid adding dashboard, chat, sites, CI, release, and deploy commands as
+  root recipes in this phase unless they are repeatedly needed.
 - [x] Move any multi-line logic into root `scripts/` instead of growing the
   `justfile`.
 
@@ -461,21 +464,21 @@ For each later import:
 
 The first successful monorepo milestone is intentionally modest:
 
-- [ ] `finitecomputer-v2`, `finitechat`, and `finite-sites` are present in
+- [x] `finitecomputer-v2`, `finitechat`, and `finite-sites` are present in
   `finite-mono` as top-level copied folders.
-- [ ] Source commit SHAs are recorded.
-- [ ] Existing repos are untouched.
+- [x] Source commit SHAs are recorded.
+- [x] Existing repos are untouched.
 - [ ] Root `docs/README.md` exists.
-- [ ] Root `docs/monorepo-migration-log.md` exists.
-- [ ] Rust crates from all three copied repos are members of one root Cargo
+- [x] Root `docs/monorepo-migration-log.md` exists.
+- [x] Rust crates from all three copied repos are members of one root Cargo
   workspace.
-- [ ] One root `Cargo.lock` exists and is verified.
-- [ ] The dashboard still installs and runs from the copied
+- [x] One root `Cargo.lock` exists and is verified.
+- [x] The dashboard still installs and runs from the copied
   `finitecomputer-v2` tree.
-- [ ] Finite Chat core checks still run from `finitechat`.
-- [ ] Finite Sites checks still run from `finite-sites`.
-- [ ] Root `just check` works.
-- [ ] Root `just test` works, or documented exclusions exist for tests that
+- [x] Finite Chat core checks still run from `finitechat`.
+- [x] Finite Sites checks still run from `finite-sites`.
+- [x] Root `just check` works.
+- [x] Root `just test` works, or documented exclusions exist for tests that
   need services not yet covered by the harness.
 - [ ] Docs have a current root starting point and copied stale docs are labeled
   where linked.

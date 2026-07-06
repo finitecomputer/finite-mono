@@ -206,6 +206,66 @@ Notes:
 - Python tests created `.finitechat/` and `__pycache__/` artifacts in the
   copied tree; those generated artifacts were removed after validation.
 
+## Phase 4: Copy `finite-sites`
+
+Date: 2026-07-06
+
+Source:
+
+- From `/Users/alex/Projects/finite/finite-sites`
+- To `/Users/alex/Projects/finite/finite-mono/finite-sites`
+- Source commit: `768a0b84898e7acfd865dd1e13645ab6ce19ea09`
+- Source worktree state before copy: clean
+
+Copy method:
+
+- Direct `rsync` snapshot copy.
+- No git history was preserved.
+- The existing source repo was not modified.
+
+Excluded generated or local paths:
+
+- `.git/`
+- `target/`
+- `.dev-data/`
+- `.finite/`
+- `.env`
+- `*.pem`
+- `*.key`
+- `.DS_Store`
+
+Root workspace integration:
+
+- Removed copied `finite-sites/Cargo.toml` and `finite-sites/Cargo.lock` so the
+  copied Rust crates resolve through the monorepo root workspace and root
+  `Cargo.lock`.
+- Added `finite-sites/crates/*` as explicit root workspace members.
+- Moved `finite-sites` workspace dependencies that were not already present into
+  the root `[workspace.dependencies]` table.
+- Extended root `tokio` features with `signal` and `time` for `finitesitesd`.
+
+Validation:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo check --workspace`
+- `just test` from `finite-sites/`
+  - Result: passed. After workspace flattening, this command resolves through
+    the monorepo root workspace.
+- `cargo run -p fsite-cli --bin fsite -- describe workflow project-config --output json`
+  from `finite-sites/`
+  - Result: passed and emitted valid JSON.
+- `just check` from the monorepo root
+  - Result: passed with `--locked`.
+- `just test` from the monorepo root
+  - Result: passed with `--locked`.
+
+Notes:
+
+- `just dev` was not run because it starts a long-running local server against
+  `.dev-data`.
+- No generated `finite-sites` artifacts were left in the copied tree after
+  validation.
+
 ## Phase 5: Root Cargo Workspace for `finitecomputer-v2`
 
 Date: 2026-07-06
@@ -256,16 +316,26 @@ Fedimint reference checked:
 
 Changes:
 
-- Kept `just default` as `just --list`.
+- Kept `just default` as a command list. After adding the first module, it runs
+  `just --list-submodules --list` so nested commands are visible.
 - Added `just metadata` for root Cargo workspace metadata validation.
 - Added `just check` for `cargo check --workspace --locked`.
 - Added `just test` for `cargo test --workspace --locked`.
-- Left dashboard, chat, sites, CI, release, deploy, and formatter commands out
-  of the root command surface for now.
+- Added `mod sites 'finite-sites/justfile'`, making commands such as
+  `just sites build` available from the monorepo root.
+- Updated `finite-sites/justfile` so `build`, `test`, `lint`, and `fmt` are
+  package-scoped to the Finite Sites crates instead of using the full root
+  workspace.
+- Left dashboard, chat, CI, release, deploy, and root formatter commands out of
+  the root command surface for now.
 
 Validation:
 
-- `just --list`
+- `just`
+- `just --list-submodules --list`
 - `just metadata`
 - `just check`
 - `just test`
+- `just sites build`
+- `just sites test`
+- `just sites lint`

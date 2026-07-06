@@ -1,0 +1,15 @@
+[package]
+name = "finitesites-store"
+version = "0.2.16"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+finitesites-proto = { path = "../finitesites-proto" }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

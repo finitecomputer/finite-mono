@@ -1,0 +1,10 @@
+[project]
+slug = "finite-nextjs-demo"
+
+[outputs.web]
+kind = "app"
+site_name = "finite-nextjs-demo"
+branch = "main"
+path = "bundle"
+start = "node server.js"
+
