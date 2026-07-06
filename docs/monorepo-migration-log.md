@@ -131,6 +131,81 @@ Notes:
   `finitecomputer-v2/target` and
   `finitecomputer-v2/apps/dashboard/node_modules`.
 
+## Phase 3: Copy `finitechat`
+
+Date: 2026-07-06
+
+Source:
+
+- From `/Users/alex/Projects/finite/finitechat`
+- To `/Users/alex/Projects/finite/finite-mono/finitechat`
+- Source commit: `f13c973d493831065994767b0f93783a49873071`
+- Source worktree state before copy: clean
+
+Copy method:
+
+- Direct `rsync` snapshot copy.
+- No git history was preserved.
+- The existing source repo was not modified.
+
+Excluded generated or local paths:
+
+- `.git/`
+- `target/`
+- `.finitechat/`
+- `.state/`
+- `.direnv/`
+- `.env`
+- `.env.*`
+- `ios/.build/`
+- `ios/Frameworks/`
+- `ios/Bindings/*.swift`
+- `ios/Bindings/*FFI.h`
+- `ios/Bindings/*FFI.modulemap`
+- `ios/*.xcodeproj/`
+- Python `__pycache__/` and `*.pyc` files
+- `.DS_Store`
+
+Root workspace integration:
+
+- Removed copied `finitechat/Cargo.toml` and `finitechat/Cargo.lock` so the
+  copied Rust crates resolve through the monorepo root workspace and root
+  `Cargo.lock`.
+- Added `finitechat/crates/*` and `finitechat/uniffi-bindgen` as explicit root
+  workspace members.
+- Moved `finitechat`'s workspace dependency table into the root
+  `[workspace.dependencies]`, with local paths adjusted to `finitechat/...`.
+- Aligned `rusqlite` to `0.37` in the root workspace dependency table because
+  the combined workspace can only link one `libsqlite3-sys` crate.
+
+Validation:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo check --workspace`
+- `just check`
+- `just test`
+- `python3 -m unittest discover -s tests -p '*test*.py'` from `finitechat/`
+  - Initial result: failed because the test expected binaries under
+    `finitechat/target/debug` after the workspace was flattened.
+- `CARGO_TARGET_DIR=/Users/alex/Projects/finite/finite-mono/target python3 -m unittest discover -s tests -p '*test*.py'`
+  from `finitechat/`
+  - Result: passed, 119 tests, 4 skipped.
+- `cargo run -p finitechat-rmp -- doctor`
+  - From monorepo root: failed because `finitechat-rmp` searches for
+    `rmp.toml` in the current directory and parents.
+  - From `finitechat/`: passed.
+
+Notes:
+
+- `just test` passed for the expanded root Rust workspace, including the copied
+  `finitechat` Rust tests.
+- `finitecomputer-v2` still depends on git-pinned `finitechat-*` crates. The
+  copied local `finitechat-*` crates coexist in the workspace for now; replacing
+  those git dependencies with local path dependencies is a later compatibility
+  step.
+- Python tests created `.finitechat/` and `__pycache__/` artifacts in the
+  copied tree; those generated artifacts were removed after validation.
+
 ## Phase 5: Root Cargo Workspace for `finitecomputer-v2`
 
 Date: 2026-07-06

@@ -1,0 +1,315 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_smoke:
+        description: "Run the full Docker runtime smoke with encrypted backup/restore"
+        required: false
+        type: boolean
+        default: false
+      publish_runtime_image:
+        description: "After Docker smoke passes, publish the proven runtime image to GHCR"
+        required: false
+        type: boolean
+        default: false
+      phala_durable_smoke:
+        description: "Run the Phala-style durable /home/node Docker smoke"
+        required: false
+        type: boolean
+        default: false
+      publish_phala_runtime_image:
+        description: "After durable /home/node Docker smoke passes, publish the proven runtime image to GHCR"
+        required: false
+        type: boolean
+        default: false
+      restic_backend:
+        description: "Backup backend for the Docker runtime smoke"
+        required: false
+        type: choice
+        default: local
+        options:
+          - local
+          - s3
+      restic_repository:
+        description: "Full restic repository URL when restic_backend=s3; optional if bucket/prefix are provided"
+        required: false
+        type: string
+      latitude_storage_bucket:
+        description: "Latitude Object Storage bucket used to derive the S3 restic repository"
+        required: false
+        type: string
+      latitude_object_endpoint:
+        description: "Latitude Object Storage endpoint used when deriving the S3 restic repository"
+        required: false
+        type: string
+        default: https://objects.nyc.storage.sh
+      restic_prefix:
+        description: "Per-agent restic repository prefix under the Latitude bucket"
+        required: false
+        type: string
+      tinfoil_config_repo:
+        description: "Public GitHub owner/repo containing tinfoil-config.yml"
+        required: false
+        type: string
+        default: finitecomputer/tinfoil-agent-runtime-canary
+      tinfoil_release_tag:
+        description: "Release tag to use in the generated Tinfoil canary runbook"
+        required: false
+        type: string
+        default: v0.1.0
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    tags:
+      - "v*"
+
+env:
+  FINITE_HERMES_AGENT_VERSION: "0.17.0"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    name: Rust and Hermes bridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: rustfmt, clippy
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cargo fmt
+        run: cargo fmt --all --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace
+
+      - name: Hermes sidecar smoke
+        run: scripts/hermes-sidecar-smoke.sh
+
+      - name: Upload Hermes sidecar smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-sidecar-smoke-report
+          path: target/hermes-sidecar-smoke/report.json
+          if-no-files-found: ignore
+
+      - name: Install Python tooling
+        run: python3 -m pip install basedpyright==1.39.8 "hermes-agent==${FINITE_HERMES_AGENT_VERSION}" ruff==0.15.17
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: BasedPyright
+        run: basedpyright
+
+      - name: Hermes adapter regression report
+        run: scripts/hermes-adapter-regression-report.py --report target/hermes-adapter-regressions/report.json
+
+      - name: Upload Hermes adapter regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-adapter-regression-report
+          path: target/hermes-adapter-regressions/report.json
+          if-no-files-found: ignore
+
+      - name: Hermes platform adapter tests
+        run: python3 -m unittest discover -s tests -p '*test*.py'
+
+  docker-runtime-smoke:
+    name: Docker runtime smoke
+    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    needs: test
+    timeout-minutes: 75
+    if: >-
+      ${{
+        (github.event_name == 'workflow_dispatch' && inputs.docker_smoke) ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_runtime_image) ||
+        (github.event_name == 'workflow_dispatch' && inputs.phala_durable_smoke) ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_phala_runtime_image) ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        startsWith(github.ref, 'refs/tags/')
+      }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Require S3 restic for publish
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_runtime_image && inputs.restic_backend != 's3' }}
+        run: |
+          echo "publish_runtime_image=true requires restic_backend=s3" >&2
+          exit 1
+
+      - name: Set runtime image ref
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image_ref="ghcr.io/${owner}/finite-chat-hermes-runtime:${GITHUB_SHA}"
+          echo "RUNTIME_IMAGE_REF=$image_ref" >> "$GITHUB_ENV"
+          echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
+
+      - name: Build runtime image
+        run: |
+          scripts/hermes-build-runtime-image.py \
+            --image-ref "$RUNTIME_IMAGE_REF" \
+            --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
+            --report target/hermes-docker-smoke/image-build.json
+
+      - name: Docker runtime smoke
+        if: >-
+          ${{
+            (github.event_name == 'workflow_dispatch' && (inputs.docker_smoke || inputs.publish_runtime_image))
+          }}
+        env:
+          FINITE_DOCKER_SKIP_IMAGE_BUILD: "1"
+          FINITE_DOCKER_RESTIC_BACKEND: ${{ github.event_name == 'workflow_dispatch' && inputs.restic_backend || 'local' }}
+          FINITE_DOCKER_RESTIC_REPOSITORY: ${{ github.event_name == 'workflow_dispatch' && inputs.restic_repository || '' }}
+          FINITE_LATITUDE_STORAGE_BUCKET: ${{ inputs.latitude_storage_bucket || vars.FINITE_LATITUDE_STORAGE_BUCKET || secrets.FINITE_LATITUDE_STORAGE_BUCKET }}
+          FINITE_LATITUDE_OBJECT_ENDPOINT: ${{ inputs.latitude_object_endpoint || vars.FINITE_LATITUDE_OBJECT_ENDPOINT || secrets.FINITE_LATITUDE_OBJECT_ENDPOINT || 'https://objects.nyc.storage.sh' }}
+          FINITE_DOCKER_RESTIC_PREFIX: ${{ inputs.restic_prefix || vars.FINITE_DOCKER_RESTIC_PREFIX }}
+          FINITE_DOCKER_RESTIC_PASSWORD: ${{ secrets.FINITE_DOCKER_RESTIC_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.FINITE_DOCKER_RESTIC_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.FINITE_DOCKER_RESTIC_AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.FINITE_DOCKER_RESTIC_AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ secrets.FINITE_DOCKER_RESTIC_AWS_REGION }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
+          FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
+        run: scripts/hermes-sidecar-docker-smoke.sh
+
+      - name: Durable home Docker smoke
+        if: >-
+          ${{
+            (github.event_name == 'workflow_dispatch' && (inputs.phala_durable_smoke || inputs.publish_phala_runtime_image)) ||
+            (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+            startsWith(github.ref, 'refs/tags/')
+          }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
+          FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
+        run: |
+          scripts/hermes-durable-home-docker-smoke.py \
+            --image "$RUNTIME_IMAGE_REF" \
+            --report target/hermes-durable-home-docker-smoke/report.json
+
+      - name: Login to GHCR
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.publish_runtime_image || inputs.publish_phala_runtime_image) }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish proven runtime image
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_runtime_image }}
+        run: |
+          scripts/hermes-publish-proven-image.py \
+            --push \
+            --require-restic-backend s3 \
+            --report target/hermes-docker-smoke/report.json \
+            --image-ref "$RUNTIME_IMAGE_REF" \
+            --publish-report target/hermes-docker-smoke/image-publish.json
+
+      - name: Publish Phala durable runtime image
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_phala_runtime_image }}
+        run: |
+          scripts/hermes-publish-proven-image.py \
+            --push \
+            --report target/hermes-durable-home-docker-smoke/report.json \
+            --image-ref "$RUNTIME_IMAGE_REF" \
+            --publish-report target/hermes-durable-home-docker-smoke/image-publish.json
+
+      - name: Build Tinfoil handoff report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_runtime_image }}
+        run: |
+          scripts/hermes-tinfoil-handoff.py \
+            --smoke-report target/hermes-docker-smoke/report.json \
+            --preflight-report target/hermes-docker-smoke/restic-preflight.json \
+            --publish-report target/hermes-docker-smoke/image-publish.json \
+            --handoff-report target/hermes-docker-smoke/tinfoil-handoff.json
+
+      - name: Generate Tinfoil canary artifacts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_runtime_image }}
+        run: |
+          scripts/hermes-tinfoil-canary-artifacts.py \
+            --handoff-report target/hermes-docker-smoke/tinfoil-handoff.json \
+            --output-dir target/hermes-docker-smoke/tinfoil-canary \
+            --config-repo "${{ inputs.tinfoil_config_repo }}" \
+            --tag "${{ inputs.tinfoil_release_tag }}"
+
+      - name: Download Hermes sidecar smoke report
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-sidecar-smoke-report
+          path: target/hermes-sidecar-smoke
+
+      - name: Download Hermes adapter regression report
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-adapter-regression-report
+          path: target/hermes-adapter-regressions
+
+      - name: Build hardening evidence audit
+        if: always()
+        run: scripts/hermes-hardening-audit.py --report target/hermes-hardening-audit.json
+
+      - name: Prepare Docker runtime smoke artifacts
+        if: always()
+        run: |
+          if [ -d target/hermes-docker-smoke ]; then
+            sudo chown -R "$(id -u):$(id -g)" target/hermes-docker-smoke
+            chmod -R u+rwX,go+rX target/hermes-docker-smoke
+          fi
+
+      - name: Upload Docker runtime smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-docker-smoke-report
+          path: |
+            target/hermes-hardening-audit.json
+            target/hermes-adapter-regressions/report.json
+            target/hermes-docker-smoke/image-build.json
+            target/hermes-docker-smoke/report.json
+            target/hermes-docker-smoke/restic-preflight.json
+            target/hermes-docker-smoke/image-publish.json
+            target/hermes-docker-smoke/tinfoil-handoff.json
+            target/hermes-docker-smoke/tinfoil-canary/**
+            target/hermes-docker-smoke/restic-repo/**
+            target/hermes-durable-home-docker-smoke/report.json
+            target/hermes-durable-home-docker-smoke/image-publish.json
+          if-no-files-found: ignore

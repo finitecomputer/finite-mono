@@ -6,6 +6,19 @@ members = [
     "finitecomputer-v2/crates/finite-saas-core",
     "finitecomputer-v2/crates/finite-saas-local",
     "finitecomputer-v2/crates/finite-saas-runner",
+    "finitechat/crates/finitechat-blob",
+    "finitechat/crates/finitechat-cli",
+    "finitechat/crates/finitechat-client",
+    "finitechat/crates/finitechat-core",
+    "finitechat/crates/finitechat-delivery",
+    "finitechat/crates/finitechat-hermes",
+    "finitechat/crates/finitechat-http",
+    "finitechat/crates/finitechat-mls",
+    "finitechat/crates/finitechat-proto",
+    "finitechat/crates/finitechat-rmp",
+    "finitechat/crates/finitechat-server",
+    "finitechat/crates/finitechat-transport",
+    "finitechat/uniffi-bindgen",
 ]
 
 [workspace.package]
@@ -13,3 +26,36 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/finitecomputer/finite-mono"
 rust-version = "1.88"
+
+[workspace.dependencies]
+axum = "0.8"
+base64 = "0.22"
+bech32 = "0.11"
+clap = { version = "4", features = ["derive"] }
+finite-identity = { git = "https://github.com/finitecomputer/finite-identity", rev = "54a6936b5d7a0e8dc79018a30d9c794b10d25307" }
+finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
+finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
+futures-util = "0.3"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+hypernote-mdx = { git = "https://github.com/futurepaul/hypernote-mdx", rev = "db23b3d72e81389247716c5a59174cc4f4d55a34", version = "0.3.0" }
+openmls = { version = "0.8.1", default-features = false }
+openmls_basic_credential = "0.5.0"
+openmls_memory_storage = { version = "0.5.0", features = ["extensions-draft-08"] }
+openmls_rust_crypto = "0.5.1"
+qrcode = { version = "0.14", default-features = false }
+reqwest = { version = "=0.12.27", default-features = false, features = ["blocking", "http2", "json", "rustls-tls-webpki-roots"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+secp256k1 = { version = "0.29.1", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+uniffi = "0.31"
+walkdir = "2"

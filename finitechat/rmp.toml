@@ -1,0 +1,11 @@
+[project]
+name = "finitechat"
+org = "computer.finite"
+
+[core]
+crate = "finitechat-core"
+bindings = "uniffi"
+
+[ios]
+bundle_id = "computer.finite.finitechat"
+scheme = "FiniteChat"

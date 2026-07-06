@@ -1,0 +1,20 @@
+[package]
+name = "finitechat-mls"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+finitechat-proto = { path = "../finitechat-proto" }
+hkdf.workspace = true
+openmls.workspace = true
+secp256k1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+openmls_basic_credential.workspace = true
+openmls_memory_storage.workspace = true
+openmls_rust_crypto.workspace = true

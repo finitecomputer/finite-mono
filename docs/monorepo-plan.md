@@ -166,16 +166,16 @@ behavior.
 
 Tasks:
 
-- [ ] Copy `finitechat` into `finite-mono/finitechat`.
-- [ ] Exclude generated or machine-local directories such as `target/`,
+- [x] Copy `finitechat` into `finite-mono/finitechat`.
+- [x] Exclude generated or machine-local directories such as `target/`,
   `.finitechat/`, `.state/`, iOS build products, and script caches.
-- [ ] Keep the repo's internal folder structure intact.
-- [ ] Run the old Rust checks from `finite-mono/finitechat`.
-- [ ] Run the old Python smoke tests from `finite-mono/finitechat` if they are
+- [x] Keep the repo's internal folder structure intact.
+- [x] Run the old Rust checks from `finite-mono/finitechat`.
+- [x] Run the old Python smoke tests from `finite-mono/finitechat` if they are
   still expected to pass locally.
-- [ ] Run the minimum iOS or bindgen smoke that currently exists, if it is
+- [x] Run the minimum iOS or bindgen smoke that currently exists, if it is
   practical locally.
-- [ ] Record copied commit SHA, ignored local files, validation commands, and
+- [x] Record copied commit SHA, ignored local files, validation commands, and
   failures in `docs/monorepo-migration-log.md`.
 
 Exit criterion: `finitechat` works from its copied folder using the same
@@ -215,8 +215,8 @@ Tasks:
   before writing the Finite root workspace.
 - [x] Confirm root `Cargo.toml` still has one `[workspace]`.
 - [x] Add `finitecomputer-v2/crates/*` members explicitly.
-- [ ] Add `finitechat/crates/*` members explicitly.
-- [ ] Add `finitechat/uniffi-bindgen` if it should remain a workspace member.
+- [x] Add `finitechat/crates/*` members explicitly.
+- [x] Add `finitechat/uniffi-bindgen` if it should remain a workspace member.
 - [ ] Add `finite-sites/crates/*` members explicitly.
 - [x] Decide whether to use a root `[workspace.package]` immediately or later.
 - [x] Decide whether to merge `[workspace.dependencies]` immediately or keep

@@ -1,0 +1,37 @@
+[package]
+name = "finitechat-cli"
+version = "0.1.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "finitechat"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+finite-identity.workspace = true
+finitechat-blob = { path = "../finitechat-blob" }
+finitechat-transport.workspace = true
+finitechat-client = { path = "../finitechat-client" }
+finitechat-core = { path = "../finitechat-core" }
+finitechat-hermes = { path = "../finitechat-hermes" }
+finitechat-mls = { path = "../finitechat-mls" }
+qrcode.workspace = true
+finitechat-http = { path = "../finitechat-http" }
+finitechat-proto = { path = "../finitechat-proto" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+finitechat-delivery.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+finitechat-hermes = { path = "../finitechat-hermes" }
+finitechat-mls = { path = "../finitechat-mls" }
+finitechat-server = { path = "../finitechat-server" }
+tempfile.workspace = true

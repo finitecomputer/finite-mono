@@ -1,0 +1,92 @@
+Finite Chat Privacy Policy
+Effective date: June 23, 2026
+
+Finite Chat is designed for private, end-to-end encrypted conversations between
+people and agents. We collect as little information as we can operate with, and
+we do not sell, rent, or monetize personal data.
+
+Information we collect
+
+Finite Chat may collect the username or display name you choose to use in the
+app. If you use Nostr-based profile discovery, the app may also process your
+public profile information, such as your public key, npub, profile name, avatar,
+and other public profile fields that you or a relay publish.
+
+Finite Chat servers process the technical information needed to deliver
+encrypted messages, including public account or device identifiers, room
+identifiers, message identifiers, delivery state, timestamps, and encrypted
+message or attachment payloads. Message contents, attachment contents, room
+membership secrets, and private keys are encrypted and are not readable by
+Finite Chat servers.
+
+Message contents
+
+Finite Chat uses end-to-end encryption. We cannot read the contents of your
+messages, voice notes, attachments, or agent conversations from the server-side
+encrypted payloads. Decrypted message history and private keys are stored on
+your device or in local stores you control.
+
+Attachments and media
+
+When you send attachments, Finite Chat uploads encrypted attachment data or
+encrypted attachment references required for delivery. We do not store plaintext
+attachment contents on Finite Chat servers.
+
+Device permissions
+
+Finite Chat asks for access only when you choose to use a related feature:
+
+- Camera access is used to scan invite and profile QR codes.
+- Microphone access is used to record voice messages.
+- Speech recognition is used to transcribe voice messages you choose to send.
+- Photo library add access is used when you choose to save media from a chat.
+
+Third-party services
+
+Finite Chat may connect to Nostr relays to discover public profile information
+and contact lists. Public Nostr profile information is controlled by the relays
+and clients you use.
+
+If you use an agent or model provider through Hermes or another integration,
+that provider may receive the content you intentionally send to that agent after
+it is decrypted by the agent runtime. Those providers are governed by their own
+terms and privacy policies.
+
+How we use information
+
+We use the information described above to operate Finite Chat, deliver encrypted
+messages, maintain delivery and retry state, show public profile information,
+support invites and device setup, debug service reliability, and respond to
+support requests.
+
+We do not sell data
+
+We do not sell, rent, or monetize your personal data or message contents.
+
+Sharing
+
+We may share limited information only when necessary to operate the service,
+comply with law, protect the security of Finite Chat, or respond to abuse,
+fraud, or safety issues. We cannot provide decrypted message contents that we do
+not possess.
+
+Retention
+
+Encrypted delivery data and minimal delivery metadata may be retained as needed
+to operate the service, support synchronization, and maintain reliability. Local
+decrypted data on your device is controlled by your device and app settings.
+
+Your choices
+
+You can stop using Finite Chat at any time. You can delete local app data from
+your device. Public Nostr profile data should be managed through the Nostr
+clients and relays where it was published.
+
+Changes
+
+We may update this policy as Finite Chat changes. If we make material changes,
+we will update the effective date and publish the revised policy.
+
+Contact
+
+Questions about this policy can be sent to privacy@finite.computer.
