@@ -41,9 +41,9 @@ checkout, then add shared workspace structure around them.
   orchestration.
 - `just dev up --headless`: start the same local stack without an interactive
   log viewer.
-- `just dev smoke`: start the headless stack, run the integration smoke test,
-  and tear it down.
-- `just dev rust-smoke`: start the headless stack, run the ignored Rust
-  integration smoke test, and tear it down.
+- `just dev smoke`: start the headless backend stack, run the backend smoke
+  test, and tear it down.
+- `just dev rust-smoke`: run the ignored Rust backend smoke test through the
+  `run_devfinity_test` fixture API.
 - `just dev status`: print devfinity process and service status.
 - `just dev cleanup`: best-effort cleanup for orphaned local stack processes.

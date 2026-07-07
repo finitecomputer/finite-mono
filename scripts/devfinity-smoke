@@ -33,87 +33,17 @@ check_tcp() {
   echo "$name ok: tcp $host:$port"
 }
 
-check_dashboard_agent_creation() {
-  local run_id
-  local display_name
-  local launch_code
-  local idempotency_key
-  local response_headers
-  local response_body
-  local me_json
-
-  run_id="${DEVFINITY_SMOKE_RUN_ID:-$(date +%s)-$$}"
-  display_name="Devfinity Smoke Agent $run_id"
-  launch_code="${DEVFINITY_SMOKE_LAUNCH_CODE:-off2026}"
-  idempotency_key="devfinity-smoke-$run_id"
-  response_headers="${DEVFINITY_STATE_DIR:?}/dashboard-create-agent.headers"
-  response_body="${DEVFINITY_STATE_DIR:?}/dashboard-create-agent.html"
-  me_json="${DEVFINITY_STATE_DIR:?}/core-me-after-dashboard-create.json"
-
-  curl -fsS \
-    -D "$response_headers" \
-    -o "$response_body" \
-    -X POST \
-    --data-urlencode "displayName=$display_name" \
-    --data-urlencode "launchCode=$launch_code" \
-    --data-urlencode "idempotencyKey=$idempotency_key" \
-    "$dashboard_url/agent-creation-requests"
-
-  if tr -d '\r' <"$response_headers" | grep -Eiq '^location: .*agentCreationError='; then
-    echo "dashboard agent creation redirected with an error" >&2
-    tr -d '\r' <"$response_headers" | grep -Ei '^location:' >&2 || true
-    exit 1
-  fi
-
-  curl -fsS \
-    -H "authorization: Bearer ${FC_CORE_API_TOKEN:?}" \
-    -H "content-type: application/json" \
-    -H "x-finite-workos-user-id: ${FC_DASHBOARD_DEV_WORKOS_USER_ID:?}" \
-    -H "x-finite-workos-email: ${FC_DASHBOARD_DEV_EMAIL:?}" \
-    -H "x-finite-workos-email-verified: true" \
-    "$core_url/api/core/v1/me" \
-    >"$me_json"
-
-  node - "$me_json" "$display_name" <<'JS'
-const fs = require("node:fs");
-
-const [mePath, displayName] = process.argv.slice(2);
-const me = JSON.parse(fs.readFileSync(mePath, "utf8"));
-const requests = Array.isArray(me.agent_creation_requests) ? me.agent_creation_requests : [];
-const projects = Array.isArray(me.projects) ? me.projects : [];
-const request = requests.find((candidate) =>
-  candidate.display_name === displayName &&
-  (candidate.status === "requested" || candidate.status === "launching")
-);
-
-if (!request) {
-  throw new Error(`Core did not report a pending dashboard-created agent request for ${displayName}`);
-}
-
-const project = projects.find((candidate) => candidate.project?.id === request.project_id);
-if (!project) {
-  throw new Error(`Core reported request ${request.id} without its project ${request.project_id}`);
-}
-
-console.log(`dashboard->core ok: request ${request.id} created project ${request.project_id}`);
-JS
-}
-
 need bash
 need curl
-need node
 
 core_url="${FC_CORE_URL:-http://127.0.0.1:14200}"
 chat_url="${FINITECHAT_SERVER_URL:-http://127.0.0.1:18787}"
 sites_url="${FINITE_SITES_API:-http://127.0.0.1:18789}"
-dashboard_url="${FC_DASHBOARD_URL:-http://127.0.0.1:13002/dashboard}"
 postgres_port="${DEVFINITY_POSTGRES_PORT:-15432}"
 
 check_tcp "postgres" "127.0.0.1" "$postgres_port"
 check_http "core" "$core_url/healthz" '"ok":true'
 check_http "finitechat" "$chat_url/health" '"status":"ok"'
 check_http "finitesites" "$sites_url/api/v1/healthz" '"ok":true'
-check_http "dashboard" "$dashboard_url" '<html'
-check_dashboard_agent_creation
 
-echo "devfinity smoke passed"
+echo "devfinity backend smoke passed"

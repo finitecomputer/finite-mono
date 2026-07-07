@@ -309,8 +309,8 @@ workflow as the reference point: copy the durable contract, not the product
 specific complexity.
 
 `devfinity` should be the Finite-aware launcher. It should own state layout,
-generated environment variables, process lifecycle, logs, readiness, and
-test-fixture context.
+generated environment variables, process lifecycle, logs, readiness, and the
+test fixture stack handle.
 
 The durable target is a devimint-style Rust harness: one library-owned stack
 object starts child processes, exposes generated environment and typed clients,
@@ -318,18 +318,31 @@ waits for readiness, runs wrapped commands/tests, and tears the stack down. A
 local visual UI should be a small mprocs-style log viewer over devfinity-owned
 logs, not the process orchestrator.
 
+Devfinity must not treat the monorepo source checkout as the runtime boundary
+for Rust services. Core, Chat, and Sites should be added to
+`devfinity/Cargo.toml` as dependencies when their components start the service
+through library APIs. If a Rust service lacks a usable library entrypoint, add
+one to that service crate first.
+
+Scope devfinity to backend infrastructure and Rust-controllable services. For
+non-Rust services such as the dashboard, use an outer dev process composer: it
+starts or wraps devfinity for backend infra, waits for devfinity readiness and
+env, then runs dashboard/UI `just` commands. Dashboard source paths, npm
+install logic, and frontend dev-server details should not live inside the
+devfinity crate.
+
 The initial prototype used process-compose as the local runtime. That runtime
 has been retired from the compiled harness. Do not grow the old generated
 process-compose config or add a generic runtime abstraction unless a real
 second backend appears.
 
-Initial harness scope should be narrow:
+Initial backend harness scope should be narrow:
 
-- Start the minimum local dashboard/control-plane path.
+- Start the minimum local backend/control-plane path.
 - Start or connect to a local Finite Chat server.
 - Start or connect to Finite Sites.
 - Create deterministic local state.
-- Print the URLs and credentials needed for manual smoke testing.
+- Print the backend URLs and credentials needed for manual smoke testing.
 
 Initial structure:
 
@@ -352,19 +365,20 @@ Target runtime shape:
 - `devfinity status`: read-only status for configured service endpoints and any
   running devfinity-owned stack.
 
-Initial managed services:
+Initial devfinity-managed services:
 
 - Native local Postgres for `finite-saas-core`, using the Postgres binaries from
   the Nix development shell.
 - `finite-saas-core` on a deterministic local port.
-- Dashboard dev server with development auth enabled.
 - Local `finitechat-server` backed by SQLite state.
 - Local `finitesitesd` with its data dir under `.local-state/devfinity/`.
 
-For local ergonomics, add an mprocs-style viewer only after lifecycle,
-generated env, fixtures, and base components are library-owned. The viewer
-should tail devfinity log files and provide a developer shell; it should not
-decide startup order or own service teardown.
+Dashboard and other UI/dev-server processes belong to an outer composer that
+consumes devfinity-generated env and readiness markers. For local ergonomics,
+add that mprocs-style viewer/composer only after lifecycle, generated env,
+fixtures, and base backend components are library-owned. The viewer should tail
+devfinity and UI logs and provide a developer shell; it should not duplicate
+backend service startup order or backend teardown.
 
 Tasks:
 
@@ -374,21 +388,40 @@ Tasks:
       wrapper: `devfinity` is a Rust harness.
 - [x] Replace the initial process-compose prototype with devimint-style
       Rust-owned process orchestration.
-- [ ] Add devimint-style generated vars/env globals for paths, ports, logs, and
+- [x] Add devimint-style generated vars/env globals for paths, ports, logs, and
       shell exports.
-- [ ] Add unique fixture run directories and non-conflicting fixture port
+- [x] Add unique fixture run directories and non-conflicting fixture port
       allocation while preserving deterministic local defaults.
-- [ ] Add `DevfinityTestContext` and `run_devfinity_test` so Rust integration
-      tests can start and tear down stacks through the library.
-- [ ] Add a small process reaper so killed children are fully reaped before
-      replacement processes bind the same ports.
+- [x] Add devimint-style `run_devfinity_test` so Rust integration tests can
+      start and tear down stacks through the library with `DevfinityStack` as
+      the test handle.
+- [x] Remove Dashboard from devfinity-managed ports, paths, env, readiness, and
+      process ownership.
+- [x] Move dashboard startup and create-agent e2e smoke out of devfinity.
+- [ ] Add dashboard startup and create-agent e2e smoke to an outer composer
+      that consumes devfinity env/readiness and runs dashboard just/script
+      commands.
+- [ ] Audit Core, Chat, and Sites server library surfaces and add small public
+      serve entrypoints where they are missing.
+- [ ] Add a small devfinity task manager for in-process Rust backend services,
+      keeping native Postgres as an external infrastructure process.
+- [ ] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` as their
+      components start using library server entrypoints.
+- [ ] Migrate Core, Chat, and Sites one at a time away from `target/debug/...`,
+      keeping backend smokes passing after each migration.
+- [ ] Remove startup `cargo build`, service `target/debug/...` paths, and the
+      repo-root fixture workaround only after no backend service needs the
+      source checkout as a runtime boundary.
+- [ ] Add small process/task shutdown hardening so killed Postgres children and
+      stopped Rust service tasks are fully cleaned up before replacement runs.
 - [ ] Move base service specs out of `stack.rs` into typed components for
-      Postgres, Core, Chat, Sites, and Dashboard.
-- [ ] Add a small mprocs-style local log viewer after env, fixtures, and base
-      components are library-owned.
-- [x] Define the first smoke scenario: readiness probes cover Core `/healthz`,
-      Finite Chat `/health`, Finite Sites `/api/v1/healthz`, and dashboard
-      `/dashboard`.
+      Postgres, Core, Chat, and Sites.
+- [ ] Add a small outer mprocs-style local composer after env, fixtures, and
+      base backend components are library-owned.
+- [x] Define the first backend smoke scenario: readiness probes cover Core
+      `/healthz`, Finite Chat `/health`, and Finite Sites `/api/v1/healthz`.
+- [ ] Define the outer dashboard smoke scenario: start dashboard after
+      devfinity readiness, submit the create-agent form, and verify Core state.
 - [x] Decide where the harness should live in `finite-mono`: a top-level
       `devfinity/` workspace crate.
 - [x] Add `process-compose` to the Nix development shell for the initial
@@ -406,15 +439,15 @@ Tasks:
 - [x] Add `devfinity up --headless -- <command>` for devimint-style wrapped
       integration commands.
 - [x] Add `just dev smoke` using the wrapped-command path against real local
-      Core, Finite Chat, Finite Sites, Dashboard, and Postgres infrastructure.
-- [x] Add an ignored Rust integration smoke test that is run through
+      Core, Finite Chat, Finite Sites, and Postgres infrastructure.
+- [x] Add an ignored Rust backend integration smoke test that is run through
       `just dev rust-smoke`.
 - [x] Add log collection for failed local runs.
 - [x] Document the harness in `docs/local-integration-harness.md`.
 
 Later:
 
-- [ ] Graduate devfinity Rust smokes into typed fixture tests once
+- [x] Graduate devfinity Rust smokes into typed fixture tests once
       `run_devfinity_test` exists.
 
 Exit criterion: one command can start the first useful local Finite stack smoke

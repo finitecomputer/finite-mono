@@ -1,8 +1,9 @@
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+use crate::vars::{StackPaths, StackPorts, unique_run_name};
 
 #[derive(Debug, Clone)]
 pub struct DevfinityStack {
@@ -52,113 +53,6 @@ impl Default for StackProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackPaths {
-    pub repo_root: PathBuf,
-    pub state_dir: PathBuf,
-    pub run_dir: PathBuf,
-    pub logs_dir: PathBuf,
-    pub control_dir: PathBuf,
-    pub postgres_dir: PathBuf,
-    pub postgres_data_dir: PathBuf,
-    pub postgres_script: PathBuf,
-    pub core_dir: PathBuf,
-    pub dashboard_dir: PathBuf,
-    pub finitechat_dir: PathBuf,
-    pub finitesites_dir: PathBuf,
-    pub finite_home_dir: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackPorts {
-    pub core: u16,
-    pub dashboard: u16,
-    pub postgres: u16,
-    pub finitechat: u16,
-    pub finitesites: u16,
-}
-
-impl StackPorts {
-    pub fn base() -> Self {
-        Self {
-            core: 14200,
-            dashboard: 13002,
-            postgres: 15432,
-            finitechat: 18787,
-            finitesites: 18789,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackEnv {
-    pub devfinity_state_dir: String,
-    pub devfinity_logs_dir: String,
-    pub devfinity_postgres_port: String,
-    pub fc_workos_auth_enabled: String,
-    pub fc_dashboard_allow_dev_account_auth: String,
-    pub fc_dashboard_dev_email: String,
-    pub fc_dashboard_dev_workos_user_id: String,
-    pub fc_core_url: String,
-    pub fc_core_base_url: String,
-    pub fc_core_api_token: String,
-    pub fc_core_database_url: String,
-    pub fc_dashboard_url: String,
-    pub finitechat_server_url: String,
-    pub fc_runner_finitechat_server_url: String,
-    pub finite_sites_api: String,
-    pub finite_home: String,
-}
-
-impl StackEnv {
-    pub fn values(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("DEVFINITY_STATE_DIR", self.devfinity_state_dir.clone()),
-            ("DEVFINITY_LOGS_DIR", self.devfinity_logs_dir.clone()),
-            (
-                "DEVFINITY_POSTGRES_PORT",
-                self.devfinity_postgres_port.clone(),
-            ),
-            (
-                "FC_WORKOS_AUTH_ENABLED",
-                self.fc_workos_auth_enabled.clone(),
-            ),
-            (
-                "FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH",
-                self.fc_dashboard_allow_dev_account_auth.clone(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_EMAIL",
-                self.fc_dashboard_dev_email.clone(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                self.fc_dashboard_dev_workos_user_id.clone(),
-            ),
-            ("FC_CORE_URL", self.fc_core_url.clone()),
-            ("FC_CORE_BASE_URL", self.fc_core_base_url.clone()),
-            ("FC_CORE_API_TOKEN", self.fc_core_api_token.clone()),
-            ("FC_CORE_DATABASE_URL", self.fc_core_database_url.clone()),
-            ("FC_DASHBOARD_URL", self.fc_dashboard_url.clone()),
-            ("FINITECHAT_SERVER_URL", self.finitechat_server_url.clone()),
-            (
-                "FC_RUNNER_FINITECHAT_SERVER_URL",
-                self.fc_runner_finitechat_server_url.clone(),
-            ),
-            ("FINITE_SITES_API", self.finite_sites_api.clone()),
-            ("FINITE_HOME", self.finite_home.clone()),
-        ]
-    }
-
-    pub fn exports(&self) -> String {
-        let mut out = String::new();
-        for (key, value) in self.values() {
-            let _ = writeln!(out, "export {key}={}", shell_quote(&value));
-        }
-        out
-    }
-}
-
 impl DevfinityStack {
     pub fn new(state_dir: PathBuf) -> Result<Self> {
         let repo_root = std::env::current_dir().context("failed to read current directory")?;
@@ -167,6 +61,21 @@ impl DevfinityStack {
 
     pub fn new_with_repo_root(repo_root: PathBuf, state_dir: PathBuf) -> Result<Self> {
         Self::with_profile_and_repo_root(StackProfile::Base, repo_root, state_dir)
+    }
+
+    pub fn new_fixture(state_dir: PathBuf) -> Result<Self> {
+        let repo_root = std::env::current_dir().context("failed to read current directory")?;
+        Self::new_fixture_with_repo_root(repo_root, state_dir)
+    }
+
+    pub fn new_fixture_with_repo_root(repo_root: PathBuf, state_dir: PathBuf) -> Result<Self> {
+        Self::with_profile_repo_root_run_ports(
+            StackProfile::Base,
+            repo_root,
+            state_dir,
+            unique_run_name("fixture"),
+            StackPorts::allocate()?,
+        )
     }
 
     pub fn with_profile(profile: StackProfile, state_dir: PathBuf) -> Result<Self> {
@@ -179,8 +88,24 @@ impl DevfinityStack {
         repo_root: PathBuf,
         state_dir: PathBuf,
     ) -> Result<Self> {
+        Self::with_profile_repo_root_run_ports(
+            profile,
+            repo_root,
+            state_dir,
+            profile.run_name().to_string(),
+            StackPorts::base(),
+        )
+    }
+
+    pub(crate) fn with_profile_repo_root_run_ports(
+        profile: StackProfile,
+        repo_root: PathBuf,
+        state_dir: PathBuf,
+        run_name: String,
+        ports: StackPorts,
+    ) -> Result<Self> {
         let state_dir = absolute_path(&repo_root, &state_dir);
-        let run_dir = state_dir.join("runs").join(profile.run_name());
+        let run_dir = state_dir.join("runs").join(run_name);
         let logs_dir = run_dir.join("logs");
         let control_dir = run_dir.join("control");
         Ok(Self {
@@ -190,7 +115,7 @@ impl DevfinityStack {
             logs_dir,
             control_dir,
             profile,
-            ports: StackPorts::base(),
+            ports,
             core_token: "devfinity-core-token".to_string(),
         })
     }
@@ -206,11 +131,12 @@ impl DevfinityStack {
             run_dir: self.run_dir.clone(),
             logs_dir: self.logs_dir.clone(),
             control_dir: self.control_dir.clone(),
+            ready_file: self.run_dir.join("ready"),
+            error_file: self.run_dir.join("error"),
             postgres_dir: self.postgres_dir(),
             postgres_data_dir: self.postgres_data_dir(),
             postgres_script: self.postgres_script_path(),
             core_dir: self.core_dir(),
-            dashboard_dir: self.dashboard_dir(),
             finitechat_dir: self.finitechat_dir(),
             finitesites_dir: self.finitesites_dir(),
             finite_home_dir: self.finite_home_dir(),
@@ -225,29 +151,6 @@ impl DevfinityStack {
         &mut self.ports
     }
 
-    pub fn env(&self) -> StackEnv {
-        let core_url = self.core_url();
-        let finitechat_url = self.finitechat_url();
-        StackEnv {
-            devfinity_state_dir: self.run_dir.display().to_string(),
-            devfinity_logs_dir: self.logs_dir.display().to_string(),
-            devfinity_postgres_port: self.ports.postgres.to_string(),
-            fc_workos_auth_enabled: "0".to_string(),
-            fc_dashboard_allow_dev_account_auth: "1".to_string(),
-            fc_dashboard_dev_email: "devfinity@finite.computer".to_string(),
-            fc_dashboard_dev_workos_user_id: "user_devfinity".to_string(),
-            fc_core_url: core_url.clone(),
-            fc_core_base_url: core_url,
-            fc_core_api_token: self.core_token.clone(),
-            fc_core_database_url: self.database_url(),
-            fc_dashboard_url: self.dashboard_url(),
-            finitechat_server_url: finitechat_url.clone(),
-            fc_runner_finitechat_server_url: finitechat_url,
-            finite_sites_api: self.finitesites_api_url(),
-            finite_home: self.finite_home_dir().display().to_string(),
-        }
-    }
-
     pub fn ensure_dirs(&self) -> Result<()> {
         let paths = self.paths();
         for dir in [
@@ -257,7 +160,6 @@ impl DevfinityStack {
             &paths.control_dir,
             &paths.postgres_dir,
             &paths.core_dir,
-            &paths.dashboard_dir,
             &paths.finitechat_dir,
             &paths.finitesites_dir,
             &paths.finite_home_dir,
@@ -268,16 +170,10 @@ impl DevfinityStack {
         Ok(())
     }
 
-    pub fn write_env_file(&self) -> Result<()> {
-        fs::write(self.run_dir.join("env"), self.env_exports())
-            .with_context(|| format!("failed to write {}", self.run_dir.join("env").display()))
-    }
-
     pub fn print_summary(&self) {
         println!("devfinity local stack");
         println!("  state:      {}", self.run_dir.display());
         println!("  logs:       {}", self.logs_dir.display());
-        println!("  dashboard:  {}", self.dashboard_url());
         println!("  core:       {}", self.core_url());
         println!("  chat:       {}", self.finitechat_url());
         println!("  sites api:  {}", self.finitesites_api_url());
@@ -293,24 +189,14 @@ impl DevfinityStack {
         println!("Run `devfinity cleanup` if a previous stack left orphaned processes behind.");
     }
 
-    pub fn env_exports(&self) -> String {
-        self.env().exports()
-    }
-
-    pub fn env_values(&self) -> Vec<(&'static str, String)> {
-        self.env().values()
-    }
-
     pub fn urls_text(&self) -> String {
         format!(
             concat!(
-                "dashboard={}\n",
                 "core={}\n",
                 "finitechat={}\n",
                 "finitesites_api={}\n",
                 "finitesites_base=http://*.sites.localhost:{}\n"
             ),
-            self.dashboard_url(),
             self.core_url(),
             self.finitechat_url(),
             self.finitesites_api_url(),
@@ -320,10 +206,6 @@ impl DevfinityStack {
 
     pub fn core_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.ports.core)
-    }
-
-    pub fn dashboard_url(&self) -> String {
-        format!("http://127.0.0.1:{}/dashboard", self.ports.dashboard)
     }
 
     pub fn finitechat_url(&self) -> String {
@@ -355,10 +237,6 @@ impl DevfinityStack {
 
     pub(crate) fn core_dir(&self) -> PathBuf {
         self.process_state_dir("core")
-    }
-
-    pub(crate) fn dashboard_dir(&self) -> PathBuf {
-        self.process_state_dir("dashboard")
     }
 
     pub(crate) fn finitechat_dir(&self) -> PathBuf {

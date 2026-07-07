@@ -661,7 +661,7 @@ Decision:
 - The durable target is devimint-style Rust-owned process orchestration, not
   process-compose as the core runtime.
 - `devfinity` should own child process handles, logs, readiness, generated env,
-  test context, wrapped commands, and teardown.
+  the fixture stack handle, wrapped commands, and teardown.
 - A local mprocs-style UI should be a small log viewer and developer shell over
   devfinity-owned logs, not the supervisor.
 - Do not copy `devimint` block for block. Copy the process ownership,
@@ -707,3 +707,140 @@ Validation:
 - `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
 - `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- status`
 - `git diff --check`
+
+## Devfinity Env And Fixture API
+
+Date: 2026-07-07
+
+Changes:
+
+- Added `devfinity::vars` with `DevfinityVars`, `StackPaths`, `StackPorts`,
+  and `StackEnv`.
+- Moved generated environment construction and env-file rendering out of
+  `topology.rs`.
+- Added ready/error marker files to the generated run layout.
+- Added unique fixture run names and non-conflicting fixture port allocation
+  while keeping deterministic `default` ports for manual local development.
+- Added `devfinity::run_devfinity_test` in `lib.rs`, following devimint's
+  small `run_devfed_test` shape. The test closure receives `&DevfinityStack`
+  directly instead of a separate wrapper type.
+- Updated the ignored Rust smoke test to start and tear down the stack through
+  `run_devfinity_test` instead of the CLI wrapped-command path.
+- Updated `just dev rust-smoke` and local harness docs to describe the fixture
+  path.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo fmt --all -- --check`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c just dev rust-smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- status`
+- `git diff --check`
+
+## Devfinity Source-Checkout Boundary Correction
+
+Date: 2026-07-07
+
+Decision:
+
+- Devfinity should not launch Rust services from the monorepo source checkout
+  as `target/debug/...` binaries.
+- The durable model is to add Core, Chat, and Sites crates to
+  `devfinity/Cargo.toml` as dependencies when their devfinity components start
+  those services through library server entrypoints.
+- If a Rust service lacks a usable server entrypoint, add that API to the
+  service crate first instead of making devfinity shell out to its binary.
+- Native Postgres remains an external infrastructure process.
+- The dashboard is a non-Rust app. Its startup should be isolated in an outer
+  dev process composer that starts or wraps devfinity, waits for backend
+  readiness, loads generated env, and then runs dashboard just/script commands.
+- The current `repo_root`, startup `cargo build`, and `target/debug/...` usage
+  remain transitional violations. Remove them before hardening the process
+  reaper or adding the outer local composer.
+
+Plan changes:
+
+- Added a dedicated "Remove Source-Checkout Service Launches" phase before
+  process reaper hardening.
+- Updated the monorepo harness plan and local integration harness docs to make
+  crate-dependency service startup the target architecture.
+
+Validation:
+
+- Documentation-only change.
+
+## Devfinity Backend Scope And Outer Composer
+
+Date: 2026-07-07
+
+Decision:
+
+- Scope devfinity to backend infrastructure and Rust-controllable services.
+- Keep Core, Chat, Sites, and native Postgres in the devfinity backend harness.
+- Move Dashboard and future UI/dev-server processes to an outer dev process
+  composer that consumes devfinity env and readiness markers.
+- The outer composer may be a small `just` recipe, script, or mprocs config. It
+  should start or wrap devfinity, wait for backend readiness, then run
+  dashboard/UI commands.
+- Dashboard source paths, npm install logic, and frontend dev-server details
+  should not live inside the devfinity crate.
+- Dashboard create-agent e2e coverage should move out of devfinity backend
+  fixture tests and into the outer composer workflow.
+
+Validation:
+
+- Documentation-only change.
+
+## Devfinity Backend-Only Stack Realignment
+
+Date: 2026-07-07
+
+Changes:
+
+- Removed Dashboard from the devfinity-managed stack implementation.
+- Removed the Dashboard port, path, generated env values, readiness probe, npm
+  dependency preflight, process spec, and status entry from devfinity.
+- Converted `scripts/devfinity-smoke` to a backend-only smoke covering
+  Postgres, Core, Chat, and Sites.
+- Converted the ignored Rust smoke test to the same backend-only fixture model.
+- Updated checked plan items and local docs so already-landed devfinity work no
+  longer claims Dashboard is part of the backend harness.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo fmt --all -- --check`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c just dev smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c just dev rust-smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- status`
+- `git diff --check`
+
+## Devfinity Phase 4 Sequencing Correction
+
+Date: 2026-07-07
+
+Decision:
+
+- Phase 4 should not start by deleting `repo_root`.
+- `repo_root`, startup `cargo build`, and `target/debug/...` binary launches
+  are symptoms of missing service library entrypoints and missing in-process
+  service supervision.
+- The next work should audit Core, Chat, and Sites server APIs, add small public
+  serve entrypoints where needed, add a devfinity task manager for Rust backend
+  services, and then migrate services one at a time while backend smokes pass.
+- Native Postgres remains a process. The shutdown hardening phase should cover
+  both Postgres process cleanup and in-process Rust service task shutdown.
+
+Plan changes:
+
+- Rewrote Phase 4 as "Rust Backend Service Boundaries".
+- Moved `repo_root` removal to the end of Phase 4.
+- Renamed the next hardening phase to "Process And Task Shutdown Hardening".
+- Updated the monorepo harness checklist to match this sequence.
+
+Validation:
+
+- Documentation-only change.

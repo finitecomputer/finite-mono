@@ -24,27 +24,23 @@ devfinity/
     process.rs
     process_reaper.rs
     stack.rs
-    fixtures.rs
     components/
       mod.rs
       postgres.rs
       core.rs
       chat.rs
       sites.rs
-      dashboard.rs
     clients/
       mod.rs
       core.rs
       chat.rs
       sites.rs
-    local_ui/
-      mod.rs
-      mprocs.rs
 ```
 
 Responsibilities:
 
-- `lib.rs`: public harness API.
+- `lib.rs`: public harness API, including the `run_devfinity_test` fixture
+  entrypoint, mirroring devimint's small `run_devfed_test` shape.
 - `main.rs`: thin CLI over the library.
 - `topology.rs`: profiles and stable stack shape.
 - `vars.rs`: generated paths, ports, environment contract, shell export helpers,
@@ -58,19 +54,34 @@ Responsibilities:
 - `components/`: typed service definitions, commands, logs, environment, and
   readiness probes.
 - `clients/`: typed or semi-typed harness clients used by tests.
-- `fixtures.rs`: `run_devfinity_test`-style helpers for integration tests.
-- `local_ui/`: optional local log viewer integration such as mprocs.
 
 The target is a devimint-style harness: Rust owns process lifecycle, readiness,
-environment, logs, and cleanup. A local TUI should be only a viewer over logs
-and shell state. Fedimint's `mprocs` setup is the model: small viewer config,
-not the orchestrator.
+environment, logs, and cleanup for backend infrastructure and Rust-controllable
+services. A local TUI or app-dev process composer should live outside
+devfinity and consume generated env/ready markers. Fedimint's `mprocs` setup is
+the model for the outer layer: small viewer/composer config, not the backend
+orchestrator.
 
 Do not copy `devimint` block for block. Copy the contract and ownership model:
-one library-owned stack object starts child processes, exposes typed context to
+one library-owned stack object starts child processes, exposes the stack handle to
 tests, tears processes down reliably, and writes logs/artifacts for humans and
 CI. Avoid importing Fedimint-specific federation, gateway, Bitcoin, version
 selection, and CLI complexity.
+
+Do not make devfinity launch Rust services from the source checkout. The current
+intermediate implementation still does this for Core, Chat, and Sites by
+building workspace binaries and spawning `target/debug/...`; that is a
+transitional violation to remove next. The durable shape is for `devfinity` to
+depend on the relevant Rust crates and start their library server entrypoints
+directly. If a service does not expose the right library API yet, add that API
+to the service crate before wiring it into devfinity.
+
+Non-Rust services are outside devfinity. For the dashboard, prefer a very small
+checked-in `just` recipe or script owned by an outer dev process composer. That
+outer layer should start or wrap devfinity for backend infra, wait for the
+devfinity readiness/env contract, then start dashboard or other UI commands.
+Do not spread dashboard source paths, npm install rules, or framework-specific
+startup details through the Rust harness.
 
 Process-compose was a transitional implementation detail from the first
 prototype and has been retired from the compiled harness. New architecture work
@@ -85,12 +96,15 @@ crate through Rust APIs.
 Do not bulk-add every workspace crate only to resemble Fedimint. Add
 dependencies as typed harness boundaries appear:
 
-- Add Core crates when Core component config, clients, fixture data, or
-  assertions use Core types.
-- Add Chat crates when Chat component config, clients, fixture data, or
-  assertions use Chat types.
-- Add Sites crates when Sites component config, clients, fixture data, or
-  assertions use Sites types.
+- Add Core crates when the Core component starts the Core server through a
+  library entrypoint, or when clients, fixture data, or assertions use Core
+  types.
+- Add Chat crates when the Chat component starts the Chat server through a
+  library entrypoint, or when clients, fixture data, or assertions use Chat
+  types.
+- Add Sites crates when the Sites component starts the Sites server through a
+  library entrypoint, or when clients, fixture data, or assertions use Sites
+  types.
 - Add later component crates only in the phase where those components become
   typed devfinity components.
 
@@ -155,74 +169,146 @@ abstractions. The library should expose a generated environment/global state
 object and a test fixture entrypoint that starts the stack, waits for readiness,
 runs test code, and tears everything down.
 
-- [ ] Add `vars.rs` with a `DevfinityVars` or `DevfinityGlobal` object that
+- [x] Add `vars.rs` with a `DevfinityVars` or `DevfinityGlobal` object that
       owns generated paths, ports, environment values, log paths, ready/error
       marker paths, and shell exports.
-- [ ] Move `StackEnv` construction and env-file rendering out of `topology.rs`
+- [x] Move `StackEnv` construction and env-file rendering out of `topology.rs`
       into `vars.rs`.
-- [ ] Keep deterministic `default` run state and ports for manual local
+- [x] Keep deterministic `default` run state and ports for manual local
       development.
-- [ ] Add unique fixture run directories for tests, using temp dirs or an
+- [x] Add unique fixture run directories for tests, using temp dirs or an
       explicit test-dir argument similar to devimint's `--test-dir`.
-- [ ] Add non-conflicting fixture port allocation while preserving deterministic
+- [x] Add non-conflicting fixture port allocation while preserving deterministic
       manual ports.
-- [ ] Add `fixtures.rs` with `DevfinityTestContext`.
-- [ ] Add `run_devfinity_test` or an equivalent sync/async fixture entrypoint
+- [x] Add `run_devfinity_test` in `lib.rs`, following devimint's small
+      `run_devfed_test` shape.
+- [x] Add a sync fixture entrypoint
       that accepts a closure, starts the stack, waits for readiness, runs the
       closure, and tears the stack down.
-- [ ] Make the fixture context expose generated paths, ports, environment,
-      log/artifact locations, and service URLs.
-- [ ] Make fixture startup apply generated environment variables to the test
+- [x] Pass the `DevfinityStack` handle to fixture tests so generated paths,
+      ports, environment, log/artifact locations, and service URLs stay on the
+      primary stack object.
+- [x] Make fixture startup apply generated environment variables to the test
       process before constructing clients, matching devimint's env-first
       contract.
-- [ ] Add ready/error marker files for external wrappers that need to wait for
+- [x] Add ready/error marker files for external wrappers that need to wait for
       a stack from outside the process.
-- [ ] Move the ignored Rust smoke test onto the fixture API.
-- [ ] Keep shell smoke tests as compatibility checks, not the primary model.
-- [ ] Add or document a `devfinity env` command only if shell workflows need to
-      print the current run environment without starting a new stack.
+- [x] Move the ignored Rust smoke test onto the fixture API.
+- [x] Keep shell smoke tests as compatibility checks, not the primary model.
+- [x] Defer `devfinity env` until a shell workflow needs to print the current
+      run environment without starting a new stack.
 
 Exit criterion: a Rust integration test can start the base profile through
-`run_devfinity_test`, consume generated env/context, and shut the stack down
+`run_devfinity_test`, consume generated env/stack data, and shut the stack down
 without calling the CLI directly.
 
-## Phase 4: Process Reaper Hardening
+## Phase 4: Rust Backend Service Boundaries
 
-Goal: make process teardown closer to devimint before relying on fixtures in CI
-or parallel local tests.
+Goal: replace source-checkout binary launches deliberately. Do not start by
+deleting `repo_root`; it is only removable after Core, Chat, and Sites have
+usable library server entrypoints and devfinity has a way to supervise
+in-process backend tasks.
 
-- [ ] Add `process_reaper.rs`.
+Current state:
+
+- [x] Remove Dashboard from `DevfinityStack`, `StackPorts`, `StackPaths`,
+      generated env, service readiness checks, and process ownership.
+- [x] Move the dashboard create-agent smoke out of devfinity's backend fixture
+      tests.
+- [x] Keep native Postgres as an external infrastructure process because it is
+      not a Rust service crate.
+- [ ] Add the dashboard create-agent smoke to an outer dev/e2e composer
+      workflow.
+
+Boundary audit:
+
+- [ ] Document the existing server library surfaces before changing devfinity:
+      Core exposes router/store APIs but its `serve()` wrapper is binary-only;
+      Chat exposes `HttpServerState` and `http_router` but not a public server
+      runner; Sites exposes `server::serve_on` plus lower-level pieces but
+      could use a smaller dev serve helper.
+- [ ] Decide the in-process service supervision shape for devfinity: a small
+      task manager that owns async service tasks, captures failures, and
+      coordinates shutdown alongside the native Postgres process.
+- [ ] Keep the current binary-launch backend path as compatibility until each
+      service has been migrated and the backend smoke still passes.
+
+Service API work:
+
+- [ ] Add a public Core server entrypoint, for example `CoreServeOptions` plus
+      `serve_core(...)`, in `finite-saas-core` rather than shelling out to the
+      binary.
+- [ ] Add a public Chat server entrypoint, for example `ChatServeOptions` plus
+      `serve_chat(...)`, around `finitechat-server`'s durable state and router.
+- [ ] Add a public Sites dev server entrypoint, for example
+      `SitesServeOptions` plus `serve_sites(...)`, that hides Engine/Mailer/
+      Supervisor setup from devfinity.
+
+Devfinity migration:
+
+- [ ] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` only as each
+      component starts using its library API.
+- [ ] Migrate one backend service at a time from `target/debug/...` to its
+      library entrypoint, keeping `just dev smoke` and `just dev rust-smoke`
+      passing after each migration.
+- [ ] Stop running `cargo build` as a devfinity startup preflight once no
+      backend service is launched from `target/debug/...`.
+- [ ] Remove `repo_root` from `DevfinityStack` and `StackPaths` only after
+      service startup and wrapped-command execution no longer need it.
+- [ ] Remove `default_repo_root()` from `lib.rs` after fixture startup no
+      longer needs source-checkout path recovery.
+- [ ] Prove `run_devfinity_test` works regardless of the Cargo test process
+      current directory.
+
+Exit criterion: Core, Chat, and Sites are started through Rust crate
+dependencies, Dashboard remains outside devfinity, the backend smoke still
+passes, and devfinity no longer needs a source-checkout repo root to run
+fixture tests.
+
+## Phase 5: Process And Task Shutdown Hardening
+
+Goal: make teardown closer to devimint before relying on fixtures in CI or
+parallel local tests. After Phase 4, this covers both native Postgres process
+cleanup and in-process Rust backend task shutdown.
+
+- [ ] Add a small shutdown/reaper module for native child processes and
+      in-process service tasks.
 - [ ] Move SIGTERM/SIGKILL/wait logic out of `ProcessHandle` into the reaper.
 - [ ] Ensure dropped handles synchronously reap children or otherwise guarantee
       ports and file locks are released before a replacement process starts.
+- [ ] Ensure dropped service task handles request shutdown and observe task
+      completion or failure.
 - [ ] Reap recently killed children before spawning a new daemon.
-- [ ] Keep cleanup scoped to devfinity-owned process metadata.
+- [ ] Keep cleanup scoped to devfinity-owned process/task metadata.
 - [ ] Add tests for stale PID/control-file cleanup and repeated start/stop on
       the same ports.
 
 Exit criterion: repeated fixture runs can start and stop the base stack without
-port/file-lock races, and cleanup remains scoped to devfinity-owned processes.
+port/file-lock races, failed service tasks are surfaced clearly, and cleanup
+remains scoped to devfinity-owned processes/tasks.
 
-## Phase 5: Typed Base Components
+## Phase 6: Typed Base Components
 
-Goal: make Core, Chat, Sites, Dashboard, and Postgres first-class typed
-components instead of service specs embedded in `stack.rs`.
+Goal: make Core, Chat, Sites, and Postgres first-class typed
+components instead of service specs embedded in `stack.rs`. This phase should
+build on Phase 4's crate-dependency service startup, not on source-checkout
+binary launches.
 
-- [ ] Add a `Component` abstraction for name, state, command, environment,
-      readiness, and dependencies.
+- [ ] Add a `Component` abstraction for name, state, environment, readiness,
+      dependencies, and either an in-process Rust service entrypoint or a
+      tightly scoped external infrastructure process.
 - [ ] Implement `components::postgres`.
 - [ ] Implement `components::core`.
 - [ ] Implement `components::chat`.
 - [ ] Implement `components::sites`.
-- [ ] Implement `components::dashboard`.
 - [ ] Keep Postgres as typed infrastructure required by Core.
 - [ ] Move Core-specific environment construction into `components::core`.
 - [ ] Move Chat-specific SQLite state and environment construction into
       `components::chat`.
 - [ ] Move Sites-specific state and environment construction into
       `components::sites`.
-- [ ] Add only the Core, Chat, and Sites Rust dependencies that are needed for
-      typed config, clients, fixture data, or assertions.
+- [ ] Keep Core, Chat, and Sites Rust dependencies justified by library
+      startup, typed config, clients, fixture data, or assertions.
 - [ ] Add `clients::core` for Core health and development-account workflows.
 - [ ] Add `clients::chat` for Chat health and basic message/server workflows.
 - [ ] Add `clients::sites` for Sites health and basic site/document workflows.
@@ -233,23 +319,28 @@ Exit criterion: Core, Chat, and Sites can be started, inspected, and tested
 through typed devfinity components and clients, while the Rust process manager
 owns lifecycle and cleanup.
 
-## Phase 6: Local UI And Shell Contract
+## Phase 7: Outer Dev Composer And Shell Contract
 
-Goal: add local ergonomics only after lifecycle, env, fixtures, and base
-components are library-owned.
+Goal: add local ergonomics only after backend lifecycle, env, fixtures, and
+base components are library-owned by devfinity. UI/dev-server processes live in
+this outer layer, not inside devfinity.
 
-- [ ] Add a tiny mprocs-style local viewer that tails generated logs and opens a
-      developer shell with generated env loaded.
-- [ ] Keep the viewer as a wrapper around `devfinity up -- <command>` or the
-      fixture/env contract; it must not decide startup order or own teardown.
-- [ ] Add a checked-in viewer config that tails Core, Chat, Sites, Dashboard,
-      Postgres, and devfinity logs.
+- [ ] Add one outer dev composer entrypoint, likely a `just` recipe plus a tiny
+      script or mprocs config.
+- [ ] Have the outer composer start or wrap `devfinity up --headless`, wait for
+      backend readiness, load generated env, then start Dashboard or other UI
+      commands.
+- [ ] Keep Dashboard npm install/start details in the outer dashboard recipe,
+      not in the devfinity crate.
+- [ ] Tail Core, Chat, Sites, Postgres, devfinity, and Dashboard logs from the
+      outer viewer when useful.
 - [ ] Add shell aliases/helpers only as consumers of generated env.
 
 Exit criterion: local developers can get the devimint-style log/shell
-experience without adding a second process orchestrator.
+experience and dashboard workflow without making devfinity orchestrate
+non-backend UI processes.
 
-## Phase 7: Base Architecture Checkpoint
+## Phase 8: Base Architecture Checkpoint
 
 Goal: stop and validate the harness shape before adding more architecture
 components.
@@ -270,7 +361,7 @@ components.
 Exit criterion: the team is comfortable using this architecture as the pattern
 for additional components.
 
-## Phase 8: Add Identity And Auth
+## Phase 9: Add Identity And Auth
 
 Goal: make identity and auth explicit harness components instead of implicit
 environment conventions.
@@ -286,7 +377,7 @@ environment conventions.
 Exit criterion: identity state is owned by devfinity fixtures and can be shared
 across Core, Chat, and later components.
 
-## Phase 9: Add Brain, Search, And Remaining Runtime Pieces
+## Phase 10: Add Brain, Search, And Remaining Runtime Pieces
 
 Goal: add the rest of the local architecture after the component model has
 proved itself.
@@ -303,7 +394,7 @@ proved itself.
 Exit criterion: devfinity can stitch together the broader Finite architecture
 without losing the simple base development path.
 
-## Phase 10: App-Facing Development Backend
+## Phase 11: App-Facing Development Backend
 
 Goal: let apps use devfinity as their local backend and integration-test
 substrate.

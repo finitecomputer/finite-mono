@@ -3,12 +3,13 @@
 `devfinity` is the Finite monorepo local integration harness. It follows the
 Fedimint `devimint` pattern at a smaller scale: one Finite-aware command
 prepares deterministic local state, writes environment exports, starts local
-services, exposes test context, and tears the stack down.
+services, exposes the stack handle to tests, and tears the stack down.
 
 The current implementation uses Rust-owned orchestration, modeled after
 `devimint`: devfinity owns child processes, logs, readiness, generated
-environment, and teardown. A future mprocs-style local UI should only tail logs
-and provide an ergonomic shell; it should not own lifecycle.
+environment, and teardown for backend infrastructure. Dashboard and other
+UI/dev-server processes should move to an outer dev composer that consumes the
+devfinity env/readiness contract.
 
 By default, `devfinity up` starts the stack, waits for readiness, and keeps the
 parent process alive until Ctrl-C. Use `--headless` for automation or
@@ -35,7 +36,7 @@ The equivalent direct commands are:
 cargo run -p devfinity -- up
 cargo run -p devfinity -- up --headless
 cargo run -p devfinity -- up --headless -- scripts/devfinity-smoke
-cargo run -p devfinity -- up --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
+cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
 cargo run -p devfinity -- status
 cargo run -p devfinity -- cleanup
 ```
@@ -45,15 +46,15 @@ headless mode, waits for the configured services to become ready, runs the
 command with the generated devfinity environment variables, and tears the stack
 down afterward. This is the automation path for local integration tests.
 
-`just dev smoke` is intentionally more than a health check. It verifies service
-readiness, then submits the dashboard create-agent form, lets the dashboard call
-Core, and confirms through Core's `/api/core/v1/me` response that the agent
-creation request and project were persisted in Postgres for the dev account.
+`just dev smoke` verifies backend readiness for Postgres, Core, Chat, and
+Sites. Dashboard create-agent coverage belongs to the future outer e2e composer
+because it includes a non-Rust UI/dev-server process.
 
 `just dev rust-smoke` demonstrates the same model from Rust. The test is marked
-`#[ignore]` so regular workspace test runs do not start or require devfinity;
-the `just` recipe runs it through the wrapped-command path so it receives the
-same generated environment variables as any other devfinity integration test.
+`#[ignore]` so regular workspace test runs do not start or require devfinity.
+The test calls `run_devfinity_test`, which starts a unique fixture stack,
+applies generated environment variables to the test process, passes the
+`DevfinityStack` handle to the closure, and tears the stack down afterward.
 
 `status` is read-only. It prints the generated state paths, devfinity-owned PID
 control files, and short TCP/HTTP checks for the configured services.
@@ -65,23 +66,37 @@ automatically through Rust process handles.
 
 ## Library API
 
-The primary Rust entrypoint is `devfinity::DevfinityStack`. The base profile is
-represented by `StackProfile::Base`, which starts Core, Chat, Sites, Dashboard,
-and native Postgres through Rust-owned process handles.
+The primary Rust entrypoints are `devfinity::DevfinityStack` for direct stack
+control and `devfinity::run_devfinity_test` for integration tests. The base
+profile is represented by `StackProfile::Base`, which should own backend
+infrastructure only: Core, Chat, Sites, and native Postgres.
 
 The typed topology surface is:
 
 - `StackPaths`: generated state, logs, control, Postgres, service, and
   `FINITE_HOME` paths.
-- `StackPorts`: deterministic local ports for Core, Dashboard, Postgres, Chat,
-  and Sites.
-- `StackEnv`: the canonical generated environment values used by env files and
-  wrapped commands.
+- `StackPorts`: deterministic manual ports and allocated fixture ports for
+  Core, Postgres, Chat, and Sites.
+- `StackEnv`: the canonical generated environment values used by env files,
+  wrapped commands, and fixture tests.
+- `DevfinityVars`: generated paths, ports, env, ready/error markers, and shell
+  exports for a run.
+- `run_devfinity_test`: devimint-style fixture entrypoint that starts a stack,
+  runs a closure with `&DevfinityStack`, and tears the stack down.
 
 `process.rs` owns child process spawning, log files, PID control files, and
 shutdown behavior. `stack.rs` owns startup order, readiness polling,
-wrapped-command execution, status, and cleanup. Typed components and fixture
-APIs are the next architectural layers.
+wrapped-command execution, status, and cleanup. Typed components and clients
+are the next architectural layers.
+
+The current base stack still contains one transitional violation: Rust services
+are built from the workspace and launched as `target/debug/...` binaries. The
+next harness phase audits and adds the missing server entrypoints, adds
+in-process service supervision to devfinity, then migrates Core, Chat, and Sites
+one at a time. `repo_root` and the startup `cargo build` preflight should
+disappear only after no backend service depends on `target/debug/...`.
+Dashboard is a Node app and belongs in an outer dev composer that consumes
+devfinity env/readiness before starting UI commands.
 
 ## Initial Stack
 
@@ -89,14 +104,15 @@ The first `devfinity` stack is intentionally narrow:
 
 - Native local Postgres for `finite-saas-core`, using the Postgres binaries from
   the Nix development shell.
-- `finite-saas-core`.
-- Dashboard dev server with development auth enabled.
-- Local `finitechat-server` backed by SQLite.
-- Local `finitesitesd` with app execution disabled.
+- `finite-saas-core`, currently through its binary but targeted to move behind
+  a library server entrypoint.
+- Local `finitechat-server` backed by SQLite, targeted to move behind its
+  library server entrypoint.
+- Local `finitesitesd` with app execution disabled, targeted to move behind its
+  library server entrypoint.
 
-The richer create-agent canary still lives in
-`finitecomputer-v2/scripts/local_create_agent_canary.sh`. That flow can become
-a later `devfinity` profile after the base stack is stable.
+Dashboard dev server startup and the richer create-agent canary belong to the
+outer dev/e2e composer, not to devfinity's backend fixture API.
 
 ## State
 
@@ -106,9 +122,15 @@ Generated state lives under:
 .local-state/devfinity/runs/default/
 ```
 
+Fixture runs created by `run_devfinity_test` use unique run directories under
+`$DEVFINITY_TEST_STATE_DIR` when set, or under the system temp directory by
+default. Manual `devfinity up` keeps the deterministic `default` run.
+
 Important generated files:
 
 - `env`: shell exports for local CLI tools.
+- `ready`: marker written after the stack becomes ready.
+- `error`: marker written when startup or a fixture test fails.
 - `control/*.pid`: devfinity-owned process control files for recovery.
 - `run-postgres.sh`: generated native Postgres launcher.
 - `urls.txt`: useful service URLs.
@@ -127,7 +149,6 @@ Run from `nix develop` or otherwise provide:
 
 - Rust/Cargo.
 - Postgres client/server binaries from the Nix shell.
-- Node/npm, for the dashboard dev server.
 - `curl`, for the smoke script.
 
 The harness writes state files before starting services, so

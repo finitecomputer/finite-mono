@@ -26,7 +26,6 @@ enum ManagedProcess {
     Core,
     FiniteChat,
     FiniteSites,
-    Dashboard,
 }
 
 impl ManagedProcess {
@@ -36,7 +35,6 @@ impl ManagedProcess {
             Self::Core => "core",
             Self::FiniteChat => "finitechat",
             Self::FiniteSites => "finitesites",
-            Self::Dashboard => "dashboard",
         }
     }
 
@@ -46,7 +44,6 @@ impl ManagedProcess {
             Self::Core,
             Self::FiniteChat,
             Self::FiniteSites,
-            Self::Dashboard,
         ]
     }
 }
@@ -60,6 +57,7 @@ impl fmt::Display for ManagedProcess {
 impl DevfinityStack {
     pub fn write_files(&self) -> Result<()> {
         self.ensure_dirs()?;
+        self.clear_run_markers();
         self.write_env_file()?;
         self.write_postgres_script()?;
         fs::write(self.run_dir.join("urls.txt"), self.urls_text()).with_context(|| {
@@ -79,9 +77,7 @@ impl DevfinityStack {
             return Ok(ExitCode::SUCCESS);
         }
 
-        self.prepare_for_start()?;
-        let mut running = self.start_managed_stack()?;
-        self.wait_for_services_ready(Duration::from_secs(180), &mut running)?;
+        let mut running = self.start()?;
 
         match mode {
             StackRunMode::Foreground => println!(
@@ -102,17 +98,29 @@ impl DevfinityStack {
             bail!("wrapped command cannot be empty");
         }
 
-        self.write_files()?;
-        self.validate_command_plan()?;
-        self.prepare_for_start()?;
-        let mut running = self.start_managed_stack()?;
-        let outcome = match self.wait_for_services_ready(Duration::from_secs(180), &mut running) {
-            Ok(()) => self.run_stack_command(command),
-            Err(error) => Err(error),
-        };
+        let mut running = self.start()?;
+        let outcome = self.run_stack_command(command);
 
         if let Err(error) = running.shutdown() {
             eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
+        }
+
+        outcome
+    }
+
+    pub fn start(&self) -> Result<RunningDevfinityStack> {
+        let outcome = (|| {
+            self.write_files()?;
+            self.validate_command_plan()?;
+            self.prepare_for_start()?;
+            let mut running = self.start_managed_stack()?;
+            self.wait_for_services_ready(Duration::from_secs(180), &mut running)?;
+            self.mark_ready()?;
+            Ok(running)
+        })();
+
+        if outcome.is_err() {
+            let _ = self.mark_error();
         }
 
         outcome
@@ -178,7 +186,6 @@ impl DevfinityStack {
     fn start_managed_stack(&self) -> Result<RunningDevfinityStack> {
         let manager = self.process_manager();
         self.run_rust_build(&manager)?;
-        self.run_dashboard_deps(&manager)?;
 
         let mut running = RunningDevfinityStack::new();
         running.spawn(&manager, self.postgres_spec())?;
@@ -188,7 +195,6 @@ impl DevfinityStack {
         running.spawn(&manager, self.finitechat_spec())?;
         running.spawn(&manager, self.finitesites_spec())?;
         self.wait_for_core_ready(Duration::from_secs(60), &mut running)?;
-        running.spawn(&manager, self.dashboard_spec())?;
 
         Ok(running)
     }
@@ -206,30 +212,6 @@ impl DevfinityStack {
             .current_dir(&self.repo_root);
         let status = manager.run_command("rust-build", &mut command)?;
         ensure_status_success("rust-build", status, &self.logs_dir.join("rust-build.log"))
-    }
-
-    fn run_dashboard_deps(&self, manager: &ProcessManager) -> Result<()> {
-        let mut command = Command::new("bash");
-        command
-            .arg("-c")
-            .arg(concat!(
-                "set -eu; ",
-                "if [ ! -x node_modules/.bin/next ] || ",
-                "[ ! -f node_modules/.package-lock.json ] || ",
-                "find package.json package-lock.json -newer node_modules/.package-lock.json ",
-                "-print -quit | grep -q .; then ",
-                "npm ci; ",
-                "else ",
-                "echo \"dashboard dependencies already installed\"; ",
-                "fi"
-            ))
-            .current_dir(self.dashboard_source_dir());
-        let status = manager.run_command("dashboard-deps", &mut command)?;
-        ensure_status_success(
-            "dashboard-deps",
-            status,
-            &self.logs_dir.join("dashboard-deps.log"),
-        )
     }
 
     fn wait_for_postgres_ready(
@@ -352,12 +334,6 @@ impl DevfinityStack {
                 self.ports.finitesites,
                 "/api/v1/healthz",
             ),
-            check_http_service(
-                ManagedProcess::Dashboard,
-                "127.0.0.1",
-                self.ports.dashboard,
-                "/dashboard",
-            ),
         ]
     }
 
@@ -367,7 +343,6 @@ impl DevfinityStack {
             ("core", self.ports.core),
             ("finitechat", self.ports.finitechat),
             ("finitesites", self.ports.finitesites),
-            ("dashboard", self.ports.dashboard),
         ] {
             if connect_tcp("127.0.0.1", port).is_ok() {
                 bail!(
@@ -382,7 +357,6 @@ impl DevfinityStack {
         for command in [
             "bash",
             "cargo",
-            "npm",
             "initdb",
             "postgres",
             "pg_isready",
@@ -553,57 +527,11 @@ wait "$postgres_pid"
         .env(self.process_env())
     }
 
-    fn dashboard_spec(&self) -> ProcessSpec {
-        ProcessSpec::new(
-            ManagedProcess::Dashboard.as_str(),
-            "./node_modules/.bin/next",
-            self.dashboard_source_dir(),
-            self.logs_dir.join("dashboard.log"),
-        )
-        .args([
-            "dev".to_string(),
-            "--hostname".to_string(),
-            "127.0.0.1".to_string(),
-            "--port".to_string(),
-            self.ports.dashboard.to_string(),
-        ])
-        .env(
-            self.process_env()
-                .into_iter()
-                .chain([
-                    ("FC_WORKOS_AUTH_ENABLED".to_string(), "0".to_string()),
-                    (
-                        "FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH".to_string(),
-                        "1".to_string(),
-                    ),
-                    (
-                        "FC_DASHBOARD_DEV_EMAIL".to_string(),
-                        "devfinity@finite.computer".to_string(),
-                    ),
-                    (
-                        "FC_DASHBOARD_DEV_WORKOS_USER_ID".to_string(),
-                        "user_devfinity".to_string(),
-                    ),
-                    ("FC_CORE_BASE_URL".to_string(), self.core_url()),
-                    ("FC_CORE_API_TOKEN".to_string(), self.core_token.clone()),
-                    (
-                        "NEXT_PUBLIC_WORKOS_REDIRECT_URI".to_string(),
-                        format!("http://127.0.0.1:{}/callback", self.ports.dashboard),
-                    ),
-                ])
-                .collect::<Vec<_>>(),
-        )
-    }
-
     fn process_env(&self) -> Vec<(String, String)> {
         self.env_values()
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
             .collect()
-    }
-
-    fn dashboard_source_dir(&self) -> std::path::PathBuf {
-        self.repo_root.join("finitecomputer-v2/apps/dashboard")
     }
 }
 
@@ -650,7 +578,7 @@ impl RunningDevfinityStack {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) -> Result<()> {
         let mut first_error = None;
         for handle in self.handles.iter_mut().rev() {
             if let Err(error) = handle.shutdown() {
