@@ -1,0 +1,62 @@
+name: Tinfoil Deploy - Staging
+run-name: Deploy staging ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to deploy, for example v0.0.3"
+        required: true
+        default: "v0.0.3"
+        type: string
+      container_name:
+        description: "Tinfoil container name"
+        required: true
+        default: "finite-searxng"
+        type: string
+
+concurrency:
+  group: tinfoil-staging-deploy-${{ inputs.container_name }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
+      SEARXNG_SECRET_VALUE: ${{ secrets.SEARXNG_SECRET_VALUE }}
+      TINFOIL_CONTAINER_NAME: ${{ inputs.container_name }}
+      TINFOIL_CONFIG_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
+
+      - name: Verify required secret
+        run: |
+          if [ -z "$TINFOIL_API_KEY" ]; then
+            echo "::error::Set repository or organization secret TINFOIL_API_KEY to a Tinfoil org admin key."
+            exit 1
+          fi
+
+      - name: Install Tinfoil CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          version="$(
+            curl -fsSL https://api.github.com/repos/tinfoilsh/tinfoil-cli/releases/latest |
+              jq -r '.tag_name | sub("^v"; "")'
+          )"
+          curl -fsSL \
+            "https://github.com/tinfoilsh/tinfoil-cli/releases/latest/download/tinfoil-cli_${version}_linux_amd64.tar.gz" \
+            -o /tmp/tinfoil-cli.tar.gz
+          tar -xzf /tmp/tinfoil-cli.tar.gz -C /tmp
+          install -m 0755 /tmp/tinfoil "$HOME/.local/bin/tinfoil"
+          "$HOME/.local/bin/tinfoil" --help >/dev/null
+
+      - name: Deploy staging container
+        env:
+          TINFOIL_BIN: /home/runner/.local/bin/tinfoil
+        run: scripts/deploy-staging.sh "$TINFOIL_CONFIG_TAG"

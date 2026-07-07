@@ -1,0 +1,45 @@
+# Copy this file into the upstream Firecrawl checkout as
+# docker-compose.override.yml before running `docker compose up -d`.
+#
+# It keeps the upstream Compose file as the source of truth while adding the
+# Finite hardening we want for a plain Docker deployment.
+
+services:
+  api:
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS 'http://127.0.0.1:${INTERNAL_PORT:-3002}/v0/health/readiness' >/dev/null",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  playwright-service:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  rabbitmq:
+    restart: unless-stopped
+
+  nuq-postgres:
+    restart: unless-stopped
+    volumes:
+      - nuq-postgres-data:/var/lib/postgresql/data
+
+  foundationdb:
+    restart: unless-stopped
+
+  foundationdb-init:
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "sleep 5 && out=$$(fdbcli -C /var/fdb/fdb.cluster --exec 'configure new single ssd' 2>&1); status=$$?; printf '%s\n' \"$$out\"; if [ \"$$status\" -eq 0 ]; then exit 0; fi; printf '%s\n' \"$$out\" | grep -Eiq 'already.*configured|database.*configured|already.*exists'"
+
+volumes:
+  nuq-postgres-data:

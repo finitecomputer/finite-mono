@@ -1,0 +1,88 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
+      - yep
+      - mwmbl
+      - searchmysite
+      - wiby
+      - presearch
+      - github
+      - mdn
+      - stackoverflow
+      - askubuntu
+      - pubmed
+      - reuters
+      - bing news
+      - docker hub
+      - mankier
+      - openlibrary
+      - wikiquote
+      - wikibooks
+      - wikinews
+      - wiktionary
+      - searchch
+
+general:
+  debug: false
+  instance_name: "finite-search"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  public_instance: false
+  secret_key: "${SEARXNG_SECRET}"
+
+ui:
+  static_use_hash: true
+
+engines:
+  - name: bing
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: searchmysite
+    disabled: false
+  - name: wiby
+    disabled: false
+  - name: presearch
+    disabled: false
+  - name: github
+    disabled: false
+  - name: mdn
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: askubuntu
+    disabled: false
+  - name: pubmed
+    disabled: false
+  - name: reuters
+    disabled: false
+  - name: bing news
+    disabled: false
+  - name: docker hub
+    disabled: false
+  - name: mankier
+    disabled: false
+  - name: openlibrary
+    disabled: false
+  - name: wikiquote
+    disabled: false
+  - name: wikibooks
+    disabled: false
+  - name: wikinews
+    disabled: false
+  - name: wiktionary
+    disabled: false
+  - name: searchch
+    disabled: false

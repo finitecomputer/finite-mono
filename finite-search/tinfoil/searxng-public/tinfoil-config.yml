@@ -1,0 +1,51 @@
+# Tinfoil Container Configuration
+# Public repo root requirement:
+#   This file must live at the root of a public GitHub repo.
+#
+# Replace OWNER/REPO before running the release workflow. The workflow rewrites
+# this image value with the final ghcr.io digest.
+
+cvm-version: 0.10.4
+cpus: 8
+memory: 16384
+
+networks:
+  public:
+    egress: open
+
+containers:
+  - name: "searxng"
+    image: "ghcr.io/finitecomputer/finite-searxng-tinfoil:placeholder"
+    env:
+      - SEARXNG_BASE_URL: ""
+      - SEARXNG_LIMITER: "false"
+      - SEARXNG_PORT: "8080"
+      - FINITE_SEARCH_PROXY_PORT: "8081"
+      - FINITE_SEARCH_UPSTREAM: "http://127.0.0.1:8080"
+    secrets:
+      - SEARXNG_SECRET
+      - FINITE_SEARCH_TOKEN
+    networks: [public]
+    restart: unless-stopped
+    read_only: false
+    tmpfs:
+      /tmp: "size=256m"
+    memory: "512m"
+    cpus: 2.0
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- 'http://127.0.0.1:8081/healthz' >/dev/null",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+shim:
+  upstream-container: "searxng"
+  upstream-port: 8081
+  paths:
+    - /search
+    - /search/*

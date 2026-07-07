@@ -1,0 +1,17 @@
+check:
+    scripts/check-static.sh
+
+doctor host="lat2":
+    scripts/doctor.sh {{host}}
+
+smoke-searxng url="http://127.0.0.1:8080":
+    SEARXNG_URL={{url}} scripts/smoke-searxng.sh
+
+smoke-firecrawl url="http://127.0.0.1:3002":
+    FIRECRAWL_URL={{url}} scripts/smoke-firecrawl.sh
+
+smoke-stack searxng="http://127.0.0.1:8080" firecrawl="http://127.0.0.1:3002":
+    SEARXNG_URL={{searxng}} FIRECRAWL_URL={{firecrawl}} scripts/smoke-stack.sh
+
+probe-stack searxng="http://127.0.0.1:8080" firecrawl="http://127.0.0.1:3002":
+    SEARXNG_URL={{searxng}} FIRECRAWL_URL={{firecrawl}} scripts/probe-stack.sh
