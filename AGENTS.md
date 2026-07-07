@@ -1,33 +1,12 @@
 # Finite Mono Agent Guide
 
-This repository is being built as the Finite monorepo. Follow
-`docs/monorepo-plan.md` and check off completed steps as work lands.
-
-Before implementing a monorepo component, check the corresponding Fedimint
-pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
-
-## Current Migration Rules
-
-- Keep `finitecomputer-v2`, `finitechat`, and `finite-sites` as top-level
-  copied folders at first.
-- Do not preserve source repo git history.
-- Do not mutate the existing source repos while constructing `finite-mono`.
-- Do not split apps, services, integrations, examples, or deployment files into
-  new root folders during the initial copy.
-- Keep the root `justfile` and `scripts/` minimal.
-- Defer the local integration harness, CI, quality gates, and broad Nix build
-  system until their phases in the plan.
-
-## Editing
-
-- Use `apply_patch` for manual file edits.
-- Keep docs and config ASCII unless a file already requires otherwise.
-- Update `docs/monorepo-migration-log.md` when recording migration facts.
-- Update checkboxes in `docs/monorepo-plan.md` as phases progress.
+Use the repository's current docs and local conventions as the source of truth
+for implementation details. Keep changes scoped to the task and avoid broad
+reorganization unless explicitly requested.
 
 ## Development Environment
 
-- Dependencies and toolchains for this monorepo are managed by Nix. Do not
+- Dependencies and toolchains for this repository are managed by Nix. Do not
   install `cargo`, Rust, Node, Postgres, OpenSSL, or other repo dependencies on
   the user system to satisfy project commands.
 - The recommended local workflow is Direnv loading the repo flake through
@@ -36,5 +15,3 @@ pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   repo root.
 - Prefer root `just` commands for repo workflows; `just` recipes use
   `scripts/dev-shell` to enter the pinned development environment when needed.
-- For direct commands that are not in a `justfile`, run them through
-  `scripts/with-dev-env` unless `IN_NIX_SHELL` is already set.

@@ -37,9 +37,10 @@ checkout, then add shared workspace structure around them.
 - `just sites lint`: run Finite Sites formatting and Clippy checks.
 - `just search check`: run Finite Search static checks.
 - `just skills check`: validate the shared Finite skills tree.
-- `just dev up`: start the initial local stack with `devfinity` and the
-  process-compose TUI.
-- `just dev up --headless`: start the same local stack without the TUI.
+- `just dev up`: start the local stack with Rust-owned `devfinity`
+  orchestration.
+- `just dev up --headless`: start the same local stack without an interactive
+  log viewer.
 - `just dev smoke`: start the headless stack, run the integration smoke test,
   and tear it down.
 - `just dev rust-smoke`: start the headless stack, run the ignored Rust
