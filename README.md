@@ -2,16 +2,22 @@
 
 `finite-mono` is the new Finite monorepo.
 
-The first migration is intentionally conservative. The starting repos are copied
-into top-level folders with their internal structure intact:
+The first migration is intentionally conservative. Imported repos are copied
+into top-level folders with their internal structure mostly intact:
 
 - `finitecomputer-v2`
 - `finitechat`
 - `finite-sites`
+- `finite-identity`
+- `finite-nostr`
+- `finite-auth`
+- `finite-brain`
+- `finite-search`
+- `finite-skills`
 
 Do not reorganize dashboards, mobile code, deployment files, integrations, or
-service wiring during the first copy. The initial goal is to make the copied
-repos work in one checkout, then add shared workspace structure around them.
+service wiring during import. The goal is to make copied repos work in one
+checkout, then add shared workspace structure around them.
 
 ## Start Here
 
@@ -29,6 +35,8 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just sites build`: build the Finite Sites packages.
 - `just sites test`: test the Finite Sites packages.
 - `just sites lint`: run Finite Sites formatting and Clippy checks.
+- `just search check`: run Finite Search static checks.
+- `just skills check`: validate the shared Finite skills tree.
 - `just dev up`: start the initial local stack with `devfinity` and the
   process-compose TUI.
 - `just dev up --headless`: start the same local stack without the TUI.

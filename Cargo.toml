@@ -2,6 +2,15 @@
 resolver = "2"
 members = [
     "devfinity",
+    "finite-auth/crates/finite-auth-core",
+    "finite-auth/crates/finite-auth-store",
+    "finite-brain/crates/finite-brain-app",
+    "finite-brain/crates/finite-brain-cli",
+    "finite-brain/crates/finite-brain-core",
+    "finite-brain/crates/finite-brain-server",
+    "finite-brain/crates/finite-brain-store",
+    "finite-identity",
+    "finite-nostr",
     "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",
@@ -40,7 +49,12 @@ axum = "0.8"
 base64 = "0.22"
 bech32 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
-finite-identity = { git = "https://github.com/finitecomputer/finite-identity", rev = "54a6936b5d7a0e8dc79018a30d9c794b10d25307" }
+finite-auth-core = { path = "finite-auth/crates/finite-auth-core" }
+finite-brain-core = { path = "finite-brain/crates/finite-brain-core" }
+finite-brain-server = { path = "finite-brain/crates/finite-brain-server" }
+finite-brain-store = { path = "finite-brain/crates/finite-brain-store" }
+finite-identity = { path = "finite-identity" }
+finite-nostr = { path = "finite-nostr" }
 finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
 flate2 = "1"
@@ -57,6 +71,7 @@ openmls = { version = "0.8.1", default-features = false }
 openmls_basic_credential = "0.5.0"
 openmls_memory_storage = { version = "0.5.0", features = ["extensions-draft-08"] }
 openmls_rust_crypto = "0.5.1"
+nostr = { version = "0.45.0-alpha.2", features = ["nip44", "nip59", "nip98", "os-rng"] }
 pulldown-cmark = "0.13"
 qrcode = { version = "0.14", default-features = false }
 reqwest = { version = "=0.12.27", default-features = false, features = ["blocking", "http2", "json", "rustls-tls-webpki-roots"] }
@@ -75,3 +90,6 @@ tar = "0.4"
 uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }
 walkdir = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

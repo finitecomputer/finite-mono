@@ -507,12 +507,12 @@ Do not batch these until the pattern is proven.
 
 Candidate order:
 
-- [ ] `finite-identity`
-- [ ] `finite-nostr`
-- [ ] `finite-auth`
-- [ ] `finite-brain`
-- [ ] `finite-search`
-- [ ] `finite-skills`
+- [x] `finite-identity`
+- [x] `finite-nostr`
+- [x] `finite-auth`
+- [x] `finite-brain`
+- [x] `finite-search`
+- [x] `finite-skills`
 - [ ] `reporting`
 - [ ] legacy `finitecomputer`
 
@@ -524,6 +524,25 @@ For each later import:
 - [ ] Preserve the old local validation loop first.
 - [ ] Normalize paths and docs only after the copy works.
 
+Completed for `finite-identity`:
+
+- [x] Record source commit SHA.
+- [x] Copy files into a top-level source repo folder.
+- [x] Add Rust crate to root workspace.
+- [x] Replace existing pinned git dependency with the local workspace package.
+- [x] Preserve and run the old local validation loop.
+
+Completed for `finite-nostr`, `finite-auth`, `finite-brain`, `finite-search`,
+and `finite-skills`:
+
+- [x] Record source commit SHAs.
+- [x] Copy files into top-level source repo folders.
+- [x] Add Rust crates to root workspace where applicable.
+- [x] Replace copied nested Rust workspaces with root workspace membership where
+      applicable.
+- [x] Add root `just` modules for repos with useful local command surfaces.
+- [x] Preserve and run the old local validation loops.
+
 ## First Milestone Definition
 
 The first successful monorepo milestone is intentionally modest:
@@ -532,7 +551,7 @@ The first successful monorepo milestone is intentionally modest:
       `finite-mono` as top-level copied folders.
 - [x] Source commit SHAs are recorded.
 - [x] Existing repos are untouched.
-- [ ] Root `docs/README.md` exists.
+- [x] Root `docs/README.md` exists.
 - [x] Root `docs/monorepo-migration-log.md` exists.
 - [x] Rust crates from all three copied repos are members of one root Cargo
       workspace.
@@ -544,5 +563,5 @@ The first successful monorepo milestone is intentionally modest:
 - [x] Root `just check` works.
 - [x] Root `just test` works, or documented exclusions exist for tests that
       need services not yet covered by the harness.
-- [ ] Docs have a current root starting point and copied stale docs are labeled
+- [x] Docs have a current root starting point and copied stale docs are labeled
       where linked.

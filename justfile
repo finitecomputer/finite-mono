@@ -4,6 +4,10 @@ set shell := ["scripts/dev-shell", "-cu"]
 mod dev 'devfinity/justfile'
 # Commands for controlling finite sites
 mod sites 'finite-sites/justfile'
+# Commands for controlling finite search
+mod search 'finite-search/justfile'
+# Commands for validating finite skills
+mod skills 'finite-skills/justfile'
 
 # Lists just commands
 default:

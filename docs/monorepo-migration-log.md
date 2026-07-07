@@ -448,3 +448,135 @@ Not run:
 
 - `just dev up` without `--dry-run`; it starts the long-running local stack
   and depends on local Docker and dashboard Node/npm readiness.
+
+## Later Repo Import: `finite-identity`
+
+Date: 2026-07-07
+
+Fedimint reference checked:
+
+- Fedimint keeps Rust packages in one root Cargo workspace and uses one root
+  lockfile.
+- Finite follows that pattern for this import: `finite-identity` is a top-level
+  workspace member, and downstream crates consume it through a local workspace
+  path instead of a pinned git dependency.
+
+Source snapshot:
+
+| Repo | Source path | Commit SHA | Working tree at record time |
+| --- | --- | --- | --- |
+| `finite-identity` | `/Users/alex/Projects/finite/finite-identity` | `54a6936b5d7a0e8dc79018a30d9c794b10d25307` | Clean |
+
+Changes:
+
+- Copied `finite-identity` into `finite-mono/finite-identity`.
+- Excluded source `.git/` and `target/`.
+- Added `finite-identity` as a root Cargo workspace member.
+- Replaced the root workspace dependency
+  `finite-identity = { git = "...", rev = "54a6936..." }` with
+  `finite-identity = { path = "finite-identity" }`.
+- Removed the copied `finite-identity/Cargo.lock` after root Cargo resolution
+  succeeded, preserving one root `Cargo.lock`.
+- Updated root docs navigation to include the `finite-identity` README, spec,
+  and CLI conventions.
+
+Validation:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo fmt --all -- --check`
+- `cargo test -p finite-identity --locked`
+- `cargo clippy -p finite-identity --all-targets --locked -- -D warnings`
+- `find . -name Cargo.lock -print | sort`
+- `cargo metadata --format-version 1 --no-deps --locked`
+- `cargo check --workspace --locked`
+- `cargo test -p finitechat-core --locked shared_identity -- --nocapture`
+- `cargo test -p fsite-cli --locked`
+
+Result:
+
+- `finite-identity` builds and tests as a local workspace package.
+- Existing `finitechat-core` shared identity tests pass against the local
+  package.
+- Existing `fsite-cli` identity tests pass against the local package.
+- Only one Cargo lockfile exists: `Cargo.lock` at the monorepo root.
+
+## Later Repo Imports: `finite-nostr`, `finite-auth`, `finite-brain`,
+`finite-search`, and `finite-skills`
+
+Date: 2026-07-07
+
+Fedimint reference checked:
+
+- Fedimint keeps Rust packages in one root Cargo workspace and one root
+  lockfile, with `just` as the developer command surface and repo scripts for
+  larger command implementations.
+- Finite follows that pattern here for Rust repos and uses root `just` modules
+  for non-Rust repos that already have or need useful local checks.
+
+Source snapshots:
+
+| Repo | Source path | Commit SHA | Working tree at record time |
+| --- | --- | --- | --- |
+| `finite-nostr` | `/Users/alex/Projects/finite/finite-nostr` | `fefd22b3f3c39481225a28000bba0b2b9354d1ce` | Clean |
+| `finite-auth` | `/Users/alex/Projects/finite/finite-auth` | `13347c93650b55be819d37ec77fbc3b50664a432` | Clean |
+| `finite-brain` | `/Users/alex/Projects/finite/finite-brain` | `8e1033ce1af54402e6d8feea0f002cbe020b4a35` | Clean |
+| `finite-search` | `/Users/alex/Projects/finite/finite-search` | `02d7628922e418405c059753ceaf3449e40a24e7` | Clean |
+| `finite-skills` | `/Users/alex/Projects/finite/finite-skills` | `80ada39d477d645eaaacb624e89e0010d3e4aedc` | Clean |
+
+Changes:
+
+- Copied each repo into a top-level monorepo folder with generated/build state
+  excluded.
+- Added `finite-nostr` as a root Cargo workspace member and workspace
+  dependency.
+- Added `finite-auth-core` and `finite-auth-store` as root Cargo workspace
+  members, removed the copied nested `finite-auth` workspace manifest and
+  copied lockfile, and kept `finite-nostr` as a top-level local dependency.
+- Added `finite-brain-app`, `finite-brain-cli`, `finite-brain-core`,
+  `finite-brain-server`, and `finite-brain-store` as root Cargo workspace
+  members. Removed the copied nested `finite-brain` workspace manifest,
+  copied lockfile, and duplicate `finite-brain/crates/finite-nostr` package.
+- Retargeted `finite-brain` to use the imported top-level `finite-nostr` and
+  `finite-identity` workspace packages.
+- Added `just search ...` as a root module backed by `finite-search/justfile`.
+- Added `finite-skills/justfile` and `finite-skills/scripts/check-static.sh`
+  for content validation, then exposed it as `just skills ...`.
+- Added missing YAML frontmatter to
+  `finite-skills/skills/software-development/publish-web-apps-finite/SKILL.md`
+  after the new checker found it.
+- Hardened the existing Finite Sites git test helper so synthetic test commits
+  disable inherited global GPG signing config.
+- Updated root README and docs navigation to include the imported repos and
+  relevant local commands.
+
+Validation:
+
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo fmt --all -- --check`
+- `cargo test -p finite-nostr --locked`
+- `cargo clippy -p finite-nostr --all-targets --locked -- -D warnings`
+- `cargo test -p finite-auth-core -p finite-auth-store --locked`
+- `cargo clippy -p finite-auth-core -p finite-auth-store --all-targets --locked -- -D warnings`
+- `cargo test -p finite-brain-core -p finite-brain-store -p finite-brain-server -p finite-brain-cli -p finite-brain-app --locked`
+- `cargo clippy -p finite-brain-core -p finite-brain-store -p finite-brain-server -p finite-brain-cli -p finite-brain-app --all-targets --locked -- -D warnings`
+- `cargo build -p finite-brain-core -p finite-brain-store -p finite-brain-server -p finite-brain-cli -p finite-brain-app --locked`
+- `node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+- `node --check finite-brain/crates/finite-brain-server/src/smoke-ui.js`
+- `node finite-brain/crates/finite-brain-server/src/product-client.test.js`
+- `just search check`
+- `just skills check`
+- `just --list-submodules --list`
+- `just check`
+- `just test`
+- `git diff --check`
+
+Result:
+
+- Rust repos build and test as local root workspace packages.
+- `finite-search` static checks pass through the root `just search check`
+  module. Ruby emitted local gem extension warnings before the success line,
+  but the check exited successfully.
+- `finite-skills` static checks pass across 46 skill files.
+- The root command surface now exposes `search` and `skills` modules.
+- Full root `just check` and `just test` pass after disabling inherited Git
+  commit signing for Finite Sites synthetic test commits.

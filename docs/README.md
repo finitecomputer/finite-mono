@@ -42,6 +42,23 @@ Docs copied with each source repo remain inside their owning folders for now:
 - [`finitecomputer-v2/docs`](../finitecomputer-v2/docs)
 - [`finitechat/docs`](../finitechat/docs)
 - [`finite-sites/docs`](../finite-sites/docs)
+- [`finite-nostr/docs`](../finite-nostr/docs)
+- [`finite-auth/docs`](../finite-auth/docs)
+- [`finite-brain/docs`](../finite-brain/docs)
+- [`finite-search/docs`](../finite-search/docs)
+- [`finite-skills/skills`](../finite-skills/skills)
+
+Some imported repos also have root-level source repo docs:
+
+- [`finite-identity/README.md`](../finite-identity/README.md)
+- [`finite-identity/SPEC.md`](../finite-identity/SPEC.md)
+- [`finite-identity/CLI-CONVENTIONS.md`](../finite-identity/CLI-CONVENTIONS.md)
+- [`finite-nostr/README.md`](../finite-nostr/README.md)
+- [`finite-auth/README.md`](../finite-auth/README.md)
+- [`finite-brain/README.md`](../finite-brain/README.md)
+- [`finite-brain/development.md`](../finite-brain/development.md)
+- [`finite-search/README.md`](../finite-search/README.md)
+- [`finite-skills/README.md`](../finite-skills/README.md)
 
 Treat repo-local docs as owner-scoped background until the Phase 13 stale-docs
 audit promotes, rewrites, or deletes them.

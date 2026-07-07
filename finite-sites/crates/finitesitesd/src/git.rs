@@ -990,6 +990,7 @@ mod tests {
 
     fn run_test_git(args: &[&str], cwd: &Path) -> std::process::Output {
         let output = Command::new("git")
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
             .args(args)
             .current_dir(cwd)
             .output()
