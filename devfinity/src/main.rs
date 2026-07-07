@@ -28,6 +28,9 @@ enum Command {
     Status,
     /// Best-effort cleanup for orphaned devfinity processes.
     Cleanup,
+    /// Internal helper used by Finite Sites project Git hooks.
+    #[command(name = "git-post-receive", hide = true)]
+    GitPostReceive,
 }
 
 #[derive(Debug, Args)]
@@ -57,6 +60,11 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::GitPostReceive) {
+        finitesitesd::git::run_post_receive_hook_from_env().map_err(anyhow::Error::msg)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let stack = DevfinityStack::new(cli.state_dir)?;
 
     match cli.command {
@@ -78,5 +86,6 @@ fn run() -> anyhow::Result<ExitCode> {
         }
         Command::Status => stack.status(),
         Command::Cleanup => stack.cleanup(),
+        Command::GitPostReceive => unreachable!("handled before stack construction"),
     }
 }

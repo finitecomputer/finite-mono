@@ -1,9 +1,3 @@
-# Finite Mono Agent Guide
-
-Use the repository's current docs and local conventions as the source of truth
-for implementation details. Keep changes scoped to the task and avoid broad
-reorganization unless explicitly requested.
-
 ## Development Environment
 
 - Dependencies and toolchains for this repository are managed by Nix. Do not

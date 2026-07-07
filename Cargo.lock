@@ -725,6 +725,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "finite-saas-core",
+ "finitechat-server",
+ "finitesitesd",
+ "tokio",
  "ureq",
 ]
 

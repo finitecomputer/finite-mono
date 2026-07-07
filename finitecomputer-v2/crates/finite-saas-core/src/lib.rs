@@ -1,4 +1,5 @@
 pub mod api;
+pub mod server;
 pub mod store;
 
 use serde::{Deserialize, Serialize};

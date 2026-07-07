@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use finite_saas_core::api::router;
+use finite_saas_core::server::{CoreServeOptions, connect_postgres_with_retry, serve_core};
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
     ApproveFinitePrivateGrantInput, ExistingHostProjectImport, FinitePrivateApiKey,
@@ -13,12 +13,8 @@ use finite_saas_core::{
 use serde::Deserialize;
 use std::env;
 use std::io::{self, Read};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::time::{Instant, sleep};
-use tower_http::trace::TraceLayer;
 
 #[derive(Debug, Parser)]
 #[command(name = "finite-saas-core")]
@@ -451,14 +447,21 @@ async fn main() -> Result<()> {
 async fn serve() -> Result<()> {
     let api_token = required_env("FC_CORE_API_TOKEN")?;
     let bind = env::var("FC_CORE_BIND").unwrap_or_else(|_| "127.0.0.1:4200".to_string());
-    let addr: SocketAddr = bind.parse()?;
-
-    let store = postgres_store_from_env().await?;
-    let app = router(store, api_token).layer(TraceLayer::new_for_http());
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "finite-saas-core listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    let database_url = required_env("FC_CORE_DATABASE_URL")?;
+    serve_core(CoreServeOptions {
+        bind: bind.parse()?,
+        database_url,
+        api_token,
+        postgres_connect_timeout: optional_duration_secs(
+            "FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS",
+            60,
+        )?,
+        postgres_connect_retry_interval: optional_duration_millis(
+            "FC_CORE_POSTGRES_CONNECT_RETRY_MS",
+            1_000,
+        )?,
+    })
+    .await
 }
 
 async fn reconcile_imports_from_manifest(
@@ -764,39 +767,7 @@ async fn postgres_store_from_env() -> Result<CoreStore> {
     let database_url = required_env("FC_CORE_DATABASE_URL")?;
     let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
     let retry_interval = optional_duration_millis("FC_CORE_POSTGRES_CONNECT_RETRY_MS", 1_000)?;
-    postgres_store_with_retry(&database_url, timeout, retry_interval).await
-}
-
-async fn postgres_store_with_retry(
-    database_url: &str,
-    timeout: Duration,
-    retry_interval: Duration,
-) -> Result<CoreStore> {
-    let started = Instant::now();
-    let mut attempts = 0usize;
-
-    loop {
-        attempts += 1;
-        match connect_and_migrate_postgres(database_url).await {
-            Ok(store) => return Ok(store),
-            Err(error) => {
-                if started.elapsed() >= timeout {
-                    return Err(error).with_context(|| {
-                        format!("Core Postgres was not ready after {attempts} attempts")
-                    });
-                }
-
-                eprintln!("finite-saas-core waiting for Core Postgres: {error}");
-                sleep(retry_interval).await;
-            }
-        }
-    }
-}
-
-async fn connect_and_migrate_postgres(database_url: &str) -> Result<CoreStore> {
-    let store = CoreStore::connect_postgres(database_url).await?;
-    store.migrate().await?;
-    Ok(store)
+    connect_postgres_with_retry(&database_url, timeout, retry_interval).await
 }
 
 fn read_import_manifest(path: &PathBuf) -> Result<Vec<ExistingHostProjectImport>> {

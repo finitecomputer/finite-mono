@@ -2,12 +2,16 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use finite_saas_core::server::{CoreServeOptions, serve_core};
+use finitechat_server::{ChatServeOptions, serve_chat};
+use finitesitesd::{AppRunnerKind, ServeOptions as FiniteSitesServeOptions, serve_sites};
+use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 use crate::process::{ProcessHandle, ProcessManager, ProcessSpec};
 use crate::topology::{DevfinityStack, shell_quote};
@@ -36,15 +40,6 @@ impl ManagedProcess {
             Self::FiniteChat => "finitechat",
             Self::FiniteSites => "finitesites",
         }
-    }
-
-    fn all() -> &'static [ManagedProcess] {
-        &[
-            Self::Postgres,
-            Self::Core,
-            Self::FiniteChat,
-            Self::FiniteSites,
-        ]
     }
 }
 
@@ -151,11 +146,7 @@ impl DevfinityStack {
         println!();
 
         println!("processes:");
-        let names = ManagedProcess::all()
-            .iter()
-            .map(|process| process.as_str())
-            .collect::<Vec<_>>();
-        for status in self.process_manager().statuses(&names) {
+        for status in self.process_manager().statuses(&["devfinity", "postgres"]) {
             match (status.pid, status.running) {
                 (Some(pid), true) => println!("  {:<16} running pid={pid}", status.name),
                 (Some(pid), false) => println!("  {:<16} stopped pid={pid}", status.name),
@@ -164,6 +155,22 @@ impl DevfinityStack {
                     status.name,
                     status.pid_file.display()
                 ),
+            }
+        }
+        let devfinity_status = self
+            .process_manager()
+            .statuses(&["devfinity"])
+            .into_iter()
+            .next()
+            .expect("one status");
+        for process in [
+            ManagedProcess::Core,
+            ManagedProcess::FiniteChat,
+            ManagedProcess::FiniteSites,
+        ] {
+            match (devfinity_status.pid, devfinity_status.running) {
+                (Some(pid), true) => println!("  {:<16} in-process pid={pid}", process),
+                _ => println!("  {:<16} stopped (in-process)", process),
             }
         }
         println!();
@@ -185,33 +192,42 @@ impl DevfinityStack {
 
     fn start_managed_stack(&self) -> Result<RunningDevfinityStack> {
         let manager = self.process_manager();
-        self.run_rust_build(&manager)?;
+        let orchestrator_pid_file = self.write_orchestrator_pid()?;
 
-        let mut running = RunningDevfinityStack::new();
+        let mut running = match RunningDevfinityStack::new(orchestrator_pid_file.clone()) {
+            Ok(running) => running,
+            Err(error) => {
+                remove_file_best_effort(&orchestrator_pid_file);
+                return Err(error);
+            }
+        };
         running.spawn(&manager, self.postgres_spec())?;
         self.wait_for_postgres_ready(Duration::from_secs(45), &mut running)?;
 
-        running.spawn(&manager, self.core_spec())?;
-        running.spawn(&manager, self.finitechat_spec())?;
-        running.spawn(&manager, self.finitesites_spec())?;
+        running.spawn_task(ManagedProcess::Core, {
+            let options = self.core_serve_options();
+            async move { serve_core(options).await.context("core service failed") }
+        });
+        running.spawn_task(ManagedProcess::FiniteChat, {
+            let options = self.finitechat_serve_options();
+            async move {
+                serve_chat(options)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("finitechat service failed: {error}"))
+            }
+        });
+        running.spawn_task(ManagedProcess::FiniteSites, {
+            let options = self.finitesites_serve_options()?;
+            async move {
+                serve_sites(options)
+                    .await
+                    .map_err(anyhow::Error::msg)
+                    .context("finitesites service failed")
+            }
+        });
         self.wait_for_core_ready(Duration::from_secs(60), &mut running)?;
 
         Ok(running)
-    }
-
-    fn run_rust_build(&self, manager: &ProcessManager) -> Result<()> {
-        let mut command = Command::new("cargo");
-        command
-            .arg("build")
-            .arg("-p")
-            .arg("finite-saas-core")
-            .arg("-p")
-            .arg("finitechat-server")
-            .arg("-p")
-            .arg("finitesitesd")
-            .current_dir(&self.repo_root);
-        let status = manager.run_command("rust-build", &mut command)?;
-        ensure_status_success("rust-build", status, &self.logs_dir.join("rust-build.log"))
     }
 
     fn wait_for_postgres_ready(
@@ -256,9 +272,8 @@ impl DevfinityStack {
             }
             if started.elapsed() >= timeout {
                 bail!(
-                    "core did not become ready within {}s; see {}",
-                    timeout.as_secs(),
-                    self.logs_dir.join("core.log").display()
+                    "core did not become ready within {}s; check the devfinity process output",
+                    timeout.as_secs()
                 );
             }
             std::thread::sleep(Duration::from_millis(750));
@@ -356,7 +371,6 @@ impl DevfinityStack {
     fn validate_command_plan(&self) -> Result<()> {
         for command in [
             "bash",
-            "cargo",
             "initdb",
             "postgres",
             "pg_isready",
@@ -446,116 +460,106 @@ wait "$postgres_pid"
         .env(self.process_env())
     }
 
-    fn core_spec(&self) -> ProcessSpec {
-        ProcessSpec::new(
-            ManagedProcess::Core.as_str(),
-            self.repo_root
-                .join("target/debug/finite-saas-core")
-                .display()
-                .to_string(),
-            self.repo_root.clone(),
-            self.logs_dir.join("core.log"),
-        )
-        .args(["serve"])
-        .env(
-            self.process_env()
-                .into_iter()
-                .chain([
-                    (
-                        "FC_CORE_BIND".to_string(),
-                        format!("127.0.0.1:{}", self.ports.core),
-                    ),
-                    ("FC_CORE_DATABASE_URL".to_string(), self.database_url()),
-                    ("FC_CORE_API_TOKEN".to_string(), self.core_token.clone()),
-                ])
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    fn finitechat_spec(&self) -> ProcessSpec {
-        ProcessSpec::new(
-            ManagedProcess::FiniteChat.as_str(),
-            self.repo_root
-                .join("target/debug/finitechat-server")
-                .display()
-                .to_string(),
-            self.repo_root.clone(),
-            self.logs_dir.join("finitechat.log"),
-        )
-        .args([
-            "serve".to_string(),
-            format!("127.0.0.1:{}", self.ports.finitechat),
-            "--sqlite".to_string(),
-            self.finitechat_dir()
-                .join("server.sqlite3")
-                .display()
-                .to_string(),
-        ])
-        .env(self.process_env())
-    }
-
-    fn finitesites_spec(&self) -> ProcessSpec {
-        let port = self.ports.finitesites.to_string();
-        ProcessSpec::new(
-            ManagedProcess::FiniteSites.as_str(),
-            self.repo_root
-                .join("target/debug/finitesitesd")
-                .display()
-                .to_string(),
-            self.repo_root.clone(),
-            self.logs_dir.join("finitesites.log"),
-        )
-        .args([
-            "serve".to_string(),
-            "--data".to_string(),
-            self.finitesites_dir().display().to_string(),
-            "--listen".to_string(),
-            format!("127.0.0.1:{port}"),
-            "--api-url".to_string(),
-            format!("http://127.0.0.1:{port}"),
-            "--base-domain".to_string(),
-            "sites.localhost".to_string(),
-            "--document-base-domain".to_string(),
-            "docs.sites.localhost".to_string(),
-            "--git-url".to_string(),
-            format!("http://git.sites.localhost:{port}"),
-            "--site-port".to_string(),
-            port,
-            "--app-runner".to_string(),
-            "none".to_string(),
-        ])
-        .env(self.process_env())
-    }
-
     fn process_env(&self) -> Vec<(String, String)> {
         self.env_values()
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
             .collect()
     }
+
+    fn write_orchestrator_pid(&self) -> Result<std::path::PathBuf> {
+        fs::create_dir_all(self.control_dir()).with_context(|| {
+            format!(
+                "failed to create process control dir {}",
+                self.control_dir().display()
+            )
+        })?;
+        let path = self.control_dir().join("devfinity.pid");
+        fs::write(&path, std::process::id().to_string())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
+    fn core_serve_options(&self) -> CoreServeOptions {
+        CoreServeOptions {
+            bind: local_addr(self.ports.core),
+            database_url: self.database_url(),
+            api_token: self.core_token.clone(),
+            postgres_connect_timeout: Duration::from_secs(60),
+            postgres_connect_retry_interval: Duration::from_millis(1_000),
+        }
+    }
+
+    fn finitechat_serve_options(&self) -> ChatServeOptions {
+        ChatServeOptions {
+            addr: local_addr(self.ports.finitechat).to_string(),
+            sqlite_path: Some(
+                self.finitechat_dir()
+                    .join("server.sqlite3")
+                    .display()
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn finitesites_serve_options(&self) -> Result<FiniteSitesServeOptions> {
+        let port = self.ports.finitesites;
+        Ok(FiniteSitesServeOptions {
+            data_dir: self.finitesites_dir(),
+            listen: local_addr(port),
+            base_domain: "sites.localhost".to_string(),
+            document_base_domain: "docs.sites.localhost".to_string(),
+            api_url: format!("http://127.0.0.1:{port}"),
+            git_base_url: format!("http://git.sites.localhost:{port}"),
+            git_hook_helper_path: std::env::current_exe()
+                .context("failed to determine devfinity executable path")?,
+            git_auto_reconcile: true,
+            site_url_scheme: "http".to_string(),
+            site_url_port: Some(port),
+            mail_provider: None,
+            mail_from: None,
+            app_runner_kind: AppRunnerKind::Disabled,
+            idle_timeout_seconds: finitesitesd::apps::DEFAULT_IDLE_TIMEOUT_SECONDS,
+        })
+    }
 }
 
 #[derive(Debug)]
 pub struct RunningDevfinityStack {
-    handles: Vec<ProcessHandle>,
+    processes: Vec<ProcessHandle>,
+    tasks: Vec<ServiceTask>,
+    runtime: Runtime,
+    orchestrator_pid_file: Option<std::path::PathBuf>,
 }
 
 impl RunningDevfinityStack {
-    fn new() -> Self {
-        Self {
-            handles: Vec::new(),
-        }
+    fn new(orchestrator_pid_file: std::path::PathBuf) -> Result<Self> {
+        Ok(Self {
+            processes: Vec::new(),
+            tasks: Vec::new(),
+            runtime: Runtime::new().context("failed to start devfinity async runtime")?,
+            orchestrator_pid_file: Some(orchestrator_pid_file),
+        })
     }
 
     fn spawn(&mut self, manager: &ProcessManager, spec: ProcessSpec) -> Result<()> {
         let handle = manager.spawn(spec)?;
         println!("starting {} pid={}", handle.name(), handle.pid());
-        self.handles.push(handle);
+        self.processes.push(handle);
         Ok(())
     }
 
+    fn spawn_task<F>(&mut self, process: ManagedProcess, future: F)
+    where
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let handle = self.runtime.spawn(future);
+        println!("starting {process} task pid={}", std::process::id());
+        self.tasks.push(ServiceTask::new(process, handle));
+    }
+
     fn check_processes(&mut self) -> Result<()> {
-        for handle in &mut self.handles {
+        for handle in &mut self.processes {
             if let Some(status) = handle.try_exit_status()? {
                 bail!(
                     "{} exited before devfinity finished: {status}; see {}",
@@ -563,6 +567,9 @@ impl RunningDevfinityStack {
                     handle.log_path().display()
                 );
             }
+        }
+        for task in &mut self.tasks {
+            task.check(&self.runtime)?;
         }
         Ok(())
     }
@@ -580,7 +587,15 @@ impl RunningDevfinityStack {
 
     pub fn shutdown(&mut self) -> Result<()> {
         let mut first_error = None;
-        for handle in self.handles.iter_mut().rev() {
+        for task in self.tasks.iter_mut().rev() {
+            if let Err(error) = task.shutdown(&self.runtime) {
+                eprintln!("failed to stop {}: {error:#}", task.process);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        for handle in self.processes.iter_mut().rev() {
             if let Err(error) = handle.shutdown() {
                 eprintln!("failed to stop {}: {error:#}", handle.name());
                 if first_error.is_none() {
@@ -588,10 +603,63 @@ impl RunningDevfinityStack {
                 }
             }
         }
+        if let Some(path) = self.orchestrator_pid_file.take() {
+            remove_file_best_effort(&path);
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ServiceTask {
+    process: ManagedProcess,
+    handle: Option<JoinHandle<Result<()>>>,
+}
+
+impl ServiceTask {
+    fn new(process: ManagedProcess, handle: JoinHandle<Result<()>>) -> Self {
+        Self {
+            process,
+            handle: Some(handle),
+        }
+    }
+
+    fn check(&mut self, runtime: &Runtime) -> Result<()> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        if !handle.is_finished() {
+            return Ok(());
+        }
+        match runtime.block_on(self.handle.take().expect("checked handle exists")) {
+            Ok(Ok(())) => bail!("{} task exited before devfinity finished", self.process),
+            Ok(Err(error)) => bail!(
+                "{} task failed before devfinity finished: {error:#}",
+                self.process
+            ),
+            Err(error) => bail!(
+                "{} task join failed before devfinity finished: {error}",
+                self.process
+            ),
+        }
+    }
+
+    fn shutdown(&mut self, runtime: &Runtime) -> Result<()> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        if !handle.is_finished() {
+            handle.abort();
+        }
+        match runtime.block_on(handle) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(anyhow::Error::new(error)),
+        }
     }
 }
 
@@ -695,13 +763,6 @@ fn pending_service_checks(checks: &[ServiceCheck]) -> Vec<String> {
         .collect()
 }
 
-fn ensure_status_success(name: &str, status: ExitStatus, log_path: &Path) -> Result<()> {
-    if status.success() {
-        return Ok(());
-    }
-    bail!("{name} exited with {status}; see {}", log_path.display())
-}
-
 fn ensure_command_available(command: &str) -> Result<()> {
     let check = Command::new("bash")
         .arg("-lc")
@@ -729,6 +790,18 @@ fn shell_words(words: &[String]) -> String {
         .map(|word| shell_quote(word))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn local_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+fn remove_file_best_effort(path: &std::path::Path) {
+    if path.exists() {
+        if let Err(error) = fs::remove_file(path) {
+            eprintln!("failed to remove {}: {error}", path.display());
+        }
+    }
 }
 
 fn install_shutdown_signal_handlers() {

@@ -3,6 +3,8 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+mod serve;
+
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -72,6 +74,7 @@ use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use serve::{ChatServeOptions, serve_chat};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 

@@ -401,17 +401,18 @@ Tasks:
 - [ ] Add dashboard startup and create-agent e2e smoke to an outer composer
       that consumes devfinity env/readiness and runs dashboard just/script
       commands.
-- [ ] Audit Core, Chat, and Sites server library surfaces and add small public
+- [x] Audit Core, Chat, and Sites server library surfaces and add small public
       serve entrypoints where they are missing.
-- [ ] Add a small devfinity task manager for in-process Rust backend services,
+- [x] Add a small devfinity task manager for in-process Rust backend services,
       keeping native Postgres as an external infrastructure process.
-- [ ] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` as their
+- [x] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` as their
       components start using library server entrypoints.
-- [ ] Migrate Core, Chat, and Sites one at a time away from `target/debug/...`,
-      keeping backend smokes passing after each migration.
-- [ ] Remove startup `cargo build`, service `target/debug/...` paths, and the
-      repo-root fixture workaround only after no backend service needs the
-      source checkout as a runtime boundary.
+- [x] Migrate Core, Chat, and Sites away from `target/debug/...`, keeping
+      backend smokes passing.
+- [x] Remove startup `cargo build` and service `target/debug/...` paths after
+      no backend service needs the source checkout as a runtime boundary.
+- [ ] Remove the repo-root fixture workaround after wrapped-command execution
+      and fixture setup no longer need source-checkout path recovery.
 - [ ] Add small process/task shutdown hardening so killed Postgres children and
       stopped Rust service tasks are fully cleaned up before replacement runs.
 - [ ] Move base service specs out of `stack.rs` into typed components for

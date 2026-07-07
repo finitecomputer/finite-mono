@@ -13,6 +13,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+finite-saas-core = { path = "../finitecomputer-v2/crates/finite-saas-core" }
+finitechat-server = { path = "../finitechat/crates/finitechat-server" }
+finitesitesd = { path = "../finite-sites/crates/finitesitesd" }
+tokio = { workspace = true }
 
 [dev-dependencies]
 ureq = { workspace = true }

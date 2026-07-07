@@ -84,17 +84,17 @@ The typed topology surface is:
 - `run_devfinity_test`: devimint-style fixture entrypoint that starts a stack,
   runs a closure with `&DevfinityStack`, and tears the stack down.
 
-`process.rs` owns child process spawning, log files, PID control files, and
-shutdown behavior. `stack.rs` owns startup order, readiness polling,
-wrapped-command execution, status, and cleanup. Typed components and clients
-are the next architectural layers.
+`process.rs` owns child process spawning for native infrastructure, log files,
+PID control files, and shutdown behavior. `stack.rs` owns startup order,
+readiness polling, in-process Rust service tasks, wrapped-command execution,
+status, and cleanup. Typed components and clients are the next architectural
+layers.
 
-The current base stack still contains one transitional violation: Rust services
-are built from the workspace and launched as `target/debug/...` binaries. The
-next harness phase audits and adds the missing server entrypoints, adds
-in-process service supervision to devfinity, then migrates Core, Chat, and Sites
-one at a time. `repo_root` and the startup `cargo build` preflight should
-disappear only after no backend service depends on `target/debug/...`.
+The current base stack starts Core, Chat, and Sites through Rust crate
+dependencies and a devfinity-owned Tokio task manager. Native Postgres remains
+an external process. The remaining transitional violation is `repo_root` path
+recovery for fixture setup and wrapped-command execution; that should disappear
+after those paths no longer need source-checkout recovery.
 Dashboard is a Node app and belongs in an outer dev composer that consumes
 devfinity env/readiness before starting UI commands.
 

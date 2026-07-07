@@ -306,6 +306,30 @@ fn load_cookie_secret(data_dir: &Path) -> Result<[u8; 32], String> {
 }
 
 fn serve(options: ServeOptions) -> Result<(), String> {
+    let server = build_sites_server(options)?;
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|error| format!("cannot start runtime: {error}"))?;
+    runtime.block_on(server.serve())
+}
+
+pub async fn serve_sites(options: ServeOptions) -> Result<(), String> {
+    build_sites_server(options)?.serve().await
+}
+
+struct SitesServer {
+    engine: Engine,
+    mail: Box<dyn mailer::Mailer>,
+    supervisor: apps::Supervisor,
+    options: ServeOptions,
+}
+
+impl SitesServer {
+    async fn serve(self) -> Result<(), String> {
+        server::serve(self.engine, self.mail, self.supervisor, self.options).await
+    }
+}
+
+fn build_sites_server(options: ServeOptions) -> Result<SitesServer, String> {
     let store = open_store(&options.data_dir)?;
     let blobs = BlobStore::open(&options.data_dir.join("blobs"))
         .map_err(|error| format!("cannot open blob store: {error}"))?;
@@ -347,9 +371,12 @@ fn serve(options: ServeOptions) -> Result<(), String> {
     };
     let supervisor = apps::Supervisor::new(app_runner, options.idle_timeout_seconds);
 
-    let runtime =
-        tokio::runtime::Runtime::new().map_err(|error| format!("cannot start runtime: {error}"))?;
-    runtime.block_on(server::serve(engine, mail, supervisor, options))
+    Ok(SitesServer {
+        engine,
+        mail,
+        supervisor,
+        options,
+    })
 }
 
 fn allowlist_mutate(args: &[String], allow: bool) -> Result<(), String> {

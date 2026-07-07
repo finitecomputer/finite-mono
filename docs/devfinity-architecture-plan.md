@@ -222,36 +222,36 @@ Current state:
 
 Boundary audit:
 
-- [ ] Document the existing server library surfaces before changing devfinity:
+- [x] Document the existing server library surfaces before changing devfinity:
       Core exposes router/store APIs but its `serve()` wrapper is binary-only;
       Chat exposes `HttpServerState` and `http_router` but not a public server
       runner; Sites exposes `server::serve_on` plus lower-level pieces but
       could use a smaller dev serve helper.
-- [ ] Decide the in-process service supervision shape for devfinity: a small
+- [x] Decide the in-process service supervision shape for devfinity: a small
       task manager that owns async service tasks, captures failures, and
       coordinates shutdown alongside the native Postgres process.
-- [ ] Keep the current binary-launch backend path as compatibility until each
-      service has been migrated and the backend smoke still passes.
+- [x] Remove the binary-launch backend path after the service entrypoints and
+      task manager are in place and the backend smoke still passes.
 
 Service API work:
 
-- [ ] Add a public Core server entrypoint, for example `CoreServeOptions` plus
+- [x] Add a public Core server entrypoint, for example `CoreServeOptions` plus
       `serve_core(...)`, in `finite-saas-core` rather than shelling out to the
       binary.
-- [ ] Add a public Chat server entrypoint, for example `ChatServeOptions` plus
+- [x] Add a public Chat server entrypoint, for example `ChatServeOptions` plus
       `serve_chat(...)`, around `finitechat-server`'s durable state and router.
-- [ ] Add a public Sites dev server entrypoint, for example
-      `SitesServeOptions` plus `serve_sites(...)`, that hides Engine/Mailer/
+- [x] Add a public Sites dev server entrypoint, for example
+      `ServeOptions` plus `serve_sites(...)`, that hides Engine/Mailer/
       Supervisor setup from devfinity.
 
 Devfinity migration:
 
-- [ ] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` only as each
+- [x] Add Core, Chat, and Sites crates to `devfinity/Cargo.toml` only as each
       component starts using its library API.
-- [ ] Migrate one backend service at a time from `target/debug/...` to its
+- [x] Migrate backend services from `target/debug/...` to their
       library entrypoint, keeping `just dev smoke` and `just dev rust-smoke`
-      passing after each migration.
-- [ ] Stop running `cargo build` as a devfinity startup preflight once no
+      passing.
+- [x] Stop running `cargo build` as a devfinity startup preflight once no
       backend service is launched from `target/debug/...`.
 - [ ] Remove `repo_root` from `DevfinityStack` and `StackPaths` only after
       service startup and wrapped-command execution no longer need it.

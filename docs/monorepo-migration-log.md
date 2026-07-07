@@ -844,3 +844,39 @@ Plan changes:
 Validation:
 
 - Documentation-only change.
+
+## Devfinity Rust Service Entry Point Migration
+
+Date: 2026-07-07
+
+Changes:
+
+- Added public Core server entrypoints in `finite-saas-core`:
+  `CoreServeOptions`, `serve_core`, `serve_core_with_store`, and reusable
+  Postgres retry/open logic.
+- Added public Chat server entrypoints in `finitechat-server`:
+  `ChatServeOptions` and `serve_chat`.
+- Added public async Sites startup via `finitesitesd::serve_sites`.
+- Migrated devfinity to depend on Core, Chat, and Sites crates directly and
+  start those services as in-process Tokio tasks.
+- Removed the devfinity startup `cargo build` preflight and `target/debug/...`
+  service launch paths.
+- Kept native Postgres as the only external process in the base backend stack.
+- Added a hidden `devfinity git-post-receive` passthrough so Finite Sites Git
+  hooks can still call the current devfinity executable when Sites runs
+  in-process.
+- Updated status output to report the devfinity orchestrator PID, Postgres PID,
+  and Core/Chat/Sites as in-process services.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo fmt --all -- --check`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p finite-saas-core --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p finitechat-server --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p finitesitesd --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- status`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c just dev smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c just dev rust-smoke`
+- `git diff --check`
