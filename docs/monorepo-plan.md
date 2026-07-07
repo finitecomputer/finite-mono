@@ -318,10 +318,10 @@ waits for readiness, runs wrapped commands/tests, and tears the stack down. A
 local visual UI should be a small mprocs-style log viewer over devfinity-owned
 logs, not the process orchestrator.
 
-The initial prototype used process-compose as the local runtime. Treat that as
-a compatibility baseline to retire, not as the target architecture. Do not grow
-the generated process-compose config or a generic runtime abstraction unless a
-real second backend appears.
+The initial prototype used process-compose as the local runtime. That runtime
+has been retired from the compiled harness. Do not grow the old generated
+process-compose config or add a generic runtime abstraction unless a real
+second backend appears.
 
 Initial harness scope should be narrow:
 
@@ -361,9 +361,10 @@ Initial managed services:
 - Local `finitechat-server` backed by SQLite state.
 - Local `finitesitesd` with its data dir under `.local-state/devfinity/`.
 
-For local ergonomics, add an mprocs-style viewer only after the Rust process
-manager owns lifecycle. The viewer should tail devfinity log files and provide a
-developer shell; it should not decide startup order or own service teardown.
+For local ergonomics, add an mprocs-style viewer only after lifecycle,
+generated env, fixtures, and base components are library-owned. The viewer
+should tail devfinity log files and provide a developer shell; it should not
+decide startup order or own service teardown.
 
 Tasks:
 
@@ -373,7 +374,18 @@ Tasks:
       wrapper: `devfinity` is a Rust harness.
 - [x] Replace the initial process-compose prototype with devimint-style
       Rust-owned process orchestration.
-- [ ] Add a small mprocs-style local log viewer after devfinity owns lifecycle.
+- [ ] Add devimint-style generated vars/env globals for paths, ports, logs, and
+      shell exports.
+- [ ] Add unique fixture run directories and non-conflicting fixture port
+      allocation while preserving deterministic local defaults.
+- [ ] Add `DevfinityTestContext` and `run_devfinity_test` so Rust integration
+      tests can start and tear down stacks through the library.
+- [ ] Add a small process reaper so killed children are fully reaped before
+      replacement processes bind the same ports.
+- [ ] Move base service specs out of `stack.rs` into typed components for
+      Postgres, Core, Chat, Sites, and Dashboard.
+- [ ] Add a small mprocs-style local log viewer after env, fixtures, and base
+      components are library-owned.
 - [x] Define the first smoke scenario: readiness probes cover Core `/healthz`,
       Finite Chat `/health`, Finite Sites `/api/v1/healthz`, and dashboard
       `/dashboard`.
@@ -402,8 +414,8 @@ Tasks:
 
 Later:
 
-- [ ] Graduate devfinity Rust smokes into typed fixture tests once the
-      devimint-style Rust process manager exists.
+- [ ] Graduate devfinity Rust smokes into typed fixture tests once
+      `run_devfinity_test` exists.
 
 Exit criterion: one command can start the first useful local Finite stack smoke
 without requiring the old standalone repo layout.
