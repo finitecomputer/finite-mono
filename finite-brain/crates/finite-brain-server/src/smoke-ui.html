@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FiniteBrain Smoke UI</title>
+    <link rel="stylesheet" href="/smoke/ui.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Development only</p>
+        <h1>FiniteBrain Smoke UI</h1>
+      </div>
+      <button id="healthButton" type="button">Check health</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel setup-panel">
+        <h2>Connection</h2>
+        <label>
+          Nostr Authorization header
+          <textarea id="authHeader" rows="4" spellcheck="false" placeholder="Nostr eyJ..."></textarea>
+        </label>
+        <div class="grid two">
+          <label>
+            Vault id
+            <input id="vaultId" value="smoke" />
+          </label>
+          <label>
+            Folder id
+            <input id="folderId" value="general" />
+          </label>
+          <label>
+            Object id
+            <input id="objectId" value="obj_000000000001" />
+          </label>
+          <label>
+            Invitation code
+            <input id="inviteCode" placeholder="invite-..." />
+          </label>
+          <label>
+            Share Link id
+            <input id="shareLinkId" placeholder="share-link-..." />
+          </label>
+          <label>
+            Shared Folder Invitation id
+            <input id="sharedInvitationId" placeholder="shared-folder-invitation-..." />
+          </label>
+          <label>
+            Connection id
+            <input id="connectionId" placeholder="connection-..." />
+          </label>
+        </div>
+        <p class="note">
+          This tool uses dev keys or pasted signed payloads only. It is not a production signer,
+          wallet, or client.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>Smoke Actions</h2>
+        <div class="actions">
+          <button id="bootstrapButton" type="button">Bootstrap summary</button>
+          <button id="metadataButton" type="button">Load metadata</button>
+          <button id="syncButton" type="button">Sync bootstrap</button>
+          <button id="mountsButton" type="button">Load mounts</button>
+          <button id="exportButton" type="button">Encrypted export</button>
+          <button id="searchButton" type="button">Search boundary</button>
+        </div>
+        <details>
+          <summary>Create vault request body</summary>
+          <textarea id="createVaultBody" rows="6" spellcheck="false">{
+  "vaultId": "smoke",
+  "kind": "organization",
+  "name": "Smoke Vault"
+}</textarea>
+          <button id="createVaultButton" type="button">POST create vault</button>
+        </details>
+        <details>
+          <summary>Create Folder request body</summary>
+          <textarea id="createFolderBody" rows="10" spellcheck="false">{
+  "folderId": "restricted",
+  "name": "Restricted",
+  "role": "folder",
+  "access": "restricted",
+  "parentFolderId": "general",
+  "path": "general/Restricted",
+  "sharedFolderSource": false,
+  "accessUserIds": [],
+  "grants": [],
+  "accessChangeEvent": {}
+}</textarea>
+          <button id="createFolderButton" type="button">POST create folder</button>
+        </details>
+        <details>
+          <summary>Encrypted object or sync payload</summary>
+          <textarea id="syncPayload" rows="8" spellcheck="false" placeholder="Paste a signed encrypted object write body or sync record JSON"></textarea>
+          <button id="putObjectButton" type="button">PUT object</button>
+          <button id="getObjectButton" type="button">GET object</button>
+          <button id="submitSyncButton" type="button">POST sync record</button>
+        </details>
+        <details>
+          <summary>Vault Invitation body</summary>
+          <textarea id="vaultInvitationBody" rows="6" spellcheck="false">{
+  "targetNpub": "npub...",
+  "initialFolderAccess": ["general"],
+  "expiresAt": "2026-06-30T00:00:00.000Z"
+}</textarea>
+          <button id="createVaultInvitationButton" type="button">POST vault invitation</button>
+          <button id="getVaultInvitationButton" type="button">GET invitation code</button>
+          <button id="acceptVaultInvitationButton" type="button">POST accept invitation</button>
+        </details>
+        <details>
+          <summary>Share Link body</summary>
+          <textarea id="shareLinkBody" rows="9" spellcheck="false">{
+  "recipientNpub": "npub...",
+  "grant": {
+    "id": "grant-dev",
+    "keyVersion": 1,
+    "recipientNpub": "npub...",
+    "wrappedEventJson": "{\"kind\":1059}"
+  },
+  "accessChangeEvent": {},
+  "expiresAt": "2026-06-30T00:00:00.000Z",
+  "createPersonalMount": true
+}</textarea>
+          <button id="createShareLinkButton" type="button">POST share link</button>
+          <button id="getShareLinkButton" type="button">GET share link</button>
+          <button id="acceptShareLinkButton" type="button">POST accept share link</button>
+          <button id="revokeShareLinkButton" type="button">DELETE share link</button>
+        </details>
+        <details>
+          <summary>Shared Folder / Connection body</summary>
+          <textarea id="sharedFolderBody" rows="11" spellcheck="false">{
+  "destinationVaultId": "destination",
+  "destinationAdminNpub": "npub...",
+  "grant": {
+    "id": "grant-shared-dev",
+    "keyVersion": 1,
+    "recipientNpub": "npub...",
+    "wrappedEventJson": "{\"kind\":1059}"
+  },
+  "accessChangeEvent": {}
+}</textarea>
+          <button id="markShareSourceButton" type="button">POST mark source</button>
+          <button id="createSharedInvitationButton" type="button">POST shared invitation</button>
+          <button id="getSharedInvitationButton" type="button">GET shared invitation</button>
+          <button id="acceptSharedInvitationButton" type="button">POST accept shared invitation</button>
+          <button id="updateConnectionButton" type="button">PATCH connection members</button>
+          <button id="revokeConnectionButton" type="button">DELETE connection</button>
+        </details>
+      </section>
+
+      <section class="panel status-panel">
+        <h2>State</h2>
+        <div class="state-grid">
+          <div>
+            <p class="label">Vault summary</p>
+            <ul id="summaryList" class="list"></ul>
+          </div>
+          <div>
+            <p class="label">Vaults/Folders</p>
+            <ul id="folderList" class="list"></ul>
+          </div>
+          <div>
+            <p class="label">Objects/current revisions</p>
+            <ul id="objectList" class="list"></ul>
+          </div>
+          <div>
+            <p class="label">Grants/setup state</p>
+            <ul id="grantList" class="list"></ul>
+          </div>
+          <div>
+            <p class="label">Invitations and Share Links</p>
+            <ul id="invitationList" class="list"></ul>
+          </div>
+          <div>
+            <div class="label-row">
+              <p class="label">Connections and mounts</p>
+              <a class="panel-link" href="/client">Open client</a>
+            </div>
+            <ul id="mountList" class="list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Error States</h2>
+        <div class="state-pills">
+          <span>No access</span>
+          <span>Setup incomplete</span>
+          <span>Conflict</span>
+          <span>Rebootstrap required</span>
+          <span>Expired invite/share</span>
+          <span>Missing grant</span>
+        </div>
+      </section>
+
+      <section class="panel output-panel">
+        <h2>Output</h2>
+        <pre id="output">Ready.</pre>
+      </section>
+    </main>
+
+    <script src="/smoke/ui.js"></script>
+  </body>
+</html>

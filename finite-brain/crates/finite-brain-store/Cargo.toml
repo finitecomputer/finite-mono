@@ -1,0 +1,23 @@
+[package]
+name = "finite-brain-store"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FiniteBrain SQLite store and transaction boundary."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+finite-brain-core = { path = "../finite-brain-core" }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+time = { version = "0.3.44", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "finite-brain-app"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Binary entrypoint for the FiniteBrain application server."
+
+[[bin]]
+name = "finite-brain"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8.7", features = ["tokio", "http1"] }
+finite-brain-server = { path = "../finite-brain-server" }
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

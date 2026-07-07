@@ -1,0 +1,197 @@
+# fbrain CLI Reference
+
+This reference tracks the Rust `finite-brain-cli` surface. In repo development,
+run `cargo run -p finite-brain-cli --bin fbrain -- <args>` from the repo root or
+build once and run `target/debug/fbrain`.
+
+Global flags:
+
+- `--config-dir <path>`: override fbrain config state for this invocation. The
+  signing identity is not stored here (see Identity below).
+- `--json`: return machine-readable output where the command supports it.
+- `--server <url>`: command-specific server override. Server resolution is
+  explicit `--server`, saved Vault Working Tree server, `FINITE_BRAIN_SERVER_URL`,
+  then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
+
+Transport accepts `https://` endpoints and `http://` only for localhost or
+loopback IPs.
+
+## Command Map
+
+```sh
+fbrain [--config-dir <path>] doctor
+fbrain auth status|import [--file <path>]
+fbrain signer status|public-key|sign|encrypt|decrypt
+fbrain daemon status|start|stop|logs|tick|watch
+fbrain sync status|now [--summary]
+fbrain open <vault-id> [path]
+fbrain status [--json]
+fbrain unlock [folder|--all]
+fbrain conflicts
+fbrain resolve <id>
+fbrain activity
+fbrain access explain|list|grant|revoke
+fbrain vault create|metadata|export
+fbrain folder create|list
+fbrain mount list
+fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
+fbrain invites create|show|accept|revoke
+fbrain share link|accept|revoke|source|folder-invite|folder-accept
+```
+
+## Identity
+
+`fbrain` signs with the shared Finite identity used by every Finite tool, at
+`$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
+`~/.finite/identity/identity.json` otherwise. Whichever Finite tool runs first
+mints the key; `fbrain` finds it. The first `fbrain` command that needs to
+sign mints an identity if none exists; `auth status` only reports and never
+creates one.
+
+```sh
+fbrain auth status --json
+fbrain auth import < secret.txt
+fbrain auth import --file <path>
+fbrain signer public-key
+fbrain signer sign --kind text --content "hello"
+fbrain signer encrypt --to <npub> --text "..."
+fbrain signer decrypt --from <npub> --payload "..."
+```
+
+`auth import` adopts an existing secret (`nsec1...` or 64-char hex) as the
+shared identity. The secret is read from stdin or `--file`, never from an argv
+flag, and import refuses to overwrite an existing identity. The legacy
+`auth login --nsec`/`auth logout` verbs and the plaintext `auth.json` config
+file are removed.
+
+Use `auth status --json` to confirm the acting npub, identity file, and config
+directory. Do not print or request secrets during normal agent work.
+
+## Working Tree And Sync
+
+```sh
+fbrain doctor --server "$SERVER"
+fbrain open <vault-id> <tree-path> --server "$SERVER"
+cd <tree-path>
+fbrain status --json
+fbrain sync status --json
+fbrain sync now --summary
+fbrain unlock --all
+fbrain sync now --summary
+fbrain sync now --json
+fbrain conflicts --json
+fbrain resolve <conflict-id>
+fbrain activity
+```
+
+`open` creates `.finitebrain/` state, saves the server URL when provided, marks
+the daemon running, and attempts an initial sync. `sync now` fetches the encrypted
+export, opens available grants, pushes local markdown changes, bootstraps latest
+state, and materializes readable Folders back into the tree.
+
+Useful `sync now --json` fields include `status`, `latestSequence`,
+`recordCount`, `localChanges`, `remoteChanges`, and `conflicts`. Expected status
+values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, and
+`blocked-local-conflicts`.
+
+## Unlocking Folder Keys
+
+```sh
+fbrain unlock --all
+fbrain unlock <folder-id>
+fbrain unlock --all --json
+```
+
+`unlock` opens readable Folder Keys into local session state. After opening a
+fresh Vault Working Tree, run `sync now --summary`, `unlock --all`, then
+`sync now --summary` again so newly readable Folders are materialized before
+editing. Use a specific Folder id when you only need one Folder opened.
+
+## Daemon Watch
+
+```sh
+fbrain daemon status --json
+fbrain daemon watch --poll-ms 250 --json
+fbrain daemon watch --poll-secs 5 --remote-poll-ticks 12
+fbrain daemon watch --once --json
+fbrain daemon watch --max-ticks 3 --json
+fbrain daemon watch --poll-only
+fbrain daemon tick --json
+fbrain daemon logs --json
+fbrain daemon stop
+```
+
+`daemon watch` is foreground and should run under tmux, systemd, or an agent
+supervisor for long-running work. The default strategy is file-aware:
+initial sync, sync when readable Vault Working Tree markdown changes are
+detected, and bounded periodic remote polling. Use `--remote-poll-ticks 0` to
+disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
+
+`daemon status --json` exposes `lastTickAt`, `lastError`, `tickCount`,
+`failureCount`, `retryBackoffMillis`, `watchStrategy`, and
+`lastLocalChangeCount`.
+
+## Access And Admin
+
+```sh
+fbrain access explain <folder-id>
+fbrain access list --vault <vault-id>
+fbrain access grant --vault <vault-id> --folder <folder-id> --target <npub>
+fbrain access revoke --vault <vault-id> --folder <folder-id> --target <npub>
+fbrain access revoke --vault <vault-id> --folder <folder-id> --target <npub> --rotation-body rotation.json
+```
+
+`access grant` delegates to `permissions grant-folder` and requires the current
+agent to have the Folder Key opened for the Folder's current key version.
+`access revoke` refuses unsafe metadata-only removal unless `--rotation-body`
+contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
+`accessChangeEvent`.
+
+```sh
+fbrain vault create <vault-id> --kind personal --name "My Vault"
+fbrain vault create <vault-id> --kind organization --name "Org Vault"
+fbrain vault metadata --vault <vault-id>
+fbrain vault export --vault <vault-id>
+
+fbrain folder list --vault <vault-id>
+fbrain folder create <folder-id> --vault <vault-id> --name Notes --path Notes
+fbrain folder create <folder-id> --vault <vault-id> --role folder --access restricted --member <npub>
+fbrain mount list --vault <vault-id>
+```
+
+Folder roles are `personal_home`, `vault_ops`, `general`, and `folder` (hyphen
+aliases are accepted). Folder access modes are `owner`, `admin_only`,
+`all_members`, and `restricted` (hyphen aliases are accepted). For organization
+vaults, `folder create` defaults to restricted access; for personal vaults it
+defaults to owner access.
+
+```sh
+fbrain permissions add-member --vault <vault-id> --target <npub>
+fbrain permissions remove-member --vault <vault-id> --target <npub>
+fbrain permissions add-admin --vault <vault-id> --target <npub>
+fbrain permissions remove-admin --vault <vault-id> --target <npub>
+fbrain permissions grant-folder --vault <vault-id> --folder <folder-id> --target <npub>
+```
+
+## Invitations And Sharing
+
+```sh
+fbrain invites create --vault <vault-id> --target <npub> --folder <folder-id>
+fbrain invites create --vault <vault-id> --target <npub> --expires 2099-01-01T00:00:00Z
+fbrain invites show --code <invite-code>
+fbrain invites accept --code <invite-code>
+fbrain invites accept --vault <vault-id> --id <invitation-id>
+fbrain invites revoke --vault <vault-id> --id <invitation-id>
+
+fbrain share link --vault <vault-id> --folder <folder-id> --target <npub>
+fbrain share link --vault <vault-id> --folder <folder-id> --target <npub> --personal-mount
+fbrain share accept --id <share-link-id>
+fbrain share revoke --id <share-link-id>
+fbrain share source --vault <vault-id> --folder <folder-id>
+fbrain share folder-invite --vault <vault-id> --folder <folder-id> --destination-vault <vault-id> --destination-admin <npub>
+fbrain share folder-accept --id <shared-folder-invitation-id>
+```
+
+Share-link and shared-folder invitation creation need the source Folder Key
+opened locally so the CLI can wrap the grant for the recipient or destination
+admin.

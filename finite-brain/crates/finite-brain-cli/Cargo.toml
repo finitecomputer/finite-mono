@@ -1,0 +1,32 @@
+[package]
+name = "finite-brain-cli"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent-native CLI for FiniteBrain Vault Working Trees."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fbrain"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22.1"
+finite-brain-core = { path = "../finite-brain-core" }
+finite-identity.workspace = true
+finite-nostr.workspace = true
+nostr = { version = "0.45.0-alpha.2", features = ["nip44", "os-rng"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+time = { version = "0.3.44", features = ["formatting"] }
+ureq = "2.12.1"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FiniteBrain</title>
+    <link rel="stylesheet" href="/client/app.css?v=20260705-access-lists" />
+  </head>
+  <body>
+    <div class="obsidian-shell" data-workspace-view="page">
+      <aside class="app-ribbon" aria-label="Primary navigation">
+        <button class="ribbon-button active" id="ribbonFilesButton" type="button" title="Files" aria-label="Files" aria-pressed="true">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 5h6l2 2h10v12H3z" />
+            <path d="M3 9h18" />
+          </svg>
+          <span class="sr-only">Files</span>
+        </button>
+        <button class="ribbon-button" id="ribbonGraphButton" type="button" title="Graph View" aria-label="Graph View" aria-pressed="false">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="6" cy="7" r="2.5" />
+            <circle cx="18" cy="6" r="2.5" />
+            <circle cx="16" cy="18" r="2.5" />
+            <path d="M8.2 7h7.3M7.5 9.1l6.9 7M17.3 8.5l-1 7" />
+          </svg>
+          <span class="sr-only">Graph View</span>
+        </button>
+        <button class="ribbon-button" id="ribbonSearchButton" type="button" title="Search" aria-label="Search" aria-pressed="false">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.5" cy="10.5" r="5.5" />
+            <path d="m15 15 5 5" />
+          </svg>
+          <span class="sr-only">Search</span>
+        </button>
+        <button class="ribbon-button" id="ribbonCommandButton" type="button" title="Quick switcher" aria-label="Quick switcher" aria-pressed="false">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h14M5 12h10M5 17h6" />
+            <path d="m16 15 3 2-3 2" />
+          </svg>
+          <span class="sr-only">Quick switcher</span>
+        </button>
+        <button class="ribbon-button" id="ribbonAccessButton" type="button" title="Vault access" aria-label="Vault access" aria-pressed="false">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 11V8a5 5 0 0 1 10 0v3" />
+            <rect x="5" y="11" width="14" height="10" rx="2" />
+            <path d="M12 15v3" />
+          </svg>
+          <span class="sr-only">Vault access</span>
+        </button>
+      </aside>
+
+      <aside class="file-sidebar" aria-label="Vault file explorer">
+        <header class="vault-header">
+          <div>
+            <p class="eyebrow">FiniteBrain</p>
+            <h1 id="sidebarModeTitle">Files</h1>
+          </div>
+        </header>
+
+        <details id="vaultControlDetails" class="vault-control-strip" aria-label="Vault controls" open>
+          <summary>
+            <span>Vault</span>
+            <span id="vaultControlSummary">Personal vault</span>
+          </summary>
+          <div class="vault-control-body">
+            <label class="sr-only" for="vaultSelect">Vault</label>
+            <div class="vault-picker">
+              <select id="vaultSelect" aria-label="Vault">
+                <option value="personal">Personal vault</option>
+              </select>
+              <input id="vaultIdInput" type="hidden" value="personal" />
+              <button id="loadVaultButton" class="vault-load-button" type="button" title="Load and decrypt vault" aria-label="Load and decrypt vault">Load</button>
+            </div>
+            <button id="connectSignerButton" class="vault-connect-button" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="7.5" cy="12.5" r="3.5" />
+                <path d="M11 12.5h9M16 12.5v3M19 12.5v2" />
+              </svg>
+              <span>Connect signer</span>
+            </button>
+            <details id="vaultCreateDetails" class="vault-create-details">
+              <summary>Create organization</summary>
+              <div id="vaultCreateRow" class="vault-create-row">
+                <label class="sr-only" for="organizationVaultNameInput">New organization vault</label>
+                <input
+                  id="organizationVaultNameInput"
+                  placeholder="New organization"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button id="createOrganizationVaultButton" class="compact-icon-button" type="button" title="Create organization vault" aria-label="Create organization vault">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <div class="sidebar-toolbar" aria-label="File explorer actions">
+          <button id="obsidianNewPageButton" class="sidebar-icon-button" type="button" title="New Page" aria-label="New Page">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 3h8l4 4v14H6z" />
+              <path d="M14 3v5h5M9 15h6M12 12v6" />
+            </svg>
+          </button>
+          <button id="obsidianNewFolderButton" class="sidebar-icon-button" type="button" title="New Folder" aria-label="New Folder">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 6h6l2 2h10v11H3z" />
+              <path d="M12 13h6M15 10v6" />
+            </svg>
+          </button>
+          <span class="toolbar-spacer"></span>
+          <button id="refreshReaderButton" class="sidebar-icon-button" type="button" title="Refresh Vault" aria-label="Refresh Vault">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 7v5h-5M4 17v-5h5" />
+              <path d="M18.2 9A7 7 0 0 0 6.4 6.8M5.8 15A7 7 0 0 0 17.6 17.2" />
+            </svg>
+          </button>
+        </div>
+
+        <section id="filesSidebarPanel" class="file-explorer sidebar-mode-panel">
+          <ol id="readerFolderList" class="obsidian-file-tree"></ol>
+        </section>
+
+        <section id="searchSidebarPanel" class="sidebar-mode-panel sidebar-tool-panel" hidden>
+          <div class="sidebar-section-title">
+            <span>Search</span>
+            <span id="searchResultCount" class="pill muted">0</span>
+          </div>
+          <input
+            id="sidebarSearchInput"
+            aria-label="Search pages"
+            placeholder="Search pages"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <ol id="sidebarSearchResults" class="obsidian-file-tree search-results"></ol>
+        </section>
+
+        <section id="accessSidebarPanel" class="sidebar-mode-panel sidebar-tool-panel" hidden>
+          <div class="sidebar-section-title">
+            <span>Access</span>
+            <span id="accessSidebarCount" class="pill muted" aria-live="polite">0</span>
+          </div>
+
+          <div
+            class="access-view-switch"
+            role="tablist"
+            aria-label="Vault and access views"
+          >
+            <button
+              id="accessVaultViewButton"
+              class="active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="accessVaultPanel"
+              tabindex="0"
+            >
+              Vaults
+            </button>
+            <button
+              id="accessFolderViewButton"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="accessFolderPanel"
+              tabindex="-1"
+            >
+              Access
+            </button>
+          </div>
+
+          <div
+            id="accessVaultPanel"
+            class="access-mode-panel"
+            role="tabpanel"
+            aria-labelledby="accessVaultViewButton"
+          >
+            <section class="vault-management-section vault-primary-section">
+              <div class="access-header">
+                <h3 id="vaultManagementTitle">Vaults</h3>
+                <p id="vaultManagementSummary" class="access-summary">Choose a Vault, then Load to decrypt its readable Folders.</p>
+              </div>
+              <ol id="vaultGuideSteps" class="vault-guide-steps" hidden></ol>
+              <ol id="vaultSwitchList" class="vault-switch-list" aria-label="Available Vaults"></ol>
+              <div class="access-button-row vault-quick-actions">
+                <button id="accessConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
+                <button id="accessLoadVaultButton" type="button" class="access-add-button">Load</button>
+              </div>
+            </section>
+
+            <details id="accessCreateOrganizationPanel" class="access-vault-create">
+              <summary>Create organization vault</summary>
+              <div class="access-vault-create-body">
+                <label class="access-inline-field">
+                  <input
+                    id="accessOrganizationVaultNameInput"
+                    placeholder="New organization"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button id="accessCreateOrganizationVaultButton" type="button" class="access-add-button">Create</button>
+                </label>
+                <p class="access-field-hint">Create an organization Vault with the active signer as admin.</p>
+              </div>
+            </details>
+          </div>
+
+          <div
+            id="accessFolderPanel"
+            class="access-mode-panel"
+            role="tabpanel"
+            aria-labelledby="accessFolderViewButton"
+            hidden
+          >
+            <div class="access-folder-selector">
+              <div class="access-folder-picker">
+                <span class="access-selector-label section-title">Folder</span>
+                <button id="accessFolderButton" class="folder-selector-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span id="accessFolderTitle">No Folder selected</span>
+                  <span id="accessFolderStatus" class="pill muted">empty</span>
+                  <svg class="icon selector-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 10l5 5 5-5" />
+                  </svg>
+                </button>
+              </div>
+              <div id="accessFolderDropdown" class="folder-dropdown" hidden>
+                <ol id="accessFolderList" class="folder-dropdown-list" role="listbox"></ol>
+              </div>
+            </div>
+
+            <div id="accessInspector" class="access-inspector-new">
+              <div id="accessBasicView" class="access-basic-view">
+                <div class="access-header">
+                  <h3 id="accessCurrentFolder">No folder selected</h3>
+                  <p id="accessSummaryLine" class="access-summary">Load a Vault and select a Folder to inspect access.</p>
+                </div>
+
+                <div id="accessWhoHasSection" class="access-who-has-section">
+                  <div class="access-section-header">
+                    <span class="section-title">Who has access</span>
+                    <button id="accessManageToggle" class="access-inline-button" type="button" aria-expanded="false" hidden>
+                      <span id="accessManageToggleLabel">Manage</span>
+                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                    </button>
+                  </div>
+                  <ol id="accessWhoHasList" class="access-who-has-list">
+                    <li class="access-empty-state">No access information available</li>
+                  </ol>
+
+                  <div id="accessAddPersonForm" class="access-inline-form" hidden>
+                    <label class="access-inline-field">
+                      <input
+                        id="accessAddPersonInput"
+                        placeholder="name@example.com, npub1..., or hex"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                      <button id="accessAddPersonButton" type="button" class="access-add-button">Add</button>
+                    </label>
+                    <p id="accessAddPersonHint" class="access-field-hint">Enter NIP-05, npub, or hex to grant folder access</p>
+                  </div>
+                </div>
+              </div>
+
+              <input id="accessTargetNpubInput" type="hidden" />
+              <div id="accessFlowPanel" hidden></div>
+              <div id="accessOverviewPanel" hidden></div>
+              <div id="accessBadgeRow" hidden></div>
+              <button id="grantFolderAccessButton" type="button" hidden>Grant</button>
+              <button id="removeFolderAccessButton" type="button" hidden>Remove</button>
+
+              <details id="accessAdvancedSection" class="access-advanced-section">
+                <summary class="access-advanced-summary">
+                  <span>Share links</span>
+                  <small>Single-use folder access</small>
+                </summary>
+                <div class="access-advanced-content">
+                  <div id="accessShareSection" class="access-subsection">
+                    <h4 class="access-subsection-title">Share with link</h4>
+                    <p class="access-subsection-desc">Create single-use access links for this folder</p>
+
+                    <div id="accessShareForm" class="access-share-form">
+                      <p id="accessShareHint" class="access-field-hint access-share-hint">Open this Folder key to create share links.</p>
+                      <label class="access-field">
+                        <span>Target identity</span>
+                        <input
+                          id="accessShareTargetInput"
+                          placeholder="name@example.com, npub1..., or hex"
+                          autocomplete="off"
+                          spellcheck="false"
+                          aria-describedby="accessShareHint"
+                        />
+                      </label>
+                      <label class="access-field">
+                        <span>Expires</span>
+                        <input
+                          id="accessShareExpiresAtInput"
+                          type="datetime-local"
+                          autocomplete="off"
+                        />
+                      </label>
+                      <label class="access-checkbox">
+                        <input id="accessShareMountInput" type="checkbox" />
+                        <span>Create personal mount</span>
+                      </label>
+                      <button id="createShareLinkButton" type="button" class="access-primary-button">Create share link</button>
+                    </div>
+
+                    <div class="access-share-list">
+                      <div class="access-section-header">
+                        <span class="section-title">Links for this Folder</span>
+                        <span id="folderShareLinkCount" class="pill muted">0</span>
+                      </div>
+                      <ol id="folderShareLinkList" class="access-who-has-list">
+                        <li class="access-empty-state">Vault admins see this Folder's share links here.</li>
+                      </ol>
+                    </div>
+
+                    <div class="access-share-existing">
+                      <label class="access-field">
+                        <span>Existing link</span>
+                        <input
+                          id="accessShareLinkInput"
+                          placeholder="share-link-..."
+                          autocomplete="off"
+                          spellcheck="false"
+                        />
+                      </label>
+                      <div class="access-button-row">
+                        <button id="acceptShareLinkButton" type="button">Accept</button>
+                        <button id="revokeShareLinkButton" type="button" class="danger-action">Revoke</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            <section id="vaultPeopleSection" class="vault-management-section">
+              <div class="access-section-header">
+                <span class="section-title">Vault people</span>
+                <span id="vaultPeopleCount" class="pill muted">0</span>
+              </div>
+              <ol id="vaultPeopleList" class="access-who-has-list">
+                <li class="access-empty-state">Load an organization Vault to manage people.</li>
+              </ol>
+              <div class="access-inline-form vault-people-form">
+                <label class="access-inline-field">
+                  <input
+                    id="vaultMemberNpubInput"
+                    placeholder="member NIP-05, npub, or hex"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button id="addVaultMemberButton" type="button" class="access-add-button">Add member</button>
+                </label>
+                <label class="access-inline-field">
+                  <input
+                    id="vaultAdminNpubInput"
+                    placeholder="admin NIP-05, npub, or hex"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button id="addVaultAdminButton" type="button" class="access-add-button">Add admin</button>
+                </label>
+                <p id="vaultPeopleHint" class="access-field-hint">Admins must already be Vault members.</p>
+              </div>
+            </section>
+
+            <section id="vaultInvitationListSection" class="vault-management-section">
+              <div class="access-section-header">
+                <span class="section-title">Invitations</span>
+                <span id="vaultInvitationCount" class="pill muted">0</span>
+              </div>
+              <ol id="vaultInvitationList" class="access-who-has-list">
+                <li class="access-empty-state">Vault admins see pending invitations here.</li>
+              </ol>
+            </section>
+
+            <section id="sharedFolderSection" class="vault-management-section">
+              <div class="access-section-header">
+                <span class="section-title">Shared folders</span>
+                <span id="sharedFolderCount" class="pill muted">0</span>
+              </div>
+              <ol id="sharedFolderList" class="access-who-has-list">
+                <li class="access-empty-state">Vault admins see cross-Vault shared Folders here.</li>
+              </ol>
+              <p class="access-field-hint">Connections mount a source Folder into this Vault. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
+            </section>
+
+            <details id="vaultInvitationPanel" class="access-vault-admin" open>
+              <summary class="access-admin-summary">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+                </svg>
+                <span>Vault invitations</span>
+                <small id="vaultInvitationHint">Admin-only features</small>
+              </summary>
+              <div class="access-admin-content">
+                <div class="access-admin-section">
+                  <h4>Create vault invitation</h4>
+                  <label class="access-field">
+                    <span>Invite identity</span>
+                    <input
+                      id="vaultInviteTargetNpubInput"
+                      placeholder="name@example.com, npub1..., or hex"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label class="access-field">
+                    <span>Folders granted on join</span>
+                    <input
+                      id="vaultInviteFoldersInput"
+                      value="getting-started"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label class="access-field">
+                    <span>Expires</span>
+                    <input
+                      id="vaultInviteExpiresAtInput"
+                      type="datetime-local"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <div class="access-button-row">
+                    <button id="createVaultInvitationButton" type="button">Create invite</button>
+                    <button id="revokeVaultInvitationButton" class="danger-action" type="button">Revoke invite</button>
+                  </div>
+                </div>
+
+                <div class="access-admin-section">
+                  <h4>Accept vault invitation</h4>
+                  <label class="access-field">
+                    <span>Invite code</span>
+                    <input
+                      id="vaultInviteCodeInput"
+                      placeholder="invite-..."
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <div class="access-button-row">
+                    <button id="getVaultInvitationButton" type="button">Inspect invite</button>
+                    <button id="acceptVaultInvitationButton" type="button">Accept invite</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div
+            id="accessResultPanel"
+            class="access-result"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            hidden
+          ></div>
+          <p id="accessBusyStatus" class="access-busy-status" hidden aria-live="polite">Working…</p>
+        </section>
+
+      </aside>
+
+      <main class="obsidian-workspace">
+        <section
+          id="pageWorkspace"
+          class="workspace-view page-workspace"
+          role="region"
+          aria-label="Page reader"
+        >
+          <article class="page-surface">
+            <header class="page-header">
+              <div>
+                <h2 id="readerPageTitle">No page selected</h2>
+                <p id="readerPagePath" class="page-path">No page path loaded</p>
+              </div>
+              <div class="page-header-actions">
+                <span id="readerPageMeta" class="pill muted">locked</span>
+                <button id="readerModeButton" class="reader-mode-button" type="button" aria-pressed="false">
+                  Reading
+                </button>
+              </div>
+            </header>
+            <div id="readerPageContent" class="note-content note-markdown">
+              Open a vault to read pages.
+            </div>
+            <div id="editorSlashMenu" class="editor-slash-menu" role="listbox" aria-label="Editor slash commands" hidden></div>
+            <details id="editorDrawer" class="editor-drawer">
+              <summary>
+                <span>Markdown source</span>
+                <span id="editorStatusText">No page loaded</span>
+              </summary>
+              <div class="editor-shell">
+                <label id="pageSourceEditorLabel" class="page-editor-label page-source-editor" hidden>
+                  Markdown source
+                  <textarea id="pageDraftInput" rows="8" spellcheck="true"># New Page
+
+Start writing here.</textarea>
+                </label>
+              </div>
+              <button id="encryptDraftButton" type="button" hidden>Prepare encrypted revision</button>
+            </details>
+          </article>
+        </section>
+
+        <section
+          id="graphWorkspace"
+          class="workspace-view graph-workspace"
+          role="region"
+          aria-label="Graph View"
+          hidden
+        >
+          <header class="graph-topbar">
+            <div>
+              <p class="eyebrow">Local graph</p>
+              <h2>Graph View</h2>
+            </div>
+            <span id="graphStats" class="pill muted">0 nodes / 0 links</span>
+            <div class="graph-controls">
+              <input
+                id="graphFilterInput"
+                aria-label="Filter graph"
+                placeholder="Filter graph"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button id="renderGraphButton" class="graph-icon-button primary-action" type="button" title="Render graph" aria-label="Render graph">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+              </button>
+              <button id="replayGraphButton" class="graph-icon-button" type="button" title="Replay graph" aria-label="Replay graph">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </button>
+            </div>
+          </header>
+          <div class="graph-stage">
+            <svg id="graphCanvas" class="graph-canvas" viewBox="0 0 900 560" role="img" aria-label="FiniteBrain graph view"></svg>
+            <div id="graphEmptyState" class="graph-empty-state">
+              <p class="eyebrow">Graph View</p>
+              <h3 id="graphEmptyTitle">No graph yet</h3>
+              <p id="graphEmptyCopy">Open a vault to build the local graph.</p>
+            </div>
+            <div class="graph-floating-controls" aria-label="Graph controls">
+              <button id="fitGraphButton" type="button" title="Fit graph" aria-label="Fit graph">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+                </svg>
+              </button>
+              <button id="resetGraphButton" type="button" title="Reset graph" aria-label="Reset graph">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
+                </svg>
+              </button>
+            </div>
+            <ol id="replayList" class="plain-list replay-list graph-replay-overlay"></ol>
+          </div>
+        </section>
+      </main>
+
+      <div class="client-hidden-state" hidden aria-hidden="true">
+        <input id="pageFolderIdInput" value="getting-started" autocomplete="off" spellcheck="false" />
+        <input id="pageObjectIdInput" value="obj_000000000001" autocomplete="off" spellcheck="false" />
+        <input id="pageBaseRevisionInput" value="" autocomplete="off" spellcheck="false" />
+        <input id="folderKeyInput" value="" autocomplete="off" spellcheck="false" />
+        <input id="okfDestinationFolderInput" value="getting-started" autocomplete="off" spellcheck="false" />
+        <select id="okfConflictModeInput">
+          <option value="skip">skip</option>
+          <option value="copy">copy</option>
+          <option value="overwrite">overwrite</option>
+        </select>
+        <textarea id="okfBundleInput" spellcheck="false">{
+  "pages": [
+    {
+      "path": "content/General/imported-page.md",
+      "content": "# Imported Page\n\nImported through this client."
+    }
+  ]
+}</textarea>
+      </div>
+
+      <div id="contextMenu" class="context-menu" role="menu" hidden></div>
+      <div
+        id="commandPalette"
+        class="command-palette-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="commandPaletteTitle"
+        hidden
+      >
+        <section class="command-palette-panel">
+          <header class="command-palette-header">
+            <div>
+              <p class="eyebrow">Navigate</p>
+              <h2 id="commandPaletteTitle">Quick switcher</h2>
+            </div>
+            <button id="closeCommandPaletteButton" class="sidebar-icon-button" type="button" title="Close" aria-label="Close quick switcher">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m7 7 10 10M17 7 7 17" />
+              </svg>
+            </button>
+          </header>
+          <input
+            id="commandPaletteInput"
+            aria-label="Search commands and pages"
+            placeholder="Search commands and pages"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <ol id="commandPaletteList" class="command-palette-list"></ol>
+        </section>
+      </div>
+    </div>
+
+    <script src="/client/app.js?v=20260705-access-lists"></script>
+  </body>
+</html>

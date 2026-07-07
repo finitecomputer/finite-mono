@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - staging
+      - "feature/**"
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+  client:
+    name: Product Client JavaScript
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check Product Client script syntax
+        run: node --check crates/finite-brain-server/src/product-client.js
+
+      - name: Check Smoke UI script syntax
+        run: node --check crates/finite-brain-server/src/smoke-ui.js
+
+      - name: Run Product Client smoke test
+        run: node crates/finite-brain-server/src/product-client.test.js

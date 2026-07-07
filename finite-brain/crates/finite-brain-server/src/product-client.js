@@ -1,0 +1,7706 @@
+const FiniteBrainProductClient = (() => {
+  const state = {
+    config: null,
+    signerStatus: "checking",
+    pubkeyHex: null,
+    activeVaultId: "personal",
+    visibleVaults: [],
+    metadata: null,
+    keyring: null,
+    lastError: null,
+    preparedWrite: null,
+    preparedWriteTarget: null,
+    okfPlan: null,
+    projection: createClientProjection(),
+    readerBusy: false,
+    selectedFolderId: null,
+    selectedPageKey: null,
+    activeWorkspaceView: "page",
+    activeSidebarMode: "files",
+    activeAccessFolderId: null,
+    activeAccessView: "vault",
+    activeAccessIntent: "overview",
+    accessBusy: false,
+    accessResult: null,
+    identityByNpub: new Map(),
+    lastShareLinkId: null,
+    lastVaultInvitationCode: null,
+    lastVaultInvitationId: null,
+    vaultInvitations: null,
+    folderShareLinks: null,
+    folderShareLinksFolderId: null,
+    sharedFolderInvitations: null,
+    sharedFolderConnections: null,
+    readerMode: "reading",
+    editorMode: "visual",
+    vaultControlsCollapsedAfterLoad: false,
+    expandedFolderIds: new Set(),
+    contextMenuTarget: null,
+    commandPaletteOpen: false,
+    editorSlashOpen: false,
+    editorSlashQuery: "",
+    editorSlashRange: null,
+    editorSlashSelectedIndex: 0,
+    accessFolderDropdownListenerBound: false,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const setOptionalDisabled = (id, disabled) => {
+    const element = $(id);
+    if (element) element.disabled = disabled;
+  };
+  const onOptionalClick = (id, handler) => {
+    const element = $(id);
+    if (element) element.addEventListener("click", handler);
+  };
+  const CIPHER = "AES-256-GCM";
+  const FOLDER_OBJECT_VERSION = "finite-folder-object-v1";
+  const FOLDER_OBJECT_PAGE_VERSION = "finite-folder-object-page-v1";
+  const REVISION_VERSION = "finite-folder-object-revision-v1";
+  const TOMBSTONE_VERSION = "finite-folder-object-tombstone-v1";
+  const APP_EVENT_KIND = 30078;
+  const MAX_OBJECT_ID_ATTEMPTS = 1000;
+  const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
+  const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
+  const DEFAULT_AGENTS_MARKDOWN =
+    [
+      "# AGENTS.md",
+      "",
+      "This is a FiniteBrain vault. Treat every readable Folder as its own encrypted,",
+      "syncable LLM wiki scope.",
+      "",
+      "## Operating Model",
+      "",
+      "FiniteBrain stores encrypted Vault state on the server. Trusted clients and agent runtimes open Folder Key Grants locally, decrypt accessible Pages and Assets, edit ordinary files, then sync encrypted changes back.",
+      "",
+      "Agents act as the user. They do not have independent Vault membership, Folder access, or attribution unless explicitly modeled as a separate user.",
+      "",
+      "A Vault is not one giant wiki with folders. It is a namespace of many",
+      "Folder-scoped LLM wikis. Folder access determines which wiki scopes can be read",
+      "or written.",
+      "",
+      "## Use `fbrain`",
+      "",
+      "Use `fbrain` for identity, sync, access, and daemon state.",
+      "",
+      "Start here:",
+      "",
+      "```sh",
+      "fbrain doctor --server \"$SERVER\"",
+      "fbrain auth status --json",
+      "fbrain open \"$VAULT\" \"$TREE\" --server \"$SERVER\"",
+      "cd \"$TREE\"",
+      "fbrain sync now --summary",
+      "fbrain unlock --all",
+      "fbrain sync now --summary",
+      "fbrain conflicts --json",
+      "```",
+      "",
+      "Use an explicit config dir in agent runtimes:",
+      "",
+      "```sh",
+      "fbrain --config-dir \"$HOME/.config/finitebrain\" auth status --json",
+      "```",
+      "",
+      "Never print or expose Nostr secrets, Folder Keys, grant plaintext, auth files, decrypted sync internals, or rotation bodies.",
+      "",
+      "## Editing Rules",
+      "",
+      "Before editing:",
+      "",
+      "1. Sync.",
+      "2. Unlock readable folders.",
+      "3. Read this file.",
+      "4. Read `HUMANS.md`.",
+      "5. Read `_index.md`, `index.md`, `log.md`, `config.md`, or `SCHEMA.md` when present.",
+      "6. Search before creating new pages.",
+      "",
+      "Only edit readable content. Do not edit `.finitebrain/`, encrypted sync evidence, locked metadata-only folders, generated state files, auth files, or key material.",
+      "",
+      "After editing:",
+      "",
+      "```sh",
+      "fbrain sync now --summary",
+      "fbrain conflicts --json",
+      "```",
+      "",
+      "Resolve conflicts before reporting done.",
+      "",
+      "## LLM Wiki Rules",
+      "",
+      "Use each readable Folder as a durable LLM wiki scope.",
+      "",
+      "- The default `getting-started` Folder is the shared orientation scope for users and agents.",
+      "- The default `restricted` Folder is the starter tighter-boundary scope for sensitive work.",
+      "- Keep raw sources immutable under that Folder's `raw/`.",
+      "- Store non-Markdown source files under that Folder's `raw/assets/`.",
+      "- Pair every Asset with a Markdown Source Note that records provenance, content type, hash or extraction status when known.",
+      "- Cite Source Notes from synthesized wiki pages; do not make the blob itself the knowledge surface.",
+      "- Put synthesized durable knowledge in that Folder's `wiki/`.",
+      "- Prefer updating existing pages over creating duplicates.",
+      "- Use `[[wikilinks]]` for internal relationships.",
+      "- Keep the Folder-local `_index.md` current.",
+      "- Append only to the Folder-local `log.md` after meaningful writes in that Folder.",
+      "- Use `inventory/` for source candidates, open questions, watch items, and next actions.",
+      "- Use `datasets/` for manifests, schemas, samples, and query recipes.",
+      "- Use `output/` for reports, plans, summaries, and deliverables.",
+      "- Archive superseded material instead of deleting it.",
+      "- Answer from curated wiki pages first; say what is missing when evidence is thin.",
+      "- Never summarize restricted Folder contents into a less-restricted Folder, index, log, or output.",
+      "",
+      "## Suggested Layout",
+      "",
+      "```text",
+      "config.md",
+      "_index.md",
+      "log.md",
+      "inbox/",
+      "raw/",
+      "  assets/",
+      "wiki/",
+      "inventory/",
+      "datasets/",
+      "output/",
+      "archive/",
+      "```",
+      "",
+      "Local folder instructions may override this layout.",
+      "",
+      "## Final Report",
+      "",
+      "When finished, report:",
+      "",
+      "- working tree path",
+      "- acting npub, if relevant",
+      "- folders readable or locked",
+      "- pages or sources created/updated/moved/deleted",
+      "- index/log updates",
+      "- sync summary",
+      "- latest sequence, if available",
+      "- whether conflicts are empty",
+    ].join("\n") + "\n";
+  const DEFAULT_HUMANS_MARKDOWN =
+    [
+      "# HUMANS.md",
+      "",
+      "This vault is your private, encrypted knowledge workspace.",
+      "",
+      "FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back.",
+      "",
+      "A FiniteBrain vault is a namespace of wiki scopes. Each top-level Folder is its",
+      "own LLM wiki with its own `_index.md`, `config.md`, and `log.md`.",
+      "",
+      "Inside a Folder:",
+      "",
+      "- `raw/` is source material.",
+      "- `raw/assets/` is non-Markdown source files such as PDFs, images, audio, video, and datasets.",
+      "- Source Notes are Markdown pages that explain those files and make them usable by agents.",
+      "- `wiki/` is durable notes and synthesized understanding.",
+      "- `inventory/` tracks things to revisit.",
+      "- `datasets/` indexes structured references.",
+      "- `output/` holds reports, plans, and finished work.",
+      "- `log.md` records meaningful changes for that Folder only.",
+      "",
+      "The default `getting-started` Folder is for orientation and shared operating",
+      "rules. The default `restricted` Folder demonstrates a tighter access boundary",
+      "for private work.",
+      "",
+      "Agents should read `AGENTS.md` first, sync before editing, avoid duplicates, preserve sources, create Source Notes for assets, and keep the wiki useful for future work.",
+    ].join("\n") + "\n";
+  const DEFAULT_SCOPE_CONFIG_MARKDOWN =
+    [
+      "# Wiki Scope Config",
+      "",
+      "This Folder is an independent FiniteBrain LLM wiki scope.",
+      "",
+      "Use this Folder's `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`",
+      "directories for knowledge that belongs inside this access boundary. Keep this",
+      "Folder's `_index.md` and `log.md` scoped only to pages in this Folder.",
+      "",
+      "Store non-Markdown source files in `raw/assets/` and pair each one with a",
+      "Markdown Source Note in this Folder.",
+      "",
+      "Do not summarize restricted sibling Folder contents here unless the user",
+      "explicitly chooses this Folder as an equal-or-more-restricted destination.",
+    ].join("\n") + "\n";
+  const DEFAULT_SCOPE_INDEX_MARKDOWN =
+    [
+      "# Folder Index",
+      "",
+      "This index maps this Folder's local wiki scope.",
+      "",
+      "Add durable pages, Source Notes, outputs, and open questions here as this Folder",
+      "grows. Do not list private titles, summaries, or activity from sibling Folders.",
+    ].join("\n") + "\n";
+  const DEFAULT_SCOPE_LOG_MARKDOWN =
+    [
+      "# Folder Log",
+      "",
+      "Append meaningful changes in this Folder only.",
+      "",
+      "Do not record activity from sibling Folders here.",
+    ].join("\n") + "\n";
+  const DEFAULT_GETTING_STARTED_README_MARKDOWN =
+    [
+      "# Getting Started",
+      "",
+      "This Folder explains the default FiniteBrain vault layout.",
+      "",
+      "Default Folders:",
+      "",
+      "- `getting-started` is the shared orientation scope for users and agents. Keep",
+      "  operating rules, onboarding notes, and vault-level guidance here.",
+      "- `restricted` is the starter tighter-boundary scope for sensitive work. Do not",
+      "  copy restricted titles, summaries, source notes, assets, or logs back here",
+      "  unless the intended audience is allowed to read them.",
+      "",
+      "Inside any Folder, keep non-Markdown source files as encrypted Assets under",
+      "`raw/assets/`. Pair each Asset with a Markdown Source Note in the same Folder.",
+      "Agents and synthesized wiki pages cite the Source Note; the Asset preserves the",
+      "original bytes.",
+      "",
+      "Keep durable knowledge inside Folder-scoped `wiki/` pages, and keep private or",
+      "sensitive work inside a Folder with an equal or tighter access boundary.",
+    ].join("\n") + "\n";
+  const DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN =
+    [
+      "# How FiniteBrain Works",
+      "",
+      "FiniteBrain stores encrypted Vault data on the server. The client or agent",
+      "opens Folder Keys locally, decrypts the Pages and Assets it can access, edits",
+      "ordinary files, and syncs encrypted updates back.",
+      "",
+      "Non-Markdown source files are encrypted as Assets and kept under `raw/assets/`.",
+      "Agents use Markdown Source Notes to describe those Assets before synthesizing",
+      "durable wiki pages from them.",
+      "",
+      "Each top-level Folder is an LLM wiki scope. A Folder has its own `config.md`,",
+      "`_index.md`, and `log.md`, so activity and summaries stay inside the same",
+      "access boundary as the content they describe.",
+    ].join("\n") + "\n";
+  const DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN =
+    [
+      "# Access And Folders",
+      "",
+      "Access is Folder-scoped.",
+      "",
+      "- `getting-started` is the default shared orientation Folder.",
+      "- `restricted` is the default example of a tighter access boundary.",
+      "- Open Folders are intended for everyone who belongs in that Vault.",
+      "- Restricted Folders are for material that should only be visible to approved",
+      "  people.",
+      "- Do not copy restricted titles, summaries, Source Notes, Assets, or log entries",
+      "  into a less-restricted Folder.",
+    ].join("\n") + "\n";
+  const DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN =
+    [
+      "# Restricted Folder Example",
+      "",
+      "This Folder demonstrates a tighter access boundary.",
+      "",
+      "In an organization Vault, this Folder starts with access for admins only. Add",
+      "specific members later when the work in this Folder should be shared with them.",
+      "",
+      "Keep this Folder's `_index.md` and `log.md` local to this Folder. Do not",
+      "summarize this Folder into `getting-started` unless the user explicitly chooses",
+      "that destination and the audience is allowed to see the summary.",
+    ].join("\n") + "\n";
+  const defaultPage = (folderId, objectId, path, markdown) =>
+    Object.freeze({ folderId, objectId, path, markdown });
+  const defaultScopePages = (folderId) => [
+    defaultPage(
+      folderId,
+      `obj_default_${folderId}_scope_config`,
+      "config.md",
+      DEFAULT_SCOPE_CONFIG_MARKDOWN
+    ),
+    defaultPage(folderId, `obj_default_${folderId}_scope_index`, "_index.md", DEFAULT_SCOPE_INDEX_MARKDOWN),
+    defaultPage(folderId, `obj_default_${folderId}_scope_log`, "log.md", DEFAULT_SCOPE_LOG_MARKDOWN),
+  ];
+  const defaultPrimaryScopePages = (folderId) => [
+    defaultPage(folderId, "obj_default_agents", "AGENTS.md", DEFAULT_AGENTS_MARKDOWN),
+    defaultPage(folderId, "obj_default_humans", "HUMANS.md", DEFAULT_HUMANS_MARKDOWN),
+    ...defaultScopePages(folderId),
+  ];
+  const gettingStartedGuidePages = () => [
+    defaultPage(
+      "getting-started",
+      "obj_default_getting-started_readme",
+      "README.md",
+      DEFAULT_GETTING_STARTED_README_MARKDOWN
+    ),
+    defaultPage(
+      "getting-started",
+      "obj_default_getting-started_how_finitebrain_works",
+      "wiki/how-finitebrain-works.md",
+      DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN
+    ),
+    defaultPage(
+      "getting-started",
+      "obj_default_getting-started_access_and_folders",
+      "wiki/access-and-folders.md",
+      DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN
+    ),
+  ];
+  const restrictedGuidePage = () =>
+    defaultPage(
+      "restricted",
+      "obj_default_restricted_example",
+      "wiki/restricted-folder-example.md",
+      DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN
+    );
+  const starterVaultPages = () => [
+    ...defaultPrimaryScopePages("getting-started"),
+    ...gettingStartedGuidePages(),
+    ...defaultScopePages("restricted"),
+    restrictedGuidePage(),
+  ];
+  const PERSONAL_DEFAULT_VAULT_PAGES = Object.freeze([
+    ...starterVaultPages(),
+  ]);
+  const ORGANIZATION_DEFAULT_VAULT_PAGES = Object.freeze([
+    ...starterVaultPages(),
+  ]);
+  const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const graphViewport = { height: 560, width: 900 };
+  const EDITOR_SLASH_COMMANDS = [
+    { id: "paragraph", label: "Paragraph", detail: "Normal text", aliases: ["p", "text"] },
+    { id: "heading1", label: "Heading 1", detail: "Large section title", aliases: ["h1", "title"] },
+    { id: "heading2", label: "Heading 2", detail: "Section heading", aliases: ["h2", "subtitle"] },
+    { id: "bullet", label: "Bulleted list", detail: "Start a list", aliases: ["ul", "list"] },
+    { id: "quote", label: "Quote", detail: "Callout or excerpt", aliases: ["blockquote", "callout"] },
+    { id: "codeblock", label: "Code block", detail: "Fenced code", aliases: ["pre", "code block", "fence"] },
+    { id: "code", label: "Inline code", detail: "Code text", aliases: ["backtick", "mono"] },
+    { id: "bold", label: "Bold", detail: "Strong emphasis", aliases: ["b", "strong"] },
+    { id: "italic", label: "Italic", detail: "Soft emphasis", aliases: ["i", "em"] },
+    { id: "link", label: "Link", detail: "Add a URL", aliases: ["url", "href"] },
+    { id: "rule", label: "Divider", detail: "Horizontal rule", aliases: ["hr", "line"] },
+  ];
+
+  function shortKey(value) {
+    if (!value) return "-";
+    if (value.length <= 18) return value;
+    return `${value.slice(0, 10)}...${value.slice(-8)}`;
+  }
+
+  function publicKeyIdentityFromInput(input) {
+    const value = String(input || "").trim();
+    if (!value) return null;
+    if (/^[0-9a-fA-F]{64}$/.test(value)) {
+      const hex = value.toLowerCase();
+      const npub = npubFromHex(hex);
+      return { npub, hex, display: shortKey(npub), nip05: null, relays: [], verifiedAt: null };
+    }
+    try {
+      const hex = npubToHex(value);
+      const npub = npubFromHex(hex);
+      return { npub, hex, display: shortKey(npub), nip05: null, relays: [], verifiedAt: null };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function normalizeIdentityResponse(identity) {
+    if (!identity) return null;
+    const npub = identity.npub || identity.userId || identity.user_id || "";
+    if (!npub) return null;
+    return {
+      npub,
+      hex: identity.hex || identity.publicKeyHex || identity.public_key_hex || null,
+      display: identity.display || identity.nip05 || shortKey(npub),
+      nip05: identity.nip05 || null,
+      relays: identity.relays || [],
+      verifiedAt: identity.verifiedAt || identity.verified_at || null,
+    };
+  }
+
+  function rememberIdentity(identity) {
+    const normalized = normalizeIdentityResponse(identity);
+    if (!normalized) return null;
+    state.identityByNpub.set(normalized.npub, normalized);
+    return normalized;
+  }
+
+  function rememberIdentitiesFrom(value) {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(rememberIdentitiesFrom);
+      return;
+    }
+    if (Array.isArray(value.identities)) {
+      value.identities.forEach(rememberIdentity);
+    }
+    for (const key of ["invitations", "shareLinks", "outgoing", "incoming"]) {
+      if (Array.isArray(value[key])) value[key].forEach(rememberIdentitiesFrom);
+    }
+  }
+
+  function identityForNpub(npub) {
+    const value = String(npub || "");
+    if (!value) return null;
+    return state.identityByNpub.get(value) || null;
+  }
+
+  function identityDisplay(npub) {
+    return identityForNpub(npub)?.display || shortKey(npub);
+  }
+
+  async function resolveIdentityInputValue(input, message) {
+    const value = String(input || "").trim();
+    if (!value) throw new Error(message);
+    const local = publicKeyIdentityFromInput(value);
+    if (local) return rememberIdentity(local);
+    const resolved = await protectedRequest("/_admin/identities/resolve", {
+      method: "POST",
+      body: JSON.stringify({ input: value }),
+    });
+    return rememberIdentity(resolved);
+  }
+
+  function personalVaultIdForPubkey(pubkeyHex) {
+    return pubkeyHex ? `personal-${pubkeyHex.slice(0, 16)}` : PERSONAL_VAULT_PLACEHOLDER_ID;
+  }
+
+  function normalizeVisibleVault(vault) {
+    const vaultId = vault?.vaultId || vault?.vault_id || vault?.id || "";
+    if (!vaultId) return null;
+    const kind = String(vault.kind || "organization").toLowerCase();
+    return {
+      vaultId,
+      kind: kind === "personal" ? "personal" : "organization",
+      name: vault.name || (kind === "personal" ? "Personal vault" : vaultId),
+      role: vault.role || (kind === "personal" ? "owner" : "member"),
+      inviteCode: vault.inviteCode || vault.invite_code || null,
+    };
+  }
+
+  function defaultPersonalVault() {
+    return {
+      vaultId: personalVaultIdForPubkey(state.pubkeyHex),
+      kind: "personal",
+      name: "Personal vault",
+      role: "owner",
+      pending: true,
+    };
+  }
+
+  function visibleVaultOptions(vaults = state.visibleVaults) {
+    const normalized = vaults.map(normalizeVisibleVault).filter(Boolean);
+    const personal = normalized.find((vault) => vault.kind === "personal") || defaultPersonalVault();
+    const organizations = normalized
+      .filter((vault) => vault.kind === "organization")
+      .sort((left, right) => left.name.localeCompare(right.name) || left.vaultId.localeCompare(right.vaultId));
+    return [personal, ...organizations];
+  }
+
+  function activeVaultOption() {
+    return visibleVaultOptions().find((vault) => vault.vaultId === state.activeVaultId) || defaultPersonalVault();
+  }
+
+  function activeVaultLabel() {
+    return state.metadata?.name || activeVaultOption()?.name || state.activeVaultId || "Personal vault";
+  }
+
+  function resetVaultSessionState() {
+    state.metadata = null;
+    state.keyring = null;
+    state.projection = createClientProjection();
+    state.selectedFolderId = null;
+    state.selectedPageKey = null;
+    state.activeAccessFolderId = null;
+    state.activeAccessIntent = "overview";
+    state.accessResult = null;
+    state.okfPlan = null;
+    state.expandedFolderIds = new Set();
+    state.vaultInvitations = null;
+    state.folderShareLinks = null;
+    state.folderShareLinksFolderId = null;
+    state.sharedFolderInvitations = null;
+    state.sharedFolderConnections = null;
+  }
+
+  function setActiveVaultId(vaultId, options = {}) {
+    const nextVaultId = vaultId || state.activeVaultId || personalVaultIdForPubkey(state.pubkeyHex);
+    const changed = nextVaultId !== state.activeVaultId;
+    state.activeVaultId = nextVaultId;
+    const input = $("vaultIdInput");
+    if (input) input.value = nextVaultId;
+    const select = $("vaultSelect");
+    if (select) select.value = nextVaultId;
+    if (changed && options.reset !== false) resetVaultSessionState();
+  }
+
+  function selectedVaultIdFromControls() {
+    return $("vaultSelect")?.value || $("vaultIdInput")?.value || state.activeVaultId;
+  }
+
+  function renderVaultSelect() {
+    const select = $("vaultSelect");
+    if (!select) return;
+    const options = visibleVaultOptions();
+    const personalOptions = options.filter((vault) => vault.kind === "personal");
+    const organizationOptions = options.filter((vault) => vault.kind === "organization");
+    const groups = [
+      ["Personal", personalOptions],
+      ["Organizations", organizationOptions],
+    ];
+    const nodes = [];
+    for (const [label, vaults] of groups) {
+      if (!vaults.length) continue;
+      const group = document.createElement("optgroup");
+      group.label = label;
+      for (const vault of vaults) {
+        const option = document.createElement("option");
+        option.value = vault.vaultId;
+      option.textContent =
+          vault.kind === "personal" ? vault.name : `${vault.name} - ${vault.role}`;
+        group.appendChild(option);
+      }
+      nodes.push(group);
+    }
+    select.replaceChildren(...nodes);
+    select.value = options.some((vault) => vault.vaultId === state.activeVaultId)
+      ? state.activeVaultId
+      : options[0]?.vaultId || PERSONAL_VAULT_PLACEHOLDER_ID;
+    state.activeVaultId = select.value || state.activeVaultId;
+    const input = $("vaultIdInput");
+    if (input) input.value = state.activeVaultId;
+  }
+
+  function vaultIdFromName(prefix, name) {
+    const slug =
+      String(name || prefix)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48) || prefix;
+    return `${prefix}-${slug}-${Date.now().toString(36)}`.slice(0, 128);
+  }
+
+  function rememberVisibleVault(metadata) {
+    if (!metadata?.vaultId) return;
+    const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    const vault = normalizeVisibleVault({
+      vaultId: metadata.vaultId,
+      kind: metadata.kind,
+      name: metadata.name,
+      role: metadata.kind === "personal" ? "owner" : actorNpub && metadata.admins?.includes(actorNpub) ? "admin" : "member",
+    });
+    if (!vault) return;
+    state.visibleVaults = [
+      vault,
+      ...state.visibleVaults.filter((candidate) => normalizeVisibleVault(candidate)?.vaultId !== vault.vaultId),
+    ];
+  }
+
+  function deriveSignerState(provider) {
+    if (!provider) {
+      return {
+        status: "unavailable",
+        label: "missing",
+        detail: "No NIP-07 signer was found in this browser.",
+        canConnect: false,
+      };
+    }
+    if (typeof provider.getPublicKey !== "function" || typeof provider.signEvent !== "function") {
+      return {
+        status: "unsupported",
+        label: "unsupported",
+        detail: "A signer is present, but it does not expose getPublicKey and signEvent.",
+        canConnect: false,
+      };
+    }
+    return {
+      status: "ready",
+      label: "ready",
+      detail: "NIP-07 signer detected. Connect to load protected Vault state.",
+      canConnect: true,
+    };
+  }
+
+  function normalizeAccessValue(access) {
+    const value = String(access || "unknown")
+      .trim()
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/[-\s]+/g, "_")
+      .toLowerCase();
+    return value || "unknown";
+  }
+
+  function folderAccessValue(folder) {
+    return normalizeAccessValue(folder?.access ?? folder?.accessMode ?? folder?.access_mode);
+  }
+
+  function folderAccessUsers(folder) {
+    return folder?.accessUserIds || folder?.access_user_ids || [];
+  }
+
+  function folderStatus(folder) {
+    if (folder?.setupIncomplete ?? folder?.setup_incomplete) return "setup";
+    if (folderAccessValue(folder) === "restricted" && folderAccessUsers(folder).length === 0) {
+      return "locked";
+    }
+    return "ready";
+  }
+
+  function folderAccessLabel(access) {
+    const normalized = normalizeAccessValue(access);
+    return (
+      {
+        admin_only: "admin only",
+        all_members: "all members",
+        owner: "owner",
+        restricted: "restricted",
+      }[normalized] || normalized.replaceAll("_", " ")
+    );
+  }
+
+  function metadataFolderRows(metadata) {
+    return (metadata?.folders || []).map((folder) => {
+      const access = folderAccessValue(folder);
+      const status = folderStatus(folder);
+      const accessLabel = folderAccessLabel(access);
+      const flags = [];
+      if (folder.sharedFolderSource ?? folder.shared_folder_source) flags.push("source");
+      if (folder.setupIncomplete ?? folder.setup_incomplete) flags.push("setup needed");
+      if (status === "locked") flags.push("locked");
+      const currentKeyVersion = folder.currentKeyVersion ?? folder.current_key_version ?? 1;
+      return {
+        access,
+        accessLabel,
+        accessUserIds: folderAccessUsers(folder),
+        currentKeyVersion,
+        id: folder.id,
+        path: folder.path,
+        setupIncomplete: Boolean(folder.setupIncomplete ?? folder.setup_incomplete),
+        sharedFolderSource: Boolean(folder.sharedFolderSource ?? folder.shared_folder_source),
+        status,
+        label: `${folder.path} - ${accessLabel} - key v${currentKeyVersion}`,
+        detail: flags.join(", "),
+      };
+    });
+  }
+
+  function folderKeyVersionKey(folderId, keyVersion) {
+    return `${folderId}@${keyVersion || 1}`;
+  }
+
+  function accessBadgesForFolder(row, openedFolderKeys = new Set()) {
+    if (!row) return [];
+    const badges = [];
+    if (row.access === "admin_only") {
+      badges.push({ kind: "access", label: "admin", tone: "warn" });
+    } else if (row.access === "restricted") {
+      badges.push({ kind: "access", label: "restricted", tone: "warn" });
+    } else if (row.access === "all_members") {
+      badges.push({ kind: "access", label: "all", tone: "muted" });
+    } else {
+      badges.push({ kind: "access", label: row.accessLabel || "access", tone: "muted" });
+    }
+    if (row.sharedFolderSource) badges.push({ kind: "shared", label: "shared", tone: "ready" });
+    if (row.setupIncomplete) badges.push({ kind: "setup", label: "setup", tone: "error" });
+    if (row.status === "locked" || (row.pageCount > 0 && row.readableCount === 0)) {
+      badges.push({ kind: "locked", label: "locked", tone: "warn" });
+    }
+    if (openedFolderKeys.has(folderKeyVersionKey(row.id, row.currentKeyVersion))) {
+      badges.push({ kind: "key", label: "key open", tone: "ready" });
+    }
+    badges.push({ kind: "version", label: `v${row.currentKeyVersion || 1}`, tone: "muted" });
+    return badges;
+  }
+
+  function sidebarAccessBadgesForFolder(row, openedFolderKeys = new Set()) {
+    return [];
+  }
+
+  function accessActionRoute(action, target) {
+    if (!target?.folderId) return null;
+    if (action === "share-folder") {
+      return { folderId: target.folderId, intent: "links", sidebarMode: "access" };
+    }
+    if (action === "manage-access") {
+      return { folderId: target.folderId, intent: "people", sidebarMode: "access" };
+    }
+    if (action === "inspect-access") {
+      return { folderId: target.folderId, intent: "overview", sidebarMode: "access" };
+    }
+    return null;
+  }
+
+  function accessIntentValue(intent) {
+    if (intent === "share" || intent === "links") return "links";
+    if (intent === "manage" || intent === "people") return "people";
+    return "overview";
+  }
+
+  function normalizeAccessView(view) {
+    return view === "vault" ? "vault" : "folder";
+  }
+
+  function setAccessView(view) {
+    state.activeAccessView = normalizeAccessView(view);
+    state.accessResult = null;
+    render();
+    if (state.activeAccessView === "vault" && state.vaultInvitations === null) {
+      refreshAccessManagementListsInBackground();
+    }
+  }
+
+  // Vaults/Access tabs share one sidebar panel; intent (overview/people/links) only
+  // affects the Access tab chrome such as expanded share links or the add-person form.
+  function applyAccessIntentChrome(row) {
+    const intent = accessIntentValue(state.activeAccessIntent);
+    const advancedSection = $("accessAdvancedSection");
+    const addForm = $("accessAddPersonForm");
+    const manageToggle = $("accessManageToggle");
+    if (!row || normalizeAccessView(state.activeAccessView) !== "folder") return;
+
+    if (intent === "links" && advancedSection) {
+      advancedSection.open = true;
+    }
+
+    const canManage =
+      row.access === "restricted" &&
+      hasOpenedAccessFolderKey(row) &&
+      state.signerStatus === "connected";
+    if (intent === "people" && canManage && addForm && manageToggle) {
+      addForm.hidden = false;
+      manageToggle.setAttribute("aria-expanded", "true");
+      setText("accessManageToggleLabel", "Cancel");
+    }
+  }
+
+  function accessPanelState(intent, row) {
+    const mode = accessIntentValue(intent);
+    if (!row) {
+      return {
+        detail: "Load a Vault and select a Folder to inspect access.",
+        mode,
+        status: "empty",
+        title: "No Folder selected",
+        tone: "muted",
+      };
+    }
+    const pageDetail = readerFolderDetail(row);
+    return {
+      detail: `${pageDetail} in this Folder`,
+      mode,
+      status: row.accessLabel,
+      title: row.path,
+      tone: row.status === "ready" ? "ready" : "warn",
+    };
+  }
+
+  function countLabel(count, singular, plural = `${singular}s`) {
+    return `${count} ${count === 1 ? singular : plural}`;
+  }
+
+  function accessAudienceSummary(row) {
+    if (!row) return "-";
+    if (row.access === "owner") return "Owner only";
+    if (row.access === "admin_only") return "Admins";
+    if (row.access === "all_members") return "All members";
+    if (row.access === "restricted") return "Restricted";
+    return row.accessLabel || "Unknown";
+  }
+
+  function accessPeopleSummary(row, metadata) {
+    if (!row) return "-";
+    const explicitCount = row.accessUserIds?.length || 0;
+    const adminCount = metadata?.admins?.length || 0;
+    const memberCount = metadata?.members?.length || 0;
+    if (row.access === "owner") return "Owner";
+    if (row.access === "admin_only") return countLabel(adminCount, "admin");
+    if (row.access === "all_members") return countLabel(memberCount, "member");
+    if (row.access === "restricted" && metadata?.kind === "organization") {
+      return explicitCount
+        ? `${countLabel(adminCount, "admin")} + ${countLabel(explicitCount, "person", "people")}`
+        : `${countLabel(adminCount, "admin")}`;
+    }
+    if (row.access === "restricted") {
+      return explicitCount ? countLabel(explicitCount, "person", "people") : "Owner only";
+    }
+    return "-";
+  }
+
+  function accessKeySummary(row, openedFolderKeys) {
+    if (!row) return "-";
+    const keyVersion = row.currentKeyVersion || 1;
+    const keyOpen = openedFolderKeys.has(folderKeyVersionKey(row.id, keyVersion));
+    return `${keyOpen ? "Open" : "Closed"} v${keyVersion}`;
+  }
+
+  function accessPagesSummary(row) {
+    if (!row) return "-";
+    if (!row.pageCount) return "0 pages";
+    if (row.readableCount === row.pageCount) return pageCountLabel(row.pageCount);
+    if (!row.readableCount) return `${pageCountLabel(row.pageCount)} locked`;
+    return `${row.readableCount}/${row.pageCount} readable`;
+  }
+
+  function accessOverviewCopy(row, metadata, openedFolderKeys) {
+    if (!row) return "Load a Vault to inspect Folder access.";
+    const keyOpen = openedFolderKeys.has(folderKeyVersionKey(row.id, row.currentKeyVersion || 1));
+    if (row.setupIncomplete) return "This Folder still needs setup before its current key state is reliable.";
+    if (row.access === "owner") return "Only the personal Vault owner should be able to open this Folder.";
+    if (row.access === "admin_only") return "Vault admins can open this Folder. Ordinary members cannot.";
+    if (row.access === "all_members") return "Every member of this Vault can open this Folder after their Folder Key is available.";
+    if (row.access === "restricted" && metadata?.kind === "organization") {
+      return keyOpen
+        ? "Admins and explicitly granted people can open this restricted Folder."
+        : "This restricted Folder needs its Folder Key opened before People or Links can change it.";
+    }
+    if (row.access === "restricted") {
+      return keyOpen
+        ? "This personal restricted Folder is open in this session and stays inside its tighter boundary."
+        : "This personal restricted Folder is owner-scoped until you grant or share access.";
+    }
+    return "Access is Folder-scoped. Keep summaries and logs inside a Folder with the right audience.";
+  }
+
+  function accessPeopleHint(row, metadata) {
+    if (!row) return "Choose a Folder first.";
+    if (row.access !== "restricted") return "Direct people grants are only needed for restricted Folders.";
+    if (metadata?.kind === "organization") return "Admins can open it; add explicit people when needed.";
+    return "Personal restricted Folders start owner-only; grant one npub when sharing is intentional.";
+  }
+
+  function accessFlowHint(row, mode, keyOpen) {
+    if (!row) return "Choose a Folder to manage access.";
+    if (mode === "people" && row.access !== "restricted") {
+      return "This Folder uses Vault-level access, so there is no direct people list to edit.";
+    }
+    if (mode === "links" && row.access !== "restricted") {
+      return "Create links from restricted Folders so the link carries a bounded Folder Key Grant.";
+    }
+    if (!keyOpen) return "Open this Folder key before creating grants or links.";
+    if (mode === "people") return "Grant adds one npub. Remove rotates the Folder Key and re-encrypts readable Pages.";
+    if (mode === "links") return "Create a single-use link for a target identity, or accept an existing link.";
+    return "Choose People or Links when this Folder needs an access change.";
+  }
+
+  function renderAccessSummary(row, metadata, openedFolderKeys) {
+    setText("accessAudienceSummary", accessAudienceSummary(row));
+    setText("accessKeySummary", accessKeySummary(row, openedFolderKeys));
+    setText("accessPeopleSummary", accessPeopleSummary(row, metadata));
+    setText("accessPageSummary", accessPagesSummary(row));
+  }
+
+  function metadataMountRows(metadata) {
+    return (metadata?.mountedFolders || []).map((mount) => ({
+      id: mount.mountId,
+      label: `${mount.displayName} -> ${mount.sourceVaultId}/${mount.sourceFolderId}`,
+      state: mount.state,
+    }));
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
+  function base64ToBytes(value) {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  function hexToBytes(value) {
+    if (!/^[0-9a-fA-F]+$/.test(value) || value.length % 2 !== 0) {
+      throw new Error("hex value is invalid");
+    }
+    const bytes = new Uint8Array(value.length / 2);
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+    }
+    return bytes;
+  }
+
+  function bytesToHex(bytes) {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function convertBits(data, fromBits, toBits, pad) {
+    let accumulator = 0;
+    let bits = 0;
+    const result = [];
+    const maxValue = (1 << toBits) - 1;
+    for (const value of data) {
+      if (value < 0 || value >> fromBits !== 0) throw new Error("invalid bech32 source value");
+      accumulator = (accumulator << fromBits) | value;
+      bits += fromBits;
+      while (bits >= toBits) {
+        bits -= toBits;
+        result.push((accumulator >> bits) & maxValue);
+      }
+    }
+    if (pad && bits > 0) {
+      result.push((accumulator << (toBits - bits)) & maxValue);
+    } else if (bits >= fromBits || ((accumulator << (toBits - bits)) & maxValue) !== 0) {
+      throw new Error("invalid bech32 padding");
+    }
+    return result;
+  }
+
+  function bech32Polymod(values) {
+    const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    let checksum = 1;
+    for (const value of values) {
+      const top = checksum >> 25;
+      checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+      for (let index = 0; index < 5; index += 1) {
+        if ((top >> index) & 1) checksum ^= generators[index];
+      }
+    }
+    return checksum;
+  }
+
+  function bech32HrpExpand(hrp) {
+    const result = [];
+    for (let index = 0; index < hrp.length; index += 1) {
+      result.push(hrp.charCodeAt(index) >> 5);
+    }
+    result.push(0);
+    for (let index = 0; index < hrp.length; index += 1) {
+      result.push(hrp.charCodeAt(index) & 31);
+    }
+    return result;
+  }
+
+  function bech32Encode(hrp, data) {
+    const values = [...bech32HrpExpand(hrp), ...data, 0, 0, 0, 0, 0, 0];
+    const polymod = bech32Polymod(values) ^ 1;
+    const checksum = [];
+    for (let index = 0; index < 6; index += 1) {
+      checksum.push((polymod >> (5 * (5 - index))) & 31);
+    }
+    return `${hrp}1${[...data, ...checksum].map((value) => BECH32_CHARSET[value]).join("")}`;
+  }
+
+  function bech32Decode(value) {
+    const source = String(value || "").trim();
+    if (!source) throw new Error("bech32 value is empty");
+    if (source !== source.toLowerCase() && source !== source.toUpperCase()) {
+      throw new Error("bech32 value mixes upper and lower case");
+    }
+    const normalized = source.toLowerCase();
+    const separator = normalized.lastIndexOf("1");
+    if (separator < 1 || separator + 7 > normalized.length) {
+      throw new Error("bech32 value is malformed");
+    }
+    const hrp = normalized.slice(0, separator);
+    const data = normalized
+      .slice(separator + 1)
+      .split("")
+      .map((char) => {
+        const index = BECH32_CHARSET.indexOf(char);
+        if (index === -1) throw new Error("bech32 value has an invalid character");
+        return index;
+      });
+    if (bech32Polymod([...bech32HrpExpand(hrp), ...data]) !== 1) {
+      throw new Error("bech32 checksum is invalid");
+    }
+    return { hrp, data: data.slice(0, -6) };
+  }
+
+  function npubFromHex(pubkeyHex) {
+    return bech32Encode("npub", convertBits(hexToBytes(pubkeyHex), 8, 5, true));
+  }
+
+  function npubToHex(npub) {
+    const decoded = bech32Decode(npub);
+    if (decoded.hrp !== "npub") throw new Error("expected an npub");
+    const bytes = Uint8Array.from(convertBits(decoded.data, 5, 8, false));
+    if (bytes.length !== 32) throw new Error("npub must contain a 32-byte public key");
+    return bytesToHex(bytes);
+  }
+
+  function createClientProjection() {
+    return {
+      pages: new Map(),
+      seenEventIds: new Set(),
+      localDrafts: new Map(),
+      conflicts: [],
+    };
+  }
+
+  function pageKey(folderId, objectId) {
+    return `${folderId}/${objectId}`;
+  }
+
+  function createSessionKeyring() {
+    return {
+      keys: new Map(),
+      openedGrants: [],
+    };
+  }
+
+  function folderKeyId(vaultId, folderId, keyVersion) {
+    return `${vaultId}:${folderId}:${keyVersion}`;
+  }
+
+  async function importFolderKey(keyring, { vaultId, folderId, keyVersion, folderKey }) {
+    const rawKey = base64ToBytes(folderKey);
+    if (rawKey.length !== 32) throw new Error("Folder Key must be 32 bytes");
+    const cryptoKey = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, [
+      "encrypt",
+      "decrypt",
+    ]);
+    const id = folderKeyId(vaultId, folderId, keyVersion);
+    keyring.keys.set(id, {
+      cryptoKey,
+      folderId,
+      keyVersion,
+      rawKey,
+      vaultId,
+    });
+    return keyring.keys.get(id);
+  }
+
+  async function openFolderKeyGrantPlaintext(keyring, grantPlaintext) {
+    if (grantPlaintext.version !== "finite-folder-key-grant-v1") {
+      throw new Error("unsupported Folder Key Grant version");
+    }
+    const opened = await importFolderKey(keyring, grantPlaintext);
+    const alreadyOpened = keyring.openedGrants.some(
+      (grant) =>
+        grant.folderId === grantPlaintext.folderId &&
+        grant.keyVersion === grantPlaintext.keyVersion &&
+        grant.recipientNpub === grantPlaintext.recipientNpub &&
+        grant.vaultId === grantPlaintext.vaultId
+    );
+    if (!alreadyOpened) {
+      keyring.openedGrants.push({
+        folderId: grantPlaintext.folderId,
+        issuerNpub: grantPlaintext.issuerNpub,
+        keyVersion: grantPlaintext.keyVersion,
+        recipientNpub: grantPlaintext.recipientNpub,
+        vaultId: grantPlaintext.vaultId,
+      });
+    }
+    return opened;
+  }
+
+  function isHex64(value) {
+    return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
+  }
+
+  function requireHex64(value, field) {
+    if (!isHex64(value)) throw new Error(`${field} must be a 64-character hex public key`);
+    return value.toLowerCase();
+  }
+
+  function parseJsonObject(value, field) {
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch (_) {
+      throw new Error(`${field} is not valid JSON`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${field} must be a JSON object`);
+    }
+    return parsed;
+  }
+
+  function publicKeyTags(event) {
+    return (Array.isArray(event?.tags) ? event.tags : []).filter(
+      (tag) => Array.isArray(tag) && tag[0] === "p" && typeof tag[1] === "string"
+    );
+  }
+
+  function validateGiftWrapShell(event, expectedRecipientHex) {
+    if (!event || typeof event !== "object") throw new Error("Folder Key Grant wrapper is missing");
+    if (event.kind !== 1059) throw new Error("Folder Key Grant wrapper must be kind 1059");
+    requireHex64(event.pubkey, "gift wrap pubkey");
+    if (typeof event.content !== "string" || !event.content) {
+      throw new Error("Folder Key Grant wrapper content is missing");
+    }
+    const recipients = publicKeyTags(event).map((tag) => requireHex64(tag[1], "gift wrap recipient tag"));
+    if (!recipients.length) throw new Error("Folder Key Grant wrapper is missing a recipient tag");
+    if (expectedRecipientHex && !recipients.includes(expectedRecipientHex)) {
+      throw new Error("Folder Key Grant wrapper is not addressed to the connected signer");
+    }
+  }
+
+  function validateSealEvent(event) {
+    if (!event || typeof event !== "object") throw new Error("Folder Key Grant seal is missing");
+    if (event.kind !== 13) throw new Error("Folder Key Grant seal must be kind 13");
+    requireHex64(event.pubkey, "seal pubkey");
+    if (typeof event.content !== "string" || !event.content) {
+      throw new Error("Folder Key Grant seal content is missing");
+    }
+  }
+
+  function canonicalNostrEventIdInput(event) {
+    return JSON.stringify([
+      0,
+      event.pubkey,
+      Number(event.created_at),
+      Number(event.kind),
+      Array.isArray(event.tags) ? event.tags : [],
+      typeof event.content === "string" ? event.content : "",
+    ]);
+  }
+
+  async function validateRumorEvent(event, expectedIssuerHex) {
+    if (!event || typeof event !== "object") throw new Error("Folder Key Grant rumor is missing");
+    if (event.kind !== APP_EVENT_KIND) throw new Error(`Folder Key Grant rumor must be kind ${APP_EVENT_KIND}`);
+    const rumorPubkey = requireHex64(event.pubkey, "rumor pubkey");
+    if (expectedIssuerHex && rumorPubkey !== expectedIssuerHex) {
+      throw new Error("Folder Key Grant rumor issuer does not match the seal");
+    }
+    if (typeof event.content !== "string" || !event.content) {
+      throw new Error("Folder Key Grant rumor content is missing");
+    }
+    if (event.id !== undefined && event.id !== null) {
+      requireHex64(event.id, "rumor id");
+      const expectedId = await sha256Hex(canonicalNostrEventIdInput(event));
+      if (event.id.toLowerCase() !== expectedId) {
+        throw new Error("Folder Key Grant rumor id does not match its content");
+      }
+    }
+  }
+
+  function validateFolderKeyGrantPlaintext(plaintext, expectedRecipientNpub = null, grant = null) {
+    if (!plaintext || typeof plaintext !== "object") throw new Error("Folder Key Grant plaintext is missing");
+    if (plaintext.version !== "finite-folder-key-grant-v1") throw new Error("unsupported Folder Key Grant version");
+    if (!plaintext.folderKey) throw new Error("Folder Key Grant is missing a Folder Key");
+    if (expectedRecipientNpub && plaintext.recipientNpub !== expectedRecipientNpub) {
+      throw new Error("Folder Key Grant recipient does not match the connected signer");
+    }
+    if (grant?.folderId && plaintext.folderId !== grant.folderId) {
+      throw new Error("Folder Key Grant folder does not match export metadata");
+    }
+    if (grant?.keyVersion && Number(plaintext.keyVersion) !== Number(grant.keyVersion)) {
+      throw new Error("Folder Key Grant key version does not match export metadata");
+    }
+    if (grant?.recipientNpub && plaintext.recipientNpub !== grant.recipientNpub) {
+      throw new Error("Folder Key Grant recipient does not match export metadata");
+    }
+    return plaintext;
+  }
+
+  function plaintextDevelopmentGrantFromExportGrant(grant, expectedRecipientNpub = null) {
+    if (!grant?.wrappedEventJson) return null;
+    let wrapped;
+    try {
+      wrapped = JSON.parse(grant.wrappedEventJson);
+    } catch (_) {
+      return null;
+    }
+    if (typeof wrapped.content !== "string") return null;
+    let plaintext;
+    try {
+      plaintext = JSON.parse(wrapped.content);
+    } catch (_) {
+      return null;
+    }
+    if (plaintext.version !== "finite-folder-key-grant-v1" || !plaintext.folderKey) return null;
+    if (expectedRecipientNpub && plaintext.recipientNpub !== expectedRecipientNpub) return null;
+    return plaintext;
+  }
+
+  function nip44DecryptAdapter(options = {}) {
+    if (options.decrypt) return options.decrypt;
+    const provider = options.provider || window.nostr;
+    if (provider?.nip44 && typeof provider.nip44.decrypt === "function") {
+      return (pubkeyHex, ciphertext) =>
+        invokeNip44ProviderMethod(provider, "decrypt", pubkeyHex, ciphertext);
+    }
+    return null;
+  }
+
+  function nip44EncryptAdapter(options = {}) {
+    if (options.encrypt) return options.encrypt;
+    const provider = options.provider || window.nostr;
+    if (provider?.nip44 && typeof provider.nip44.encrypt === "function") {
+      return (pubkeyHex, plaintext) =>
+        invokeNip44ProviderMethod(provider, "encrypt", pubkeyHex, plaintext);
+    }
+    return null;
+  }
+
+  async function invokeNip44ProviderMethod(provider, method, peerHex, payload) {
+    const api = provider?.nip44;
+    const operation = api?.[method];
+    if (typeof operation !== "function") throw new Error(`NIP-44 ${method} is unavailable`);
+    try {
+      return await operation.call(api, peerHex, payload);
+    } catch (error) {
+      if (!/reading 'enable'/.test(String(error?.message || error))) throw error;
+      const receiver = Object.create(api || null);
+      receiver.provider = provider;
+      const prototypeOperation = Object.getPrototypeOf(api || {})?.[method];
+      const fallbacks =
+        typeof prototypeOperation === "function" && prototypeOperation !== operation
+          ? [prototypeOperation, operation]
+          : [operation];
+      let fallbackError = error;
+      for (const fallback of fallbacks) {
+        try {
+          return await fallback.call(receiver, peerHex, payload);
+        } catch (nextError) {
+          fallbackError = nextError;
+        }
+      }
+      throw fallbackError;
+    }
+  }
+
+  async function plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub = null, options = {}) {
+    if (!grant?.wrappedEventJson) throw new Error("Folder Key Grant wrapper is missing");
+    const decrypt = nip44DecryptAdapter(options);
+    if (!decrypt) throw new Error("NIP-44 decryption is unavailable");
+    const expectedRecipientHex = expectedRecipientNpub ? npubToHex(expectedRecipientNpub) : null;
+    const giftWrap = parseJsonObject(grant.wrappedEventJson, "Folder Key Grant wrapper");
+    validateGiftWrapShell(giftWrap, expectedRecipientHex);
+    const sealPlaintext = await decrypt(requireHex64(giftWrap.pubkey, "gift wrap pubkey"), giftWrap.content);
+    const seal = parseJsonObject(sealPlaintext, "Folder Key Grant seal");
+    validateSealEvent(seal);
+    const sealIssuerHex = requireHex64(seal.pubkey, "seal pubkey");
+    const rumorPlaintext = await decrypt(sealIssuerHex, seal.content);
+    const rumor = parseJsonObject(rumorPlaintext, "Folder Key Grant rumor");
+    await validateRumorEvent(rumor, sealIssuerHex);
+    const plaintext = parseJsonObject(rumor.content, "Folder Key Grant plaintext");
+    return validateFolderKeyGrantPlaintext(plaintext, expectedRecipientNpub, grant);
+  }
+
+  async function openFolderKeyGrants(keyring, exportedVault, expectedRecipientNpub = null, options = {}) {
+    const opened = [];
+    const skipped = [];
+    for (const grant of exportedVault?.keyGrants || []) {
+      try {
+        const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, options);
+        await openFolderKeyGrantPlaintext(keyring, plaintext);
+        opened.push({
+          folderId: plaintext.folderId,
+          keyVersion: plaintext.keyVersion,
+        });
+      } catch (error) {
+        skipped.push({
+          id: grant.id || grant.folderId || "unknown-grant",
+          error: error.message,
+        });
+      }
+    }
+    return { opened, skipped };
+  }
+
+  async function openDevelopmentFolderKeyGrants(keyring, exportedVault, expectedRecipientNpub = null) {
+    const opened = [];
+    const skipped = [];
+    for (const grant of exportedVault?.keyGrants || []) {
+      const plaintext = plaintextDevelopmentGrantFromExportGrant(grant, expectedRecipientNpub);
+      if (!plaintext) {
+        skipped.push(grant.id || grant.folderId || "unknown-grant");
+        continue;
+      }
+      await openFolderKeyGrantPlaintext(keyring, plaintext);
+      opened.push({
+        folderId: plaintext.folderId,
+        keyVersion: plaintext.keyVersion,
+      });
+    }
+    return { opened, skipped };
+  }
+
+  function canonicalFolderObjectAad({ vaultId, folderId, objectId, keyVersion }) {
+    return `{"version":${JSON.stringify(FOLDER_OBJECT_VERSION)},"vaultId":${JSON.stringify(
+      vaultId
+    )},"folderId":${JSON.stringify(folderId)},"objectId":${JSON.stringify(
+      objectId
+    )},"keyVersion":${keyVersion}}`;
+  }
+
+  function canonicalEnvelope({ keyVersion, nonce, ciphertext }) {
+    return `{"version":${JSON.stringify(FOLDER_OBJECT_VERSION)},"cipher":${JSON.stringify(
+      CIPHER
+    )},"keyVersion":${keyVersion},"nonce":${JSON.stringify(nonce)},"ciphertext":${JSON.stringify(
+      ciphertext
+    )}}`;
+  }
+
+  async function encryptFolderObject(keyring, input) {
+    const key = keyring.keys.get(folderKeyId(input.vaultId, input.folderId, input.keyVersion));
+    if (!key) throw new Error(`No Folder Key opened for ${input.folderId} v${input.keyVersion}`);
+    const nonce = input.nonceBytes || crypto.getRandomValues(new Uint8Array(12));
+    if (nonce.length !== 12) throw new Error("AES-GCM nonce must be 12 bytes");
+    const aad = new TextEncoder().encode(canonicalFolderObjectAad(input));
+    const plaintext = new TextEncoder().encode(input.plaintext);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce, additionalData: aad },
+      key.cryptoKey,
+      plaintext
+    );
+    return canonicalEnvelope({
+      keyVersion: input.keyVersion,
+      nonce: bytesToBase64(nonce),
+      ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    });
+  }
+
+  async function openFolderObject(keyring, input) {
+    const envelope = typeof input.ciphertext === "string" ? JSON.parse(input.ciphertext) : input.ciphertext;
+    const key = keyring.keys.get(folderKeyId(input.vaultId, input.folderId, envelope.keyVersion));
+    if (!key) {
+      return {
+        folderId: input.folderId,
+        objectId: input.objectId,
+        revision: input.revision,
+        status: "locked",
+      };
+    }
+    const aad = new TextEncoder().encode(
+      canonicalFolderObjectAad({
+        vaultId: input.vaultId,
+        folderId: input.folderId,
+        objectId: input.objectId,
+        keyVersion: envelope.keyVersion,
+      })
+    );
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64ToBytes(envelope.nonce),
+        additionalData: aad,
+      },
+      key.cryptoKey,
+      base64ToBytes(envelope.ciphertext)
+    );
+    const opened = decodeFolderObjectPlaintext(
+      new TextDecoder().decode(plaintext),
+      input.path || `${input.objectId}.md`
+    );
+    if (opened.type === "asset") {
+      return {
+        bytes: opened.bytes,
+        bytesBase64: opened.bytesBase64,
+        contentHash: opened.contentHash,
+        contentType: opened.contentType,
+        filename: opened.filename,
+        folderId: input.folderId,
+        objectId: input.objectId,
+        path: opened.path,
+        revision: input.revision,
+        status: "ready",
+        type: "asset",
+      };
+    }
+    return {
+      folderId: input.folderId,
+      objectId: input.objectId,
+      path: opened.path,
+      revision: input.revision,
+      status: "ready",
+      text: opened.markdown,
+      type: "page",
+    };
+  }
+
+  function decodeFolderObjectPagePlaintext(plaintext, fallbackPath) {
+    const opened = decodeFolderObjectPlaintext(plaintext, fallbackPath);
+    if (opened.type !== "page") throw new Error(`Folder object ${opened.path} is an Asset, not a Page`);
+    return { path: opened.path, markdown: opened.markdown };
+  }
+
+  function decodeFolderObjectPlaintext(plaintext, fallbackPath) {
+    const fallback = normalizeSafeRelativePath(fallbackPath || "page.md", "Page path");
+    try {
+      const object = JSON.parse(String(plaintext || ""));
+      if (object?.type === "asset") {
+        const path = normalizeAssetPath(object.path, "Asset path");
+        const bytesBase64 = String(object.bytesBase64 || "");
+        const bytes = base64ToBytes(bytesBase64);
+        const size = Number(object.size ?? bytes.length);
+        if (size !== bytes.length) throw new Error("Asset size does not match decoded bytes");
+        return {
+          bytes,
+          bytesBase64,
+          contentHash: String(object.contentHash || ""),
+          contentType: String(object.contentType || "application/octet-stream"),
+          filename: String(object.filename || path.split("/").at(-1) || "asset"),
+          path,
+          size,
+          type: "asset",
+        };
+      }
+      const page = object;
+      if (page?.version === FOLDER_OBJECT_PAGE_VERSION) {
+        const path = normalizeSafeRelativePath(page.path, "Page path");
+        if (!path.toLowerCase().endsWith(".md")) throw new Error("Page path must end in .md");
+        if (typeof page.markdown !== "string") throw new Error("Page markdown must be a string");
+        return { path, markdown: page.markdown, type: "page" };
+      }
+    } catch (error) {
+      if (error instanceof SyntaxError) return { path: fallback, markdown: String(plaintext || ""), type: "page" };
+      throw error;
+    }
+    return { path: fallback, markdown: String(plaintext || ""), type: "page" };
+  }
+
+  function encodeFolderObjectPagePlaintext(path, markdown) {
+    const safePath = normalizeSafeRelativePath(path || "page.md", "Page path");
+    if (!safePath.toLowerCase().endsWith(".md")) throw new Error("Page path must end in .md");
+    return JSON.stringify({
+      version: FOLDER_OBJECT_PAGE_VERSION,
+      path: safePath,
+      markdown: String(markdown || ""),
+    });
+  }
+
+  async function encodeFolderObjectAssetPlaintext(path, bytes, contentType = "application/octet-stream") {
+    const safePath = normalizeAssetPath(path || "raw/assets/asset.bin", "Asset path");
+    const rawBytes = bytes instanceof Uint8Array ? bytes : base64ToBytes(String(bytes || ""));
+    const filename = safePath.split("/").at(-1) || "asset";
+    return JSON.stringify({
+      type: "asset",
+      path: safePath,
+      filename,
+      contentType: String(contentType || "application/octet-stream"),
+      size: rawBytes.length,
+      contentHash: await sha256HexBytes(rawBytes),
+      bytesBase64: bytesToBase64(rawBytes),
+    });
+  }
+
+  async function ciphertextHash(envelopeJson) {
+    return sha256Hex(envelopeJson);
+  }
+
+  function revisionCreatedAt(createdAtUnix) {
+    return new Date(createdAtUnix * 1000).toISOString().replace(".000Z", "Z");
+  }
+
+  function accessChangeCreatedAt(createdAtUnix) {
+    return new Date(createdAtUnix * 1000).toISOString().replace(".000Z", "Z");
+  }
+
+  function canonicalRevisionPayload(input) {
+    const baseRevision = input.baseRevision === undefined ? null : input.baseRevision;
+    return `{"version":${JSON.stringify(REVISION_VERSION)},"vaultId":${JSON.stringify(
+      input.vaultId
+    )},"folderId":${JSON.stringify(input.folderId)},"objectId":${JSON.stringify(
+      input.objectId
+    )},"operation":${JSON.stringify(input.operation)},"revision":${
+      input.revision
+    },"baseRevision":${baseRevision === null ? "null" : baseRevision},"keyVersion":${
+      input.keyVersion
+    },"cipher":${JSON.stringify(CIPHER)},"ciphertextHash":${JSON.stringify(
+      input.ciphertextHash
+    )},"authorNpub":${JSON.stringify(input.authorNpub)},"createdAt":${JSON.stringify(
+      input.createdAt
+    )}}`;
+  }
+
+  function revisionTags(input) {
+    return [
+      [
+        "d",
+        `finite-folder-object-revision:${input.vaultId}:${input.folderId}:${input.objectId}:${input.revision}`,
+      ],
+      ["vault", input.vaultId],
+      ["folder", input.folderId],
+      ["object", input.objectId],
+      ["operation", input.operation],
+      ["keyVersion", String(input.keyVersion)],
+    ];
+  }
+
+  function canonicalTombstonePayload(input) {
+    return `{"version":${JSON.stringify(TOMBSTONE_VERSION)},"vaultId":${JSON.stringify(
+      input.vaultId
+    )},"folderId":${JSON.stringify(input.folderId)},"objectId":${JSON.stringify(
+      input.objectId
+    )},"operation":"delete","revision":${input.revision},"baseRevision":${
+      input.baseRevision
+    },"authorNpub":${JSON.stringify(input.authorNpub)},"deletedAt":${JSON.stringify(
+      input.deletedAt
+    )}}`;
+  }
+
+  function tombstoneTags(input) {
+    return [
+      [
+        "d",
+        `finite-folder-object-tombstone:${input.vaultId}:${input.folderId}:${input.objectId}:${input.revision}`,
+      ],
+      ["vault", input.vaultId],
+      ["folder", input.folderId],
+      ["object", input.objectId],
+      ["operation", "delete"],
+    ];
+  }
+
+  async function buildPageWriteRequest(keyring, input) {
+    const baseRevision =
+      input.baseRevision === "" || input.baseRevision === undefined || input.baseRevision === null
+        ? null
+        : Number(input.baseRevision);
+    const revision = baseRevision === null ? 1 : baseRevision + 1;
+    const envelopeJson = await encryptFolderObject(keyring, {
+      folderId: input.folderId,
+      keyVersion: input.keyVersion,
+      nonceBytes: input.nonceBytes,
+      objectId: input.objectId,
+      plaintext: input.plaintext,
+      vaultId: input.vaultId,
+    });
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const payload = canonicalRevisionPayload({
+      authorNpub: input.authorNpub,
+      baseRevision,
+      ciphertextHash: await ciphertextHash(envelopeJson),
+      createdAt: revisionCreatedAt(createdAtUnix),
+      folderId: input.folderId,
+      keyVersion: input.keyVersion,
+      objectId: input.objectId,
+      operation: input.operation || (baseRevision === null ? "create" : "update"),
+      revision,
+      vaultId: input.vaultId,
+    });
+    const eventTemplate = {
+      kind: APP_EVENT_KIND,
+      created_at: createdAtUnix,
+      tags: revisionTags({
+        folderId: input.folderId,
+        objectId: input.objectId,
+        operation: input.operation || (baseRevision === null ? "create" : "update"),
+        keyVersion: input.keyVersion,
+        revision,
+        vaultId: input.vaultId,
+      }),
+      content: payload,
+    };
+    const revisionEvent = await input.signEvent(eventTemplate);
+    return {
+      baseRevision,
+      keyVersion: input.keyVersion,
+      cipher: CIPHER,
+      ciphertext: envelopeJson,
+      revisionEvent,
+    };
+  }
+
+  async function buildPageDeleteRequest(input) {
+    const baseRevision = Number(input.baseRevision);
+    if (!Number.isInteger(baseRevision) || baseRevision < 1) {
+      throw new Error("Page delete requires a positive base revision");
+    }
+    const revision = baseRevision + 1;
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const deletedAt = revisionCreatedAt(createdAtUnix);
+    const payload = canonicalTombstonePayload({
+      authorNpub: input.authorNpub,
+      baseRevision,
+      deletedAt,
+      folderId: input.folderId,
+      objectId: input.objectId,
+      revision,
+      vaultId: input.vaultId,
+    });
+    const eventTemplate = {
+      kind: APP_EVENT_KIND,
+      created_at: createdAtUnix,
+      tags: tombstoneTags({
+        folderId: input.folderId,
+        objectId: input.objectId,
+        revision,
+        vaultId: input.vaultId,
+      }),
+      content: payload,
+    };
+    const tombstoneEvent = await input.signEvent(eventTemplate);
+    return {
+      baseRevision,
+      tombstoneEvent,
+    };
+  }
+
+  function mergeSyncProjection(projection, sync) {
+    const next = {
+      pages: new Map(projection.pages),
+      seenEventIds: new Set(projection.seenEventIds),
+      localDrafts: new Map(projection.localDrafts),
+      conflicts: [...projection.conflicts],
+    };
+    for (const record of sync.records || []) {
+      if (next.seenEventIds.has(record.recordEventId)) continue;
+      next.seenEventIds.add(record.recordEventId);
+    }
+    for (const object of sync.objects || []) {
+      const key = pageKey(object.folderId, object.objectId);
+      const localDraft = next.localDrafts.get(key);
+      if (localDraft && object.revision > localDraft.baseRevision) {
+        next.conflicts.push({
+          folderId: object.folderId,
+          objectId: object.objectId,
+          localBaseRevision: localDraft.baseRevision,
+          serverRevision: object.revision,
+          status: "conflict",
+        });
+        continue;
+      }
+      next.pages.set(key, object);
+    }
+    return next;
+  }
+
+  async function openSyncObjects(keyring, sync) {
+    if (!keyring) return sync;
+    const objects = await Promise.all(
+      (sync.objects || []).map(async (object) => {
+        if (object.deleted) return object;
+        try {
+          const opened = await openFolderObject(keyring, object);
+          return {
+            ...object,
+            ...opened,
+            title: opened.text
+              ? pageTitleFromText(opened.text, pageTitleFromPath(opened.path || object.path, object.objectId))
+              : object.title,
+          };
+        } catch (error) {
+          return {
+            ...object,
+            error: error.message,
+            status: "locked",
+          };
+        }
+      })
+    );
+    return {
+      ...sync,
+      objects,
+    };
+  }
+
+  function pageTitleFromText(text, fallback) {
+    const heading = String(text || "").match(/^#\s+(.+)$/m);
+    return heading ? heading[1].trim() : fallback;
+  }
+
+  function pageTitleFromPath(path, fallback) {
+    const filename = String(path || "")
+      .split("/")
+      .filter(Boolean)
+      .pop();
+    return filename ? filename.replace(/\.md$/i, "") : fallback;
+  }
+
+  function pageTitleForPage(page) {
+    return page.title || pageTitleFromText(page.text ?? "", pageTitleFromPath(page.path, page.objectId));
+  }
+
+  function normalizePageReference(value) {
+    return String(value || "")
+      .trim()
+      .replace(/^\.?\//, "")
+      .replace(/\.md$/i, "")
+      .replace(/^#/, "")
+      .toLowerCase();
+  }
+
+  function extractPageLinks(text) {
+    const links = new Set();
+    const wikiPattern = /\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
+    const markdownPattern = /\[[^\]]+\]\(([^)]+)\)/g;
+    for (const match of String(text || "").matchAll(wikiPattern)) {
+      links.add(normalizePageReference(match[1]));
+    }
+    for (const match of String(text || "").matchAll(markdownPattern)) {
+      const target = match[1].split("#")[0];
+      if (!/^https?:\/\//i.test(target)) links.add(normalizePageReference(target));
+    }
+    return [...links].filter(Boolean);
+  }
+
+  function inlineLinkSegments(text) {
+    const source = String(text || "");
+    const segments = [];
+    const pattern = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
+    let cursor = 0;
+    for (const match of source.matchAll(pattern)) {
+      if (match.index > cursor) {
+        segments.push({ kind: "text", text: source.slice(cursor, match.index) });
+      }
+      if (match[1]) {
+        segments.push({
+          kind: "internal",
+          target: normalizePageReference(match[1]),
+          text: String(match[2] || match[1]).trim(),
+        });
+      } else {
+        const target = String(match[4] || "").trim();
+        const external = /^https?:\/\//i.test(target);
+        segments.push({
+          kind: external ? "external" : "internal",
+          target: external ? target : normalizePageReference(target.split("#")[0]),
+          text: String(match[3] || target).trim(),
+        });
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < source.length) {
+      segments.push({ kind: "text", text: source.slice(cursor) });
+    }
+    return segments.filter((segment) => segment.text || segment.target);
+  }
+
+  function splitMarkdownTableRow(line) {
+    let source = String(line || "").trim();
+    if (!source.includes("|")) return null;
+    if (source.startsWith("|")) source = source.slice(1);
+    if (source.endsWith("|")) source = source.slice(0, -1);
+    const cells = [];
+    let cell = "";
+    let escaped = false;
+    for (const char of source) {
+      if (char === "\\" && !escaped) {
+        escaped = true;
+        cell += char;
+        continue;
+      }
+      if (char === "|" && !escaped) {
+        cells.push(cell.trim().replaceAll("\\|", "|"));
+        cell = "";
+        continue;
+      }
+      escaped = false;
+      cell += char;
+    }
+    cells.push(cell.trim().replaceAll("\\|", "|"));
+    return cells.length > 1 ? cells : null;
+  }
+
+  function tableDelimiterAlignments(cells) {
+    const alignments = [];
+    for (const cell of cells || []) {
+      const value = String(cell || "").trim();
+      if (!/^:?-{3,}:?$/.test(value)) return null;
+      if (value.startsWith(":") && value.endsWith(":")) alignments.push("center");
+      else if (value.endsWith(":")) alignments.push("right");
+      else if (value.startsWith(":")) alignments.push("left");
+      else alignments.push("");
+    }
+    return alignments.length ? alignments : null;
+  }
+
+  function parseMarkdownListItem(line) {
+    const trimmed = String(line || "").trim();
+    const ordered = trimmed.match(/^(\d+)[.)]\s+(.+)$/);
+    if (ordered) {
+      return {
+        checked: null,
+        ordered: true,
+        start: Number(ordered[1]) || 1,
+        text: ordered[2].trim(),
+      };
+    }
+    const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (!unordered) return null;
+    const task = unordered[1].match(/^\[([ xX])\]\s+(.+)$/);
+    return {
+      checked: task ? task[1].toLowerCase() === "x" : null,
+      ordered: false,
+      start: null,
+      text: (task ? task[2] : unordered[1]).trim(),
+    };
+  }
+
+  function normalizeMarkdownTableRow(cells, width) {
+    return Array.from({ length: width }, (_, index) => String(cells[index] || "").trim());
+  }
+
+  function normalizeCodeBlockText(value) {
+    let lines = Array.isArray(value)
+      ? value.map((line) => String(line || ""))
+      : String(value || "").replace(/\r\n/g, "\n").split("\n");
+    while (lines.length && !lines[0].trim()) lines.shift();
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    const indentedLines = lines.filter((line) => line.trim()).map((line) => line.match(/^[ \t]*/)?.[0] || "");
+    if (indentedLines.length && indentedLines.every((indent) => indent.length > 0)) {
+      let sharedIndent = indentedLines[0];
+      for (const indent of indentedLines.slice(1)) {
+        while (sharedIndent && !indent.startsWith(sharedIndent)) sharedIndent = sharedIndent.slice(0, -1);
+      }
+      if (sharedIndent) {
+        lines = lines.map((line) => (line.startsWith(sharedIndent) ? line.slice(sharedIndent.length) : line));
+      }
+    }
+    return lines.join("\n");
+  }
+
+  function markdownPreviewBlocks(markdown) {
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const blocks = [];
+    let paragraph = [];
+
+    function flushParagraph() {
+      if (!paragraph.length) return;
+      blocks.push({ text: paragraph.join(" "), type: "paragraph" });
+      paragraph = [];
+    }
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        continue;
+      }
+      const fence = trimmed.match(/^(```|~~~)\s*([A-Za-z0-9_+.#-]+)?\s*$/);
+      if (fence) {
+        flushParagraph();
+        const code = [];
+        const fenceMarker = fence[1];
+        const language = fence[2] || "";
+        index += 1;
+        while (index < lines.length && !lines[index].trim().startsWith(fenceMarker)) {
+          code.push(lines[index]);
+          index += 1;
+        }
+        blocks.push({ language, text: normalizeCodeBlockText(code), type: "code" });
+        continue;
+      }
+      const heading = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+      if (heading) {
+        flushParagraph();
+        blocks.push({ level: heading[1].length, text: heading[2].trim(), type: "heading" });
+        continue;
+      }
+      const headerCells = splitMarkdownTableRow(trimmed);
+      const delimiterCells = splitMarkdownTableRow(lines[index + 1] || "");
+      const tableAlignments = tableDelimiterAlignments(delimiterCells);
+      if (headerCells && tableAlignments && headerCells.length === tableAlignments.length) {
+        flushParagraph();
+        const width = headerCells.length;
+        const rows = [];
+        index += 2;
+        while (index < lines.length) {
+          const rowCells = splitMarkdownTableRow(lines[index]);
+          if (!rowCells) break;
+          rows.push(normalizeMarkdownTableRow(rowCells, width));
+          index += 1;
+        }
+        index -= 1;
+        blocks.push({
+          alignments: tableAlignments,
+          headers: normalizeMarkdownTableRow(headerCells, width),
+          rows,
+          type: "table",
+        });
+        continue;
+      }
+      const listItem = parseMarkdownListItem(trimmed);
+      if (listItem) {
+        flushParagraph();
+        const ordered = listItem.ordered;
+        const items = [];
+        let start = listItem.start;
+        while (index < lines.length) {
+          const item = parseMarkdownListItem(lines[index]);
+          if (!item || item.ordered !== ordered) break;
+          if (start === null) start = item.start;
+          items.push({
+            checked: item.checked,
+            text: item.text,
+          });
+          index += 1;
+        }
+        index -= 1;
+        blocks.push({ items, ordered, start, type: "list" });
+        continue;
+      }
+      if (/^>\s?/.test(trimmed)) {
+        flushParagraph();
+        const quotes = [];
+        while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+          quotes.push(lines[index].trim().replace(/^>\s?/, ""));
+          index += 1;
+        }
+        index -= 1;
+        blocks.push({ text: quotes.join(" "), type: "quote" });
+        continue;
+      }
+      if (/^([-*_])(?:\s*\1){2,}$/.test(trimmed)) {
+        flushParagraph();
+        blocks.push({ type: "rule" });
+        continue;
+      }
+      paragraph.push(trimmed);
+    }
+    flushParagraph();
+    return blocks;
+  }
+
+  function pageStatsForText(text) {
+    const clean = String(text || "").trim();
+    const words = clean ? clean.split(/\s+/).filter(Boolean).length : 0;
+    return {
+      links: extractPageLinks(clean).length,
+      words,
+    };
+  }
+
+  function normalizeSafeRelativePath(value, label = "path") {
+    const normalized = String(value || "")
+      .trim()
+      .replace(/^\.\/+/, "");
+    if (
+      !normalized ||
+      normalized.startsWith("/") ||
+      normalized.includes("\\") ||
+      normalized.split("/").some((segment) => !segment || segment === "." || segment === "..") ||
+      [".finitebrain", "_admin", ".git"].includes(normalized.split("/")[0])
+    ) {
+      throw new Error(`${label} must be a safe relative path`);
+    }
+    return normalized;
+  }
+
+  function targetPathFromBundlePath(path) {
+    const safePath = normalizeSafeRelativePath(path, "OKF object path");
+    const parts = safePath.split("/");
+    if (parts[0] === "content" && parts.length >= 3) return parts.slice(2).join("/");
+    return safePath;
+  }
+
+  function normalizeAssetPath(value, label = "Asset path") {
+    const safePath = normalizeSafeRelativePath(value || "raw/assets/asset.bin", label);
+    if (!safePath.startsWith("raw/assets/")) throw new Error(`${label} must live under raw/assets/`);
+    return safePath;
+  }
+
+  function assetTargetPathFromBundlePath(path) {
+    const safePath = targetPathFromBundlePath(path);
+    if (safePath.startsWith("raw/assets/")) return safePath;
+    const filename = safePath.split("/").filter(Boolean).pop() || "asset";
+    return normalizeAssetPath(`raw/assets/${filename}`, "OKF asset target path");
+  }
+
+  function parseOkfBundle(input, options = {}) {
+    const source = typeof input === "string" ? JSON.parse(input) : input;
+    if (!source || typeof source !== "object") throw new Error("OKF bundle must be a JSON object");
+
+    const sourceFiles = source.files || source;
+    const files = new Map();
+    for (const [path, content] of Object.entries(sourceFiles || {})) {
+      if (typeof content === "string" && (path.endsWith(".md") || path === "okf-vault.json")) {
+        files.set(normalizeSafeRelativePath(path, "OKF file path"), content);
+      }
+    }
+
+    const manifest =
+      source.manifest ||
+      (files.has("okf-vault.json") ? JSON.parse(files.get("okf-vault.json")) : null);
+    const pages = [];
+    const assets = [];
+    if (Array.isArray(source.pages)) {
+      source.pages.forEach((page, index) => {
+        const sourcePath = normalizeSafeRelativePath(
+          page.sourcePath || page.path || page.targetPath || `import/page-${index + 1}.md`,
+          "OKF page source path"
+        );
+        const targetPath = normalizeSafeRelativePath(
+          page.targetPath || page.pagePath || targetPathFromBundlePath(page.path || sourcePath),
+          "OKF page target path"
+        );
+        const markdown = page.markdown ?? page.content;
+        if (typeof markdown !== "string") throw new Error(`OKF page ${sourcePath} is missing content`);
+        pages.push({
+          sourceFolderId: page.folderId || null,
+          sourceObjectId: page.objectId || null,
+          sourcePath,
+          folderId: options.destinationFolderId || page.targetFolderId || page.folderId || DEFAULT_CLIENT_FOLDER_ID,
+          targetPath,
+          markdown,
+          contentType: page.contentType || "text/markdown",
+          links: extractPageLinks(markdown),
+        });
+      });
+    }
+    if (Array.isArray(source.assets)) {
+      source.assets.forEach((asset, index) => {
+        const sourcePath = normalizeSafeRelativePath(
+          asset.sourcePath || asset.path || asset.targetPath || `attachments/asset-${index + 1}`,
+          "OKF asset source path"
+        );
+        const targetPath = normalizeAssetPath(
+          asset.targetPath || asset.assetPath || assetTargetPathFromBundlePath(asset.path || sourcePath),
+          "OKF asset target path"
+        );
+        const bytesBase64 = String(asset.bytesBase64 || "");
+        assets.push({
+          sourceFolderId: asset.folderId || null,
+          sourceObjectId: asset.objectId || null,
+          sourcePath,
+          folderId: options.destinationFolderId || asset.targetFolderId || asset.folderId || DEFAULT_CLIENT_FOLDER_ID,
+          targetPath,
+          bytesBase64,
+          contentHash: asset.contentHash || "",
+          contentType: asset.contentType || "application/octet-stream",
+          size: asset.size === undefined ? base64ToBytes(bytesBase64).length : Number(asset.size),
+        });
+      });
+    } else if (manifest?.objects) {
+      for (const object of manifest.objects) {
+        const sourcePath = normalizeSafeRelativePath(object.path, "OKF manifest object path");
+        const contentType = object.contentType || "text/markdown";
+        if (contentType === "text/markdown" && !Array.isArray(source.pages)) {
+          const markdown = files.get(sourcePath);
+          if (typeof markdown !== "string") throw new Error(`OKF file missing for ${sourcePath}`);
+          pages.push({
+            sourceFolderId: object.folderId || null,
+            sourceObjectId: object.objectId || null,
+            sourcePath,
+            folderId: options.destinationFolderId || object.targetFolderId || object.folderId || DEFAULT_CLIENT_FOLDER_ID,
+            targetPath: normalizeSafeRelativePath(
+              object.targetPath || object.pagePath || targetPathFromBundlePath(sourcePath),
+              "OKF page target path"
+            ),
+            markdown,
+            contentType,
+            links: extractPageLinks(markdown),
+          });
+        } else {
+          const rawAsset = sourceFiles?.[sourcePath];
+          const bytesBase64 =
+            typeof object.bytesBase64 === "string"
+              ? object.bytesBase64
+              : typeof rawAsset === "string"
+                ? rawAsset
+                : String(rawAsset?.bytesBase64 || "");
+          assets.push({
+            sourceFolderId: object.folderId || null,
+            sourceObjectId: object.objectId || null,
+            sourcePath,
+            folderId: options.destinationFolderId || object.targetFolderId || object.folderId || DEFAULT_CLIENT_FOLDER_ID,
+            targetPath: normalizeAssetPath(
+              object.targetPath || object.assetPath || assetTargetPathFromBundlePath(sourcePath),
+              "OKF asset target path"
+            ),
+            bytesBase64,
+            contentHash: object.contentHash || rawAsset?.contentHash || "",
+            contentType,
+            size: object.size === undefined ? base64ToBytes(bytesBase64).length : Number(object.size),
+          });
+        }
+      }
+    } else {
+      for (const [sourcePath, markdown] of files.entries()) {
+        if (sourcePath === "okf-vault.json" || sourcePath.startsWith("_wiki/")) continue;
+        pages.push({
+          sourceFolderId: null,
+          sourceObjectId: null,
+          sourcePath,
+          folderId: options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID,
+          targetPath: targetPathFromBundlePath(sourcePath),
+          markdown,
+          contentType: "text/markdown",
+          links: extractPageLinks(markdown),
+        });
+      }
+    }
+
+    return {
+      version: manifest?.version || source.version || "finite-okf-vault-import-v1",
+      assets,
+      pages,
+      omissions: manifest?.omissions || source.omissions || [],
+    };
+  }
+
+  function normalizeExistingPageRecord(record) {
+    const folderId = record.folderId || DEFAULT_CLIENT_FOLDER_ID;
+    const path =
+      record.path ||
+      record.pagePath ||
+      record.targetPath ||
+      (record.title ? `${slugForObjectId(record.title)}.md` : `${record.objectId}.md`);
+    return {
+      folderId,
+      objectId: record.objectId,
+      revision: Number(record.revision || 0),
+      targetPath: normalizeSafeRelativePath(path, "existing Page path"),
+    };
+  }
+
+  function targetKey(folderId, targetPath) {
+    return `${folderId}\n${targetPath}`;
+  }
+
+  function slugForObjectId(value) {
+    return String(value || "page")
+      .trim()
+      .toLowerCase()
+      .replace(/\.md$/i, "")
+      .replace(/[^a-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 88) || "page";
+  }
+
+  function validObjectId(value) {
+    return /^[A-Za-z0-9_-]{16,128}$/.test(value || "") && !String(value).includes(".");
+  }
+
+  function objectIdForTargetPath(targetPath, occupiedObjectIds) {
+    const base = `obj_${slugForObjectId(targetPath)}`.padEnd(16, "0").slice(0, 112);
+    let candidate = base;
+    let index = 2;
+    while (occupiedObjectIds.has(candidate) || !validObjectId(candidate)) {
+      if (index > MAX_OBJECT_ID_ATTEMPTS) {
+        throw new Error(`could not allocate import object id for ${targetPath}`);
+      }
+      candidate = `${base}_${index}`.slice(0, 128);
+      index += 1;
+    }
+    occupiedObjectIds.add(candidate);
+    return candidate;
+  }
+
+  function uniqueImportedCopyPath(folderId, targetPath, occupiedTargets) {
+    const safePath = normalizeSafeRelativePath(targetPath, "copy target path");
+    const slash = safePath.lastIndexOf("/");
+    const dot = safePath.lastIndexOf(".");
+    const hasExtension = dot > slash;
+    const stem = hasExtension ? safePath.slice(0, dot) : safePath;
+    const extension = hasExtension ? safePath.slice(dot) : "";
+    for (let index = 1; index <= 1000; index += 1) {
+      const suffix = index === 1 ? " imported" : ` imported ${index}`;
+      const candidate = normalizeSafeRelativePath(`${stem}${suffix}${extension}`, "copy target path");
+      if (!occupiedTargets.has(targetKey(folderId, candidate))) return candidate;
+    }
+    throw new Error(`Could not allocate copy path for ${targetPath}`);
+  }
+
+  function resolveRelativePath(fromPath, target) {
+    if (!target || target.startsWith("#") || /^https?:\/\//i.test(target) || target.startsWith("mailto:")) {
+      return null;
+    }
+    const cleanTarget = target.split("#")[0];
+    if (cleanTarget.startsWith("/") || cleanTarget.includes("\\")) return null;
+    const parts = fromPath.split("/");
+    parts.pop();
+    for (const segment of cleanTarget.split("/")) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") {
+        if (!parts.length) return null;
+        parts.pop();
+      } else {
+        parts.push(segment);
+      }
+    }
+    try {
+      return normalizeSafeRelativePath(parts.join("/"), "OKF link target");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function relativePathBetween(fromPath, toPath) {
+    const from = fromPath.split("/");
+    from.pop();
+    const to = toPath.split("/");
+    let common = 0;
+    while (common < from.length && common < to.length && from[common] === to[common]) common += 1;
+    return [...Array(from.length - common).fill(".."), ...to.slice(common)].join("/") || toPath;
+  }
+
+  function rewriteOkfMarkdownLinks(markdown, sourcePath, targetPath, sourcePathToEntry) {
+    return String(markdown || "").replace(/\[([^\]]+)\]\(([^)]+)\)/g, (original, label, href) => {
+      const resolved = resolveRelativePath(sourcePath, href);
+      if (!resolved) return original;
+      const target = sourcePathToEntry.get(resolved);
+      if (!target || target.action === "skip") return original;
+      return `[${label}](${relativePathBetween(targetPath, target.targetPath)})`;
+    });
+  }
+
+  function planOkfImport(bundleOrInput, existingPages = [], options = {}) {
+    const bundle = bundleOrInput?.pages ? bundleOrInput : parseOkfBundle(bundleOrInput, options);
+    const mode = options.conflictMode || "skip";
+    if (!["skip", "copy", "overwrite"].includes(mode)) {
+      throw new Error("OKF conflict mode must be skip, copy, or overwrite");
+    }
+
+    const existingByPath = new Map();
+    const occupiedTargets = new Set();
+    const plannedTargets = new Set();
+    const occupiedObjectIds = new Set();
+    for (const page of existingPages.map(normalizeExistingPageRecord)) {
+      existingByPath.set(targetKey(page.folderId, page.targetPath), page);
+      occupiedTargets.add(targetKey(page.folderId, page.targetPath));
+      if (page.objectId) occupiedObjectIds.add(page.objectId);
+    }
+
+    const entries = [];
+    for (const page of bundle.pages) {
+      const folderId = page.folderId || options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID;
+      let targetPath = normalizeSafeRelativePath(page.targetPath, "OKF page target path");
+      const existing = existingByPath.get(targetKey(folderId, targetPath));
+      let action = "create";
+      let objectId = null;
+      let baseRevision = null;
+      if (existing) {
+        if (mode === "skip") {
+          action = "skip";
+          objectId = existing.objectId || null;
+        }
+        if (mode === "copy") {
+          action = "copy";
+          targetPath = uniqueImportedCopyPath(folderId, targetPath, occupiedTargets);
+          objectId = objectIdForTargetPath(targetPath, occupiedObjectIds);
+        }
+        if (mode === "overwrite") {
+          action = "overwrite";
+          objectId = existing.objectId;
+          baseRevision = existing.revision;
+        }
+      } else {
+        objectId = objectIdForTargetPath(targetPath, occupiedObjectIds);
+      }
+      occupiedTargets.add(targetKey(folderId, targetPath));
+      plannedTargets.add(targetKey(folderId, targetPath));
+      entries.push({
+        action,
+        baseRevision,
+        contentType: page.contentType || "text/markdown",
+        folderId,
+        kind: "page",
+        links: [...(page.links || extractPageLinks(page.markdown))],
+        markdown: page.markdown,
+        objectId,
+        sourcePath: page.sourcePath,
+        targetPath,
+      });
+    }
+    for (const asset of bundle.assets || []) {
+      const folderId = asset.folderId || options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID;
+      let targetPath = normalizeAssetPath(asset.targetPath, "OKF asset target path");
+      const existing = existingByPath.get(targetKey(folderId, targetPath));
+      const alreadyPlanned = plannedTargets.has(targetKey(folderId, targetPath));
+      let action = "create";
+      let objectId = null;
+      let baseRevision = null;
+      if (alreadyPlanned) {
+        action = "copy";
+        targetPath = uniqueImportedCopyPath(folderId, targetPath, occupiedTargets);
+        objectId = objectIdForTargetPath(targetPath, occupiedObjectIds);
+      } else if (existing) {
+        if (mode === "skip") {
+          action = "skip";
+          objectId = existing.objectId || null;
+        }
+        if (mode === "copy") {
+          action = "copy";
+          targetPath = uniqueImportedCopyPath(folderId, targetPath, occupiedTargets);
+          objectId = objectIdForTargetPath(targetPath, occupiedObjectIds);
+        }
+        if (mode === "overwrite") {
+          action = "overwrite";
+          objectId = existing.objectId;
+          baseRevision = existing.revision;
+        }
+      } else {
+        objectId = objectIdForTargetPath(targetPath, occupiedObjectIds);
+      }
+      occupiedTargets.add(targetKey(folderId, targetPath));
+      plannedTargets.add(targetKey(folderId, targetPath));
+      entries.push({
+        action,
+        baseRevision,
+        bytesBase64: asset.bytesBase64 || "",
+        contentHash: asset.contentHash || "",
+        contentType: asset.contentType || "application/octet-stream",
+        folderId,
+        kind: "asset",
+        links: [],
+        objectId,
+        size: asset.size,
+        sourcePath: asset.sourcePath,
+        targetPath,
+      });
+    }
+
+    const sourcePathToEntry = new Map(entries.map((entry) => [entry.sourcePath, entry]));
+    for (const entry of entries) {
+      if (entry.action !== "skip" && entry.kind !== "asset") {
+        entry.markdown = rewriteOkfMarkdownLinks(
+          entry.markdown,
+          entry.sourcePath,
+          entry.targetPath,
+          sourcePathToEntry
+        );
+        entry.links = extractPageLinks(entry.markdown);
+      }
+    }
+
+    return {
+      mode,
+      entries,
+      summary: {
+        create: entries.filter((entry) => entry.action === "create").length,
+        copy: entries.filter((entry) => entry.action === "copy").length,
+        overwrite: entries.filter((entry) => entry.action === "overwrite").length,
+        skip: entries.filter((entry) => entry.action === "skip").length,
+      },
+    };
+  }
+
+  function folderKeyVersionForImport(folderId, options = {}) {
+    if (options.keyVersionByFolderId instanceof Map && options.keyVersionByFolderId.has(folderId)) {
+      return options.keyVersionByFolderId.get(folderId);
+    }
+    if (options.keyVersionByFolderId?.[folderId]) return options.keyVersionByFolderId[folderId];
+    if (typeof options.currentKeyVersion === "function") return options.currentKeyVersion(folderId);
+    return options.keyVersion || 1;
+  }
+
+  async function prepareOkfImportWrites(keyring, plan, options) {
+    if (!keyring) throw new Error("Open destination Folder Keys before importing OKF");
+    if (!options?.vaultId) throw new Error("OKF import requires a destination Vault");
+    if (!options?.authorNpub) throw new Error("OKF import requires a connected signer");
+    if (typeof options.signEvent !== "function") throw new Error("OKF import requires event signing");
+
+    const writes = [];
+    const skipped = [];
+    let nonceIndex = 0;
+    for (const entry of plan.entries) {
+      if (entry.action === "skip") {
+        skipped.push(entry);
+        continue;
+      }
+      const keyVersion = folderKeyVersionForImport(entry.folderId, options);
+      const keyId = folderKeyId(options.vaultId, entry.folderId, keyVersion);
+      if (!keyring.keys.has(keyId)) {
+        throw new Error(
+          `Folder Key is not open for ${entry.folderId}; OKF import cannot write locked destination Folder`
+        );
+      }
+      const nonceBytes =
+        typeof options.nonceFactory === "function" ? options.nonceFactory(nonceIndex, entry) : undefined;
+      nonceIndex += 1;
+      const plaintext =
+        entry.kind === "asset"
+          ? await encodeFolderObjectAssetPlaintext(
+              entry.targetPath,
+              base64ToBytes(entry.bytesBase64 || ""),
+              entry.contentType || "application/octet-stream"
+            )
+          : encodeFolderObjectPagePlaintext(entry.targetPath, entry.markdown);
+      const body = await buildPageWriteRequest(keyring, {
+        authorNpub: options.authorNpub,
+        baseRevision: entry.baseRevision,
+        createdAtUnix: options.createdAtUnix,
+        folderId: entry.folderId,
+        keyVersion,
+        nonceBytes,
+        objectId: entry.objectId,
+        operation: entry.action === "overwrite" ? "update" : "create",
+        plaintext,
+        signEvent: options.signEvent,
+        vaultId: options.vaultId,
+      });
+      writes.push({
+        action: entry.action,
+        body,
+        folderId: entry.folderId,
+        objectId: entry.objectId,
+        path: `/_admin/vaults/${encodeURIComponent(options.vaultId)}/folders/${encodeURIComponent(
+          entry.folderId
+        )}/objects/${encodeURIComponent(entry.objectId)}`,
+        sourcePath: entry.sourcePath,
+        targetPath: entry.targetPath,
+      });
+    }
+    return { skipped, writes };
+  }
+
+  function buildGraphProjection(pages, filterText = "") {
+    const filter = normalizePageReference(filterText);
+    const visiblePages = [...pages].filter(isReadablePage);
+    const nodes = visiblePages.map((page) => {
+      const id = pageKey(page.folderId, page.objectId);
+      const title = pageTitleForPage(page);
+      return {
+        id,
+        folderId: page.folderId,
+        objectId: page.objectId,
+        title,
+        normalizedTitle: normalizePageReference(title),
+      };
+    });
+    const titleToNode = new Map(nodes.map((node) => [node.normalizedTitle, node]));
+    const includedNodeIds = new Set(
+      nodes
+        .filter((node) => !filter || node.normalizedTitle.includes(filter))
+        .map((node) => node.id)
+    );
+    const edges = [];
+    for (const page of visiblePages) {
+      const source = nodes.find((node) => node.id === pageKey(page.folderId, page.objectId));
+      if (!source) continue;
+      for (const targetRef of extractPageLinks(page.text)) {
+        const target = titleToNode.get(targetRef);
+        if (!target) continue;
+        if (filter && !includedNodeIds.has(source.id) && !includedNodeIds.has(target.id)) continue;
+        includedNodeIds.add(source.id);
+        includedNodeIds.add(target.id);
+        edges.push({
+          id: `${source.id}->${target.id}`,
+          source: source.id,
+          target: target.id,
+        });
+      }
+    }
+    return {
+      nodes: nodes.filter((node) => includedNodeIds.has(node.id)),
+      edges,
+    };
+  }
+
+  function graphStats(graph, readablePageCount = graph.nodes.length) {
+    return {
+      edgeCount: graph.edges.length,
+      filteredOutCount: Math.max(0, readablePageCount - graph.nodes.length),
+      nodeCount: graph.nodes.length,
+    };
+  }
+
+  function graphNeighborIds(graph, nodeId) {
+    const neighbors = new Set(nodeId ? [nodeId] : []);
+    if (!nodeId) return neighbors;
+    for (const edge of graph.edges || []) {
+      if (edge.source === nodeId) neighbors.add(edge.target);
+      if (edge.target === nodeId) neighbors.add(edge.source);
+    }
+    return neighbors;
+  }
+
+  function stableGraphHash(value) {
+    let hash = 2166136261;
+    for (const char of String(value || "")) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function stableUnitInterval(value) {
+    return stableGraphHash(value) / 0xffffffff;
+  }
+
+  function graphLayout(graph, options = {}) {
+    const width = Number(options.width || graphViewport.width);
+    const height = Number(options.height || graphViewport.height);
+    const margin = Number(options.margin || 44);
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const positions = new Map();
+    if (!graph.nodes.length) return positions;
+
+    const degree = new Map(graph.nodes.map((node) => [node.id, 0]));
+    for (const edge of graph.edges) {
+      degree.set(edge.source, (degree.get(edge.source) || 0) + 1);
+      degree.set(edge.target, (degree.get(edge.target) || 0) + 1);
+    }
+    const orderedNodes = [...graph.nodes].sort((left, right) => {
+      const degreeDelta = (degree.get(right.id) || 0) - (degree.get(left.id) || 0);
+      if (degreeDelta) return degreeDelta;
+      return left.title.localeCompare(right.title);
+    });
+    const radiusX = Math.max(70, width / 2 - margin);
+    const radiusY = Math.max(70, height / 2 - margin);
+    if (orderedNodes.length === 1) {
+      positions.set(orderedNodes[0].id, { x: centerX, y: centerY });
+      return positions;
+    }
+
+    const folderIds = [...new Set(orderedNodes.map((node) => node.folderId || ""))].sort();
+    const folderCenters = new Map();
+    folderIds.forEach((folderId, index) => {
+      const angle =
+        (Math.PI * 2 * index) / Math.max(1, folderIds.length) +
+        stableUnitInterval(`folder-angle:${folderId}`) * 0.82;
+      const radius = 0.42 + stableUnitInterval(`folder-radius:${folderId}`) * 0.38;
+      folderCenters.set(folderId, {
+        x: centerX + Math.cos(angle) * radiusX * radius,
+        y: centerY + Math.sin(angle) * radiusY * radius,
+      });
+    });
+
+    const hasHub = orderedNodes.length > 4 && (degree.get(orderedNodes[0].id) || 0) > 1;
+    const nodeState = orderedNodes.map((node) => {
+      const nodeDegree = degree.get(node.id) || 0;
+      const folderCenter = folderCenters.get(node.folderId || "") || { x: centerX, y: centerY };
+      const jitterAngle = stableUnitInterval(`node-angle:${node.id}`) * Math.PI * 2;
+      const jitterRadius = Math.sqrt(stableUnitInterval(`node-radius:${node.id}`)) * 188;
+      const scatterAngle = stableUnitInterval(`loose-angle:${node.id}`) * Math.PI * 2;
+      const scatterRadius = 0.2 + stableUnitInterval(`loose-radius:${node.id}`) * 0.72;
+      const looseX = centerX + Math.cos(scatterAngle) * radiusX * scatterRadius;
+      const looseY = centerY + Math.sin(scatterAngle) * radiusY * scatterRadius;
+      const fixed = hasHub && node.id === orderedNodes[0].id && orderedNodes.length < 18;
+      return {
+        fixed,
+        id: node.id,
+        loose: nodeDegree === 0,
+        x: fixed
+          ? centerX
+          : nodeDegree === 0
+            ? looseX
+            : folderCenter.x + Math.cos(jitterAngle) * jitterRadius,
+        y: fixed
+          ? centerY
+          : nodeDegree === 0
+            ? looseY
+            : folderCenter.y + Math.sin(jitterAngle) * jitterRadius,
+        vx: 0,
+        vy: 0,
+      };
+    });
+    const byId = new Map(nodeState.map((node) => [node.id, node]));
+    const links = graph.edges
+      .map((edge) => ({ source: byId.get(edge.source), target: byId.get(edge.target) }))
+      .filter((edge) => edge.source && edge.target);
+    const iterations = Math.min(260, Math.max(130, orderedNodes.length * 6));
+    const linkDistance = Math.max(92, Math.min(168, 152 - Math.sqrt(orderedNodes.length) * 1.1));
+    const repulsion = Math.max(780, Math.min(2600, 18000 / Math.sqrt(orderedNodes.length)));
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      for (let leftIndex = 0; leftIndex < nodeState.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < nodeState.length; rightIndex += 1) {
+          const left = nodeState[leftIndex];
+          const right = nodeState[rightIndex];
+          let dx = right.x - left.x;
+          let dy = right.y - left.y;
+          let distanceSq = dx * dx + dy * dy;
+          if (distanceSq < 0.01) {
+            dx = stableUnitInterval(`overlap-x:${left.id}:${right.id}`) - 0.5;
+            dy = stableUnitInterval(`overlap-y:${left.id}:${right.id}`) - 0.5;
+            distanceSq = dx * dx + dy * dy;
+          }
+          const distance = Math.sqrt(distanceSq);
+          const force = repulsion / Math.max(distanceSq, 160);
+          const fx = (dx / distance) * force;
+          const fy = (dy / distance) * force;
+          if (!left.fixed) {
+            left.vx -= fx;
+            left.vy -= fy;
+          }
+          if (!right.fixed) {
+            right.vx += fx;
+            right.vy += fy;
+          }
+        }
+      }
+      for (const link of links) {
+        const dx = link.target.x - link.source.x;
+        const dy = link.target.y - link.source.y;
+        const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        const force = (distance - linkDistance) * 0.012;
+        const fx = (dx / distance) * force;
+        const fy = (dy / distance) * force;
+        if (!link.source.fixed) {
+          link.source.vx += fx;
+          link.source.vy += fy;
+        }
+        if (!link.target.fixed) {
+          link.target.vx -= fx;
+          link.target.vy -= fy;
+        }
+      }
+      for (const node of nodeState) {
+        if (node.fixed) {
+          node.x = centerX;
+          node.y = centerY;
+          node.vx = 0;
+          node.vy = 0;
+          continue;
+        }
+        const centerForce = node.loose ? 0.00022 : 0.00068;
+        node.vx += (centerX - node.x) * centerForce;
+        node.vy += (centerY - node.y) * centerForce;
+        node.vx *= 0.9;
+        node.vy *= 0.9;
+        node.x = Math.min(width - margin, Math.max(margin, node.x + node.vx));
+        node.y = Math.min(height - margin, Math.max(margin, node.y + node.vy));
+      }
+    }
+
+    for (const node of nodeState) {
+      positions.set(node.id, {
+        x: Math.round(node.fixed ? centerX : node.x),
+        y: Math.round(node.fixed ? centerY : node.y),
+      });
+    }
+    return positions;
+  }
+
+  function buildReplayFrames(changes) {
+    const ordered = [...changes].sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    const seen = new Set();
+    const pages = new Map();
+    const frames = [];
+    for (const change of ordered) {
+      if (change.recordEventId && seen.has(change.recordEventId)) continue;
+      if (change.recordEventId) seen.add(change.recordEventId);
+      if (change.deleted) {
+        pages.delete(pageKey(change.folderId, change.objectId));
+      } else if (change.page?.status === "ready") {
+        pages.set(pageKey(change.page.folderId, change.page.objectId), change.page);
+      }
+      const graph = buildGraphProjection(pages.values());
+      frames.push({
+        sequence: change.sequence || frames.length + 1,
+        action: change.deleted ? "delete" : "upsert",
+        edgeCount: graph.edges.length,
+        graph,
+        nodeCount: graph.nodes.length,
+        recordEventId: change.recordEventId || null,
+      });
+    }
+    return frames;
+  }
+
+  function decryptedPagesForGraph() {
+    const pages = [];
+    for (const [key, draft] of state.projection.localDrafts.entries()) {
+      const [folderId, objectId] = key.split("/");
+      pages.push({
+        folderId,
+        objectId,
+        path: draft.path || `${objectId}.md`,
+        status: "ready",
+        text: draft.text,
+        title: pageTitleFromText(draft.text, pageTitleFromPath(draft.path, objectId)),
+      });
+    }
+    for (const [key, page] of state.projection.pages.entries()) {
+      if (isReadablePage(page)) {
+        const [folderId, objectId] = key.split("/");
+        pages.push({
+          folderId,
+          objectId,
+          path: page.path || `${objectId}.md`,
+          status: "ready",
+          text: page.text,
+          title: pageTitleForPage({ ...page, objectId }),
+        });
+      }
+    }
+    return pages;
+  }
+
+  function projectionPagesFromProjection(projection) {
+    const pages = new Map(
+      [...projection.pages.entries()].map(([key, page]) => [
+        key,
+        {
+          ...page,
+          key,
+          title: pageTitleForPage(page),
+        },
+      ])
+    );
+    for (const [key, draft] of projection.localDrafts.entries()) {
+      const [folderId, objectId] = key.split("/");
+      pages.set(key, {
+        baseRevision: draft.baseRevision || 0,
+        folderId,
+        key,
+        localDraft: true,
+        objectId,
+        path: draft.path || `${objectId}.md`,
+        revision: draft.baseRevision || 0,
+        status: "ready",
+        text: draft.text,
+        title: pageTitleFromText(draft.text, pageTitleFromPath(draft.path, objectId)),
+      });
+    }
+    return [...pages.values()];
+  }
+
+  function projectionPages() {
+    return projectionPagesFromProjection(state.projection);
+  }
+
+  function pageTextIsPresent(page) {
+    return page?.text !== undefined && page?.text !== null;
+  }
+
+  function isAssetObject(page) {
+    return page?.type === "asset";
+  }
+
+  function isReadablePage(page) {
+    return page?.status === "ready" && !isAssetObject(page) && pageTextIsPresent(page);
+  }
+
+  function readablePages() {
+    return projectionPages().filter(isReadablePage);
+  }
+
+  function readerFolderRows(metadata, pages = projectionPages()) {
+    const pageCounts = new Map();
+    const readableCounts = new Map();
+    for (const page of pages) {
+      if (isAssetObject(page)) continue;
+      pageCounts.set(page.folderId, (pageCounts.get(page.folderId) || 0) + 1);
+      if (isReadablePage(page)) {
+        readableCounts.set(page.folderId, (readableCounts.get(page.folderId) || 0) + 1);
+      }
+    }
+    return metadataFolderRows(metadata).map((folder) => ({
+      ...folder,
+      pageCount: pageCounts.get(folder.id) || 0,
+      readableCount: readableCounts.get(folder.id) || 0,
+    }));
+  }
+
+  function readerPageRows(folderId, pages = projectionPages()) {
+    return pages
+      .filter((page) => !folderId || page.folderId === folderId)
+      .filter((page) => !isAssetObject(page))
+      .map((page) => {
+        const title = pageTitleForPage(page);
+        return {
+          ...page,
+          title,
+          label: title,
+          detail: readerPageDetail({ ...page, title }),
+        };
+      })
+      .sort((left, right) => left.title.localeCompare(right.title));
+  }
+
+  function pageLinkContext(page, pages = readablePages()) {
+    if (!isReadablePage(page)) return { backlinks: [], outgoing: [] };
+    const keyForPage = (candidate) => candidate.key || pageKey(candidate.folderId, candidate.objectId);
+    const readable = [...pages].filter(isReadablePage);
+    const referencesForPage = (candidate) =>
+      [
+        pageTitleForPage(candidate),
+        candidate.path || `${candidate.objectId}.md`,
+        String(candidate.path || `${candidate.objectId}.md`).split("/").pop(),
+      ]
+        .map(normalizePageReference)
+        .filter(Boolean);
+    const byReference = new Map();
+    for (const candidate of readable) {
+      for (const reference of referencesForPage(candidate)) {
+        if (!byReference.has(reference)) byReference.set(reference, candidate);
+      }
+    }
+    const currentKey = keyForPage(page);
+    const currentReferences = new Set(referencesForPage(page));
+    const outgoing = extractPageLinks(page.text).map((targetRef) => {
+      const target = byReference.get(targetRef);
+      if (!target) {
+        return {
+          detail: "unresolved",
+          key: null,
+          label: targetRef,
+          status: "missing",
+        };
+      }
+      return {
+        detail: target.folderId,
+        key: keyForPage(target),
+        label: pageTitleForPage(target),
+        status: "resolved",
+      };
+    });
+    const backlinks = readable
+      .filter((candidate) => keyForPage(candidate) !== currentKey)
+      .filter((candidate) =>
+        extractPageLinks(candidate.text).some((targetRef) => currentReferences.has(targetRef))
+      )
+      .map((candidate) => ({
+        detail: candidate.folderId,
+        key: keyForPage(candidate),
+        label: pageTitleForPage(candidate),
+        status: "resolved",
+      }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+    return { backlinks, outgoing };
+  }
+
+  function pageCountLabel(count) {
+    return `${count} ${count === 1 ? "page" : "pages"}`;
+  }
+
+  function pagePathLabel(page) {
+    if (!page) return "No page path loaded";
+    return `${page.folderId}/${page.path || `${page.objectId}.md`}`;
+  }
+
+  function readerPageDetail(page) {
+    if (!page) return "";
+    if (page.status === "ready") {
+      return page.path || `${page.objectId}.md`;
+    }
+    return `locked - ${page.folderId}/${page.objectId}`;
+  }
+
+  function readerFolderDetail(row) {
+    if (!row.pageCount) return "Empty";
+    if (row.readableCount === row.pageCount) {
+      return pageCountLabel(row.pageCount);
+    }
+    if (!row.readableCount) {
+      return "Locked";
+    }
+    return `${row.readableCount}/${row.pageCount}`;
+  }
+
+  function selectDefaultReaderTargets() {
+    const folders = readerFolderRows(state.metadata);
+    const folderStillExists = folders.some((folder) => folder.id === state.selectedFolderId);
+    let selectedFolderChanged = false;
+    if (!folderStillExists) {
+      const folderWithReadablePages = folders.find((folder) => folder.readableCount > 0);
+      state.selectedFolderId = folderWithReadablePages?.id || folders[0]?.id || null;
+      selectedFolderChanged = Boolean(state.selectedFolderId);
+    }
+    if (selectedFolderChanged) state.expandedFolderIds.add(state.selectedFolderId);
+
+    const pages = readerPageRows(state.selectedFolderId);
+    const pageStillExists = pages.some((page) => page.key === state.selectedPageKey);
+    if (!pageStillExists) {
+      const readablePage = pages.find((page) => page.status === "ready");
+      state.selectedPageKey = readablePage?.key || pages[0]?.key || null;
+    }
+  }
+
+  function selectedReaderPage() {
+    if (!state.selectedPageKey) return null;
+    return projectionPages().find((page) => page.key === state.selectedPageKey) || null;
+  }
+
+  function workspaceTabTitle(metadata, page) {
+    return page?.title || metadata?.name || "Open a Vault";
+  }
+
+  function sidebarModeLabel(mode) {
+    return (
+      {
+        access: "Access",
+        files: "Files",
+        search: "Search",
+      }[normalizeSidebarMode(mode)] || "Files"
+    );
+  }
+
+  function normalizeSidebarMode(mode) {
+    return ["files", "search", "access"].includes(mode) ? mode : "files";
+  }
+
+  function globalVaultControlState(sidebarMode) {
+    return {
+      hidden: normalizeSidebarMode(sidebarMode) === "access",
+    };
+  }
+
+  function commandPaletteCommands() {
+    return [
+      { id: "files", kind: "command", label: "Files", detail: "Sidebar", target: "files" },
+      { id: "search", kind: "command", label: "Search", detail: "Sidebar", target: "search" },
+      { id: "access", kind: "command", label: "Access", detail: "Sidebar", target: "access" },
+      { id: "graph", kind: "command", label: "Graph View", detail: "Workspace", target: "graph" },
+      { id: "new-page", kind: "command", label: "New Page", detail: "Current Folder", target: "new-page" },
+      { id: "refresh", kind: "command", label: "Refresh Vault", detail: "Sync", target: "refresh" },
+    ];
+  }
+
+  function commandPaletteRows(query, pages = readablePages()) {
+    const needle = String(query || "").trim().toLowerCase();
+    const pageRows = pages.filter(isReadablePage).map((page) => ({
+      detail: pagePathLabel(page),
+      id: page.key || pageKey(page.folderId, page.objectId),
+      kind: "page",
+      label: pageTitleForPage(page),
+      pageKey: page.key || pageKey(page.folderId, page.objectId),
+    }));
+    const rows = [...commandPaletteCommands(), ...pageRows];
+    if (!needle) return rows.slice(0, 12);
+    return rows
+      .filter((row) =>
+        [row.label, row.detail, row.kind].filter(Boolean).join("\n").toLowerCase().includes(needle)
+      )
+      .slice(0, 12);
+  }
+
+  function searchPageRows(query, pages = readablePages()) {
+    const needle = String(query || "").trim().toLowerCase();
+    if (!needle) return [];
+    return pages
+      .filter(isReadablePage)
+      .filter((page) => {
+        const haystack = [page.title, page.path, page.folderId, page.text].filter(Boolean).join("\n").toLowerCase();
+        return haystack.includes(needle);
+      })
+      .sort((left, right) =>
+        pageTitleForPage(left).localeCompare(pageTitleForPage(right))
+      )
+      .map((page) => ({
+        ...page,
+        label: pageTitleForPage(page),
+        detail: `${page.folderId}/${page.path || `${page.objectId}.md`}`,
+      }));
+  }
+
+  function contextMenuItemsForTarget(target) {
+    if (!target) return [];
+    if (target.type === "page") {
+      return [
+        { action: "open-page", label: "Open Page" },
+        { action: "new-page", label: "New Page in Folder" },
+        { action: "open-graph", label: "Show in Graph View" },
+        { separator: true },
+        { action: "copy-page-id", label: "Copy Page ID" },
+        { action: "copy-folder-id", label: "Copy Folder ID" },
+        { separator: true },
+        { action: "delete-page", label: "Delete Page", disabled: false, danger: true },
+      ];
+    }
+    return [
+      { action: "open-folder", label: "Open Folder" },
+      { action: "new-page", label: "New Page" },
+      { action: "new-folder", label: "New Folder Inside" },
+      { separator: true },
+      { action: "copy-folder-id", label: "Copy Folder ID" },
+      { action: "manage-access", label: "Manage Access" },
+      { action: "share-folder", label: "Share Folder" },
+      { separator: true },
+      { action: "delete-folder", label: "Delete Folder", disabled: true, danger: true },
+    ];
+  }
+
+  function setSidebarMode(mode) {
+    state.activeSidebarMode = normalizeSidebarMode(mode);
+    closeContextMenu();
+    render();
+  }
+
+  function setWorkspaceView(view) {
+    state.activeWorkspaceView = view === "graph" ? "graph" : "page";
+    if (state.activeWorkspaceView === "graph") renderGraphView();
+    render();
+  }
+
+  function workspaceChromeState(view) {
+    const pageActive = view !== "graph";
+    return {
+      graphHidden: pageActive,
+      pageHidden: !pageActive,
+      ribbonGraphClass: `ribbon-button${pageActive ? "" : " active"}`,
+      shellView: pageActive ? "page" : "graph",
+    };
+  }
+
+  function renderWorkspaceChrome(page = selectedReaderPage()) {
+    const chrome = workspaceChromeState(state.activeWorkspaceView);
+    const workspaceTitle = workspaceTabTitle(state.metadata, page);
+    const shell = document.querySelector(".obsidian-shell");
+    shell.dataset.workspaceView = chrome.shellView;
+    shell.dataset.vaultLoaded = state.metadata ? "true" : "false";
+    $("pageWorkspace").hidden = chrome.pageHidden;
+    $("graphWorkspace").hidden = chrome.graphHidden;
+    $("ribbonGraphButton").className = chrome.ribbonGraphClass;
+    setPressed("ribbonGraphButton", !chrome.graphHidden);
+    document.title = chrome.shellView === "graph" ? "Graph View - FiniteBrain" : `${workspaceTitle} - FiniteBrain`;
+  }
+
+  function renderVaultControlChrome() {
+    const details = $("vaultControlDetails");
+    if (!details) return;
+    const chrome = globalVaultControlState(state.activeSidebarMode);
+    details.hidden = chrome.hidden;
+    setText("vaultControlSummary", activeVaultLabel());
+    if (chrome.hidden) return;
+    if (state.metadata && !state.vaultControlsCollapsedAfterLoad) {
+      details.open = false;
+      state.vaultControlsCollapsedAfterLoad = true;
+    }
+    if (!state.metadata && state.vaultControlsCollapsedAfterLoad) {
+      details.open = true;
+      state.vaultControlsCollapsedAfterLoad = false;
+    }
+  }
+
+  function nextDraftObjectId() {
+    return `obj_${Date.now().toString(36)}`.padEnd(16, "0").slice(0, 128);
+  }
+
+  function visualEditorElement() {
+    return $("readerPageContent");
+  }
+
+  function focusInlineEditor() {
+    const focusDraft = () => {
+      if (state.editorMode === "source") {
+        const draft = $("pageDraftInput");
+        draft.focus?.();
+        draft.setSelectionRange?.(draft.value.length, draft.value.length);
+      } else {
+        visualEditorElement()?.focus?.();
+      }
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(focusDraft);
+    else focusDraft();
+  }
+
+  function startNewPageDraft(folderIdOverride = null) {
+    const folderId = folderIdOverride || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    const objectId = nextDraftObjectId();
+    const draftKey = pageKey(folderId, objectId);
+    const draftText = "# New Page\n\nStart writing here.";
+    state.selectedFolderId = folderId;
+    state.selectedPageKey = draftKey;
+    state.preparedWrite = null;
+    state.preparedWriteTarget = null;
+    state.activeWorkspaceView = "page";
+    state.expandedFolderIds.add(folderId);
+    $("pageFolderIdInput").value = folderId;
+    $("okfDestinationFolderInput").value = folderId;
+    $("pageObjectIdInput").value = objectId;
+    $("pageBaseRevisionInput").value = "";
+    setEditorDraftText(draftText);
+    state.projection.localDrafts.set(draftKey, {
+      baseRevision: 0,
+      path: `${objectId}.md`,
+      text: draftText,
+    });
+    log("Started a new Page draft.", { folderId, objectId });
+    render();
+    focusInlineEditor();
+  }
+
+  function pageFromContextTarget(target) {
+    if (!target || target.type !== "page") return null;
+    const key = target.pageKey || pageKey(target.folderId, target.objectId);
+    return projectionPages().find((page) => page.key === key) || null;
+  }
+
+  async function deletePageFromContextTarget(target) {
+    const page = pageFromContextTarget(target);
+    if (!page || !isReadablePage(page)) throw new Error("Select a readable Page before deleting");
+    if (!page.revision) throw new Error("Page delete requires a saved revision");
+    if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer before deleting");
+    const title = pageTitleForPage(page);
+    if (window.confirm && !window.confirm(`Delete "${title}"? This writes a signed tombstone.`)) return;
+    const body = await buildPageDeleteRequest({
+      authorNpub: currentActorNpub(),
+      baseRevision: page.revision,
+      folderId: page.folderId,
+      objectId: page.objectId,
+      signEvent: (event) => window.nostr.signEvent(event),
+      vaultId: state.activeVaultId,
+    });
+    const route = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+      page.folderId
+    )}/objects/${encodeURIComponent(page.objectId)}`;
+    const result = await protectedRequest(route, {
+      method: "DELETE",
+      body: JSON.stringify(body),
+    });
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    state.projection.pages.delete(key);
+    state.projection.localDrafts.delete(key);
+    if (state.selectedPageKey === key) state.selectedPageKey = null;
+    selectDefaultReaderTargets();
+    log("Deleted Page through signed tombstone.", {
+      folderId: page.folderId,
+      objectId: page.objectId,
+      revision: result.revision,
+      sequence: result.sequence,
+    });
+    render();
+  }
+
+  function selectReaderFolder(folderId, options = {}) {
+    state.selectedFolderId = folderId;
+    state.expandedFolderIds.add(folderId);
+    if (options.selectFirstPage !== false) {
+      const firstPage = readerPageRows(folderId).find((page) => page.status === "ready");
+      state.selectedPageKey = firstPage?.key || null;
+    }
+    state.activeWorkspaceView = "page";
+    $("pageFolderIdInput").value = folderId;
+    $("okfDestinationFolderInput").value = folderId;
+    render();
+  }
+
+  function selectAccessFolder(folderId, intent = "overview") {
+    if (state.activeAccessFolderId !== folderId || state.activeAccessIntent !== intent) {
+      state.accessResult = null;
+    }
+    const folderChanged = state.activeAccessFolderId !== folderId;
+    state.activeAccessFolderId = folderId;
+    state.activeAccessIntent = intent;
+    selectReaderFolder(folderId, { selectFirstPage: false });
+    if (folderChanged && state.folderShareLinksFolderId !== folderId) {
+      refreshFolderShareLinks(folderId)
+        .then(() => render())
+        .catch((error) => {
+          log("Failed to refresh Folder share links.", { error: error.message });
+        });
+    }
+  }
+
+  function toggleReaderFolder(folderId) {
+    const isExpanded = state.expandedFolderIds.has(folderId);
+    state.selectedFolderId = folderId;
+    $("pageFolderIdInput").value = folderId;
+    $("okfDestinationFolderInput").value = folderId;
+    if (isExpanded) {
+      state.expandedFolderIds.delete(folderId);
+      state.selectedPageKey = null;
+    } else {
+      state.expandedFolderIds.add(folderId);
+      const firstPage = readerPageRows(folderId).find((page) => page.status === "ready");
+      state.selectedPageKey = firstPage?.key || null;
+    }
+    state.activeWorkspaceView = "page";
+    closeContextMenu();
+    render();
+  }
+
+  function selectReaderPage(pageKeyValue) {
+    state.selectedPageKey = pageKeyValue;
+    state.activeWorkspaceView = "page";
+    const page = selectedReaderPage();
+    if (page) {
+      state.selectedFolderId = page.folderId;
+      state.expandedFolderIds.add(page.folderId);
+      $("pageFolderIdInput").value = page.folderId;
+      $("pageObjectIdInput").value = page.objectId;
+      $("pageBaseRevisionInput").value = String(page.revision || "");
+      if (pageTextIsPresent(page)) setEditorDraftText(page.text);
+    }
+    render();
+  }
+
+  function existingPagesForImport() {
+    const pages = [];
+    for (const [key, draft] of state.projection.localDrafts.entries()) {
+      const [folderId, objectId] = key.split("/");
+      pages.push({
+        folderId,
+        objectId,
+        revision: draft.baseRevision || 0,
+        path: draft.path || `${objectId}.md`,
+        title: pageTitleFromText(draft.text, pageTitleFromPath(draft.path, objectId)),
+      });
+    }
+    for (const [key, page] of state.projection.pages.entries()) {
+      const [folderId, objectId] = key.split("/");
+      pages.push({
+        folderId,
+        objectId,
+        revision: page.revision || 0,
+        path: page.path || `${objectId}.md`,
+        title: pageTitleForPage({ ...page, objectId }),
+      });
+    }
+    return pages;
+  }
+
+  function graphEmptyStateCopy(options = {}) {
+    const filterText = String(options.filterText || "").trim();
+    const readablePageCount = Number(options.readablePageCount || 0);
+    if (readablePageCount <= 0) {
+      return {
+        title: "No graph yet",
+        copy: "Open a vault to build the local graph.",
+      };
+    }
+    if (filterText) {
+      return {
+        title: "No matching Pages",
+        copy: "Clear or change the graph filter.",
+      };
+    }
+    return {
+      title: "No links yet",
+      copy: "Readable pages are open, but none link to another page yet.",
+    };
+  }
+
+  function drawGraph(graph, options = {}) {
+    const svg = $("graphCanvas");
+    const emptyState = $("graphEmptyState");
+    svg.replaceChildren();
+    svg.classList.remove("is-hovering");
+    svg.setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
+    if (!graph.nodes.length) {
+      if (emptyState) {
+        const copy = graphEmptyStateCopy(options);
+        setText("graphEmptyTitle", copy.title);
+        setText("graphEmptyCopy", copy.copy);
+        emptyState.hidden = false;
+      }
+      return;
+    }
+    if (emptyState) emptyState.hidden = true;
+    const positions = graphLayout(graph);
+    const edgeDegree = new Map(graph.nodes.map((node) => [node.id, 0]));
+    for (const edge of graph.edges) {
+      edgeDegree.set(edge.source, (edgeDegree.get(edge.source) || 0) + 1);
+      edgeDegree.set(edge.target, (edgeDegree.get(edge.target) || 0) + 1);
+    }
+    for (const edge of graph.edges) {
+      const source = positions.get(edge.source);
+      const target = positions.get(edge.target);
+      if (!source || !target) continue;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("class", "edge");
+      line.dataset.source = edge.source;
+      line.dataset.target = edge.target;
+      line.setAttribute("x1", String(source.x));
+      line.setAttribute("y1", String(source.y));
+      line.setAttribute("x2", String(target.x));
+      line.setAttribute("y2", String(target.y));
+      svg.appendChild(line);
+    }
+    for (const node of graph.nodes) {
+      const position = positions.get(node.id);
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      const degree = edgeDegree.get(node.id) || 0;
+      const isSelected =
+        state.selectedPageKey && node.id === state.selectedPageKey;
+      circle.setAttribute(
+        "class",
+        `node${degree > 1 ? " focus" : ""}${isSelected ? " selected" : ""}`
+      );
+      circle.dataset.baseClass = circle.getAttribute("class");
+      circle.dataset.nodeId = node.id;
+      circle.setAttribute("cx", String(position.x));
+      circle.setAttribute("cy", String(position.y));
+      circle.setAttribute("r", String(Math.min(4.9, 2.15 + Math.sqrt(degree) * 0.52)));
+      circle.setAttribute("data-folder-id", node.folderId);
+      circle.addEventListener("mouseenter", () => setGraphHover(svg, graph, node.id));
+      circle.addEventListener("mouseleave", () => clearGraphHover(svg));
+      svg.appendChild(circle);
+
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("class", `node-label${isSelected ? " selected" : ""}`);
+      label.dataset.baseClass = label.getAttribute("class");
+      label.dataset.nodeId = node.id;
+      label.setAttribute("x", String(position.x + 11));
+      label.setAttribute("y", String(position.y + 3.5));
+      label.textContent = node.title;
+      svg.appendChild(label);
+    }
+  }
+
+  function setGraphHover(svg, graph, nodeId) {
+    const neighbors = graphNeighborIds(graph, nodeId);
+    svg.classList.add("is-hovering");
+    for (const edge of svg.querySelectorAll(".edge")) {
+      const connected = edge.dataset.source === nodeId || edge.dataset.target === nodeId;
+      edge.className.baseVal = `edge${connected ? " hover-connected" : " hover-faded"}`;
+    }
+    for (const node of svg.querySelectorAll(".node")) {
+      const id = node.dataset.nodeId;
+      const baseClass = node.dataset.baseClass || "node";
+      const hoverClass =
+        id === nodeId ? " hover-active" : neighbors.has(id) ? " hover-connected" : " hover-faded";
+      node.className.baseVal = `${baseClass}${hoverClass}`;
+    }
+    for (const label of svg.querySelectorAll(".node-label")) {
+      const id = label.dataset.nodeId;
+      const baseClass = label.dataset.baseClass || "node-label";
+      const labelClass =
+        id === nodeId ? " hover-active" : neighbors.has(id) ? " hover-connected" : "";
+      label.className.baseVal = `${baseClass}${labelClass}`;
+    }
+  }
+
+  function clearGraphHover(svg) {
+    svg.classList.remove("is-hovering");
+    for (const edge of svg.querySelectorAll(".edge")) edge.className.baseVal = "edge";
+    for (const node of svg.querySelectorAll(".node")) {
+      node.className.baseVal = node.dataset.baseClass || "node";
+    }
+    for (const label of svg.querySelectorAll(".node-label")) {
+      label.className.baseVal = label.dataset.baseClass || "node-label";
+    }
+  }
+
+  function setPill(id, text, tone) {
+    const element = $(id);
+    if (!element) return;
+    element.textContent = text;
+    element.className = `pill ${tone || "muted"}`;
+  }
+
+  function openedGrantFolderKeys() {
+    return new Set(
+      (state.keyring?.openedGrants || []).map((grant) =>
+        folderKeyVersionKey(grant.folderId, grant.keyVersion)
+      )
+    );
+  }
+
+  function appendAccessBadges(parent, badges) {
+    if (!badges.length) return;
+    const row = document.createElement("span");
+    row.className = "access-badge-row";
+    for (const badge of badges) {
+      const element = document.createElement("span");
+      element.className = `access-badge ${badge.tone || "muted"}`;
+      element.textContent = badge.label;
+      row.appendChild(element);
+    }
+    parent.appendChild(row);
+  }
+
+  function renderAccessBadgeRow(id, badges) {
+    const row = $(id);
+    if (!row) return;
+    row.replaceChildren();
+    for (const badge of badges) {
+      const element = document.createElement("span");
+      element.className = `access-badge ${badge.tone || "muted"}`;
+      element.textContent = badge.label;
+      row.appendChild(element);
+    }
+  }
+
+  function setText(id, text) {
+    const element = $(id);
+    if (element) element.textContent = text;
+  }
+
+  function setPressed(id, pressed) {
+    const element = $(id);
+    if (element) element.setAttribute("aria-pressed", String(Boolean(pressed)));
+  }
+
+  function appendFormattedText(parent, text) {
+    const source = String(text || "");
+    const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_/g;
+    let cursor = 0;
+    for (const match of source.matchAll(pattern)) {
+      if (match.index > cursor) {
+        parent.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+      }
+      if (match[1]) {
+        const code = document.createElement("code");
+        code.textContent = match[1];
+        parent.appendChild(code);
+      } else if (match[2] || match[3]) {
+        const strong = document.createElement("strong");
+        strong.textContent = match[2] || match[3];
+        parent.appendChild(strong);
+      } else if (match[4]) {
+        const strike = document.createElement("del");
+        strike.textContent = match[4];
+        parent.appendChild(strike);
+      } else if (match[5] || match[6]) {
+        const emphasis = document.createElement("em");
+        emphasis.textContent = match[5] || match[6];
+        parent.appendChild(emphasis);
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < source.length) parent.appendChild(document.createTextNode(source.slice(cursor)));
+  }
+
+  function appendInlineSegments(parent, text) {
+    for (const segment of inlineLinkSegments(text)) {
+      if (segment.kind === "text") {
+        appendFormattedText(parent, segment.text);
+        continue;
+      }
+      const link = document.createElement("span");
+      link.className = segment.kind === "external" ? "external-link" : "internal-link";
+      appendFormattedText(link, segment.text || segment.target);
+      if (segment.target) link.dataset.target = segment.target;
+      parent.appendChild(link);
+    }
+  }
+
+  function renderMarkdownPreview(container, markdown) {
+    container.replaceChildren();
+    for (const block of markdownPreviewBlocks(markdown)) {
+      if (block.type === "heading") {
+        const heading = document.createElement(`h${block.level}`);
+        appendInlineSegments(heading, block.text);
+        container.appendChild(heading);
+        continue;
+      }
+      if (block.type === "list") {
+        const list = document.createElement(block.ordered ? "ol" : "ul");
+        if (block.ordered && block.start && block.start !== 1) list.start = block.start;
+        if (!block.ordered && block.items.some((item) => item.checked !== null)) {
+          list.className = "task-list";
+        }
+        for (const itemBlock of block.items) {
+          const item = document.createElement("li");
+          if (itemBlock.checked !== null) {
+            item.className = "task-list-item";
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = Boolean(itemBlock.checked);
+            checkbox.disabled = true;
+            item.appendChild(checkbox);
+          }
+          appendInlineSegments(item, itemBlock.text);
+          list.appendChild(item);
+        }
+        container.appendChild(list);
+        continue;
+      }
+      if (block.type === "quote") {
+        const quote = document.createElement("blockquote");
+        appendInlineSegments(quote, block.text);
+        container.appendChild(quote);
+        continue;
+      }
+      if (block.type === "code") {
+        const pre = document.createElement("pre");
+        pre.className = "code-block";
+        if (block.language) {
+          pre.dataset.language = block.language;
+          pre.setAttribute?.("data-language", block.language);
+        }
+        const code = document.createElement("code");
+        if (block.language) code.className = `language-${block.language}`;
+        code.textContent = block.text;
+        pre.appendChild(code);
+        container.appendChild(pre);
+        continue;
+      }
+      if (block.type === "table") {
+        const table = document.createElement("table");
+        const thead = document.createElement("thead");
+        const headerRow = document.createElement("tr");
+        block.headers.forEach((header, index) => {
+          const cell = document.createElement("th");
+          if (block.alignments[index] && cell.style) cell.style.textAlign = block.alignments[index];
+          appendInlineSegments(cell, header);
+          headerRow.appendChild(cell);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        for (const row of block.rows) {
+          const tableRow = document.createElement("tr");
+          row.forEach((value, index) => {
+            const cell = document.createElement("td");
+            if (block.alignments[index] && cell.style) cell.style.textAlign = block.alignments[index];
+            appendInlineSegments(cell, value);
+            tableRow.appendChild(cell);
+          });
+          tbody.appendChild(tableRow);
+        }
+        table.appendChild(tbody);
+        container.appendChild(table);
+        continue;
+      }
+      if (block.type === "rule") {
+        container.appendChild(document.createElement("hr"));
+        continue;
+      }
+      const paragraph = document.createElement("p");
+      appendInlineSegments(paragraph, block.text);
+      container.appendChild(paragraph);
+    }
+  }
+
+  function renderMarkdownEditor(container, markdown) {
+    renderMarkdownPreview(container, markdown);
+    if (!container.childNodes.length) {
+      const paragraph = document.createElement("p");
+      paragraph.appendChild(document.createElement("br"));
+      container.appendChild(paragraph);
+    }
+  }
+
+  function escapeMarkdownCode(value) {
+    return String(value || "").replaceAll("`", "\\`");
+  }
+
+  function inlineMarkdownFromEditorNode(node) {
+    if (!node) return "";
+    if (node.nodeType === 3) return String(node.nodeValue || "").replace(/\u00a0/g, " ");
+    if (node.nodeType !== 1) return "";
+    const tag = String(node.tagName || "").toLowerCase();
+    if (tag === "br") return "\n";
+    if (tag === "input") return "";
+    const text = Array.from(node.childNodes || []).map(inlineMarkdownFromEditorNode).join("");
+    if (!text && tag !== "img") return "";
+    if (tag === "strong" || tag === "b") return `**${text}**`;
+    if (tag === "em" || tag === "i") return `*${text}*`;
+    if (tag === "del" || tag === "s") return `~~${text}~~`;
+    if (tag === "code") return `\`${escapeMarkdownCode(text)}\``;
+    if (tag === "a") {
+      const target = node.getAttribute?.("href") || node.dataset?.target || "";
+      return target ? `[${text || target}](${target})` : text;
+    }
+    const className = String(node.className || "");
+    if (className.includes("internal-link") && node.dataset?.target) {
+      return text && text !== node.dataset.target
+        ? `[[${node.dataset.target}|${text}]]`
+        : `[[${node.dataset.target}]]`;
+    }
+    if (className.includes("external-link") && node.dataset?.target) {
+      return `[${text || node.dataset.target}](${node.dataset.target})`;
+    }
+    return text;
+  }
+
+  function markdownTableCellFromNode(node) {
+    return inlineMarkdownFromEditorNode(node)
+      .replace(/\n+/g, " ")
+      .replaceAll("|", "\\|")
+      .trim();
+  }
+
+  function tableRowsFromSection(section, cellTag) {
+    const rows = [];
+    for (const row of Array.from(section?.children || [])) {
+      const cells = Array.from(row.children || []).filter(
+        (cell) => String(cell.tagName || "").toLowerCase() === cellTag
+      );
+      if (cells.length) rows.push(cells.map(markdownTableCellFromNode));
+    }
+    return rows;
+  }
+
+  function tableMarkdownFromEditorNode(node) {
+    const sections = Array.from(node.children || []);
+    const head = sections.find((child) => String(child.tagName || "").toLowerCase() === "thead");
+    const body = sections.find((child) => String(child.tagName || "").toLowerCase() === "tbody");
+    let headers = tableRowsFromSection(head, "th")[0] || [];
+    let rows = tableRowsFromSection(body, "td");
+    if (!headers.length && rows.length) {
+      headers = rows.shift();
+    }
+    if (!headers.length) return "";
+    const width = Math.max(headers.length, ...rows.map((row) => row.length));
+    const paddedHeaders = normalizeMarkdownTableRow(headers, width);
+    const paddedRows = rows.map((row) => normalizeMarkdownTableRow(row, width));
+    return [
+      `| ${paddedHeaders.join(" | ")} |`,
+      `| ${Array.from({ length: width }, () => "---").join(" | ")} |`,
+      ...paddedRows.map((row) => `| ${row.join(" | ")} |`),
+    ].join("\n");
+  }
+
+  function editorBlockMarkdown(node) {
+    if (!node) return "";
+    if (node.nodeType === 3) return String(node.nodeValue || "").trim();
+    if (node.nodeType !== 1) return "";
+    const tag = String(node.tagName || "").toLowerCase();
+    if (/^h[1-6]$/.test(tag)) {
+      return `${"#".repeat(Number(tag.slice(1)))} ${inlineMarkdownFromEditorNode(node).trim()}`;
+    }
+    if (tag === "ul" || tag === "ol") {
+      return Array.from(node.children || [])
+        .filter((child) => String(child.tagName || "").toLowerCase() === "li")
+        .map((child, index) => {
+          const checkbox = Array.from(child.children || []).find(
+            (candidate) => String(candidate.tagName || "").toLowerCase() === "input"
+          );
+          const text = inlineMarkdownFromEditorNode(child).trim();
+          if (!text) return "";
+          if (checkbox) return `- [${checkbox.checked ? "x" : " "}] ${text}`;
+          return tag === "ol" ? `${index + 1}. ${text}` : `- ${text}`;
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (tag === "blockquote") {
+      const quote = inlineMarkdownFromEditorNode(node).trim();
+      return quote
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => `> ${line}`)
+        .join("\n");
+    }
+    if (tag === "pre") {
+      const code = normalizeCodeBlockText(String(node.textContent || "").replace(/\n$/g, ""));
+      const language = String(node.dataset?.language || node.getAttribute?.("data-language") || "").trim();
+      return `\`\`\`${language}\n${code}\n\`\`\``;
+    }
+    if (tag === "table") return tableMarkdownFromEditorNode(node);
+    if (tag === "hr") return "---";
+    return inlineMarkdownFromEditorNode(node).trim();
+  }
+
+  function markdownFromEditorElement(editor) {
+    const blocks = Array.from(editor?.childNodes || [])
+      .map(editorBlockMarkdown)
+      .map((block) => block.trim())
+      .filter(Boolean);
+    if (blocks.length) return blocks.join("\n\n");
+    return String(editor?.textContent || "").trim();
+  }
+
+  function setEditorDraftText(markdown, options = {}) {
+    const draft = $("pageDraftInput");
+    if (draft) draft.value = markdown;
+    if (options.syncVisual && state.readerMode !== "source") {
+      renderMarkdownEditor(visualEditorElement(), markdown);
+    }
+    updateEditorChrome();
+  }
+
+  function invalidatePreparedWrite() {
+    state.preparedWrite = null;
+    state.preparedWriteTarget = null;
+    updateSaveControls();
+  }
+
+  function activePageKeyFromInputs() {
+    const folderId = $("pageFolderIdInput")?.value.trim() || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    const objectId = $("pageObjectIdInput")?.value.trim() || selectedReaderPage()?.objectId || nextDraftObjectId();
+    return { folderId, objectId, key: pageKey(folderId, objectId) };
+  }
+
+  function activeLocalDraft() {
+    return state.projection.localDrafts.get(activePageKeyFromInputs().key) || null;
+  }
+
+  function canSaveActiveDraft() {
+    return Boolean(state.signerStatus === "connected" && state.keyring && activeLocalDraft());
+  }
+
+  function updateSaveControls() {
+    return canSaveActiveDraft();
+  }
+
+  function rememberActiveDraft(markdown) {
+    const { folderId, objectId, key } = activePageKeyFromInputs();
+    const baseRevision = Number($("pageBaseRevisionInput")?.value.trim() || 0) || 0;
+    const existingDraft = state.projection.localDrafts.get(key);
+    const existingPage = state.projection.pages.get(key);
+    state.projection.localDrafts.set(key, {
+      baseRevision,
+      path: existingDraft?.path || existingPage?.path || `${objectId}.md`,
+      text: markdown,
+    });
+    const draft = $("pageDraftInput");
+    if (draft) draft.value = markdown;
+    invalidatePreparedWrite();
+    updateEditorChrome();
+  }
+
+  function syncDraftFromVisualEditor(options = {}) {
+    const editor = visualEditorElement();
+    const markdown = markdownFromEditorElement(editor);
+    const draft = $("pageDraftInput");
+    if (draft) draft.value = markdown;
+    if (options.remember) rememberActiveDraft(markdown);
+    updateEditorChrome();
+    return markdown;
+  }
+
+  function setEditorMode(mode) {
+    state.editorMode = mode === "source" ? "source" : "visual";
+    if (state.editorMode === "source") {
+      syncDraftFromVisualEditor();
+      setPageContentEditable(visualEditorElement(), false);
+    } else {
+      renderMarkdownEditor(visualEditorElement(), $("pageDraftInput").value);
+      if (isReadablePage(selectedReaderPage()) && state.readerMode !== "source") {
+        setPageContentEditable(visualEditorElement(), true);
+      }
+    }
+    updateEditorChrome();
+  }
+
+  function updateEditorChrome() {
+    const source = $("pageSourceEditorLabel");
+    const page = selectedReaderPage();
+    const canEditInline = isReadablePage(page) && state.readerMode !== "source" && state.editorMode !== "source";
+    if (source) source.hidden = state.editorMode !== "source";
+    let statusText = "Reading mode";
+    if (!isReadablePage(page)) {
+      statusText = "No page loaded";
+    } else if (state.editorMode === "source") {
+      statusText = "Raw Markdown editor";
+    } else if (canEditInline) {
+      statusText = "Click to edit inline";
+    } else if (state.readerMode === "source") {
+      statusText = "Source reading mode";
+    }
+    setText("editorStatusText", statusText);
+    updateSaveControls();
+  }
+
+  function selectedTextForEditor() {
+    return String(window.getSelection?.()?.toString?.() || "");
+  }
+
+  function editorSlashCommandRows(query) {
+    const needle = String(query || "").trim().toLowerCase();
+    return EDITOR_SLASH_COMMANDS.filter((command) => {
+      if (!needle) return true;
+      const haystack = [command.id, command.label, command.detail, ...(command.aliases || [])]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function editorBlockForNode(node) {
+    const editor = visualEditorElement();
+    let current = node?.nodeType === 1 ? node : node?.parentElement;
+    while (current && current !== editor) {
+      const tag = String(current.tagName || "").toLowerCase();
+      if (/^(p|h[1-6]|li|blockquote|pre|td|th)$/.test(tag)) return current;
+      current = current.parentElement;
+    }
+    return editor;
+  }
+
+  function textOffsetRange(root, startOffset, endOffset) {
+    const range = document.createRange?.();
+    if (!range || !root) return null;
+    let cursor = 0;
+    let startSet = false;
+    let endSet = false;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const next = cursor + String(node.nodeValue || "").length;
+      if (!startSet && startOffset <= next) {
+        range.setStart(node, Math.max(0, startOffset - cursor));
+        startSet = true;
+      }
+      if (!endSet && endOffset <= next) {
+        range.setEnd(node, Math.max(0, endOffset - cursor));
+        endSet = true;
+        break;
+      }
+      cursor = next;
+    }
+    if (!startSet) range.setStart(root, root.childNodes.length);
+    if (!endSet) range.setEnd(root, root.childNodes.length);
+    return range;
+  }
+
+  function slashMenuRectForRange(range) {
+    const editorRect = visualEditorElement()?.getBoundingClientRect?.();
+    const collapsed = range?.cloneRange?.();
+    if (collapsed) {
+      collapsed.collapse(false);
+      const caretRect = collapsed.getBoundingClientRect?.();
+      if (caretRect && (caretRect.width || caretRect.height)) return caretRect;
+      const tokenRect = range.getBoundingClientRect?.();
+      if (tokenRect && (tokenRect.width || tokenRect.height)) return tokenRect;
+    }
+    return editorRect || { bottom: 96, left: 96 };
+  }
+
+  function currentEditorSlashContext() {
+    const editor = visualEditorElement();
+    if (!editor || editor.getAttribute?.("contenteditable") !== "true") return null;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed) return null;
+    if (!editor.contains(selection.anchorNode)) return null;
+    const block = editorBlockForNode(selection.anchorNode);
+    if (!block) return null;
+    const beforeRange = document.createRange?.();
+    if (!beforeRange) return null;
+    beforeRange.selectNodeContents(block);
+    try {
+      beforeRange.setEnd(selection.anchorNode, selection.anchorOffset);
+    } catch (_error) {
+      return null;
+    }
+    const beforeText = beforeRange.toString();
+    const match = beforeText.match(/(^|[\s\u00a0])\/([A-Za-z0-9_-]*)$/);
+    if (!match) return null;
+    const query = match[2] || "";
+    const startOffset = beforeText.length - query.length - 1;
+    const tokenRange = textOffsetRange(block, startOffset, beforeText.length);
+    if (!tokenRange) return null;
+    return {
+      query,
+      range: tokenRange,
+      rect: slashMenuRectForRange(tokenRange),
+      rows: editorSlashCommandRows(query),
+    };
+  }
+
+  function closeEditorSlashMenu() {
+    state.editorSlashOpen = false;
+    state.editorSlashQuery = "";
+    state.editorSlashRange = null;
+    state.editorSlashSelectedIndex = 0;
+    const menu = $("editorSlashMenu");
+    if (menu) {
+      menu.hidden = true;
+      menu.replaceChildren();
+    }
+  }
+
+  function renderEditorSlashMenu(context) {
+    const menu = $("editorSlashMenu");
+    if (!menu || !context || !context.rows.length) {
+      closeEditorSlashMenu();
+      return;
+    }
+    state.editorSlashOpen = true;
+    state.editorSlashQuery = context.query;
+    state.editorSlashRange = context.range.cloneRange?.() || context.range;
+    state.editorSlashSelectedIndex = Math.min(
+      Math.max(0, state.editorSlashSelectedIndex),
+      Math.max(0, context.rows.length - 1)
+    );
+    menu.hidden = false;
+    menu.replaceChildren();
+    menu.setAttribute("aria-activedescendant", `editorSlashCommand-${context.rows[state.editorSlashSelectedIndex].id}`);
+    for (const [index, command] of context.rows.entries()) {
+      const button = document.createElement("button");
+      button.id = `editorSlashCommand-${command.id}`;
+      button.type = "button";
+      button.className = `editor-slash-row${index === state.editorSlashSelectedIndex ? " active" : ""}`;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === state.editorSlashSelectedIndex));
+      button.dataset.editorSlashCommand = command.id;
+      const label = document.createElement("strong");
+      label.textContent = command.label;
+      const detail = document.createElement("span");
+      detail.textContent = command.detail;
+      button.append(label, detail);
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      button.addEventListener("click", () => applyEditorSlashCommand(command.id));
+      menu.appendChild(button);
+    }
+    menu.querySelector(".editor-slash-row.active")?.scrollIntoView?.({ block: "nearest" });
+    const menuWidth = Math.min(280, Math.max(220, menu.offsetWidth || 260));
+    const left = Math.max(8, Math.min(context.rect.left, window.innerWidth - menuWidth - 8));
+    const top = Math.max(8, Math.min(context.rect.bottom + 8, window.innerHeight - 280));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function refreshEditorSlashMenu() {
+    const context = currentEditorSlashContext();
+    if (!context) {
+      closeEditorSlashMenu();
+      return;
+    }
+    if (context.query !== state.editorSlashQuery) state.editorSlashSelectedIndex = 0;
+    renderEditorSlashMenu(context);
+  }
+
+  function applyEditorSlashCommand(command) {
+    const range = state.editorSlashRange?.cloneRange?.();
+    closeEditorSlashMenu();
+    const editor = visualEditorElement();
+    editor?.focus?.();
+    if (range) {
+      const selection = window.getSelection?.();
+      selection?.removeAllRanges?.();
+      range.deleteContents();
+      range.collapse(true);
+      selection?.addRange?.(range);
+    }
+    runEditorCommand(command);
+  }
+
+  function handleEditorSlashKeydown(event) {
+    if (!state.editorSlashOpen) return false;
+    const rows = editorSlashCommandRows(state.editorSlashQuery);
+    if (!rows.length) {
+      closeEditorSlashMenu();
+      return false;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      state.editorSlashSelectedIndex = (state.editorSlashSelectedIndex + 1) % rows.length;
+      renderEditorSlashMenu({ query: state.editorSlashQuery, range: state.editorSlashRange, rect: slashMenuRectForRange(state.editorSlashRange), rows });
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      state.editorSlashSelectedIndex = (state.editorSlashSelectedIndex - 1 + rows.length) % rows.length;
+      renderEditorSlashMenu({ query: state.editorSlashQuery, range: state.editorSlashRange, rect: slashMenuRectForRange(state.editorSlashRange), rows });
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      applyEditorSlashCommand(rows[state.editorSlashSelectedIndex]?.id);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeEditorSlashMenu();
+      return true;
+    }
+    return false;
+  }
+
+  function runEditorCommand(command) {
+    if (!command) return;
+    if (state.editorMode !== "visual") setEditorMode("visual");
+    const editor = visualEditorElement();
+    editor.focus?.();
+    const exec = (name, value = null) => document.execCommand?.(name, false, value);
+    if (command === "paragraph") exec("formatBlock", "p");
+    if (command === "heading1") exec("formatBlock", "h1");
+    if (command === "heading2") exec("formatBlock", "h2");
+    if (command === "bold") exec("bold");
+    if (command === "italic") exec("italic");
+    if (command === "bullet") exec("insertUnorderedList");
+    if (command === "quote") exec("formatBlock", "blockquote");
+    if (command === "codeblock") exec("formatBlock", "pre");
+    if (command === "rule") exec("insertHorizontalRule");
+    if (command === "code") {
+      exec("insertHTML", `<code>${escapeHtml(selectedTextForEditor() || "code")}</code>`);
+    }
+    if (command === "link") {
+      const target = window.prompt?.("Link target")?.trim();
+      if (target) exec("createLink", target);
+    }
+    syncDraftFromVisualEditor({ remember: true });
+  }
+
+  function setNoteEmptyState(isEmpty) {
+    $("readerPageContent").className = isEmpty ? "note-content note-content-empty" : "note-content";
+  }
+
+  function setPageContentEditable(content, enabled) {
+    if (!content) return;
+    if (enabled) {
+      content.setAttribute("contenteditable", "true");
+      content.setAttribute("spellcheck", "true");
+      content.setAttribute("role", "textbox");
+      content.setAttribute("aria-label", "Page editor");
+      content.setAttribute("aria-multiline", "true");
+      return;
+    }
+    content.removeAttribute("contenteditable");
+    content.removeAttribute("spellcheck");
+    content.removeAttribute("role");
+    content.removeAttribute("aria-label");
+    content.removeAttribute("aria-multiline");
+  }
+
+  function renderPageContent(page) {
+    const content = $("readerPageContent");
+    content.replaceChildren();
+    setPageContentEditable(content, false);
+    if (!page) {
+      content.className = "note-content note-content-empty";
+      content.textContent = "Open a vault to read pages.";
+      return;
+    }
+    if (!isReadablePage(page)) {
+      content.className = "note-content note-content-empty";
+      content.textContent = "This page is locked in this session.";
+      return;
+    }
+    if (state.readerMode === "source") {
+      content.className = "note-content note-source";
+      content.textContent = page.text || "";
+      return;
+    }
+    content.className = `note-content note-markdown inline-page-editor${page.localDraft ? " inline-page-editor-dirty" : ""}`;
+    setPageContentEditable(content, state.editorMode !== "source");
+    renderMarkdownEditor(content, page.text || "");
+  }
+
+  function renderPageStatus(page) {
+    return page;
+  }
+
+  function renderLinkContext(page) {
+    return page;
+  }
+
+  function setGraphStats(graph, readablePageCount) {
+    const stats = graphStats(graph, readablePageCount);
+    const filtered =
+      stats.filteredOutCount > 0 ? ` / ${stats.filteredOutCount} hidden by filter` : "";
+    setPill(
+      "graphStats",
+      `${stats.nodeCount} ${stats.nodeCount === 1 ? "node" : "nodes"} / ${stats.edgeCount} ${
+        stats.edgeCount === 1 ? "link" : "links"
+      }${filtered}`,
+      stats.nodeCount ? "ready" : "muted"
+    );
+  }
+
+  function setList(id, rows, emptyText, renderRow) {
+    const list = $(id);
+    if (!list) return;
+    list.replaceChildren();
+    if (!rows.length) {
+      const item = document.createElement("li");
+      item.className = "empty-row";
+      item.textContent = emptyText;
+      list.appendChild(item);
+      return;
+    }
+    for (const row of rows) {
+      const item = document.createElement("li");
+      renderRow(item, row);
+      list.appendChild(item);
+    }
+  }
+
+  function log(message, value) {
+    console.debug(`[FiniteBrain] ${message}`, value ?? "");
+  }
+
+  function closeContextMenu() {
+    state.contextMenuTarget = null;
+    const menu = $("contextMenu");
+    if (!menu) return;
+    menu.hidden = true;
+    menu.replaceChildren();
+  }
+
+  function closeCommandPalette() {
+    state.commandPaletteOpen = false;
+    const palette = $("commandPalette");
+    if (!palette) return;
+    palette.hidden = true;
+    setPressed("ribbonCommandButton", false);
+    $("ribbonCommandButton").className = "ribbon-button";
+  }
+
+  function runCommandPaletteRow(row) {
+    if (!row) return;
+    closeCommandPalette();
+    if (row.kind === "page") {
+      selectReaderPage(row.pageKey);
+      return;
+    }
+    if (row.target === "files" || row.target === "search" || row.target === "access") {
+      setSidebarMode(row.target);
+      return;
+    }
+    if (row.target === "graph") {
+      setWorkspaceView("graph");
+      return;
+    }
+    if (row.target === "new-page") {
+      startNewPageDraft();
+      return;
+    }
+    if (row.target === "refresh") {
+      refreshReader().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to refresh Vault reader.", { error: error.message });
+        state.readerBusy = false;
+        render();
+      });
+    }
+  }
+
+  function renderCommandPalette() {
+    const palette = $("commandPalette");
+    if (!palette) return;
+    palette.hidden = !state.commandPaletteOpen;
+    setPressed("ribbonCommandButton", state.commandPaletteOpen);
+    $("ribbonCommandButton").className = `ribbon-button${state.commandPaletteOpen ? " utility-active" : ""}`;
+    if (!state.commandPaletteOpen) return;
+    const list = $("commandPaletteList");
+    const rows = commandPaletteRows($("commandPaletteInput").value);
+    list.replaceChildren();
+    if (!rows.length) {
+      const item = document.createElement("li");
+      item.className = "empty-row";
+      item.textContent = "No matching commands or Pages";
+      list.appendChild(item);
+      return;
+    }
+    rows.forEach((row, index) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `command-palette-row${index === 0 ? " active" : ""}`;
+      const copy = document.createElement("span");
+      const title = document.createElement("span");
+      title.className = "command-palette-row-title";
+      title.textContent = row.label;
+      const detail = document.createElement("span");
+      detail.className = "command-palette-row-detail";
+      detail.textContent = row.detail || "";
+      copy.appendChild(title);
+      copy.appendChild(detail);
+      const kind = document.createElement("span");
+      kind.className = "command-palette-row-kind";
+      kind.textContent = row.kind;
+      button.appendChild(copy);
+      button.appendChild(kind);
+      button.addEventListener("click", () => runCommandPaletteRow(row));
+      item.appendChild(button);
+      list.appendChild(item);
+    });
+  }
+
+  function openCommandPalette(seed = "") {
+    state.commandPaletteOpen = true;
+    closeContextMenu();
+    $("commandPaletteInput").value = seed;
+    renderCommandPalette();
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => $("commandPaletteInput").focus());
+    } else {
+      $("commandPaletteInput").focus?.();
+    }
+  }
+
+  function positionContextMenu(menu, x, y, itemCount) {
+    const estimatedWidth = 240;
+    const estimatedHeight = Math.max(40, itemCount * 34 + 14);
+    const maxLeft = Math.max(8, window.innerWidth - estimatedWidth - 8);
+    const maxTop = Math.max(8, window.innerHeight - estimatedHeight - 8);
+    menu.style.left = `${Math.min(Math.max(8, x), maxLeft)}px`;
+    menu.style.top = `${Math.min(Math.max(8, y), maxTop)}px`;
+  }
+
+  function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+    return Promise.resolve();
+  }
+
+  function handleContextMenuAction(item, target) {
+    if (item.disabled) return;
+    closeContextMenu();
+    if (item.action === "open-folder") {
+      selectReaderFolder(target.folderId);
+      return;
+    }
+    if (item.action === "open-page") {
+      selectReaderPage(target.pageKey);
+      return;
+    }
+    if (item.action === "new-page") {
+      startNewPageDraft(target.folderId);
+      return;
+    }
+    if (item.action === "new-folder") {
+      createFolderFromToolbar().catch((error) => {
+        state.lastError = error.message;
+        window.alert?.(error.message);
+        log("Failed to create Folder from context menu.", { error: error.message });
+        render();
+      });
+      return;
+    }
+    if (item.action === "open-graph") {
+      $("graphFilterInput").value = target.title || target.objectId || "";
+      setWorkspaceView("graph");
+      return;
+    }
+    if (item.action === "copy-page-id") {
+      writeClipboard(target.objectId).catch(() => {});
+      log("Copied Page ID.", { objectId: target.objectId });
+      return;
+    }
+    if (item.action === "copy-folder-id") {
+      writeClipboard(target.folderId).catch(() => {});
+      log("Copied Folder ID.", { folderId: target.folderId });
+      return;
+    }
+    if (item.action === "delete-page") {
+      deletePageFromContextTarget(target).catch((error) => {
+        state.lastError = error.message;
+        window.alert?.(error.message);
+        log("Failed to delete Page.", { error: error.message });
+        render();
+      });
+      return;
+    }
+    const accessRoute = accessActionRoute(item.action, target);
+    if (accessRoute) {
+      state.accessResult = null;
+      state.activeAccessView = "folder";
+      state.activeAccessFolderId = accessRoute.folderId;
+      state.activeAccessIntent = accessRoute.intent;
+      state.selectedFolderId = accessRoute.folderId;
+      state.expandedFolderIds.add(accessRoute.folderId);
+      $("pageFolderIdInput").value = accessRoute.folderId;
+      $("okfDestinationFolderInput").value = accessRoute.folderId;
+      setSidebarMode(accessRoute.sidebarMode);
+      log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
+        folderId: accessRoute.folderId,
+        intent: accessRoute.intent,
+      });
+      return;
+    }
+  }
+
+  function openContextMenu(target, x, y) {
+    const menu = $("contextMenu");
+    if (!menu) return;
+    state.contextMenuTarget = target;
+    menu.replaceChildren();
+    const items = contextMenuItemsForTarget(target);
+    for (const item of items) {
+      if (item.separator) {
+        const separator = document.createElement("div");
+        separator.className = "context-menu-separator";
+        menu.appendChild(separator);
+        continue;
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item.label;
+      button.disabled = Boolean(item.disabled);
+      button.className = item.danger ? "danger" : "";
+      button.addEventListener("click", () => handleContextMenuAction(item, target));
+      menu.appendChild(button);
+    }
+    menu.hidden = false;
+    positionContextMenu(menu, x, y, items.length);
+  }
+
+  function appendObsidianDetail(button, detail) {
+    if (!detail) return;
+    const detailElement = document.createElement("span");
+    detailElement.className = "obsidian-file-detail";
+    detailElement.textContent = detail;
+    button.appendChild(detailElement);
+  }
+
+  function obsidianTreeButton(label, detail, className, onClick, options = {}) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    const title = document.createElement("span");
+    title.className = "obsidian-file-title";
+    title.textContent = label;
+    button.appendChild(title);
+    appendObsidianDetail(button, detail);
+    button.addEventListener("click", onClick);
+    if (options.contextTarget) {
+      button.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        openContextMenu(options.contextTarget, event.clientX, event.clientY);
+      });
+    }
+    return button;
+  }
+
+  function accessFolderOptionButton(row, isActive, openedFolders, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `folder-option-button ${row.status}${isActive ? " active" : ""}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(isActive));
+
+    const title = document.createElement("span");
+    title.className = "folder-option-title";
+    title.textContent = row.path;
+
+    const meta = document.createElement("span");
+    meta.className = "folder-option-meta";
+    meta.textContent = `${row.accessLabel} · ${accessKeySummary(row, openedFolders).toLowerCase()}`;
+
+    button.appendChild(title);
+    button.appendChild(meta);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function renderSidebarMode() {
+    const mode = normalizeSidebarMode(state.activeSidebarMode);
+    state.activeSidebarMode = mode;
+    $("filesSidebarPanel").hidden = mode !== "files";
+    $("searchSidebarPanel").hidden = mode !== "search";
+    $("accessSidebarPanel").hidden = mode !== "access";
+    $("ribbonFilesButton").className = `ribbon-button${mode === "files" ? " active" : ""}`;
+    $("ribbonSearchButton").className = `ribbon-button${mode === "search" ? " active" : ""}`;
+    $("ribbonAccessButton").className = `ribbon-button${mode === "access" ? " active" : ""}`;
+    setText("sidebarModeTitle", sidebarModeLabel(mode));
+    setPressed("ribbonFilesButton", mode === "files");
+    setPressed("ribbonSearchButton", mode === "search");
+    setPressed("ribbonAccessButton", mode === "access");
+  }
+
+  function renderSearchPanel() {
+    const query = $("sidebarSearchInput").value;
+    const rows = searchPageRows(query);
+    setPill("searchResultCount", `${rows.length}`, rows.length ? "ready" : "muted");
+    setList(
+      "sidebarSearchResults",
+      rows,
+      query.trim() ? "No matching pages" : "Search pages",
+      (item, row) => {
+        const button = obsidianTreeButton(
+          row.label,
+          row.detail,
+          `obsidian-page-button ${row.key === state.selectedPageKey ? " active" : ""}`,
+          () => selectReaderPage(row.key),
+          {
+            contextTarget: {
+              type: "page",
+              folderId: row.folderId,
+              objectId: row.objectId,
+              pageKey: row.key,
+              title: row.title,
+            },
+          }
+        );
+        item.appendChild(button);
+      }
+    );
+  }
+
+  function renderAccessResultPanel() {
+    const panel = $("accessResultPanel");
+    const result = state.accessResult;
+    panel.hidden = !result;
+    panel.className = `access-result ${result?.tone || ""}`;
+    panel.replaceChildren();
+    if (!result) return;
+    const title = document.createElement("strong");
+    title.textContent = result.title;
+    panel.appendChild(title);
+    const detail = document.createElement("span");
+    detail.textContent = result.detail;
+    panel.appendChild(detail);
+    if (result.meta) {
+      for (const [key, value] of Object.entries(result.meta)) {
+        const line = document.createElement("span");
+        line.textContent = `${key}: ${value}`;
+        panel.appendChild(line);
+      }
+    }
+  }
+
+  function renderAccessFlowPanel(activeRow) {
+    const restricted = activeRow?.access === "restricted";
+    const keyOpen = hasOpenedAccessFolderKey(activeRow);
+    const busy = state.accessBusy;
+
+    safeSetHidden("accessFlowPanel", true);
+    safeSetHidden("accessOverviewPanel", true);
+
+    // Set up share expiry defaults (these fields still exist in advanced section)
+    if (!$("accessShareExpiresAtInput").value) {
+      $("accessShareExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
+    }
+    if (state.lastShareLinkId && !$("accessShareLinkInput").value) {
+      $("accessShareLinkInput").value = state.lastShareLinkId;
+    }
+
+    // Legacy buttons that may still be referenced elsewhere
+    const canUseFolderFlow = restricted && keyOpen && !busy && state.signerStatus === "connected";
+    safeSetElement("grantFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
+    safeSetElement("removeFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
+
+    renderAccessResultPanel();
+  }
+
+  function renderVaultInvitationPanel() {
+    if (!$("vaultInviteExpiresAtInput").value) {
+      $("vaultInviteExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
+    }
+    if (state.lastVaultInvitationCode && !$("vaultInviteCodeInput").value) {
+      $("vaultInviteCodeInput").value = state.lastVaultInvitationCode;
+    }
+    const connected = state.signerStatus === "connected";
+    const busy = state.accessBusy;
+    const organizationVault = state.metadata?.kind === "organization";
+    const invitationInput = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode || "";
+    const codeAvailable = Boolean(invitationInput);
+    const codeHint = vaultInvitationIdentifierHint(invitationInput);
+    const inviteCodeUsable = codeAvailable && !codeHint;
+    $("createVaultInvitationButton").disabled = !connected || busy || !state.activeVaultId || !organizationVault;
+    $("getVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
+    $("acceptVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
+    $("revokeVaultInvitationButton").disabled = !connected || busy || !codeAvailable || !organizationVault;
+    if (!connected) {
+      setText("vaultInvitationHint", "Connect signer");
+    } else if (codeHint) {
+      setText("vaultInvitationHint", codeHint);
+    } else if (state.metadata?.kind === "organization") {
+      setText("vaultInvitationHint", activeSignerInviteDetail());
+    } else {
+      setText("vaultInvitationHint", activeSignerInviteDetail());
+    }
+  }
+
+  function renderAccessPanel() {
+    const rows = readerFolderRows(state.metadata);
+    const openedFolders = openedGrantFolderKeys();
+    const activeFolderId = state.activeAccessFolderId || state.selectedFolderId;
+    const activeRow = rows.find((row) => row.id === activeFolderId) || rows[0] || null;
+    if (activeRow && !state.activeAccessFolderId && !state.selectedFolderId) {
+      state.activeAccessFolderId = activeRow.id;
+    }
+
+    renderAccessSidebarCount(rows, state.metadata);
+    renderAccessViewSwitch();
+    renderAccessBusyChrome();
+
+    // Render folder selector
+    renderFolderSelector(activeRow, rows, openedFolders);
+
+    // Render main access inspector
+    renderAccessInspector(activeRow, state.metadata, openedFolders);
+
+    renderVaultManagementPanel(state.metadata);
+
+    // Update access result panel (for feedback)
+    renderAccessResultPanel();
+
+    // Render vault admin panel
+    renderVaultInvitationPanel();
+  }
+
+  function renderAccessSidebarCount(folderRows, metadata) {
+    const view = normalizeAccessView(state.activeAccessView);
+    if (view === "vault") {
+      const vaultCount = visibleVaultOptions().length;
+      setPill("accessSidebarCount", `${vaultCount}`, vaultCount ? "ready" : "muted");
+      return;
+    }
+    const folderCount = folderRows.length;
+    setPill("accessSidebarCount", `${folderCount}`, folderCount ? "ready" : "muted");
+  }
+
+  function renderAccessBusyChrome() {
+    const busy = state.accessBusy;
+    safeSetHidden("accessBusyStatus", !busy);
+    for (const id of ["accessFolderPanel", "accessVaultPanel"]) {
+      safeSetElement(id, (panel) => panel.classList.toggle("is-busy", busy));
+    }
+  }
+
+  function renderAccessViewSwitch() {
+    const view = normalizeAccessView(state.activeAccessView);
+    state.activeAccessView = view;
+    const folderPanel = $("accessFolderPanel");
+    const vaultPanel = $("accessVaultPanel");
+    if (folderPanel) folderPanel.hidden = view !== "folder";
+    if (vaultPanel) vaultPanel.hidden = view !== "vault";
+    for (const [id, value] of [
+      ["accessVaultViewButton", "vault"],
+      ["accessFolderViewButton", "folder"],
+    ]) {
+      const button = $(id);
+      if (!button) continue;
+      const active = view === value;
+      button.className = active ? "active" : "";
+      button.setAttribute("aria-selected", String(active));
+      button.setAttribute("tabindex", active ? "0" : "-1");
+    }
+  }
+
+  function actorIsVaultAdmin(metadata) {
+    if (metadata?.kind === "personal") return true;
+    const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    return Boolean(actorNpub && (metadata?.admins || []).includes(actorNpub));
+  }
+
+  function hasOrganizationVaultControls(metadata) {
+    return metadata?.kind === "organization";
+  }
+
+  function showsCreateOrganizationControl(metadata) {
+    return !hasOrganizationVaultControls(metadata);
+  }
+
+  function canManageVaultPeople(metadata) {
+    return (
+      Boolean(metadata) &&
+      hasOrganizationVaultControls(metadata) &&
+      state.signerStatus === "connected" &&
+      actorIsVaultAdmin(metadata) &&
+      !state.accessBusy
+    );
+  }
+
+  function linkStatusRank(status) {
+    if (status === "pending" || status === "active") return 0;
+    if (status === "accepted") return 1;
+    return 2;
+  }
+
+  function vaultInvitationRows(invitations) {
+    return [...(invitations || [])]
+      .sort(
+        (left, right) =>
+          linkStatusRank(left.status) - linkStatusRank(right.status) ||
+          String(right.createdAt).localeCompare(String(left.createdAt))
+      )
+      .map((invitation) => ({
+        expiresAt: invitation.expiresAt,
+        id: invitation.id,
+        inviteCode: invitation.inviteCode,
+        revocable: invitation.status === "pending",
+        status: invitation.status,
+        targetNpub: invitation.userId,
+      }));
+  }
+
+  function folderShareLinkRows(shareLinks) {
+    return [...(shareLinks || [])]
+      .sort(
+        (left, right) =>
+          linkStatusRank(left.status) - linkStatusRank(right.status) ||
+          String(right.createdAt).localeCompare(String(left.createdAt))
+      )
+      .map((shareLink) => ({
+        expiresAt: shareLink.expiresAt,
+        id: shareLink.id,
+        recipientNpub: shareLink.recipientNpub,
+        revocable: shareLink.status === "pending",
+        status: shareLink.status,
+      }));
+  }
+
+  function sharedFolderRelationshipRows(invitationLists, connectionLists) {
+    const rows = [];
+    for (const direction of ["outgoing", "incoming"]) {
+      for (const connection of connectionLists?.[direction] || []) {
+        rows.push({
+          acceptable: false,
+          counterpartVaultId:
+            direction === "outgoing" ? connection.destinationVaultId : connection.sourceVaultId,
+          direction,
+          folderId: connection.sourceFolderId,
+          id: connection.id,
+          kind: "connection",
+          memberCount: (connection.memberNpubs || []).length,
+          revocable: false,
+          status: connection.status,
+        });
+      }
+    }
+    for (const direction of ["outgoing", "incoming"]) {
+      for (const invitation of invitationLists?.[direction] || []) {
+        rows.push({
+          acceptable: direction === "incoming" && invitation.status === "pending",
+          counterpartVaultId:
+            direction === "outgoing" ? invitation.destinationVaultId : invitation.sourceVaultId,
+          direction,
+          folderId: invitation.sourceFolderId,
+          id: invitation.id,
+          kind: "invitation",
+          memberCount: null,
+          revocable: direction === "outgoing" && invitation.status === "pending",
+          status: invitation.status,
+        });
+      }
+    }
+    return rows.sort(
+      (left, right) => linkStatusRank(left.status) - linkStatusRank(right.status)
+    );
+  }
+
+  function vaultGuideStepRows(signerStatus, metadata, isAdmin) {
+    const signerDone = signerStatus === "connected";
+    const organizationLoaded = metadata?.kind === "organization";
+    return [
+      { done: signerDone, id: "signer", label: "Connect a NIP-07 signer" },
+      { done: organizationLoaded, id: "vault", label: "Load or create an organization Vault" },
+      {
+        done: Boolean(organizationLoaded && isAdmin),
+        id: "admin",
+        label: "Use a Vault admin npub",
+      },
+    ];
+  }
+
+  function vaultPeopleRows(metadata) {
+    if (!metadata) return [];
+    if (metadata.kind === "personal") {
+      const owner = metadata.ownerUserId || metadata.owner_user_id || null;
+      return owner
+        ? [
+            {
+              id: owner,
+              name: accessPersonName(owner),
+              role: "owner",
+              type: "owner",
+              removable: false,
+            },
+          ]
+        : [];
+    }
+    const rows = [];
+    const admins = uniqueNpubs(metadata.admins || []);
+    const members = uniqueNpubs(metadata.members || []);
+    for (const admin of admins) {
+      rows.push({
+        id: admin,
+        name: accessPersonName(admin),
+        role: "admin",
+        type: "admin",
+        removable: true,
+      });
+    }
+    for (const member of members) {
+      if (admins.includes(member)) continue;
+      rows.push({
+        id: member,
+        name: accessPersonName(member),
+        role: "member",
+        type: "member",
+        removable: true,
+      });
+    }
+    return rows;
+  }
+
+  function vaultHealthBadges(metadata, signerStatus = state.signerStatus) {
+    if (!metadata) {
+      return [{ label: "no vault", tone: "muted" }];
+    }
+    const badges = [
+      { label: metadata.kind === "organization" ? "organization" : "personal", tone: "ready" },
+      { label: `${(metadata.folders || []).length} folders`, tone: "muted" },
+      { label: `${metadata.grantCount || 0} grants`, tone: "muted" },
+    ];
+    badges.unshift(
+      signerStatus === "connected"
+        ? { label: "signer connected", tone: "ready" }
+        : { label: "signer missing", tone: "warn" }
+    );
+    if ((metadata.mountedFolders || []).length) {
+      badges.push({ label: `${metadata.mountedFolders.length} mounts`, tone: "muted" });
+    }
+    if (state.lastVaultInvitationCode) {
+      badges.push({ label: "invite ready", tone: "ready" });
+    }
+    return badges;
+  }
+
+  function vaultManagementSummary(metadata) {
+    if (!metadata) return "Choose a Vault, then Load to decrypt its readable Folders.";
+    if (metadata.kind === "personal") {
+      return "Personal vault loaded. Use Access for Folder permissions and share links.";
+    }
+    return `Organization loaded. ${countLabel((metadata.members || []).length, "member")} • ${countLabel(
+      (metadata.admins || []).length,
+      "admin"
+    )} • ${countLabel((metadata.folders || []).length, "Folder")}`;
+  }
+
+  function vaultSwitchRowMeta(vault, isLoaded) {
+    const kind = vault.kind === "personal" ? "personal" : "organization";
+    const role = vault.role || (vault.kind === "personal" ? "owner" : "member");
+    return `${kind} - ${role}${isLoaded ? " - loaded" : ""}`;
+  }
+
+  function vaultSwitchButton(vault) {
+    const isSelected = vault.vaultId === state.activeVaultId;
+    const isLoaded = state.metadata?.vaultId === vault.vaultId;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `vault-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}`;
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.setAttribute(
+      "aria-label",
+      `${vault.name || vault.vaultId}, ${vaultSwitchRowMeta(vault, isLoaded)}, ${
+        isLoaded ? "loaded" : isSelected ? "selected" : "not selected"
+      }`
+    );
+    button.addEventListener("click", () => {
+      if (vault.vaultId === state.activeVaultId) return;
+      setActiveVaultId(vault.vaultId);
+      log("Selected Vault.", { vaultId: vault.vaultId });
+      render();
+    });
+
+    const title = document.createElement("span");
+    title.className = "vault-switch-title";
+    title.textContent = vault.name || vault.vaultId;
+
+    const meta = document.createElement("span");
+    meta.className = "vault-switch-meta";
+    meta.textContent = vaultSwitchRowMeta(vault, isLoaded);
+
+    const status = document.createElement("span");
+    status.className = `pill ${isLoaded ? "ready" : isSelected ? "warn" : "muted"}`;
+    status.textContent = isLoaded ? "loaded" : isSelected ? "selected" : "select";
+    status.setAttribute("aria-hidden", "true");
+
+    button.appendChild(title);
+    button.appendChild(meta);
+    button.appendChild(status);
+    return button;
+  }
+
+  function renderVaultSwitchList() {
+    const rows = visibleVaultOptions();
+    const emptyText = state.signerStatus === "connected"
+      ? "No Vaults available."
+      : "Connect a signer to list Vaults.";
+    setList("vaultSwitchList", rows, emptyText, (item, vault) => {
+      item.appendChild(vaultSwitchButton(vault));
+    });
+  }
+
+  function renderVaultManagementPanel(metadata) {
+    const signerConnected = state.signerStatus === "connected";
+    const organizationVault = hasOrganizationVaultControls(metadata);
+    setText("vaultManagementTitle", "Vaults");
+    setText("vaultManagementSummary", vaultManagementSummary(metadata));
+    renderVaultSwitchList();
+    safeSetHidden("accessConnectSignerButton", signerConnected);
+    safeSetHidden("accessCreateOrganizationPanel", !showsCreateOrganizationControl(metadata));
+    safeSetHidden("vaultPeopleSection", !organizationVault);
+    safeSetHidden("vaultInvitationListSection", !organizationVault);
+    safeSetHidden("sharedFolderSection", !organizationVault);
+    safeSetHidden("vaultInvitationPanel", !organizationVault);
+    setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
+    setOptionalDisabled("accessLoadVaultButton", !canLoadVault());
+    setOptionalDisabled(
+      "accessCreateOrganizationVaultButton",
+      state.signerStatus !== "connected" || state.readerBusy || !state.config
+    );
+    renderVaultPeopleList(metadata);
+    renderVaultPeopleControls(metadata);
+    renderVaultGuide(metadata);
+    renderVaultInvitationList();
+    renderSharedFolderList();
+  }
+
+  function renderVaultPeopleList(metadata) {
+    const rows = vaultPeopleRows(metadata);
+    setPill("vaultPeopleCount", `${rows.length}`, rows.length ? "ready" : "muted");
+    const emptyText = metadata?.kind === "personal"
+      ? "Personal Vaults do not use a member list."
+      : "Load an organization Vault to manage people.";
+    const canManage = canManageVaultPeople(metadata);
+    setList("vaultPeopleList", rows, emptyText, (item, person) => {
+      const personInfo = document.createElement("div");
+      personInfo.className = "access-person-info";
+
+      const icon = document.createElement("svg");
+      icon.className = "access-person-icon icon";
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.innerHTML = person.type === "admin"
+        ? '<path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />'
+        : '<circle cx="12" cy="8" r="4"/><path d="M12 12c-4 0-7 2-7 6v2h14v-2c0-4-3-6-7-6z"/>';
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "access-person-name";
+      nameSpan.textContent = person.name;
+
+      const roleSpan = document.createElement("span");
+      roleSpan.className = "access-person-role";
+      roleSpan.textContent = person.role;
+
+      personInfo.appendChild(icon);
+      personInfo.appendChild(nameSpan);
+      personInfo.appendChild(roleSpan);
+      item.appendChild(personInfo);
+
+      if (!person.removable || !canManage) return;
+      const removeButton = document.createElement("button");
+      removeButton.className = "access-remove-person vault-person-action";
+      removeButton.type = "button";
+      removeButton.textContent = person.type === "admin" ? "Remove admin" : "Remove";
+      removeButton.addEventListener("click", () => {
+        const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
+        action(person.id).catch((error) => {
+          state.lastError = error.message;
+          log("Failed to update Vault people.", { error: error.message });
+        });
+      });
+      item.appendChild(removeButton);
+    });
+  }
+
+  function renderVaultPeopleControls(metadata) {
+    const canManage = canManageVaultPeople(metadata);
+    setOptionalDisabled("addVaultMemberButton", !canManage);
+    setOptionalDisabled("addVaultAdminButton", !canManage);
+    const hint = !metadata
+      ? "Load an organization Vault to manage people."
+      : metadata.kind !== "organization"
+        ? "Personal Vaults use Folder access and share links instead of member lists."
+        : actorIsVaultAdmin(metadata)
+          ? "Admins must already be Vault members."
+          : "Only Vault admins can change organization members and admins.";
+    setText("vaultPeopleHint", hint);
+  }
+
+  function linkRowActionButton(label, onClick, options = {}) {
+    const button = document.createElement("button");
+    button.className = `access-remove-person vault-person-action${options.danger ? " danger-action" : ""}`;
+    button.type = "button";
+    button.textContent = label;
+    button.disabled = state.accessBusy;
+    button.addEventListener("click", () => {
+      onClick().catch((error) => {
+        state.lastError = error.message;
+        log("Access list action failed.", { error: error.message });
+      });
+    });
+    return button;
+  }
+
+  function linkRowInfo(item, title, status, detail) {
+    const info = document.createElement("div");
+    info.className = "access-person-info";
+    const name = document.createElement("span");
+    name.className = "access-person-name";
+    name.textContent = title;
+    info.appendChild(name);
+    if (detail) {
+      const detailSpan = document.createElement("span");
+      detailSpan.className = "access-person-role";
+      detailSpan.textContent = detail;
+      info.appendChild(detailSpan);
+    }
+    const statusSpan = document.createElement("span");
+    statusSpan.className = `access-link-status ${status}`;
+    statusSpan.textContent = status;
+    info.appendChild(statusSpan);
+    item.appendChild(info);
+  }
+
+  function renderVaultGuide(metadata) {
+    const list = $("vaultGuideSteps");
+    if (!list) return;
+    const isAdmin = actorIsVaultAdmin(metadata);
+    const fullyManaged =
+      metadata?.kind === "organization" && state.signerStatus === "connected" && isAdmin;
+    const showGuide = metadata?.kind === "organization" && !fullyManaged;
+    list.hidden = !showGuide;
+    if (!showGuide) {
+      list.replaceChildren();
+      return;
+    }
+    list.replaceChildren();
+    for (const step of vaultGuideStepRows(state.signerStatus, metadata, isAdmin)) {
+      const item = document.createElement("li");
+      item.className = `vault-guide-step${step.done ? " done" : ""}`;
+      const marker = document.createElement("span");
+      marker.className = "vault-guide-marker";
+      marker.innerHTML = step.done
+        ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4L19 7" /></svg>'
+        : "";
+      const label = document.createElement("span");
+      label.className = "vault-guide-label";
+      label.textContent = step.label;
+      item.appendChild(marker);
+      item.appendChild(label);
+      list.appendChild(item);
+    }
+  }
+
+  function renderVaultInvitationList() {
+    const rows = vaultInvitationRows(state.vaultInvitations);
+    const pendingCount = rows.filter((row) => row.status === "pending").length;
+    setPill("vaultInvitationCount", `${pendingCount}`, pendingCount ? "ready" : "muted");
+    const emptyText = canLoadVaultAdminLists()
+      ? "No invitations yet. Create one under Vault invitations below."
+      : "Vault admins see pending invitations here.";
+    setList("vaultInvitationList", rows, emptyText, (item, row) => {
+      linkRowInfo(item, identityDisplay(row.targetNpub), row.status, `expires ${row.expiresAt.slice(0, 10)}`);
+      if (!row.revocable) return;
+      item.appendChild(
+        linkRowActionButton("Use code", async () => {
+          $("vaultInviteCodeInput").value = row.inviteCode;
+          setAccessResult("ready", "Invite code loaded", `${row.inviteCode} is in the invite field.`, {
+            invitationId: row.id,
+          });
+        })
+      );
+      item.appendChild(
+        linkRowActionButton("Revoke", () => revokeVaultInvitationById(row.id), { danger: true })
+      );
+    });
+  }
+
+  function renderSharedFolderList() {
+    const rows = sharedFolderRelationshipRows(
+      state.sharedFolderInvitations,
+      state.sharedFolderConnections
+    );
+    const activeCount = rows.filter(
+      (row) => row.status === "active" || row.status === "pending"
+    ).length;
+    setPill("sharedFolderCount", `${activeCount}`, activeCount ? "ready" : "muted");
+    const emptyText = canLoadVaultAdminLists()
+      ? "No shared Folders yet. Sharing across Vaults starts with a shared Folder invitation."
+      : "Vault admins see cross-Vault shared Folders here.";
+    setList("sharedFolderList", rows, emptyText, (item, row) => {
+      const directionLabel = row.direction === "outgoing" ? "to" : "from";
+      const title = `${row.folderId} ${directionLabel} ${row.counterpartVaultId}`;
+      const detail =
+        row.kind === "connection"
+          ? countLabel(row.memberCount, "member")
+          : `${row.direction} invite`;
+      linkRowInfo(item, title, row.status, detail);
+      if (row.acceptable) {
+        item.appendChild(
+          linkRowActionButton("Accept", () => acceptSharedFolderInvitationById(row.id))
+        );
+      }
+      if (row.revocable) {
+        item.appendChild(
+          linkRowActionButton("Revoke", () => revokeSharedFolderInvitationById(row.id), {
+            danger: true,
+          })
+        );
+      }
+    });
+  }
+
+  function renderFolderShareLinkList(row) {
+    const listMatchesFolder = Boolean(row) && state.folderShareLinksFolderId === row.id;
+    const rows = listMatchesFolder ? folderShareLinkRows(state.folderShareLinks) : [];
+    const pendingCount = rows.filter((linkRow) => linkRow.status === "pending").length;
+    setPill("folderShareLinkCount", `${pendingCount}`, pendingCount ? "ready" : "muted");
+    const emptyText = canLoadVaultAdminLists()
+      ? "No share links for this Folder yet."
+      : "Vault admins see this Folder's share links here.";
+    setList("folderShareLinkList", rows, emptyText, (item, linkRow) => {
+      linkRowInfo(
+        item,
+        identityDisplay(linkRow.recipientNpub),
+        linkRow.status,
+        `expires ${linkRow.expiresAt.slice(0, 10)}`
+      );
+      if (!linkRow.revocable) return;
+      item.appendChild(
+        linkRowActionButton("Use link", async () => {
+          $("accessShareLinkInput").value = linkRow.id;
+          setAccessResult("ready", "Share link loaded", `${linkRow.id} is in the link field.`, {
+            recipient: identityDisplay(linkRow.recipientNpub),
+          });
+        })
+      );
+      item.appendChild(
+        linkRowActionButton("Revoke", () => revokeShareLinkById(linkRow.id), { danger: true })
+      );
+    });
+  }
+
+  function renderFolderSelector(activeRow, rows, openedFolders) {
+    // Update folder selector button
+    if (activeRow) {
+      setText("accessFolderTitle", activeRow.path);
+      setPill("accessFolderStatus", activeRow.accessLabel, activeRow.status === "ready" ? "ready" : "warn");
+    } else {
+      setText("accessFolderTitle", "No Folder selected");
+      setPill("accessFolderStatus", "empty", "muted");
+    }
+
+    // Setup folder dropdown
+    const dropdown = $("accessFolderDropdown");
+    const button = $("accessFolderButton");
+
+    button.onclick = () => {
+      const isOpen = !dropdown.hidden;
+      dropdown.hidden = isOpen;
+      button.setAttribute("aria-expanded", String(!isOpen));
+    };
+
+    // Populate dropdown list
+    setList("accessFolderList", rows, "Load a Vault to inspect access", (item, row) => {
+      const folderButton = accessFolderOptionButton(
+        row,
+        row.id === activeRow?.id,
+        openedFolders,
+        () => {
+          selectAccessFolder(row.id);
+          dropdown.hidden = true;
+          button.setAttribute("aria-expanded", "false");
+        }
+      );
+      item.appendChild(folderButton);
+    });
+
+    if (!state.accessFolderDropdownListenerBound) {
+      state.accessFolderDropdownListenerBound = true;
+      document.addEventListener("click", (event) => {
+        const currentButton = $("accessFolderButton");
+        const currentDropdown = $("accessFolderDropdown");
+        if (!currentButton || !currentDropdown || currentDropdown.hidden) return;
+        if (!currentButton.contains(event.target) && !currentDropdown.contains(event.target)) {
+          currentDropdown.hidden = true;
+          currentButton.setAttribute("aria-expanded", "false");
+        }
+      });
+    }
+  }
+
+  function renderAccessInspector(activeRow, metadata, openedFolders) {
+    if (!activeRow) {
+      setText("accessCurrentFolder", "No folder selected");
+      setText("accessSummaryLine", "Load a Vault and select a Folder to inspect access.");
+      renderWhoHasAccessList(null, metadata, openedFolders);
+      renderAccessFlowPanel(null);
+      return;
+    }
+
+    // Update basic info
+    setText("accessCurrentFolder", activeRow.path);
+    setText("accessSummaryLine", generateAccessSummaryLine(activeRow, metadata, openedFolders));
+
+    // Render who has access
+    renderWhoHasAccessList(activeRow, metadata, openedFolders);
+    applyAccessIntentChrome(activeRow);
+
+    // Share-link defaults and legacy hidden controls stay in sync here.
+    renderAccessFlowPanel(activeRow);
+
+    // Update advanced options
+    updateAdvancedOptions(activeRow, metadata, openedFolders);
+  }
+
+  function generateAccessSummaryLine(row, metadata, openedFolders) {
+    if (!row) return "No access information available.";
+
+    const audienceText = accessAudienceSummary(row);
+    const peopleText = accessPeopleSummary(row, metadata);
+    const keyStatus = accessKeySummary(row, openedFolders);
+
+    return `${audienceText} access • ${peopleText} • ${keyStatus}`;
+  }
+
+  function renderWhoHasAccessList(row, metadata, openedFolders) {
+    const list = $("accessWhoHasList");
+    const manageToggle = $("accessManageToggle");
+    const addForm = $("accessAddPersonForm");
+
+    if (!row) {
+      list.innerHTML = '<li class="access-empty-state">No access information available</li>';
+      manageToggle.hidden = true;
+      addForm.hidden = true;
+      return;
+    }
+
+    const canManage = row.access === "restricted" && hasOpenedAccessFolderKey(row) && state.signerStatus === "connected";
+    manageToggle.hidden = !canManage;
+    if (!canManage) addForm.hidden = true;
+    setText("accessManageToggleLabel", addForm.hidden ? "Manage" : "Cancel");
+    manageToggle.setAttribute("aria-expanded", String(!addForm.hidden));
+
+    const accessList = buildAccessList(row, metadata);
+
+    if (accessList.length === 0) {
+      list.innerHTML = '<li class="access-empty-state">No explicit access granted</li>';
+    } else {
+      list.innerHTML = "";
+      accessList.forEach((person) => {
+        const item = document.createElement("li");
+
+        const personInfo = document.createElement("div");
+        personInfo.className = "access-person-info";
+
+        const icon = document.createElement("svg");
+        icon.className = "access-person-icon icon";
+        icon.setAttribute("viewBox", "0 0 24 24");
+        icon.innerHTML = person.type === "admin"
+          ? '<path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />'
+          : '<circle cx="12" cy="8" r="4"/><path d="M12 12c-4 0-7 2-7 6v2h14v-2c0-4-3-6-7-6z"/>';
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "access-person-name";
+        nameSpan.textContent = person.name;
+
+        const roleSpan = document.createElement("span");
+        roleSpan.className = "access-person-role";
+        roleSpan.textContent = person.role;
+
+        personInfo.appendChild(icon);
+        personInfo.appendChild(nameSpan);
+        if (person.role) {
+          personInfo.appendChild(roleSpan);
+        }
+
+        item.appendChild(personInfo);
+
+        if (person.removable && canManage) {
+          const removeBtn = document.createElement("button");
+          removeBtn.className = "access-remove-person";
+          removeBtn.textContent = "Remove";
+          removeBtn.onclick = () => removePersonAccess(person.id, row.id);
+          item.appendChild(removeBtn);
+        }
+
+        list.appendChild(item);
+      });
+    }
+
+    manageToggle.onclick = () => {
+      const isShowing = !addForm.hidden;
+      addForm.hidden = isShowing;
+      setText("accessManageToggleLabel", isShowing ? "Manage" : "Cancel");
+      manageToggle.setAttribute("aria-expanded", String(!addForm.hidden));
+    };
+
+    setupAddPersonForm(row);
+  }
+
+  function accessPersonId(person) {
+    if (!person) return "";
+    if (typeof person === "string") return person;
+    return person.id || person.pubkey || person.npub || person.userId || person.user_id || "";
+  }
+
+  function accessPersonName(person) {
+    if (!person) return "-";
+    if (typeof person === "string") return identityDisplay(person);
+    return (
+      person.name ||
+      person.displayName ||
+      person.display_name ||
+      identityDisplay(accessPersonId(person))
+    );
+  }
+
+  function addAccessListPerson(accessList, person, role, type, removable = false) {
+    const id = accessPersonId(person);
+    if (!id || accessList.some((entry) => entry.id === id)) return;
+    accessList.push({
+      id,
+      name: accessPersonName(person),
+      role,
+      type,
+      removable,
+    });
+  }
+
+  function buildAccessList(row, metadata) {
+    const accessList = [];
+
+    // Add implicit access based on folder mode
+    if (row.access === "owner") {
+      accessList.push({
+        id: "owner",
+        name: "You (owner)",
+        role: "owner",
+        type: "owner",
+        removable: false
+      });
+    } else if (row.access === "admin_only" && metadata?.admins) {
+      metadata.admins.forEach((admin) => addAccessListPerson(accessList, admin, "admin", "admin"));
+    } else if (row.access === "all_members") {
+      // Add admins first
+      if (metadata?.admins) {
+        metadata.admins.forEach((admin) => addAccessListPerson(accessList, admin, "admin", "admin"));
+      }
+      // Add members
+      (metadata?.members || []).forEach((member) => addAccessListPerson(accessList, member, "member", "member"));
+    } else if (row.access === "restricted") {
+      // Add admins (implicit access)
+      if (metadata?.admins) {
+        metadata.admins.forEach((admin) => addAccessListPerson(accessList, admin, "admin", "admin"));
+      } else if (metadata?.kind === "personal") {
+        accessList.push({
+          id: "owner",
+          name: "You (owner)",
+          role: "owner",
+          type: "owner",
+          removable: false,
+        });
+      }
+
+      // Add explicit grants
+      if (row.accessUserIds) {
+        row.accessUserIds.forEach(userId => {
+          const member = metadata?.members?.find((candidate) => accessPersonId(candidate) === userId);
+          addAccessListPerson(accessList, member || userId, "explicit access", "explicit", true);
+        });
+      }
+    }
+
+    return accessList;
+  }
+
+  function setupAddPersonForm(row) {
+    const addInput = $("accessAddPersonInput");
+    const addButton = $("accessAddPersonButton");
+    const addHint = $("accessAddPersonHint");
+
+    addButton.disabled = state.accessBusy || state.signerStatus !== "connected";
+
+    addButton.onclick = () => {
+      const npub = addInput.value.trim();
+      if (npub && row) {
+        // Set the target field that the existing function expects
+        $("accessTargetNpubInput").value = npub;
+        state.activeAccessIntent = "people";
+        grantFolderAccessFromPanel();
+        addInput.value = "";
+      }
+    };
+
+    addInput.onkeydown = (e) => {
+      if (e.key === "Enter" && !addButton.disabled) {
+        addButton.click();
+      }
+    };
+
+    setText("accessAddPersonHint", `Enter npub to grant access to "${row.path}"`);
+  }
+
+  function removePersonAccess(personId, folderId) {
+    if (state.accessBusy || state.signerStatus !== "connected") return;
+
+    // Use existing remove access functionality
+    state.activeAccessIntent = "people";
+    $("accessTargetNpubInput").value = personId;
+    $("removeFolderAccessButton").click();
+  }
+
+  function updateAdvancedOptions(row, metadata, openedFolders) {
+    const section = $("accessAdvancedSection");
+    const shareForm = $("accessShareForm");
+    const shareHint = $("accessShareHint");
+    const createShareButton = $("createShareLinkButton");
+    const acceptShareButton = $("acceptShareLinkButton");
+    const revokeShareButton = $("revokeShareLinkButton");
+
+    if (!row) {
+      section.hidden = true;
+      return;
+    }
+
+    section.hidden = false;
+
+    // Update share link controls
+    const keyOpen = hasOpenedAccessFolderKey(row);
+    const canShare = keyOpen && !state.accessBusy && state.signerStatus === "connected";
+
+    createShareButton.disabled = !canShare;
+    acceptShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
+    revokeShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
+
+    if (shareForm) {
+      shareForm.classList.toggle("is-ready", canShare);
+      shareForm.classList.toggle("is-locked", !canShare);
+    }
+    if (shareHint) {
+      if (state.signerStatus !== "connected") {
+        shareHint.textContent = "Connect a signer to create or accept share links.";
+      } else if (!keyOpen) {
+        shareHint.textContent = accessFlowHint(row, "links", keyOpen);
+      } else if (row.access !== "restricted") {
+        shareHint.textContent = accessFlowHint(row, "links", keyOpen);
+      } else {
+        shareHint.textContent = "Target npub receives a single-use Folder Key Grant through the link.";
+      }
+    }
+
+    // Setup expiry defaults if not set
+    if (!$("accessShareExpiresAtInput").value) {
+      $("accessShareExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
+    }
+    if (state.lastShareLinkId && !$("accessShareLinkInput").value) {
+      $("accessShareLinkInput").value = state.lastShareLinkId;
+    }
+
+    renderFolderShareLinkList(row);
+  }
+
+  // Legacy compatibility - handle missing elements gracefully
+  function safeSetElement(id, callback) {
+    const element = document.getElementById(id);
+    if (element && callback) {
+      callback(element);
+    }
+  }
+
+  function safeSetText(id, text) {
+    safeSetElement(id, (el) => el.textContent = text);
+  }
+
+  function safeSetHidden(id, hidden) {
+    safeSetElement(id, (el) => el.hidden = hidden);
+  }
+
+  function renderReader() {
+    selectDefaultReaderTargets();
+    const folderRows = readerFolderRows(state.metadata);
+
+    setList("readerFolderList", folderRows, "Load a Vault to browse folders", (item, row) => {
+      const expanded = state.expandedFolderIds.has(row.id);
+      const button = obsidianTreeButton(
+        row.path,
+        "",
+        `obsidian-folder-button ${row.status}${expanded ? " expanded" : ""}${
+          row.id === state.selectedFolderId ? " active" : ""
+        }`,
+        () => toggleReaderFolder(row.id),
+        {
+          contextTarget: {
+            type: "folder",
+            folderId: row.id,
+            path: row.path,
+          },
+        }
+      );
+      item.appendChild(button);
+      const childPages = readerPageRows(row.id);
+      if (expanded && childPages.length) {
+        const childList = document.createElement("ol");
+        childList.className = "obsidian-page-children";
+        for (const pageRow of childPages) {
+          const childItem = document.createElement("li");
+          const pageButton = obsidianTreeButton(
+            pageRow.label,
+            pageRow.status === "ready" ? "" : "Locked",
+            `obsidian-page-button ${pageRow.status}${pageRow.key === state.selectedPageKey ? " active" : ""}`,
+            () => selectReaderPage(pageRow.key),
+            {
+              contextTarget: {
+                type: "page",
+                folderId: pageRow.folderId,
+                objectId: pageRow.objectId,
+                pageKey: pageRow.key,
+                title: pageRow.title,
+              },
+            }
+          );
+          childItem.appendChild(pageButton);
+          childList.appendChild(childItem);
+        }
+        item.appendChild(childList);
+      }
+    });
+
+    const page = selectedReaderPage();
+    $("readerModeButton").textContent = state.readerMode === "source" ? "Source" : "Reading";
+    setPressed("readerModeButton", state.readerMode === "source");
+    $("readerModeButton").disabled = !isReadablePage(page);
+    if (!page) {
+      setText("readerPageTitle", state.selectedFolderId ? "No page selected" : "No folder selected");
+      setText("readerPagePath", state.selectedFolderId || "No page path loaded");
+      setPill("readerPageMeta", "empty", "muted");
+      renderPageContent(null);
+      renderLinkContext(null);
+      renderPageStatus(null);
+      renderWorkspaceChrome(null);
+      return;
+    }
+
+    setText("readerPageTitle", page.title || page.objectId);
+    setText("readerPagePath", pagePathLabel(page));
+    setPill(
+      "readerPageMeta",
+      page.localDraft ? "draft" : `rev ${page.revision || 0}`,
+      page.status === "ready" ? "ready" : "warn"
+    );
+    renderPageContent(page);
+    renderLinkContext(page);
+    renderPageStatus(page);
+    renderWorkspaceChrome(page);
+  }
+
+  function render() {
+    safeSetHidden("connectSignerButton", state.signerStatus === "connected");
+    setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
+    setOptionalDisabled("loadVaultButton", !canLoadVault());
+    setOptionalDisabled("createOrganizationVaultButton", state.signerStatus !== "connected" || state.readerBusy || !state.config);
+    setOptionalDisabled("openFolderKeyButton", !state.metadata);
+    setOptionalDisabled("encryptDraftButton", !state.keyring);
+    setOptionalDisabled("refreshReaderButton", state.readerBusy || state.signerStatus !== "connected" || !state.metadata);
+    setOptionalDisabled("planOkfImportButton", !state.metadata);
+    setOptionalDisabled(
+      "executeOkfImportButton",
+      !state.okfPlan || !state.keyring || state.signerStatus !== "connected"
+    );
+    renderVaultSelect();
+
+    renderVaultControlChrome();
+    renderSidebarMode();
+    renderReader();
+    updateEditorChrome();
+    renderSearchPanel();
+    renderAccessPanel();
+    renderCommandPalette();
+    renderOkfPlan();
+  }
+
+  function utf8Base64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
+  async function sha256Hex(text) {
+    const bytes = new TextEncoder().encode(text);
+    return sha256HexBytes(bytes);
+  }
+
+  async function sha256HexBytes(bytes) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function buildAuthEventTemplate(method, url, bodyText) {
+    const tags = [
+      ["u", url],
+      ["method", method.toUpperCase()],
+    ];
+    if (bodyText) tags.push(["payload", await sha256Hex(bodyText)]);
+    return {
+      kind: 27235,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: "",
+    };
+  }
+
+  async function signAuthHeader(path, options = {}) {
+    if (!state.config) throw new Error("Product Client config has not loaded");
+    if (!window.nostr?.signEvent) throw new Error("NIP-07 signer is unavailable");
+    const method = options.method || "GET";
+    const bodyText = options.body || "";
+    const url = `${state.config.publicBaseUrl.replace(/\/$/, "")}${path}`;
+    const eventTemplate = await buildAuthEventTemplate(method, url, bodyText);
+    const signed = await window.nostr.signEvent(eventTemplate);
+    return `${state.config.authScheme} ${utf8Base64(JSON.stringify(signed))}`;
+  }
+
+  async function protectedRequest(path, options = {}) {
+    const headers = {
+      Authorization: await signAuthHeader(path, options),
+    };
+    if (options.body) headers["Content-Type"] = "application/json";
+    const response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body || undefined,
+    });
+    const text = await response.text();
+    let body = text;
+    try {
+      body = JSON.parse(text);
+    } catch (_) {
+      body = text;
+    }
+    if (!response.ok) {
+      const message = body?.error || `Request failed with ${response.status}`;
+      throw new Error(message);
+    }
+    rememberIdentitiesFrom(body);
+    return body;
+  }
+
+  async function loadVisibleVaults() {
+    if (state.signerStatus !== "connected") {
+      state.visibleVaults = [];
+      render();
+      return [];
+    }
+    const response = await protectedRequest("/_admin/vaults");
+    state.visibleVaults = (response.vaults || []).map(normalizeVisibleVault).filter(Boolean);
+    const personal = visibleVaultOptions().find((vault) => vault.kind === "personal");
+    if (
+      personal &&
+      (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId)
+    ) {
+      setActiveVaultId(personal.vaultId, { reset: false });
+    }
+    render();
+    return state.visibleVaults;
+  }
+
+  function defaultVaultPages(kind) {
+    if (kind === "personal") return PERSONAL_DEFAULT_VAULT_PAGES.map((page) => ({ ...page }));
+    if (kind === "organization") return ORGANIZATION_DEFAULT_VAULT_PAGES.map((page) => ({ ...page }));
+    throw new Error(`Unsupported Vault kind: ${kind}`);
+  }
+
+  function defaultVaultPagesFolderId(kind) {
+    if (kind === "personal") return DEFAULT_CLIENT_FOLDER_ID;
+    if (kind === "organization") return DEFAULT_CLIENT_FOLDER_ID;
+    throw new Error(`Unsupported Vault kind: ${kind}`);
+  }
+
+  function defaultVaultBootstrapFolderIds(kind) {
+    if (kind === "personal") return ["getting-started", "restricted"];
+    if (kind === "organization") return ["getting-started", "restricted"];
+    throw new Error(`Unsupported Vault kind: ${kind}`);
+  }
+
+  function configuredRawFolderKey(input, folderId) {
+    const source = input.rawKeysByFolderId;
+    let value = null;
+    if (source instanceof Map && source.has(folderId)) value = source.get(folderId);
+    if (!value && source && Object.prototype.hasOwnProperty.call(source, folderId)) {
+      value = source[folderId];
+    }
+    if (!value) return randomFolderKeyBytes();
+    if (value instanceof Uint8Array) return value;
+    if (Array.isArray(value)) return new Uint8Array(value);
+    if (typeof value === "string") return base64ToBytes(value);
+    throw new Error(`Unsupported raw Folder Key for ${folderId}`);
+  }
+
+  async function buildVaultBootstrapPlan(input) {
+    if (!input?.vaultId) throw new Error("Vault bootstrap needs a Vault id");
+    if (!input?.kind) throw new Error("Vault bootstrap needs a Vault kind");
+    const actorNpub = input.actorNpub || currentActorNpub();
+    const signEvent = input.signEvent || ((event) => window.nostr.signEvent(event));
+    const keyring = input.keyring || createSessionKeyring();
+    const bootstrapGrants = [];
+    const folderKeys = new Map();
+    for (const folderId of defaultVaultBootstrapFolderIds(input.kind)) {
+      const rawKey = configuredRawFolderKey(input, folderId);
+      folderKeys.set(folderId, rawKey);
+      await importFolderKey(keyring, {
+        vaultId: input.vaultId,
+        folderId,
+        keyVersion: 1,
+        folderKey: bytesToBase64(rawKey),
+      });
+      const grant = await buildFolderKeyGrantRequest({
+        createdAtUnix: input.createdAtUnix,
+        issuerNpub: actorNpub,
+        keyVersion: 1,
+        provider: input.provider,
+        rawKey,
+        recipientNpub: actorNpub,
+        signEvent,
+        vaultId: input.vaultId,
+        folderId,
+      });
+      bootstrapGrants.push({ folderId, grant });
+    }
+    return {
+      bootstrapGrants,
+      defaultFolderId: defaultVaultPagesFolderId(input.kind),
+      defaultPages: defaultVaultPages(input.kind),
+      folderKeys,
+      keyring,
+    };
+  }
+
+  async function buildDefaultVaultPageWrites(input) {
+    if (!input?.keyring) throw new Error("Default Vault Pages need an opened keyring");
+    if (!input?.vaultId) throw new Error("Default Vault Pages need a Vault id");
+    const actorNpub = input.actorNpub || currentActorNpub();
+    const signEvent = input.signEvent || ((event) => window.nostr.signEvent(event));
+    const pages = input.pages || defaultVaultPages(input.kind);
+    const writes = [];
+    let pageIndex = 0;
+    for (const page of pages) {
+      const folderId = page.folderId || input.folderId || defaultVaultPagesFolderId(input.kind);
+      if (!folderId) throw new Error("Default Vault Pages need a target Folder");
+      const nonceBytes =
+        typeof input.nonceFactory === "function" ? input.nonceFactory(pageIndex, page) : undefined;
+      const body = await buildPageWriteRequest(input.keyring, {
+        authorNpub: actorNpub,
+        baseRevision: null,
+        createdAtUnix: input.createdAtUnix,
+        folderId,
+        keyVersion: input.keyVersion || 1,
+        nonceBytes,
+        objectId: page.objectId,
+        operation: "create",
+        plaintext: encodeFolderObjectPagePlaintext(page.path, page.markdown),
+        signEvent,
+        vaultId: input.vaultId,
+      });
+      writes.push({
+        body,
+        folderId,
+        objectId: page.objectId,
+        path: `/_admin/vaults/${encodeURIComponent(input.vaultId)}/folders/${encodeURIComponent(
+          folderId
+        )}/objects/${encodeURIComponent(page.objectId)}`,
+        targetPath: page.path,
+      });
+      pageIndex += 1;
+    }
+    return writes;
+  }
+
+  async function writeDefaultVaultPages(input) {
+    const request = input.request || protectedRequest;
+    const writes = await buildDefaultVaultPageWrites(input);
+    for (const write of writes) {
+      await request(write.path, {
+        method: "PUT",
+        body: JSON.stringify(write.body),
+      });
+    }
+    return writes;
+  }
+
+  async function createVault(vaultId, kind, name) {
+    const actorNpub = currentActorNpub();
+    const plan = await buildVaultBootstrapPlan({ vaultId, kind, name, actorNpub });
+    const metadata = await protectedRequest("/_admin/vaults", {
+      method: "POST",
+      body: JSON.stringify({ vaultId, kind, name, bootstrapGrants: plan.bootstrapGrants }),
+    });
+    await writeDefaultVaultPages({
+      actorNpub,
+      kind,
+      keyring: plan.keyring,
+      signEvent: (event) => window.nostr.signEvent(event),
+      vaultId,
+    });
+    state.keyring = plan.keyring;
+    return metadata;
+  }
+
+  async function ensurePersonalVaultForActiveSelection() {
+    const active = activeVaultOption();
+    if (active.kind !== "personal") return;
+    if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID && state.pubkeyHex) {
+      setActiveVaultId(personalVaultIdForPubkey(state.pubkeyHex), { reset: false });
+    }
+    const existing = state.visibleVaults
+      .map(normalizeVisibleVault)
+      .find((vault) => vault?.kind === "personal" && vault.vaultId === state.activeVaultId);
+    if (existing && !existing.pending) return;
+    try {
+      const metadata = await createVault(state.activeVaultId, "personal", "Personal vault");
+      state.metadata = metadata;
+      rememberVisibleVault(metadata);
+    } catch (error) {
+      if (!/already has a personal vault|duplicate id/.test(error.message)) throw error;
+      await loadVisibleVaults();
+      const personal = visibleVaultOptions().find((vault) => vault.kind === "personal");
+      if (!personal) throw error;
+      setActiveVaultId(personal.vaultId, { reset: false });
+    }
+  }
+
+  async function ensureInvitedVaultAcceptedForActiveSelection() {
+    const active = activeVaultOption();
+    if (active.role !== "invited" || !active.inviteCode) return;
+    const invitation = await protectedRequest(vaultInvitationAcceptPath(active.inviteCode), {
+      method: "POST",
+    });
+    state.lastVaultInvitationId = invitation.id;
+    state.lastVaultInvitationCode = invitation.inviteCode;
+    setActiveVaultId(invitation.vaultId, { reset: false });
+    await loadVisibleVaults();
+  }
+
+  async function createOrganizationVaultFromInput(inputId = "organizationVaultNameInput") {
+    const input = $(inputId);
+    const name = input?.value.trim() || "New organization";
+    if (state.signerStatus !== "connected") await connectSigner();
+    if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
+    const vaultId = vaultIdFromName("org", name);
+    const metadata = await createVault(vaultId, "organization", name);
+    if (input) input.value = "";
+    rememberVisibleVault(metadata);
+    setActiveVaultId(metadata.vaultId);
+    state.metadata = metadata;
+    await loadVisibleVaults();
+    log("Created organization Vault.", { vaultId: metadata.vaultId });
+    render();
+  }
+
+  async function loadConfig() {
+    const response = await fetch("/client/config.json");
+    state.config = await response.json();
+    if (!state.activeVaultId || state.activeVaultId === "smoke") {
+      state.activeVaultId = state.config.defaultVaultId || PERSONAL_VAULT_PLACEHOLDER_ID;
+    }
+    log("Loaded Product Client config.", state.config);
+    render();
+  }
+
+  async function detectSigner() {
+    const derived = deriveSignerState(window.nostr);
+    state.signerStatus = derived.status;
+    setText("signerDetail", derived.detail);
+    render();
+  }
+
+  async function connectSigner() {
+    const derived = deriveSignerState(window.nostr);
+    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
+    if (!derived.canConnect) {
+      state.signerStatus = derived.status;
+      setText("signerDetail", derived.detail);
+      render();
+      return;
+    }
+    const pubkey = await window.nostr.getPublicKey();
+    state.pubkeyHex = pubkey;
+    state.signerStatus = "connected";
+    if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId) {
+      setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
+    }
+    setText("signerDetail", `Connected as ${shortKey(pubkey)}.`);
+    setText("authDetail", "Signed requests are ready for protected Vault routes.");
+    log("Connected NIP-07 signer.", { pubkey: shortKey(pubkey) });
+    await loadVisibleVaults().catch((error) => {
+      state.lastError = error.message;
+      log("Failed to load visible Vaults.", { error: error.message });
+    });
+    render();
+  }
+
+  async function loadVaultMetadata() {
+    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
+    await ensureInvitedVaultAcceptedForActiveSelection();
+    await ensurePersonalVaultForActiveSelection();
+    const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/metadata`;
+    const metadata = await protectedRequest(path);
+    state.metadata = metadata;
+    rememberVisibleVault(metadata);
+    log("Loaded Vault metadata.", metadata);
+    render();
+    if (state.activeSidebarMode === "access") refreshAccessManagementListsInBackground();
+  }
+
+  function canLoadVaultAdminLists() {
+    return Boolean(
+      state.metadata &&
+        state.metadata.kind === "organization" &&
+        state.signerStatus === "connected" &&
+        actorIsVaultAdmin(state.metadata)
+    );
+  }
+
+  async function refreshVaultAdminLists() {
+    if (!canLoadVaultAdminLists()) {
+      state.vaultInvitations = null;
+      state.sharedFolderInvitations = null;
+      state.sharedFolderConnections = null;
+      return;
+    }
+    const vaultPath = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}`;
+    const invitationList = await protectedRequest(`${vaultPath}/invitations`);
+    state.vaultInvitations = invitationList.invitations || [];
+    state.sharedFolderInvitations = await protectedRequest(
+      `${vaultPath}/shared-folder-invitations`
+    );
+    state.sharedFolderConnections = await protectedRequest(
+      `${vaultPath}/shared-folder-connections`
+    );
+  }
+
+  async function refreshFolderShareLinks(folderId) {
+    if (!folderId || !canLoadVaultAdminLists()) {
+      state.folderShareLinks = null;
+      state.folderShareLinksFolderId = null;
+      return;
+    }
+    const path = `/_admin/vaults/${encodeURIComponent(
+      state.activeVaultId
+    )}/folders/${encodeURIComponent(folderId)}/share-links`;
+    const list = await protectedRequest(path);
+    state.folderShareLinks = list.shareLinks || [];
+    state.folderShareLinksFolderId = folderId;
+  }
+
+  function refreshAccessManagementListsInBackground() {
+    const work = async () => {
+      await refreshVaultAdminLists();
+      await refreshFolderShareLinks(state.activeAccessFolderId);
+      render();
+    };
+    work().catch((error) => {
+      log("Failed to refresh access management lists.", { error: error.message });
+    });
+  }
+
+  async function revokeVaultInvitationById(invitationId) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const invitation = await protectedRequest(
+        vaultInvitationRevokePath(state.activeVaultId, invitationId),
+        { method: "DELETE" }
+      );
+      setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
+        updatedAt: invitation.updatedAt,
+      });
+      log("Revoked Vault invitation from pending list.", { invitationId });
+      await refreshVaultAdminLists();
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function revokeShareLinkById(shareLinkId) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const shareLink = await protectedRequest(
+        `/_admin/share-links/${encodeURIComponent(shareLinkId)}`,
+        { method: "DELETE" }
+      );
+      setAccessResult("warn", "Share link revoked", `${shareLink.id} is ${shareLink.status}.`, {
+        updatedAt: shareLink.updatedAt,
+      });
+      log("Revoked Folder share link from list.", { shareLinkId });
+      await refreshFolderShareLinks(state.activeAccessFolderId);
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function acceptSharedFolderInvitationById(invitationId) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const invitation = await protectedRequest(
+        `/_admin/shared-folder-invitations/${encodeURIComponent(invitationId)}/accept`,
+        { method: "POST" }
+      );
+      setAccessResult(
+        "ready",
+        "Shared Folder mounted",
+        `${invitation.sourceFolderId} from ${invitation.sourceVaultId} is now mounted.`,
+        { invitationId: invitation.id, status: invitation.status }
+      );
+      log("Accepted shared Folder invitation.", { invitationId });
+      await loadVaultMetadata();
+      await refreshVaultAdminLists();
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function revokeSharedFolderInvitationById(invitationId) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const invitation = await protectedRequest(
+        `/_admin/shared-folder-invitations/${encodeURIComponent(invitationId)}`,
+        { method: "DELETE" }
+      );
+      setAccessResult(
+        "warn",
+        "Shared Folder invitation revoked",
+        `${invitation.id} is ${invitation.status}.`,
+        { updatedAt: invitation.updatedAt }
+      );
+      log("Revoked shared Folder invitation.", { invitationId });
+      await refreshVaultAdminLists();
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function openAvailableFolderKeyGrants() {
+    if (!state.keyring) state.keyring = createSessionKeyring();
+    const exported = await protectedRequest(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/export`);
+    const expectedRecipient = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    return openFolderKeyGrants(state.keyring, exported, expectedRecipient);
+  }
+
+  function canLoadVault() {
+    const signer = deriveSignerState(window.nostr);
+    return Boolean(
+      state.config &&
+        !state.readerBusy &&
+        (state.signerStatus === "connected" || signer.canConnect)
+    );
+  }
+
+  async function loadVaultReader() {
+    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
+    state.readerBusy = true;
+    render();
+    try {
+      if (state.signerStatus !== "connected") await connectSigner();
+      if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
+      await loadVisibleVaults().catch((error) => {
+        log("Failed to refresh visible Vaults before opening reader.", { error: error.message });
+      });
+      await loadVaultMetadata();
+      const grants = await openAvailableFolderKeyGrants();
+      await pullSyncBootstrap();
+      selectDefaultReaderTargets();
+      renderGraphView();
+      log("Loaded Vault reader.", {
+        openedFolderKeys: grants.opened.length,
+        skippedFolderKeyGrants: grants.skipped.length,
+        readablePages: readablePages().length,
+      });
+    } finally {
+      state.readerBusy = false;
+      render();
+    }
+  }
+
+  async function refreshReader() {
+    state.readerBusy = true;
+    render();
+    try {
+      await loadVaultMetadata();
+      if (state.keyring?.openedGrants.length) await pullSyncBootstrap();
+      selectDefaultReaderTargets();
+      log("Refreshed Vault reader.", {
+        readablePages: readablePages().length,
+      });
+    } finally {
+      state.readerBusy = false;
+      render();
+    }
+  }
+
+  function activePageInput() {
+    if (state.editorMode === "source") {
+      rememberActiveDraft($("pageDraftInput").value);
+    } else if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
+      syncDraftFromVisualEditor();
+    }
+    const folderId = $("pageFolderIdInput").value.trim() || DEFAULT_CLIENT_FOLDER_ID;
+    const objectId = $("pageObjectIdInput").value.trim() || "obj_000000000001";
+    const key = pageKey(folderId, objectId);
+    const page = state.projection.pages.get(key);
+    const draft = state.projection.localDrafts.get(key);
+    return {
+      baseRevision: $("pageBaseRevisionInput").value.trim(),
+      folderId,
+      objectId,
+      path: draft?.path || page?.path || `${objectId}.md`,
+      text: $("pageDraftInput").value,
+    };
+  }
+
+  function currentFolderKeyVersion(folderId) {
+    const folder = (state.metadata?.folders || []).find((candidate) => candidate.id === folderId);
+    return folder?.currentKeyVersion || 1;
+  }
+
+  function currentActorNpub() {
+    if (!state.pubkeyHex) throw new Error("Connect a signer first");
+    return npubFromHex(state.pubkeyHex);
+  }
+
+  function activeAccessRow() {
+    const rows = readerFolderRows(state.metadata);
+    const activeFolderId = state.activeAccessFolderId || state.selectedFolderId;
+    return rows.find((row) => row.id === activeFolderId) || rows[0] || null;
+  }
+
+  function requireRestrictedAccessRow() {
+    const row = activeAccessRow();
+    if (!row) throw new Error("Select a Folder first");
+    if (row.access !== "restricted") {
+      throw new Error("Folder sharing is available for restricted Folders");
+    }
+    return row;
+  }
+
+  function openedAccessFolderKey(row) {
+    const keyVersion = row.currentKeyVersion || currentFolderKeyVersion(row.id);
+    const key = state.keyring?.keys.get(folderKeyId(state.activeVaultId, row.id, keyVersion));
+    if (!key) throw new Error(`Open the Folder Key for ${row.path} before sharing`);
+    return key;
+  }
+
+  function hasOpenedAccessFolderKey(row) {
+    if (!row) return false;
+    const keyVersion = row.currentKeyVersion || currentFolderKeyVersion(row.id);
+    return Boolean(state.keyring?.keys.has(folderKeyId(state.activeVaultId, row.id, keyVersion)));
+  }
+
+  async function normalizedTargetNpub() {
+    return normalizedNpubInput("accessTargetNpubInput", "Paste a target identity first");
+  }
+
+  async function normalizedNpubInput(inputId, message) {
+    const value = $(inputId).value.trim();
+    const identity = await resolveIdentityInputValue(value, message);
+    return identity.npub;
+  }
+
+  function defaultShareExpiryDateTimeLocal() {
+    const date = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    date.setSeconds(0, 0);
+    return date.toISOString().slice(0, 16);
+  }
+
+  function slugFromFolderName(name) {
+    return String(name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 96);
+  }
+
+  function uniqueFolderId(baseId) {
+    const existing = new Set((state.metadata?.folders || []).map((folder) => folder.id));
+    let candidate = baseId || "folder";
+    let suffix = 2;
+    while (existing.has(candidate)) {
+      candidate = `${baseId || "folder"}-${suffix}`;
+      suffix += 1;
+    }
+    return candidate;
+  }
+
+  function folderRecipientsForAccess(access, accessUserIds = []) {
+    const recipients = new Set();
+    if (access === "owner") {
+      if (state.metadata?.ownerUserId) recipients.add(state.metadata.ownerUserId);
+      else recipients.add(currentActorNpub());
+      return [...recipients];
+    }
+    if (access === "admin_only" || access === "all_members" || access === "restricted") {
+      for (const admin of state.metadata?.admins || []) recipients.add(admin);
+    }
+    if (access === "all_members") {
+      for (const member of state.metadata?.members || []) recipients.add(member);
+    }
+    if (access === "restricted") {
+      for (const user of accessUserIds) recipients.add(user);
+    }
+    if (!recipients.size) recipients.add(currentActorNpub());
+    return [...recipients];
+  }
+
+  async function createFolderFromToolbar() {
+    if (!state.metadata) throw new Error("Open a Vault before creating a Folder");
+    if (state.signerStatus !== "connected") await connectSigner();
+    if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
+
+    const name = window.prompt("Folder name", "Notes")?.trim();
+    if (!name) return;
+    const folderId = uniqueFolderId(slugFromFolderName(name));
+    const access = state.metadata.kind === "personal" ? "owner" : "all_members";
+    const accessUserIds = [];
+    const rawKey = randomFolderKeyBytes();
+    const recipients = folderRecipientsForAccess(access, accessUserIds);
+    const createdAtUnix = Math.floor(Date.now() / 1000);
+    const grants = [];
+    for (const recipientNpub of recipients) {
+      grants.push(
+        await buildFolderKeyGrantRequest({
+          createdAtUnix,
+          folderId,
+          keyVersion: 1,
+          rawKey,
+          recipientNpub,
+          vaultId: state.activeVaultId,
+        })
+      );
+    }
+    if (!state.keyring) state.keyring = createSessionKeyring();
+    await importFolderKey(state.keyring, {
+      vaultId: state.activeVaultId,
+      folderId,
+      keyVersion: 1,
+      folderKey: bytesToBase64(rawKey),
+    });
+    const accessChangeEvent = await buildAdminAccessChangeEvent({
+      action: "set-folder-access-mode",
+      createdAtUnix,
+      folderId,
+      keyVersion: 1,
+    });
+    const metadata = await protectedRequest(
+      `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          access,
+          accessChangeEvent,
+          accessUserIds,
+          folderId,
+          grants,
+          name,
+          parentFolderId: null,
+          path: folderId,
+          role: "folder",
+          sharedFolderSource: false,
+        }),
+      }
+    );
+    state.metadata = metadata;
+    state.selectedFolderId = folderId;
+    state.expandedFolderIds.add(folderId);
+    $("pageFolderIdInput").value = folderId;
+    $("okfDestinationFolderInput").value = folderId;
+    log("Created Folder from toolbar.", { folderId, recipients: recipients.length });
+    render();
+  }
+
+  function shareExpiryIso() {
+    const value = $("accessShareExpiresAtInput").value.trim();
+    const date = value ? new Date(value) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    if (Number.isNaN(date.getTime())) throw new Error("Share link expiry is invalid");
+    return date.toISOString();
+  }
+
+  function vaultInvitationExpiryIso() {
+    const value = $("vaultInviteExpiresAtInput").value.trim();
+    const date = value ? new Date(value) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    if (Number.isNaN(date.getTime())) throw new Error("Vault invitation expiry is invalid");
+    return date.toISOString();
+  }
+
+  function initialVaultInvitationFolders(value = $("vaultInviteFoldersInput").value) {
+    return uniqueValues(
+      String(value || "")
+        .split(/[,\s]+/)
+        .map((part) => part.trim())
+        .filter(Boolean)
+    );
+  }
+
+  function buildVaultInvitationRequest(input) {
+    const targetNpub = input.targetNpub;
+    npubToHex(targetNpub);
+    return {
+      targetNpub,
+      initialFolderAccess: initialVaultInvitationFolders(input.initialFolderAccess || ""),
+      expiresAt: input.expiresAt,
+    };
+  }
+
+  function vaultInvitationIdentifierHint(input) {
+    const value = String(input || "").trim();
+    if (!value) return null;
+    if (value.startsWith("invitation-")) {
+      return "That is an invitation id. Inspect and accept use an Invite Code like invite-...; use Revoke invite or fbrain invites accept --vault <vault-id> --id <invitation-id> for id-based actions.";
+    }
+    if (!value.startsWith("invite-")) {
+      return "Invite Codes start with invite-. Check the copied code and the active signer.";
+    }
+    return null;
+  }
+
+  function currentVaultInvitationInput() {
+    const value = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode;
+    if (!value) throw new Error("Paste an Invite Code first");
+    return value;
+  }
+
+  function currentVaultInvitationCode() {
+    const value = currentVaultInvitationInput();
+    const hint = vaultInvitationIdentifierHint(value);
+    if (hint) throw new Error(hint);
+    return value;
+  }
+
+  function vaultInvitationUnavailableDetail(error) {
+    const message = error?.message || String(error || "");
+    if (message === "vault invitation unavailable") {
+      return "Vault invitation unavailable. Check the Invite Code, active signer, expiry, or whether the invite was already handled.";
+    }
+    return message;
+  }
+
+  function activeSignerInviteDetail() {
+    if (state.signerStatus !== "connected" || !state.pubkeyHex) return "Connect signer";
+    return `Active signer ${shortKey(npubFromHex(state.pubkeyHex))}. Invites are bound to the target identity.`;
+  }
+
+  function vaultInvitationCreatePath(vaultId) {
+    return `/_admin/vaults/${encodeURIComponent(vaultId)}/invitations`;
+  }
+
+  function vaultInvitationLinkPath(code) {
+    return `/_admin/vault-invitation-links/${encodeURIComponent(code)}`;
+  }
+
+  function vaultInvitationAcceptPath(code) {
+    return `${vaultInvitationLinkPath(code)}/accept`;
+  }
+
+  function vaultInvitationRevokePath(vaultId, invitationId) {
+    return `/_admin/vaults/${encodeURIComponent(vaultId)}/invitations/${encodeURIComponent(invitationId)}`;
+  }
+
+  function uniqueValues(values) {
+    return [...new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  }
+
+  function uniqueNpubs(values) {
+    return uniqueValues(values);
+  }
+
+  function folderAccessRemovalRecipients(metadata, row, targetNpub) {
+    if (!row || row.access !== "restricted") {
+      throw new Error("Folder access removal is available for restricted Folders");
+    }
+    const accessUsers = uniqueNpubs(row.accessUserIds);
+    if (!accessUsers.includes(targetNpub)) {
+      throw new Error(`${identityDisplay(targetNpub)} does not have explicit access to ${row.path}`);
+    }
+    const admins = uniqueNpubs(metadata?.admins || []);
+    if (admins.includes(targetNpub)) {
+      throw new Error("Admins can still open restricted Folders; remove admin role first");
+    }
+    const remainingAccessUsers = accessUsers.filter((npub) => npub !== targetNpub);
+    const recipients = uniqueNpubs([...admins, ...remainingAccessUsers]);
+    if (!recipients.length) throw new Error("Folder Key rotation needs at least one remaining recipient");
+    return { remainingAccessUsers, recipients };
+  }
+
+  function liveReadableFolderObjects(objects, folderId) {
+    const rows = (objects || [])
+      .filter((object) => object.folderId === folderId && !object.deleted)
+      .sort((left, right) => String(left.objectId).localeCompare(String(right.objectId)));
+    const unreadable = rows.filter((object) => object.status !== "ready" || typeof object.text !== "string");
+    if (unreadable.length) {
+      throw new Error("Every live Page in this Folder must be readable before rotating access");
+    }
+    return rows;
+  }
+
+  function randomFolderKeyBytes() {
+    return crypto.getRandomValues(new Uint8Array(32));
+  }
+
+  function deterministicClientId(prefix, parts) {
+    return sha256Hex(parts.join("\n")).then((digest) => `${prefix}-${digest.slice(0, 16)}`);
+  }
+
+  function canonicalAdminAccessChangePayload(input) {
+    const fields = [
+      `"version":${JSON.stringify("finite-vault-admin-access-change-v1")}`,
+      `"vaultId":${JSON.stringify(input.vaultId)}`,
+      `"changeId":${JSON.stringify(input.changeId)}`,
+      `"action":${JSON.stringify(input.action)}`,
+      `"adminNpub":${JSON.stringify(input.adminNpub)}`,
+    ];
+    if (input.folderId) fields.push(`"folderId":${JSON.stringify(input.folderId)}`);
+    if (input.targetNpub) fields.push(`"targetNpub":${JSON.stringify(input.targetNpub)}`);
+    if (input.keyVersion !== undefined && input.keyVersion !== null) {
+      fields.push(`"keyVersion":${Number(input.keyVersion)}`);
+    }
+    if (input.note) fields.push(`"note":${JSON.stringify(input.note)}`);
+    fields.push(`"createdAt":${JSON.stringify(input.createdAt)}`);
+    return `{${fields.join(",")}}`;
+  }
+
+  function adminAccessChangeTags(input) {
+    const tags = [
+      ["d", `finite-vault-admin-access-change:${input.vaultId}:${input.changeId}`],
+      ["vault", input.vaultId],
+      ["action", input.action],
+    ];
+    if (input.folderId) tags.push(["folder", input.folderId]);
+    if (input.targetNpub) tags.push(["p", npubToHex(input.targetNpub)]);
+    if (input.keyVersion !== undefined && input.keyVersion !== null) {
+      tags.push(["keyVersion", String(input.keyVersion)]);
+    }
+    return tags;
+  }
+
+  async function buildAdminAccessChangeEvent(input) {
+    const signEvent = input.signEvent || window.nostr?.signEvent;
+    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const createdAt = accessChangeCreatedAt(createdAtUnix);
+    const adminNpub = input.adminNpub || currentActorNpub();
+    const vaultId = input.vaultId || state.activeVaultId;
+    const changeId =
+      input.changeId ||
+      (await deterministicClientId("access-change", [
+        vaultId,
+        input.action,
+        input.folderId || "-",
+        input.targetNpub || "-",
+        createdAt,
+      ]));
+    const payload = {
+      version: "finite-vault-admin-access-change-v1",
+      vaultId,
+      changeId,
+      action: input.action,
+      adminNpub,
+      folderId: input.folderId,
+      targetNpub: input.targetNpub,
+      keyVersion: input.keyVersion,
+      note: input.note,
+      createdAt,
+    };
+    return signEvent({
+      kind: APP_EVENT_KIND,
+      created_at: createdAtUnix,
+      tags: adminAccessChangeTags(payload),
+      content: canonicalAdminAccessChangePayload(payload),
+    });
+  }
+
+  async function buildFolderKeyGrantRequest(input) {
+    const signEvent = input.signEvent || window.nostr?.signEvent;
+    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    const encrypt = nip44EncryptAdapter(input);
+    if (!encrypt && !input.allowPlaintextDevelopmentGrant) {
+      throw new Error("NIP-44 encryption is unavailable");
+    }
+    const recipientHex = npubToHex(input.recipientNpub);
+    const issuerNpub = input.issuerNpub || currentActorNpub();
+    const issuerHex = npubToHex(issuerNpub);
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const createdAt = revisionCreatedAt(createdAtUnix);
+    const folderKey = input.folderKey || bytesToBase64(input.rawKey);
+    const grantId =
+      input.id ||
+      (await deterministicClientId("grant", [
+        input.vaultId,
+        input.folderId,
+        String(input.keyVersion),
+        input.recipientNpub,
+        createdAt,
+      ]));
+    const plaintextGrant = {
+      version: "finite-folder-key-grant-v1",
+      vaultId: input.vaultId,
+      folderId: input.folderId,
+      keyVersion: input.keyVersion,
+      folderKey,
+      issuerNpub,
+      recipientNpub: input.recipientNpub,
+      createdAt,
+    };
+    const rumorTags = [
+      ["d", `finite-folder-key-grant:${input.vaultId}:${input.folderId}:${input.keyVersion}`],
+      ["vault", input.vaultId],
+      ["folder", input.folderId],
+      ["keyVersion", String(input.keyVersion)],
+    ];
+    let wrappedEvent;
+    if (encrypt) {
+      const rumorContent = JSON.stringify(plaintextGrant);
+      const rumor = {
+        pubkey: issuerHex,
+        created_at: createdAtUnix,
+        kind: APP_EVENT_KIND,
+        tags: rumorTags,
+        content: rumorContent,
+      };
+      rumor.id = await sha256Hex(canonicalNostrEventIdInput(rumor));
+      const sealContent = await encrypt(recipientHex, JSON.stringify(rumor));
+      const seal = await signEvent({
+        kind: 13,
+        created_at: createdAtUnix,
+        tags: [],
+        content: sealContent,
+      });
+      const wrappedContent = await encrypt(recipientHex, JSON.stringify(seal));
+      wrappedEvent = await signEvent({
+        kind: 1059,
+        created_at: createdAtUnix,
+        tags: [["p", recipientHex]],
+        content: wrappedContent,
+      });
+    } else {
+      wrappedEvent = await signEvent({
+        kind: 1059,
+        created_at: createdAtUnix,
+        tags: [["p", recipientHex]],
+        content: JSON.stringify(plaintextGrant),
+      });
+    }
+    return {
+      id: grantId,
+      keyVersion: input.keyVersion,
+      recipientNpub: input.recipientNpub,
+      wrappedEventJson: JSON.stringify(wrappedEvent),
+      createdAt,
+    };
+  }
+
+  function setAccessResult(tone, title, detail, meta = null) {
+    state.accessResult = { tone, title, detail, meta };
+    render();
+  }
+
+  async function buildAccessGrantForRow(row, recipientNpub) {
+    const key = openedAccessFolderKey(row);
+    return buildFolderKeyGrantRequest({
+      vaultId: state.activeVaultId,
+      folderId: row.id,
+      keyVersion: key.keyVersion,
+      rawKey: key.rawKey,
+      recipientNpub,
+    });
+  }
+
+  async function buildVaultPeopleMutationRequest(action, targetNpub) {
+    npubToHex(targetNpub);
+    return {
+      targetNpub,
+      accessChangeEvent: await buildAdminAccessChangeEvent({
+        action,
+        targetNpub,
+      }),
+    };
+  }
+
+  async function mutateVaultPeople(path, options) {
+    const metadata = await protectedRequest(path, options);
+    state.metadata = metadata;
+    rememberVisibleVault(metadata);
+    await loadVisibleVaults().catch((error) => {
+      log("Failed to refresh visible Vaults after Vault people mutation.", { error: error.message });
+    });
+    return metadata;
+  }
+
+  async function addVaultMemberFromPanel() {
+    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member identity first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const body = JSON.stringify(await buildVaultPeopleMutationRequest("add-member", targetNpub));
+      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/members`, {
+        method: "POST",
+        body,
+      });
+      $("vaultMemberNpubInput").value = "";
+      setAccessResult("ready", "Member added", `${identityDisplay(targetNpub)} can now belong to this Vault.`);
+      log("Added Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+    } catch (error) {
+      setAccessResult("error", "Add member failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function addVaultAdminFromPanel() {
+    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin identity first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const body = JSON.stringify(await buildVaultPeopleMutationRequest("add-admin", targetNpub));
+      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/admins`, {
+        method: "POST",
+        body,
+      });
+      $("vaultAdminNpubInput").value = "";
+      setAccessResult("ready", "Admin added", `${identityDisplay(targetNpub)} can manage this Vault.`);
+      log("Added Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+    } catch (error) {
+      setAccessResult("error", "Add admin failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function removeVaultMemberFromPanel(targetNpub) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const accessChangeEvent = await buildAdminAccessChangeEvent({
+        action: "remove-member",
+        targetNpub,
+      });
+      await mutateVaultPeople(
+        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/members/${encodeURIComponent(targetNpub)}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({ accessChangeEvent }),
+        }
+      );
+      setAccessResult("warn", "Member removed", `${identityDisplay(targetNpub)} was removed from this Vault.`);
+      log("Removed Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+    } catch (error) {
+      setAccessResult("error", "Remove member failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function removeVaultAdminFromPanel(targetNpub) {
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const accessChangeEvent = await buildAdminAccessChangeEvent({
+        action: "remove-admin",
+        targetNpub,
+      });
+      await mutateVaultPeople(
+        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/admins/${encodeURIComponent(targetNpub)}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({ accessChangeEvent }),
+        }
+      );
+      setAccessResult("warn", "Admin removed", `${identityDisplay(targetNpub)} is still a member.`);
+      log("Removed Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+    } catch (error) {
+      setAccessResult("error", "Remove admin failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function buildFolderAccessRemovalRequest(keyring, input) {
+    if (!keyring) throw new Error("Open this Folder key before removing access");
+    const row = input.row;
+    const vaultId = input.vaultId || state.activeVaultId;
+    const metadata = input.metadata || state.metadata;
+    const targetNpub = input.targetNpub;
+    npubToHex(targetNpub);
+    const currentKeyVersion = row.currentKeyVersion || 1;
+    const currentKey = keyring.keys.get(folderKeyId(vaultId, row.id, currentKeyVersion));
+    if (!currentKey) throw new Error(`Open the Folder Key for ${row.path} before removing access`);
+
+    const { recipients } = folderAccessRemovalRecipients(metadata, row, targetNpub);
+    const newKeyVersion = input.newKeyVersion || currentKeyVersion + 1;
+    if (newKeyVersion !== currentKeyVersion + 1) {
+      throw new Error("Folder access removal must rotate to the next key version");
+    }
+    const newRawKey = input.newRawKey || randomFolderKeyBytes();
+    if (newRawKey.length !== 32) throw new Error("New Folder Key must be 32 bytes");
+    const folderKey = bytesToBase64(newRawKey);
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const actorNpub = input.actorNpub || currentActorNpub();
+    const signEvent = input.signEvent || window.nostr?.signEvent;
+    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    await importFolderKey(keyring, {
+      vaultId,
+      folderId: row.id,
+      keyVersion: newKeyVersion,
+      folderKey,
+    });
+
+    const grants = [];
+    for (const recipientNpub of recipients) {
+      grants.push(
+        await buildFolderKeyGrantRequest({
+          vaultId,
+          folderId: row.id,
+          keyVersion: newKeyVersion,
+          rawKey: newRawKey,
+          issuerNpub: actorNpub,
+          recipientNpub,
+          createdAtUnix,
+          signEvent,
+        })
+      );
+    }
+
+    const reencryptedRecords = [];
+    for (const object of liveReadableFolderObjects(input.objects, row.id)) {
+      const write = await buildPageWriteRequest(keyring, {
+        authorNpub: actorNpub,
+        baseRevision: object.revision,
+        createdAtUnix,
+        folderId: row.id,
+        keyVersion: newKeyVersion,
+        objectId: object.objectId,
+        operation: "update",
+        plaintext: encodeFolderObjectPagePlaintext(object.path || `${object.objectId}.md`, object.text),
+        signEvent,
+        vaultId,
+      });
+      reencryptedRecords.push({
+        objectId: object.objectId,
+        ...write,
+      });
+    }
+
+    const accessChangeEvent = await buildAdminAccessChangeEvent({
+      action: "remove-folder-access",
+      adminNpub: actorNpub,
+      createdAtUnix,
+      folderId: row.id,
+      keyVersion: newKeyVersion,
+      signEvent,
+      targetNpub,
+      vaultId,
+    });
+
+    return {
+      newKeyVersion,
+      grants,
+      reencryptedRecords,
+      accessChangeEvent,
+      folderKey,
+      recipientNpubs: recipients,
+    };
+  }
+
+  async function grantFolderAccessFromPanel() {
+    const row = requireRestrictedAccessRow();
+    const targetNpub = await normalizedTargetNpub();
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const grant = await buildAccessGrantForRow(row, targetNpub);
+      const accessChangeEvent = await buildAdminAccessChangeEvent({
+        action: "grant-folder-access",
+        folderId: row.id,
+        keyVersion: row.currentKeyVersion,
+        targetNpub,
+      });
+      const body = JSON.stringify({
+        targetNpub,
+        grant,
+        accessChangeEvent,
+      });
+      const metadata = await protectedRequest(
+        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(row.id)}/access`,
+        { method: "POST", body }
+      );
+      state.metadata = metadata;
+      setAccessResult("ready", "Access granted", `${identityDisplay(targetNpub)} can open ${row.path}.`, {
+        grantId: grant.id,
+      });
+      log("Granted restricted Folder access.", { folderId: row.id, targetNpub: identityDisplay(targetNpub) });
+    } catch (error) {
+      setAccessResult("error", "Grant failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function removeFolderAccessFromPanel() {
+    const row = requireRestrictedAccessRow();
+    const targetNpub = await normalizedTargetNpub();
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const removal = await buildFolderAccessRemovalRequest(state.keyring, {
+        vaultId: state.activeVaultId,
+        metadata: state.metadata,
+        row,
+        targetNpub,
+        objects: [...state.projection.pages.values()],
+      });
+      const body = JSON.stringify({
+        newKeyVersion: removal.newKeyVersion,
+        grants: removal.grants,
+        reencryptedRecords: removal.reencryptedRecords,
+        accessChangeEvent: removal.accessChangeEvent,
+      });
+      const metadata = await protectedRequest(
+        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+          row.id
+        )}/access/${encodeURIComponent(targetNpub)}`,
+        { method: "DELETE", body }
+      );
+      state.metadata = metadata;
+      await openAvailableFolderKeyGrants();
+      await pullSyncBootstrap();
+      selectDefaultReaderTargets();
+      renderGraphView();
+      setAccessResult("warn", "Access removed", `${identityDisplay(targetNpub)} was removed from ${row.path}.`, {
+        keyVersion: `v${removal.newKeyVersion}`,
+        reencryptedPages: String(removal.reencryptedRecords.length),
+      });
+      log("Removed restricted Folder access with key rotation.", {
+        folderId: row.id,
+        keyVersion: removal.newKeyVersion,
+        reencryptedPages: removal.reencryptedRecords.length,
+        targetNpub: identityDisplay(targetNpub),
+      });
+    } catch (error) {
+      setAccessResult("error", "Remove failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function createShareLinkFromPanel() {
+    const row = requireRestrictedAccessRow();
+    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target identity first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const expiresAt = shareExpiryIso();
+      const grant = await buildAccessGrantForRow(row, recipientNpub);
+      const accessChangeEvent = await buildAdminAccessChangeEvent({
+        action: "grant-folder-access",
+        folderId: row.id,
+        keyVersion: row.currentKeyVersion,
+        targetNpub: recipientNpub,
+      });
+      const body = JSON.stringify({
+        recipientNpub,
+        grant,
+        accessChangeEvent,
+        expiresAt,
+        createPersonalMount: $("accessShareMountInput").checked,
+      });
+      const shareLink = await protectedRequest(
+        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(row.id)}/share-links`,
+        { method: "POST", body }
+      );
+      state.lastShareLinkId = shareLink.id;
+      $("accessShareLinkInput").value = shareLink.id;
+      setAccessResult("ready", "Share link created", `${shareLink.id} is pending for ${identityDisplay(recipientNpub)}.`, {
+        acceptPath: shareLink.acceptPath,
+        expiresAt: shareLink.expiresAt,
+      });
+      log("Created Folder share link.", { folderId: row.id, shareLinkId: shareLink.id });
+      await refreshFolderShareLinks(row.id);
+    } catch (error) {
+      setAccessResult("error", "Share failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function acceptShareLinkFromPanel() {
+    const shareLinkId = $("accessShareLinkInput").value.trim() || state.lastShareLinkId;
+    if (!shareLinkId) throw new Error("Paste a share link id first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const shareLink = await protectedRequest(`/_admin/share-links/${encodeURIComponent(shareLinkId)}/accept`, {
+        method: "POST",
+      });
+      state.lastShareLinkId = shareLink.id;
+      await loadVaultMetadata();
+      const grants = await openAvailableFolderKeyGrants();
+      await pullSyncBootstrap();
+      selectDefaultReaderTargets();
+      setAccessResult(
+        "ready",
+        shareLink.duplicateAccept ? "Share link already accepted" : "Share link accepted",
+        `${shareLink.folderId} is now available to this signer.`,
+        {
+          mounted: shareLink.personalMountId || "none",
+          openedKeys: String(grants.opened.length),
+        }
+      );
+      log("Accepted Folder share link.", { shareLinkId: shareLink.id });
+    } catch (error) {
+      setAccessResult("error", "Accept failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function revokeShareLinkFromPanel() {
+    const shareLinkId = $("accessShareLinkInput").value.trim() || state.lastShareLinkId;
+    if (!shareLinkId) throw new Error("Paste a share link id first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const shareLink = await protectedRequest(`/_admin/share-links/${encodeURIComponent(shareLinkId)}`, {
+        method: "DELETE",
+      });
+      state.lastShareLinkId = shareLink.id;
+      setAccessResult("warn", "Share link revoked", `${shareLink.id} is ${shareLink.status}.`, {
+        updatedAt: shareLink.updatedAt,
+      });
+      log("Revoked Folder share link.", { shareLinkId: shareLink.id });
+      await refreshFolderShareLinks(state.folderShareLinksFolderId);
+    } catch (error) {
+      setAccessResult("error", "Revoke failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function createVaultInvitationFromPanel() {
+    const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite identity first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const body = JSON.stringify(
+        buildVaultInvitationRequest({
+          targetNpub,
+          initialFolderAccess: $("vaultInviteFoldersInput").value,
+          expiresAt: vaultInvitationExpiryIso(),
+        })
+      );
+      const invitation = await protectedRequest(
+        vaultInvitationCreatePath(state.activeVaultId),
+        { method: "POST", body }
+      );
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      setAccessResult("ready", "Invitation created", `${identityDisplay(invitation.userId)} can join ${invitation.vaultId}.`, {
+        inviteCode: invitation.inviteCode,
+        invitationId: invitation.id,
+        acceptPath: invitation.acceptPath,
+        expiresAt: invitation.expiresAt,
+        "target identity": identityDisplay(invitation.userId),
+      });
+      log("Created Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
+      await refreshVaultAdminLists();
+    } catch (error) {
+      setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function inspectVaultInvitationFromPanel() {
+    const code = currentVaultInvitationCode();
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const invitation = await protectedRequest(vaultInvitationLinkPath(code));
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      setAccessResult("ready", "Invitation loaded", `${identityDisplay(invitation.userId)} is ${invitation.status}.`, {
+        vaultId: invitation.vaultId,
+        invitationId: invitation.id,
+        acceptPath: invitation.acceptPath,
+        "target identity": identityDisplay(invitation.userId),
+        signer: state.pubkeyHex ? shortKey(npubFromHex(state.pubkeyHex)) : "none",
+      });
+      log("Loaded Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
+      return invitation;
+    } catch (error) {
+      setAccessResult("error", "Inspect failed", vaultInvitationUnavailableDetail(error));
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function acceptVaultInvitationFromPanel() {
+    const code = currentVaultInvitationCode();
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const invitation = await protectedRequest(vaultInvitationAcceptPath(code), {
+        method: "POST",
+      });
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      setActiveVaultId(invitation.vaultId);
+      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      await loadVaultMetadata();
+      await loadVisibleVaults();
+      setAccessResult(
+        "ready",
+        invitation.duplicateAccept ? "Invitation already accepted" : "Invitation accepted",
+        `${invitation.vaultId} is now available to this signer.`,
+        {
+          status: invitation.status,
+          "folders granted": (invitation.initialFolderAccess || []).join(", ") || "none",
+          signer: state.pubkeyHex ? shortKey(npubFromHex(state.pubkeyHex)) : "none",
+        }
+      );
+      log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
+    } catch (error) {
+      setAccessResult("error", "Accept failed", vaultInvitationUnavailableDetail(error));
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function revokeVaultInvitationFromPanel() {
+    const value = currentVaultInvitationInput();
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      let invitationId = state.lastVaultInvitationId;
+      let vaultId = state.activeVaultId;
+      if (!invitationId || value !== invitationId) {
+        if (value.startsWith("invitation-")) {
+          invitationId = value;
+        } else {
+          const invitation = await protectedRequest(vaultInvitationLinkPath(value));
+          invitationId = invitation.id;
+          vaultId = invitation.vaultId;
+          state.lastVaultInvitationId = invitation.id;
+          state.lastVaultInvitationCode = invitation.inviteCode;
+        }
+      }
+      const invitation = await protectedRequest(
+        vaultInvitationRevokePath(vaultId, invitationId),
+        { method: "DELETE" }
+      );
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
+        updatedAt: invitation.updatedAt,
+      });
+      log("Revoked Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
+      await refreshVaultAdminLists();
+    } catch (error) {
+      setAccessResult("error", "Revoke failed", error.message);
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function openEnteredFolderKey() {
+    if (!state.keyring) state.keyring = createSessionKeyring();
+    const input = activePageInput();
+    const folderKey = $("folderKeyInput").value.trim();
+    if (!folderKey) throw new Error("Paste a base64 raw Folder Key first");
+    await openFolderKeyGrantPlaintext(state.keyring, {
+      version: "finite-folder-key-grant-v1",
+      vaultId: state.activeVaultId,
+      folderId: input.folderId,
+      keyVersion: currentFolderKeyVersion(input.folderId),
+      issuerNpub: "npub-local-session",
+      recipientNpub: state.pubkeyHex ? npubFromHex(state.pubkeyHex) : "npub-local-session",
+      folderKey,
+      issuedAt: new Date().toISOString(),
+    });
+    log("Opened Folder Key into the in-memory session keyring.", {
+      folderId: input.folderId,
+      keyVersion: currentFolderKeyVersion(input.folderId),
+    });
+    render();
+  }
+
+  async function prepareDraftWrite(options = {}) {
+    if (!state.keyring) throw new Error("Open a Folder Key before encrypting a Page draft");
+    if (!state.pubkeyHex) throw new Error("Connect a signer before preparing a signed Page write");
+    const input = activePageInput();
+    const authorNpub = npubFromHex(state.pubkeyHex);
+    const keyVersion = currentFolderKeyVersion(input.folderId);
+    state.preparedWrite = await buildPageWriteRequest(state.keyring, {
+      authorNpub,
+      baseRevision: input.baseRevision,
+      folderId: input.folderId,
+      keyVersion,
+      objectId: input.objectId,
+      plaintext: encodeFolderObjectPagePlaintext(input.path, input.text),
+      signEvent: (event) => window.nostr.signEvent(event),
+      vaultId: state.activeVaultId,
+    });
+    state.preparedWriteTarget = {
+      folderId: input.folderId,
+      objectId: input.objectId,
+      path: input.path,
+    };
+    state.projection.localDrafts.set(pageKey(input.folderId, input.objectId), {
+      baseRevision: state.preparedWrite.baseRevision || 0,
+      path: input.path,
+      text: input.text,
+    });
+    log("Encrypted Page draft and prepared signed revision request.", {
+      folderId: input.folderId,
+      objectId: input.objectId,
+      baseRevision: state.preparedWrite.baseRevision,
+      keyVersion,
+    });
+    if (options.renderAfter !== false) render();
+    return state.preparedWrite;
+  }
+
+  async function savePreparedPage() {
+    if (!state.preparedWrite) throw new Error("Prepare a Page write before saving");
+    const savedInput = activePageInput();
+    const target = state.preparedWriteTarget || savedInput;
+    const savedText = savedInput.text;
+    const savedPath = target.path || savedInput.path || `${target.objectId}.md`;
+    const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+      target.folderId
+    )}/objects/${encodeURIComponent(target.objectId)}`;
+    const result = await protectedRequest(path, {
+      method: "PUT",
+      body: JSON.stringify(state.preparedWrite),
+    });
+    state.projection.pages.set(pageKey(target.folderId, target.objectId), {
+      folderId: target.folderId,
+      objectId: target.objectId,
+      revision: result.revision,
+      path: savedPath,
+      status: "ready",
+      text: savedText,
+      title: pageTitleFromText(savedText, pageTitleFromPath(savedPath, target.objectId)),
+    });
+    state.projection.localDrafts.delete(pageKey(target.folderId, target.objectId));
+    state.preparedWrite = null;
+    state.preparedWriteTarget = null;
+    $("pageBaseRevisionInput").value = String(result.revision);
+    setEditorDraftText(savedText);
+    log("Saved encrypted Page revision.", result);
+    render();
+  }
+
+  async function saveActivePage() {
+    await prepareDraftWrite({ renderAfter: false });
+    await savePreparedPage();
+  }
+
+  async function pullSyncBootstrap() {
+    const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/sync/bootstrap`;
+    const sync = await protectedRequest(path);
+    const openedSync = await openSyncObjects(state.keyring, sync);
+    state.projection = mergeSyncProjection(state.projection, openedSync);
+    log("Pulled sync bootstrap into local projection.", {
+      conflicts: state.projection.conflicts,
+      decryptedPages: openedSync.objects.filter((object) => object.status === "ready").length,
+      pages: state.projection.pages.size,
+      seenEvents: state.projection.seenEventIds.size,
+    });
+    render();
+  }
+
+  function renderGraphView() {
+    const pages = decryptedPagesForGraph();
+    const filterText = $("graphFilterInput").value;
+    const graph = buildGraphProjection(pages, filterText);
+    drawGraph(graph, { filterText, readablePageCount: pages.length });
+    setGraphStats(graph, pages.length);
+    log("Rendered graph from decrypted client index.", {
+      edges: graph.edges.length,
+      nodes: graph.nodes.length,
+    });
+  }
+
+  function fitGraphView() {
+    $("graphCanvas").setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
+    log("Fit graph view to readable graph bounds.");
+  }
+
+  function resetGraphView() {
+    $("graphFilterInput").value = "";
+    renderGraphView();
+  }
+
+  function renderReplayFrames() {
+    const changes = [];
+    let sequence = 1;
+    for (const [key, draft] of state.projection.localDrafts.entries()) {
+      const [folderId, objectId] = key.split("/");
+      changes.push({
+        sequence,
+        recordEventId: `local-draft-${sequence}`,
+        page: {
+          folderId,
+          objectId,
+          status: "ready",
+          text: draft.text,
+        },
+      });
+      sequence += 1;
+    }
+    for (const [key, page] of state.projection.pages.entries()) {
+      if (!isReadablePage(page)) continue;
+      const [folderId, objectId] = key.split("/");
+      changes.push({
+        sequence,
+        recordEventId: `page-${sequence}`,
+        page: {
+          folderId,
+          objectId,
+          status: "ready",
+          text: page.text,
+          title: page.title,
+        },
+      });
+      sequence += 1;
+    }
+    const frames = buildReplayFrames(changes);
+    setList("replayList", frames, "No replay frames", (item, frame) => {
+      item.textContent = `#${frame.sequence} ${frame.action}: ${frame.nodeCount} nodes, ${frame.edgeCount} edges`;
+    });
+    if (frames.length) {
+      drawGraph(frames[frames.length - 1].graph, { readablePageCount: decryptedPagesForGraph().length });
+      setGraphStats(frames[frames.length - 1].graph, decryptedPagesForGraph().length);
+    }
+    log("Built graph replay frames.", frames.map((frame) => ({
+      edgeCount: frame.edgeCount,
+      nodeCount: frame.nodeCount,
+      sequence: frame.sequence,
+    })));
+  }
+
+  function renderOkfPlan() {
+    return state.okfPlan;
+  }
+
+  function folderKeyVersionMap() {
+    return new Map(
+      (state.metadata?.folders || []).map((folder) => [folder.id, folder.currentKeyVersion || 1])
+    );
+  }
+
+  function planEnteredOkfImport() {
+    const destinationFolderId = $("okfDestinationFolderInput").value.trim() || activePageInput().folderId;
+    const bundle = parseOkfBundle($("okfBundleInput").value, { destinationFolderId });
+    state.okfPlan = planOkfImport(bundle, existingPagesForImport(), {
+      conflictMode: $("okfConflictModeInput").value,
+      destinationFolderId,
+    });
+    log("Planned OKF import.", state.okfPlan.summary);
+    render();
+  }
+
+  async function executePlannedOkfImport() {
+    if (!state.okfPlan) throw new Error("Plan an OKF import before executing it");
+    if (!state.keyring) throw new Error("Open destination Folder Keys before importing OKF");
+    if (!state.pubkeyHex) throw new Error("Connect a signer before importing OKF");
+    const authorNpub = npubFromHex(state.pubkeyHex);
+    const prepared = await prepareOkfImportWrites(state.keyring, state.okfPlan, {
+      authorNpub,
+      currentKeyVersion: (folderId) => folderKeyVersionMap().get(folderId) || 1,
+      signEvent: (event) => window.nostr.signEvent(event),
+      vaultId: state.activeVaultId,
+    });
+    const results = [];
+    for (const write of prepared.writes) {
+      const result = await protectedRequest(write.path, {
+        method: "PUT",
+        body: JSON.stringify(write.body),
+      });
+      const importedEntry = state.okfPlan.entries.find((entry) => entry.objectId === write.objectId);
+      const importedAsset = importedEntry?.kind === "asset";
+      const projectionObject = {
+        folderId: write.folderId,
+        objectId: write.objectId,
+        path: write.targetPath,
+        revision: result.revision,
+        status: "ready",
+        type: importedAsset ? "asset" : "page",
+      };
+      if (importedAsset) {
+        const importedBytes = base64ToBytes(importedEntry?.bytesBase64 || "");
+        projectionObject.bytesBase64 = importedEntry?.bytesBase64 || "";
+        projectionObject.contentHash = await sha256HexBytes(importedBytes);
+        projectionObject.contentType = importedEntry?.contentType || "application/octet-stream";
+        projectionObject.size = importedBytes.length;
+      } else {
+        const importedText = importedEntry?.markdown || "";
+        projectionObject.text = importedText;
+        projectionObject.title = pageTitleFromText(importedText, write.targetPath);
+      }
+      state.projection.pages.set(pageKey(write.folderId, write.objectId), projectionObject);
+      results.push({ ...result, targetPath: write.targetPath });
+    }
+    state.okfPlan = null;
+    log("Executed OKF import through encrypted secure object routes.", {
+      imported: results.length,
+      skipped: prepared.skipped.length,
+      results,
+    });
+    render();
+  }
+
+  function bind() {
+    $("connectSignerButton").addEventListener("click", () => {
+      connectSigner().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to connect signer.", { error: error.message });
+        render();
+      });
+    });
+    $("vaultSelect").addEventListener("change", () => {
+      setActiveVaultId($("vaultSelect").value);
+      render();
+    });
+    $("loadVaultButton").addEventListener("click", () => {
+      loadVaultReader().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to load Vault reader.", { error: error.message });
+        state.readerBusy = false;
+        render();
+      });
+    });
+    $("createOrganizationVaultButton").addEventListener("click", () => {
+      createOrganizationVaultFromInput().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create organization Vault.", { error: error.message });
+        render();
+      });
+    });
+    $("organizationVaultNameInput").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      createOrganizationVaultFromInput().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create organization Vault.", { error: error.message });
+        render();
+      });
+    });
+    $("refreshReaderButton").addEventListener("click", () => {
+      refreshReader().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to refresh Vault reader.", { error: error.message });
+        state.readerBusy = false;
+        render();
+      });
+    });
+    $("readerModeButton").addEventListener("click", () => {
+      state.readerMode = state.readerMode === "source" ? "reading" : "source";
+      render();
+    });
+    $("ribbonGraphButton").addEventListener("click", () => {
+      setWorkspaceView("graph");
+    });
+    $("ribbonFilesButton").addEventListener("click", () => {
+      setWorkspaceView("page");
+      setSidebarMode("files");
+    });
+    $("ribbonSearchButton").addEventListener("click", () => {
+      setSidebarMode("search");
+    });
+    $("ribbonCommandButton").addEventListener("click", () => {
+      if (state.commandPaletteOpen) {
+        closeCommandPalette();
+      } else {
+        openCommandPalette();
+      }
+    });
+    $("ribbonAccessButton").addEventListener("click", () => {
+      setSidebarMode("access");
+    });
+    onOptionalClick("accessOverviewButton", () => {
+      const folderId = state.activeAccessFolderId || state.selectedFolderId;
+      if (!folderId) return;
+      state.activeAccessIntent = "overview";
+      state.activeAccessFolderId = folderId;
+      state.accessResult = null;
+      log("Opened Folder access overview.", { folderId });
+      render();
+    });
+    onOptionalClick("accessManageButton", () => {
+      const folderId = state.activeAccessFolderId || state.selectedFolderId;
+      if (!folderId) return;
+      state.activeAccessIntent = "people";
+      state.activeAccessFolderId = folderId;
+      state.accessResult = null;
+      log("Opened Folder people access panel.", { folderId });
+      render();
+    });
+    onOptionalClick("accessShareButton", () => {
+      const folderId = state.activeAccessFolderId || state.selectedFolderId;
+      if (!folderId) return;
+      state.activeAccessView = "folder";
+      state.activeAccessIntent = "links";
+      state.activeAccessFolderId = folderId;
+      state.accessResult = null;
+      log("Opened Folder links panel.", { folderId });
+      render();
+    });
+    onOptionalClick("accessFolderViewButton", () => setAccessView("folder"));
+    onOptionalClick("accessVaultViewButton", () => setAccessView("vault"));
+    const accessViewSwitch = document.querySelector(".access-view-switch");
+    if (accessViewSwitch) {
+      accessViewSwitch.addEventListener("keydown", (event) => {
+        const tabs = ["accessVaultViewButton", "accessFolderViewButton"]
+          .map((id) => $(id))
+          .filter(Boolean);
+        const activeIndex = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
+        if (activeIndex < 0) return;
+        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+          event.preventDefault();
+          const direction = event.key === "ArrowRight" ? 1 : -1;
+          const nextIndex = (activeIndex + direction + tabs.length) % tabs.length;
+          setAccessView(nextIndex === 0 ? "vault" : "folder");
+          tabs[nextIndex]?.focus();
+        }
+        if (event.key === "Home") {
+          event.preventDefault();
+          setAccessView("vault");
+          tabs[0]?.focus();
+        }
+        if (event.key === "End") {
+          event.preventDefault();
+          setAccessView("folder");
+          tabs[tabs.length - 1]?.focus();
+        }
+      });
+    }
+    onOptionalClick("accessConnectSignerButton", () => {
+      connectSigner().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to connect signer.", { error: error.message });
+        render();
+      });
+    });
+    onOptionalClick("accessLoadVaultButton", () => {
+      loadVaultReader().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to load Vault reader.", { error: error.message });
+        state.readerBusy = false;
+        render();
+      });
+    });
+    onOptionalClick("accessCreateOrganizationVaultButton", () => {
+      createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create organization Vault.", { error: error.message });
+        render();
+      });
+    });
+    const accessOrgNameInput = $("accessOrganizationVaultNameInput");
+    if (accessOrgNameInput) {
+      accessOrgNameInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
+          state.lastError = error.message;
+          log("Failed to create organization Vault.", { error: error.message });
+          render();
+        });
+      });
+    }
+    onOptionalClick("addVaultMemberButton", () => {
+      addVaultMemberFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to add Vault member.", { error: error.message });
+      });
+    });
+    onOptionalClick("addVaultAdminButton", () => {
+      addVaultAdminFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to add Vault admin.", { error: error.message });
+      });
+    });
+    for (const [inputId, buttonId] of [
+      ["vaultMemberNpubInput", "addVaultMemberButton"],
+      ["vaultAdminNpubInput", "addVaultAdminButton"],
+    ]) {
+      const input = $(inputId);
+      if (!input) continue;
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        const button = $(buttonId);
+        if (!button?.disabled) button.click();
+      });
+    }
+    onOptionalClick("grantFolderAccessButton", () => {
+      grantFolderAccessFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to grant Folder access.", { error: error.message });
+      });
+    });
+    onOptionalClick("removeFolderAccessButton", () => {
+      removeFolderAccessFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to remove Folder access.", { error: error.message });
+      });
+    });
+    onOptionalClick("createShareLinkButton", () => {
+      createShareLinkFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create Folder share link.", { error: error.message });
+      });
+    });
+    onOptionalClick("acceptShareLinkButton", () => {
+      acceptShareLinkFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to accept Folder share link.", { error: error.message });
+      });
+    });
+    onOptionalClick("revokeShareLinkButton", () => {
+      revokeShareLinkFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to revoke Folder share link.", { error: error.message });
+      });
+    });
+    onOptionalClick("createVaultInvitationButton", () => {
+      createVaultInvitationFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create Vault invitation.", { error: error.message });
+      });
+    });
+    onOptionalClick("getVaultInvitationButton", () => {
+      inspectVaultInvitationFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to inspect Vault invitation.", { error: error.message });
+      });
+    });
+    onOptionalClick("acceptVaultInvitationButton", () => {
+      acceptVaultInvitationFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to accept Vault invitation.", { error: error.message });
+      });
+    });
+    onOptionalClick("revokeVaultInvitationButton", () => {
+      revokeVaultInvitationFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to revoke Vault invitation.", { error: error.message });
+      });
+    });
+    $("sidebarSearchInput").addEventListener("input", () => {
+      renderSearchPanel();
+    });
+    $("commandPaletteInput").addEventListener("input", () => {
+      renderCommandPalette();
+    });
+    $("commandPaletteInput").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      runCommandPaletteRow(commandPaletteRows($("commandPaletteInput").value)[0]);
+    });
+    $("closeCommandPaletteButton").addEventListener("click", () => {
+      closeCommandPalette();
+    });
+    $("commandPalette").addEventListener("click", (event) => {
+      if (event.target === $("commandPalette")) closeCommandPalette();
+    });
+    $("obsidianNewPageButton").addEventListener("click", () => {
+      startNewPageDraft();
+    });
+    $("obsidianNewFolderButton").addEventListener("click", () => {
+      createFolderFromToolbar().catch((error) => {
+        state.lastError = error.message;
+        window.alert?.(error.message);
+        log("Failed to create Folder from toolbar.", { error: error.message });
+        render();
+      });
+    });
+    $("readerPageContent").addEventListener("input", () => {
+      if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
+        syncDraftFromVisualEditor({ remember: true });
+        refreshEditorSlashMenu();
+      }
+    });
+    $("readerPageContent").addEventListener("keydown", (event) => {
+      handleEditorSlashKeydown(event);
+    });
+    $("pageDraftInput").addEventListener("input", () => {
+      rememberActiveDraft($("pageDraftInput").value);
+    });
+    $("editorDrawer").addEventListener("toggle", () => {
+      setEditorMode($("editorDrawer").open ? "source" : "visual");
+    });
+    onOptionalClick("openFolderKeyButton", () => {
+      openEnteredFolderKey().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to open Folder Key.", { error: error.message });
+        render();
+      });
+    });
+    onOptionalClick("encryptDraftButton", () => {
+      prepareDraftWrite().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to encrypt Page draft.", { error: error.message });
+        render();
+      });
+    });
+    $("renderGraphButton").addEventListener("click", () => {
+      try {
+        renderGraphView();
+      } catch (error) {
+        state.lastError = error.message;
+        log("Failed to render graph.", { error: error.message });
+      }
+    });
+    $("graphFilterInput").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      renderGraphView();
+    });
+    $("fitGraphButton").addEventListener("click", () => {
+      fitGraphView();
+    });
+    $("resetGraphButton").addEventListener("click", () => {
+      resetGraphView();
+    });
+    $("replayGraphButton").addEventListener("click", () => {
+      try {
+        renderReplayFrames();
+      } catch (error) {
+        state.lastError = error.message;
+        log("Failed to build replay.", { error: error.message });
+      }
+    });
+    onOptionalClick("planOkfImportButton", () => {
+      try {
+        planEnteredOkfImport();
+      } catch (error) {
+        state.lastError = error.message;
+        log("Failed to plan OKF import.", { error: error.message });
+        render();
+      }
+    });
+    onOptionalClick("executeOkfImportButton", () => {
+      executePlannedOkfImport().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to execute OKF import.", { error: error.message });
+        render();
+      });
+    });
+    document.addEventListener("click", (event) => {
+      const menu = $("contextMenu");
+      if (!menu.hidden && !menu.contains(event.target)) closeContextMenu();
+      const slashMenu = $("editorSlashMenu");
+      if (state.editorSlashOpen && slashMenu && !slashMenu.contains(event.target) && !visualEditorElement()?.contains(event.target)) {
+        closeEditorSlashMenu();
+      }
+    });
+    document.addEventListener("selectionchange", () => {
+      if (state.editorSlashOpen) refreshEditorSlashMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        openCommandPalette();
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        if (!canSaveActiveDraft()) return;
+        saveActivePage().catch((error) => {
+          state.lastError = error.message;
+          log("Failed to save Page.", { error: error.message });
+          render();
+        });
+        return;
+      }
+      if (event.key === "Escape") {
+        closeContextMenu();
+        closeCommandPalette();
+        closeEditorSlashMenu();
+      }
+    });
+  }
+
+  async function start() {
+    bind();
+    setEditorDraftText($("pageDraftInput").value);
+    await loadConfig();
+    await detectSigner();
+  }
+
+  return {
+    accessActionRoute,
+    accessBadgesForFolder,
+    accessIntentValue,
+    accessPanelState,
+    accessPeopleSummary,
+    adminAccessChangeTags,
+    buildAdminAccessChangeEvent,
+    buildFolderKeyGrantRequest,
+    buildPageDeleteRequest,
+    buildPageWriteRequest,
+    buildAuthEventTemplate,
+    buildDefaultVaultPageWrites,
+    buildFolderAccessRemovalRequest,
+    buildVaultInvitationRequest,
+    buildVaultBootstrapPlan,
+    buildGraphProjection,
+    buildReplayFrames,
+    canonicalAdminAccessChangePayload,
+    commandPaletteCommands,
+    commandPaletteRows,
+    contextMenuItemsForTarget,
+    createClientProjection,
+    createSessionKeyring,
+    deriveSignerState,
+    defaultVaultBootstrapFolderIds,
+    defaultVaultPages,
+    defaultVaultPagesFolderId,
+    decodeFolderObjectPlaintext,
+    encryptFolderObject,
+    encodeFolderObjectAssetPlaintext,
+    encodeFolderObjectPagePlaintext,
+    editorSlashCommandRows,
+    extractPageLinks,
+    folderShareLinkRows,
+    graphEmptyStateCopy,
+    graphLayout,
+    graphNeighborIds,
+    graphStats,
+    inlineLinkSegments,
+    initialVaultInvitationFolders,
+    markdownFromEditorElement,
+    markdownPreviewBlocks,
+    mergeSyncProjection,
+    metadataFolderRows,
+    metadataMountRows,
+    nextDraftObjectId,
+    normalizeAccessView,
+    normalizeSidebarMode,
+    normalizeVisibleVault,
+    globalVaultControlState,
+    npubFromHex,
+    npubToHex,
+    openFolderKeyGrants,
+    openDevelopmentFolderKeyGrants,
+    openFolderKeyGrantPlaintext,
+    openFolderObject,
+    openSyncObjects,
+    parseOkfBundle,
+    pageLinkContext,
+    pagePathLabel,
+    pageStatsForText,
+    personalVaultIdForPubkey,
+    plaintextDevelopmentGrantFromExportGrant,
+    plaintextGrantFromGiftWrappedExportGrant,
+    planOkfImport,
+    prepareOkfImportWrites,
+    projectionPagesFromProjection,
+    publicKeyIdentityFromInput,
+    readerFolderDetail,
+    readerFolderRows,
+    readerPageDetail,
+    readerPageRows,
+    searchPageRows,
+    sharedFolderRelationshipRows,
+    hasOrganizationVaultControls,
+    showsCreateOrganizationControl,
+    sidebarAccessBadgesForFolder,
+    sidebarModeLabel,
+    shortKey,
+    start,
+    rememberIdentity,
+    identityDisplay,
+    visibleVaultOptions,
+    vaultHealthBadges,
+    workspaceChromeState,
+    workspaceTabTitle,
+    vaultInvitationAcceptPath,
+    vaultInvitationCreatePath,
+    vaultInvitationIdentifierHint,
+    vaultInvitationLinkPath,
+    vaultInvitationRevokePath,
+    vaultInvitationRows,
+    vaultInvitationUnavailableDetail,
+    vaultGuideStepRows,
+    vaultPeopleRows,
+  };
+})();
+
+window.FiniteBrainProductClient = FiniteBrainProductClient;
+if (!window.__FINITE_BRAIN_DISABLE_AUTOSTART__) {
+  FiniteBrainProductClient.start();
+}
