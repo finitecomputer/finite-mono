@@ -20,6 +20,7 @@ just dev up
 just dev up --headless
 just dev up --headless -- scripts/devfinity-smoke
 just dev smoke
+just dev rust-smoke
 just dev status
 just dev cleanup
 ```
@@ -30,6 +31,7 @@ The equivalent direct commands are:
 cargo run -p devfinity -- up
 cargo run -p devfinity -- up --headless
 cargo run -p devfinity -- up --headless -- scripts/devfinity-smoke
+cargo run -p devfinity -- up --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
 cargo run -p devfinity -- status
 cargo run -p devfinity -- cleanup
 ```
@@ -43,6 +45,11 @@ down afterward. This is the automation path for local integration tests.
 readiness, then submits the dashboard create-agent form, lets the dashboard call
 Core, and confirms through Core's `/api/core/v1/me` response that the agent
 creation request and project were persisted in Postgres for the dev account.
+
+`just dev rust-smoke` demonstrates the same model from Rust. The test is marked
+`#[ignore]` so regular workspace test runs do not start or require devfinity;
+the `just` recipe runs it through the wrapped-command path so it receives the
+same generated environment variables as any other devfinity integration test.
 
 `status` is read-only. It prints the generated state paths, process-compose
 socket state, devfinity pid-file process states, the local Postgres container

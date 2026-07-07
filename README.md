@@ -15,6 +15,7 @@ repos work in one checkout, then add shared workspace structure around them.
 
 ## Start Here
 
+- [Docs index](docs/README.md)
 - [Monorepo plan](docs/monorepo-plan.md)
 - [Migration log](docs/monorepo-migration-log.md)
 - [Fedimint monorepo structure analysis](docs/fedimint-monorepo-structure-analysis.md)
@@ -33,5 +34,7 @@ repos work in one checkout, then add shared workspace structure around them.
 - `just dev up --headless`: start the same local stack without the TUI.
 - `just dev smoke`: start the headless stack, run the integration smoke test,
   and tear it down.
+- `just dev rust-smoke`: start the headless stack, run the ignored Rust
+  integration smoke test, and tear it down.
 - `just dev status`: print devfinity process, container, and service status.
 - `just dev cleanup`: best-effort cleanup for orphaned local stack processes.

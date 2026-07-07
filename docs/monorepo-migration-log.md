@@ -343,6 +343,45 @@ Validation:
 - `just sites test`
 - `just sites lint`
 
+## Phase 7: Docs
+
+Date: 2026-07-06
+
+Fedimint reference checked:
+
+- Fedimint keeps root documentation under `docs/`, mixes durable Markdown
+  orientation with generated API/reference docs, and includes a docs Cargo
+  workspace package.
+- Finite is not copying the docs Cargo package or generated-doc publishing
+  setup yet. The useful pattern for now is one root docs entry point plus clear
+  ownership boundaries.
+
+Source checked:
+
+- `finite-eng-docs` source checkout:
+  `4044b9b2aae698796ae1238a9d8a8bf959377a7f`.
+- The source checkout had a dirty `README.md`; the imported files came from
+  `finite-eng-docs/docs/`, while the new monorepo `docs/README.md` was written
+  fresh for `finite-mono`.
+
+Docs added or updated:
+
+- Added `docs/README.md` as the current root docs index.
+- Imported `architecture-overview.md`, `system-flow-and-trust-boundaries.md`,
+  `navigation-plan.md`, `local-dev-matrix.md`, `slop-audit.md`, and
+  `system-flow-and-trust-boundaries.excalidraw` from `finite-eng-docs`.
+- Added unreviewed/stale status banners to the imported Markdown docs.
+- Updated imported references from "cross-repo" to monorepo/component language
+  where it was mechanical.
+- Updated root `README.md` to point at the docs index.
+
+Decision:
+
+- Repo-local docs remain inside `finitecomputer-v2/`, `finitechat/`, and
+  `finite-sites/` for now.
+- Imported orientation docs are useful background, but not canonical runbooks
+  until the Phase 13 stale-doc audit promotes, rewrites, or deletes them.
+
 ## Phase 9: Initial Local Integration Harness
 
 Date: 2026-07-06

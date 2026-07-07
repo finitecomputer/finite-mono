@@ -267,18 +267,18 @@ pretending stale imported docs are current.
 
 Tasks:
 
-- [ ] Check Fedimint's `docs/` structure before finalizing root docs
+- [x] Check Fedimint's `docs/` structure before finalizing root docs
       navigation.
-- [ ] Move this plan to `docs/monorepo-plan.md`.
-- [ ] Move the Fedimint analysis to
+- [x] Move this plan to `docs/monorepo-plan.md`.
+- [x] Move the Fedimint analysis to
       `docs/fedimint-monorepo-structure-analysis.md`.
-- [ ] Move useful `finite-eng-docs` orientation content into root docs, updating
+- [x] Move useful `finite-eng-docs` orientation content into root docs, updating
       language from "cross-repo" to "monorepo".
-- [ ] Keep copied repo docs inside their source repo folders at first.
-- [ ] Add a root `docs/README.md` that distinguishes current root docs from
+- [x] Keep copied repo docs inside their source repo folders at first.
+- [x] Add a root `docs/README.md` that distinguishes current root docs from
       imported repo-local docs.
-- [ ] Mark stale or unreviewed docs clearly before linking them as canonical.
-- [ ] Maintain `docs/monorepo-migration-log.md` until migration is done.
+- [x] Mark stale or unreviewed docs clearly before linking them as canonical.
+- [x] Maintain `docs/monorepo-migration-log.md` until migration is done.
 
 Exit criterion: root docs tell readers where to start and which copied docs are
 not yet reviewed.
@@ -381,8 +381,15 @@ Tasks:
       integration commands.
 - [x] Add `just dev smoke` using the wrapped-command path against real local
       Core, Finite Chat, Finite Sites, Dashboard, and Postgres infrastructure.
+- [x] Add an ignored Rust integration smoke test that is run through
+      `just dev rust-smoke`.
 - [x] Add log collection for failed local runs.
 - [x] Document the harness in `docs/local-integration-harness.md`.
+
+Later:
+
+- [ ] Graduate devfinity Rust smokes into a dedicated finite integration test
+      crate with typed fixtures once there are multiple real scenarios.
 
 Exit criterion: one command can start the first useful local Finite stack smoke
 without requiring the old standalone repo layout.
