@@ -1,0 +1,7 @@
+interface:
+  display_name: "Nostr Agent CLI"
+  short_description: "Use the Nostr Agent Interface CLI safely"
+  default_prompt: "Use $nostr-agent-interface-cli to inspect and run Nostr Agent Interface CLI commands safely."
+
+policy:
+  allow_implicit_invocation: true

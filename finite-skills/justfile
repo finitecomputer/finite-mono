@@ -1,0 +1,9 @@
+set shell := ["bash", "-cu"]
+
+# Lists finite-skills commands
+default:
+    just --list
+
+# Validates the shared skill tree
+check:
+    scripts/check-static.sh
