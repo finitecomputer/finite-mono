@@ -20,20 +20,25 @@ devfinity/
     lib.rs
     main.rs
     topology.rs
+    env.rs
+    process.rs
+    stack.rs
     fixtures.rs
-    runtime/
-      mod.rs
-      process_compose.rs
     components/
       mod.rs
+      postgres.rs
       core.rs
       chat.rs
       sites.rs
+      dashboard.rs
     clients/
       mod.rs
       core.rs
       chat.rs
       sites.rs
+    local_ui/
+      mod.rs
+      mprocs.rs
 ```
 
 Responsibilities:
@@ -41,16 +46,32 @@ Responsibilities:
 - `lib.rs`: public harness API.
 - `main.rs`: thin CLI over the library.
 - `topology.rs`: profiles, ports, paths, environment, and state layout.
-- `runtime/`: process-compose config generation, startup, readiness, status,
-  cleanup, and wrapped-command execution.
-- `components/`: typed service definitions and runtime wiring.
+- `env.rs`: generated environment contract and shell export helpers.
+- `process.rs`: Rust-owned `ProcessManager` and `ProcessHandle` equivalents,
+  following the durable `devimint` pattern.
+- `stack.rs`: stack startup, readiness, wrapped-command execution, status, and
+  teardown.
+- `components/`: typed service definitions, commands, logs, environment, and
+  readiness probes.
 - `clients/`: typed or semi-typed harness clients used by tests.
 - `fixtures.rs`: `run_devfinity_test`-style helpers for integration tests.
+- `local_ui/`: optional local log viewer integration such as mprocs.
 
-Process-compose should remain the concrete runtime because it gives us the TUI,
-logs, health visualization, and lifecycle behavior we want. Keep it behind a
-small `runtime::process_compose` module boundary, but do not introduce a
-multi-backend abstraction until another runtime actually exists.
+The target is a devimint-style harness: Rust owns process lifecycle, readiness,
+environment, logs, and cleanup. A local TUI should be only a viewer over logs
+and shell state. Fedimint's `mprocs` setup is the model: small viewer config,
+not the orchestrator.
+
+Do not copy `devimint` block for block. Copy the contract and ownership model:
+one library-owned stack object starts child processes, exposes typed context to
+tests, tears processes down reliably, and writes logs/artifacts for humans and
+CI. Avoid importing Fedimint-specific federation, gateway, Bitcoin, version
+selection, and CLI complexity.
+
+Process-compose was a transitional implementation detail from the first
+prototype and has been retired from the compiled harness. New architecture work
+should not reintroduce `runtime::process_compose` or a generic
+`RuntimeBackend` trait unless another real backend appears.
 
 ## Dependency Rule
 
@@ -75,31 +96,62 @@ basic config generation compile against unrelated packages.
 ## Phase 1: Library-First Core
 
 Goal: preserve current behavior while making `devfinity` architecturally ready
-to become a typed harness.
+to become a typed harness. This phase landed against the initial
+process-compose prototype and is now a compatibility baseline, not the final
+runtime direction.
 
-- [ ] Keep `main.rs` as a thin CLI wrapper.
-- [ ] Move the current stack construction API into stable library types.
-- [ ] Add `DevfinityStack` as the main public stack object.
-- [ ] Add `StackProfile` with an initial Core plus Chat plus Sites base profile.
-- [ ] Add typed `StackPaths`, `StackPorts`, and `StackEnv` structs.
-- [ ] Move process-compose YAML generation and lifecycle helpers behind a
+- [x] Keep `main.rs` as a thin CLI wrapper.
+- [x] Move the current stack construction API into stable library types.
+- [x] Add `DevfinityStack` as the main public stack object.
+- [x] Add `StackProfile` with an initial Core plus Chat plus Sites base profile.
+- [x] Add typed `StackPaths`, `StackPorts`, and `StackEnv` structs.
+- [x] Move process-compose YAML generation and lifecycle helpers behind a
       concrete `runtime::process_compose` module.
-- [ ] Avoid a `RuntimeBackend` trait until a second backend or test double forces
+- [x] Avoid a `RuntimeBackend` trait until a second backend or test double forces
       that abstraction.
-- [ ] Keep existing `just dev up`, `just dev status`, `just dev cleanup`,
+- [x] Keep existing `just dev up`, `just dev status`, `just dev cleanup`,
       `just dev smoke`, and `just dev rust-smoke` behavior working.
-- [ ] Keep native Nix Postgres as infrastructure owned by the base profile.
-- [ ] Add tests that prove the CLI delegates through the library layer rather
+- [x] Keep native Nix Postgres as infrastructure owned by the base profile.
+- [x] Add tests that prove the CLI delegates through the library layer rather
       than owning stack construction itself.
 
 Exit criterion: the current harness still behaves the same, but the core types
-make it clear where profiles, components, the process-compose runtime module,
-and fixtures belong.
+make it clear where profiles, components, the transitional process-compose
+module, and fixtures belong.
 
-## Phase 2: Typed Base Components
+## Phase 2: Devimint-Style Rust Orchestrator
+
+Goal: replace process-compose as the core runtime with a Rust-owned process
+manager that can run locally, run in CI, and back test fixtures.
+
+- [x] Add `process.rs` with `ProcessManager` and `ProcessHandle`-style types.
+- [x] Spawn each child with explicit command, working directory, environment,
+      log file, and shutdown behavior.
+- [x] Make child handles clean up on drop and on explicit stack shutdown.
+- [x] Add shared polling helpers for TCP, HTTP, and command/readiness checks.
+- [x] Add `RunningDevfinityStack` or equivalent to own live process handles.
+- [x] Move `up --headless -- <command>` onto the Rust process manager.
+- [x] Keep per-service logs under the run directory for CI artifact retention.
+- [x] Keep native Postgres startup owned by devfinity, but model it as a normal
+      managed process.
+- [x] Preserve deterministic `default` run state for local development.
+- [ ] Preserve unique run-state support for future fixture tests.
+- [ ] Add a tiny mprocs-style local viewer that tails generated logs, or defer
+      it behind a documented `devfinity logs` command if mprocs is not needed
+      yet.
+- [x] Retire process-compose after the Rust orchestrator passed the same
+      dry-run, smoke, and status checks.
+- [x] Remove `runtime::process_compose` once the Rust orchestrator has feature
+      parity for the base profile.
+
+Exit criterion: `devfinity up`, `up --headless -- <command>`, `status`, and
+`cleanup` no longer depend on process-compose for orchestration, and the base
+smoke passes with Rust-owned child processes.
+
+## Phase 3: Typed Base Components
 
 Goal: make Core, Chat, and Sites first-class typed components instead of ad hoc
-YAML sections.
+process specs.
 
 - [ ] Add a `Component` abstraction for name, state, command, environment,
       readiness, and dependencies.
@@ -117,14 +169,14 @@ YAML sections.
 - [ ] Add `clients::core` for Core health and development-account workflows.
 - [ ] Add `clients::chat` for Chat health and basic message/server workflows.
 - [ ] Add `clients::sites` for Sites health and basic site/document workflows.
-- [ ] Convert the current smoke flow to use the Core, Chat, and Sites clients where
-      practical.
+- [ ] Convert the current smoke flow to use the Core, Chat, and Sites clients
+      where practical.
 
 Exit criterion: Core, Chat, and Sites can be started, inspected, and tested
-through typed devfinity components and clients, while process-compose remains
-only the concrete runtime implementation.
+through typed devfinity components and clients, while the Rust process manager
+owns lifecycle and cleanup.
 
-## Phase 3: Rust Fixture API
+## Phase 4: Rust Fixture API
 
 Goal: make devfinity useful to integration tests as a library, similar in role
 to Fedimint's `devimint`.
@@ -147,13 +199,13 @@ Exit criterion: a Rust integration test can start the base profile through
 devfinity, exercise Core, Chat, and Sites through typed clients, and shut the
 stack down without calling the CLI directly.
 
-## Phase 4: Base Architecture Checkpoint
+## Phase 5: Base Architecture Checkpoint
 
 Goal: stop and validate the harness shape before adding more architecture
 components.
 
 - [ ] Review whether `DevfinityStack`, profiles, components,
-      `runtime::process_compose`, clients, and fixtures have clear ownership
+      `process.rs`, clients, and fixtures have clear ownership
       boundaries.
 - [ ] Confirm `devfinity/Cargo.toml` contains only dependencies justified by the
       base harness.
@@ -167,7 +219,7 @@ components.
 Exit criterion: the team is comfortable using this architecture as the pattern
 for additional components.
 
-## Phase 5: Devimint-Style Environment Contract
+## Phase 6: Devimint-Style Environment Contract
 
 Goal: make the generated devfinity environment the app-facing and shell-facing
 contract, following devimint's pattern.
@@ -188,7 +240,7 @@ Exit criterion: shell commands, app tests, and Rust fixtures all consume the sam
 generated env contract, while typed Rust clients remain a convenience layer over
 that contract.
 
-## Phase 6: Add Identity And Auth
+## Phase 7: Add Identity And Auth
 
 Goal: make identity and auth explicit harness components instead of implicit
 environment conventions.
@@ -204,7 +256,7 @@ environment conventions.
 Exit criterion: identity state is owned by devfinity fixtures and can be shared
 across Core, Chat, and later components.
 
-## Phase 7: Add Brain, Search, And Remaining Runtime Pieces
+## Phase 8: Add Brain, Search, And Remaining Runtime Pieces
 
 Goal: add the rest of the local architecture after the component model has
 proved itself.
@@ -221,7 +273,7 @@ proved itself.
 Exit criterion: devfinity can stitch together the broader Finite architecture
 without losing the simple base development path.
 
-## Phase 8: App-Facing Development Backend
+## Phase 9: App-Facing Development Backend
 
 Goal: let apps use devfinity as their local backend and integration-test
 substrate.

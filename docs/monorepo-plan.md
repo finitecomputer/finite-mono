@@ -309,14 +309,19 @@ workflow as the reference point: copy the durable contract, not the product
 specific complexity.
 
 `devfinity` should be the Finite-aware launcher. It should own state layout,
-generated environment variables, and process-compose config generation. It
-should not hand-roll process supervision.
+generated environment variables, process lifecycle, logs, readiness, and
+test-fixture context.
 
-Use `process-compose` as the default local process runtime. The default
-developer path should show the process-compose TUI so developers can see which
-services are running, their health, and their logs. A `--headless` path should
-run the same process-compose config with the TUI disabled for automation or
-non-interactive terminals.
+The durable target is a devimint-style Rust harness: one library-owned stack
+object starts child processes, exposes generated environment and typed clients,
+waits for readiness, runs wrapped commands/tests, and tears the stack down. A
+local visual UI should be a small mprocs-style log viewer over devfinity-owned
+logs, not the process orchestrator.
+
+The initial prototype used process-compose as the local runtime. Treat that as
+a compatibility baseline to retire, not as the target architecture. Do not grow
+the generated process-compose config or a generic runtime abstraction unless a
+real second backend appears.
 
 Initial harness scope should be narrow:
 
@@ -329,23 +334,25 @@ Initial harness scope should be narrow:
 Initial structure:
 
 - Add a top-level `devfinity/` Rust workspace crate.
-- Keep process-compose YAML generated under `.local-state/devfinity/` so the
-  committed repo does not hard-code machine-local state paths.
+- Keep generated local state under `.local-state/devfinity/` so the committed
+  repo does not hard-code machine-local state paths.
 - Add `docs/local-integration-harness.md` for operator/developer usage.
 - Add only thin `just dev` module wrappers around `devfinity`.
 
-Initial runtime shape:
+Target runtime shape:
 
-- `devfinity up`: create state, write env, generate process-compose YAML, then
-  run `process-compose` with the TUI enabled. Quitting the TUI or pressing
-  Ctrl-C is the normal shutdown path.
-- `devfinity up --headless`: run the same stack with `process-compose -t=false`.
-- `devfinity cleanup`: best-effort recovery for orphaned process-compose
-  processes, devfinity-managed process trees, and stale control files.
-- `devfinity status`: read-only status for process-compose, devfinity pid
-  files, and configured service endpoints.
+- `devfinity up`: create state, write env, start managed child processes, wait
+  for readiness, and stream or expose logs for local development.
+- `devfinity up --headless`: start the same stack without an interactive log
+  viewer.
+- `devfinity up --headless -- <command>`: start the stack, wait for readiness,
+  run the command with generated env, then tear the stack down.
+- `devfinity cleanup`: best-effort recovery for stale devfinity-owned state and
+  any processes that can be proven to belong to the active run.
+- `devfinity status`: read-only status for configured service endpoints and any
+  running devfinity-owned stack.
 
-Initial process-compose services:
+Initial managed services:
 
 - Native local Postgres for `finite-saas-core`, using the Postgres binaries from
   the Nix development shell.
@@ -354,26 +361,32 @@ Initial process-compose services:
 - Local `finitechat-server` backed by SQLite state.
 - Local `finitesitesd` with its data dir under `.local-state/devfinity/`.
 
-Use a Unix socket under `.local-state/devfinity/` for the process-compose
-control API by default. Avoid the default TCP control port unless a later
-remote-control use case requires it.
+For local ergonomics, add an mprocs-style viewer only after the Rust process
+manager owns lifecycle. The viewer should tail devfinity log files and provide a
+developer shell; it should not decide startup order or own service teardown.
 
 Tasks:
 
 - [x] Check Fedimint's `devimint` crate, `just mprocs`, and test harness
       structure before designing the Finite harness.
 - [x] Decide whether the harness should be Rust, shell, or a small mixed
-      wrapper: `devfinity` is a Rust generator, and process-compose
-      owns process supervision and visualization.
-- [x] Define the first smoke scenario: process-compose readiness probes cover
-      Core `/healthz`, Finite Chat `/health`, Finite Sites `/api/v1/healthz`,
-      and dashboard `/dashboard`.
+      wrapper: `devfinity` is a Rust harness.
+- [x] Replace the initial process-compose prototype with devimint-style
+      Rust-owned process orchestration.
+- [ ] Add a small mprocs-style local log viewer after devfinity owns lifecycle.
+- [x] Define the first smoke scenario: readiness probes cover Core `/healthz`,
+      Finite Chat `/health`, Finite Sites `/api/v1/healthz`, and dashboard
+      `/dashboard`.
 - [x] Decide where the harness should live in `finite-mono`: a top-level
       `devfinity/` workspace crate.
-- [x] Add `process-compose` to the Nix development shell.
+- [x] Add `process-compose` to the Nix development shell for the initial
+      prototype.
+- [x] Remove `process-compose` from the Nix development shell after replacing
+      the prototype runtime.
 - [x] Add Postgres to the Nix development shell and run local Postgres natively.
 - [x] Add `devfinity up`, `up --headless`, and `cleanup`.
-- [x] Generate process-compose YAML into `.local-state/devfinity/`.
+- [x] Generate process-compose YAML into `.local-state/devfinity/` for the
+      initial prototype.
 - [x] Add local state layout under `.local-state/` or another ignored root.
 - [x] Add a minimal `just dev up` command only after the harness exists.
 - [x] Add `just dev up --headless` and `dev cleanup` wrappers.
@@ -389,8 +402,8 @@ Tasks:
 
 Later:
 
-- [ ] Graduate devfinity Rust smokes into a dedicated finite integration test
-      crate with typed fixtures once there are multiple real scenarios.
+- [ ] Graduate devfinity Rust smokes into typed fixture tests once the
+      devimint-style Rust process manager exists.
 
 Exit criterion: one command can start the first useful local Finite stack smoke
 without requiring the old standalone repo layout.

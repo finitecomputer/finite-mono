@@ -28,7 +28,6 @@
             openssl
             postgresql_16
             pkg-config
-            process-compose
             rust-analyzer
             rustPlatform.rustLibSrc
             rustc

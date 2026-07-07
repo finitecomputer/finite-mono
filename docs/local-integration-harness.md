@@ -2,14 +2,18 @@
 
 `devfinity` is the Finite monorepo local integration harness. It follows the
 Fedimint `devimint` pattern at a smaller scale: one Finite-aware command
-prepares deterministic local state, writes environment exports, generates the
-process supervisor config, and leaves process lifecycle and visualization to a
-dedicated runtime.
+prepares deterministic local state, writes environment exports, starts local
+services, exposes test context, and tears the stack down.
 
-The runtime is `process-compose`. By default, `devfinity up` starts the
-process-compose TUI so the running services, health state, and logs are visible.
-Quitting the TUI or pressing Ctrl-C should shut down the stack. Use
-`--headless` for automation or non-interactive terminals.
+The current implementation uses Rust-owned orchestration, modeled after
+`devimint`: devfinity owns child processes, logs, readiness, generated
+environment, and teardown. A future mprocs-style local UI should only tail logs
+and provide an ergonomic shell; it should not own lifecycle.
+
+By default, `devfinity up` starts the stack, waits for readiness, and keeps the
+parent process alive until Ctrl-C. Use `--headless` for automation or
+non-interactive terminals; today it runs the same Rust orchestration path
+without an interactive log viewer.
 
 ## Commands
 
@@ -51,15 +55,33 @@ creation request and project were persisted in Postgres for the dev account.
 the `just` recipe runs it through the wrapped-command path so it receives the
 same generated environment variables as any other devfinity integration test.
 
-`status` is read-only. It prints the generated state paths, process-compose
-socket state, devfinity pid-file process states, and short TCP/HTTP checks for
-the configured services.
+`status` is read-only. It prints the generated state paths, devfinity-owned PID
+control files, and short TCP/HTTP checks for the configured services.
 
-`cleanup` is a recovery command, not the normal shutdown path. It asks
-process-compose to stop the generated stack if the local Unix socket is still
-present, then checks devfinity pid files for any remaining managed process
-trees and removes stale control files. It intentionally avoids broad host
-process killing.
+`cleanup` is a recovery command, not the normal shutdown path. It terminates
+processes recorded in the active run's devfinity-owned PID files and removes
+stale control files. Normal wrapped-command runs tear the stack down
+automatically through Rust process handles.
+
+## Library API
+
+The primary Rust entrypoint is `devfinity::DevfinityStack`. The base profile is
+represented by `StackProfile::Base`, which starts Core, Chat, Sites, Dashboard,
+and native Postgres through Rust-owned process handles.
+
+The typed topology surface is:
+
+- `StackPaths`: generated state, logs, control, Postgres, service, and
+  `FINITE_HOME` paths.
+- `StackPorts`: deterministic local ports for Core, Dashboard, Postgres, Chat,
+  and Sites.
+- `StackEnv`: the canonical generated environment values used by env files and
+  wrapped commands.
+
+`process.rs` owns child process spawning, log files, PID control files, and
+shutdown behavior. `stack.rs` owns startup order, readiness polling,
+wrapped-command execution, status, and cleanup. Typed components and fixture
+APIs are the next architectural layers.
 
 ## Initial Stack
 
@@ -87,31 +109,27 @@ Generated state lives under:
 Important generated files:
 
 - `env`: shell exports for local CLI tools.
-- `process-compose.yaml`: generated process-compose configuration.
-- `process-compose.sock`: local Unix socket for process-compose control.
+- `control/*.pid`: devfinity-owned process control files for recovery.
 - `run-postgres.sh`: generated native Postgres launcher.
 - `urls.txt`: useful service URLs.
-- `logs/`: process-compose and service logs.
+- `logs/`: preflight and service logs.
 - `postgres/data/`: native Postgres data directory.
 
 `postgres/data/` is reset before each non-dry-run stack start. This preserves
 the old Docker-backed behavior where the Core database started clean for each
-`devfinity up` run. `--dry-run` only validates generated config and does not
+`devfinity up` run. `--dry-run` validates generated state and command
+prerequisites without launching services and does not
 delete the database directory.
-
-The control API uses a Unix socket by default to avoid the default
-process-compose TCP port and keep the control plane local to the machine.
 
 ## Prerequisites
 
 Run from `nix develop` or otherwise provide:
 
 - Rust/Cargo.
-- `process-compose`.
 - Postgres client/server binaries from the Nix shell.
 - Node/npm, for the dashboard dev server.
 - `curl`, for the smoke script.
 
-The harness generates the process-compose config before starting services, so
-`cargo run -p devfinity -- up --dry-run` is useful for checking config shape
-without launching the stack.
+The harness writes state files before starting services, so
+`cargo run -p devfinity -- up --dry-run` is useful for checking generated state
+and command prerequisites without launching the stack.

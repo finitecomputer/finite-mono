@@ -2,13 +2,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use devfinity::{ProcessComposeMode, Stack};
+use devfinity::{DevfinityStack, StackRunMode};
 
 #[derive(Debug, Parser)]
 #[command(name = "devfinity")]
 #[command(about = "Local Finite integration harness")]
 struct Cli {
-    /// Root directory for generated state, logs, env, and process-compose files.
+    /// Root directory for generated state, logs, env, and process control files.
     #[arg(
         long,
         env = "DEVFINITY_STATE_DIR",
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate config and run the local stack through process-compose.
+    /// Generate config and run the local stack.
     Up(UpArgs),
     /// Print the current devfinity process and service status.
     Status,
@@ -32,11 +32,11 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct UpArgs {
-    /// Run process-compose without the TUI.
+    /// Run without an interactive log viewer.
     #[arg(long)]
     headless: bool,
 
-    /// Validate the generated process-compose config without starting services.
+    /// Validate generated state and command prerequisites without starting services.
     #[arg(long)]
     dry_run: bool,
 
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
-    let stack = Stack::new(cli.state_dir)?;
+    let stack = DevfinityStack::new(cli.state_dir)?;
 
     match cli.command {
         Command::Up(args) => {
@@ -70,11 +70,11 @@ fn run() -> anyhow::Result<ExitCode> {
                 return stack.run_wrapped_command(&args.command);
             }
             let mode = if args.headless {
-                ProcessComposeMode::Headless
+                StackRunMode::Headless
             } else {
-                ProcessComposeMode::Tui
+                StackRunMode::Foreground
             };
-            stack.run_process_compose_up(mode, args.dry_run)
+            stack.run_up(mode, args.dry_run)
         }
         Command::Status => stack.status(),
         Command::Cleanup => stack.cleanup(),

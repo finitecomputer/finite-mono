@@ -17,8 +17,8 @@ commands against the owning source folder before relying on them.
 - [Monorepo plan](monorepo-plan.md): phased construction checklist.
 - [Migration log](monorepo-migration-log.md): source snapshots, validation
   notes, and migration decisions.
-- [Local integration harness](local-integration-harness.md): `devfinity`,
-  `process-compose`, and `just dev` usage.
+- [Local integration harness](local-integration-harness.md): `devfinity` and
+  `just dev` usage.
 - [Devfinity architecture plan](devfinity-architecture-plan.md): plan for
   evolving `devfinity` into a typed integration harness.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):

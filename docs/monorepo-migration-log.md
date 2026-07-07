@@ -423,8 +423,7 @@ Notes:
   the Finite-aware config generator.
 - Normal shutdown is foreground lifecycle shutdown: quit the process-compose TUI
   or press Ctrl-C. `devfinity cleanup` is a recovery command for orphaned
-  state/processes, including devfinity-managed process trees recorded in pid
-  files.
+  process-compose socket/control state.
 - The richer local create-agent canary remains in
   `finitecomputer-v2/scripts/local_create_agent_canary.sh`; moving that into
   `devfinity` should be a later profile after the base stack is stable.
@@ -593,6 +592,118 @@ Changes:
 - The generated script initializes a local Postgres data directory, starts
   Postgres on the configured devfinity port, and creates `finite_saas_core`
   when needed.
-- Updated `devfinity status` and `devfinity cleanup` to report and clean only
-  devfinity-managed processes, service probes, and control files.
+- Updated `devfinity status` and `devfinity cleanup` to report and clean
+  devfinity-managed process state, service probes, and control files.
 - Updated the local integration harness docs and phase 9 plan text.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
+
+## Devfinity Library-First Core
+
+Date: 2026-07-07
+
+Changes:
+
+- Split the monolithic `devfinity` library into public topology types and a
+  concrete `runtime::process_compose` module.
+- Added `DevfinityStack` as the primary public stack object, while keeping
+  `Stack` as a compatibility alias.
+- Added `StackProfile::Base` for the initial Core plus Chat plus Sites profile.
+- Added typed `StackPaths`, `StackPorts`, and `StackEnv` structs for generated
+  paths, deterministic ports, and exported environment values.
+- Kept native Nix Postgres owned by the base profile and preserved the existing
+  process-compose YAML, status, cleanup, wrapped-command, and dry-run behavior.
+- Added a CLI integration test that compares `devfinity status --state-dir`
+  output against `DevfinityStack` layout to prove the binary delegates stack
+  construction to the library layer.
+- Updated the devfinity architecture plan and local integration harness docs.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
+
+## Devfinity Process-Compose Trim
+
+Date: 2026-07-07
+
+Changes:
+
+- Removed devfinity's parallel pid-file/process-tree supervision.
+- Trimmed generated `process-compose.yaml` by letting process-compose own
+  process lifecycle directly.
+- Switched service commands to the prebuilt `target/debug/*` binaries after the
+  Rust build preflight instead of nested `cargo run` wrappers.
+- Removed the unused `DEVFINITY_PIDS_DIR` environment value and `StackPaths`
+  pids field.
+- Updated `status` to print process-compose's process list when the socket is
+  available, plus the existing service probes.
+- Kept wrapped-command startup, readiness polling, cleanup, and the base smoke
+  flow working.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
+
+## Devfinity Orchestration Plan Pivot
+
+Date: 2026-07-07
+
+Decision:
+
+- The durable target is devimint-style Rust-owned process orchestration, not
+  process-compose as the core runtime.
+- `devfinity` should own child process handles, logs, readiness, generated env,
+  test context, wrapped commands, and teardown.
+- A local mprocs-style UI should be a small log viewer and developer shell over
+  devfinity-owned logs, not the supervisor.
+- Do not copy `devimint` block for block. Copy the process ownership,
+  environment, fixture, and log/artifact contracts while avoiding
+  Fedimint-specific federation, gateway, Bitcoin, and version-selection
+  complexity.
+- Treat the current process-compose implementation as a compatibility baseline
+  to retire before adding more architecture components.
+
+Docs updated:
+
+- `docs/devfinity-architecture-plan.md`
+- `docs/monorepo-plan.md`
+- `docs/local-integration-harness.md`
+
+## Devfinity Rust Orchestrator
+
+Date: 2026-07-07
+
+Changes:
+
+- Replaced the compiled process-compose runtime with Rust-owned process
+  orchestration.
+- Added `devfinity::process` with `ProcessManager`, `ProcessSpec`, and
+  `ProcessHandle` for child spawning, per-process logs, PID control files, and
+  shutdown on drop.
+- Added `devfinity::stack` with `StackRunMode`, `RunningDevfinityStack`,
+  preflight build/dependency steps, startup ordering, readiness polling,
+  wrapped-command execution, status, and cleanup.
+- Removed `runtime::process_compose` and the process-compose paths from
+  `StackPaths`/`StackEnv`.
+- Kept deterministic local state under `.local-state/devfinity/runs/default/`.
+- Removed `process-compose` from the Nix development shell because it is no
+  longer required by the harness.
+- Updated root and harness docs to describe Rust-owned orchestration and
+  devfinity PID control files.
+
+Validation:
+
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo fmt --all -- --check`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo test -p devfinity --locked`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --dry-run --headless`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- up --headless -- scripts/devfinity-smoke`
+- `IN_NIX_SHELL=1 scripts/with-dev-env nix develop . -c cargo run -p devfinity --locked -- status`
+- `git diff --check`
