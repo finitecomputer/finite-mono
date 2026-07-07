@@ -181,6 +181,9 @@ impl Stack {
         dry_run: bool,
     ) -> Result<ExitCode> {
         self.ensure_process_compose_available()?;
+        if !dry_run {
+            self.prepare_for_start()?;
+        }
         let mut command = self.process_compose_up_command();
         if matches!(mode, ProcessComposeMode::Headless) {
             command.arg("--tui=false");
@@ -197,6 +200,8 @@ impl Stack {
             bail!("wrapped command cannot be empty");
         }
 
+        self.ensure_process_compose_available()?;
+        self.prepare_for_start()?;
         let mut guard = self.start_process_compose_headless()?;
         let outcome = match self.wait_for_services_ready(Duration::from_secs(180), &mut guard) {
             Ok(()) => self.run_stack_command(command),
@@ -208,6 +213,16 @@ impl Stack {
         }
 
         outcome
+    }
+
+    pub fn prepare_for_start(&self) -> Result<()> {
+        self.ensure_postgres_not_running()?;
+        let data_dir = self.postgres_data_dir();
+        if data_dir.exists() {
+            fs::remove_dir_all(&data_dir)
+                .with_context(|| format!("failed to remove {}", data_dir.display()))?;
+        }
+        Ok(())
     }
 
     pub fn cleanup(&self) -> Result<ExitCode> {
@@ -744,6 +759,27 @@ wait "$postgres_pid"
             .stderr(Stdio::null())
             .status();
         matches!(status, Ok(status) if status.success())
+    }
+
+    fn ensure_postgres_not_running(&self) -> Result<()> {
+        let pid_file = self.pid_file(ManagedProcess::Postgres);
+        if let Some(pid) = read_pid_file(&pid_file)? {
+            if process_alive(pid) {
+                bail!(
+                    "devfinity postgres pid {pid} from {} is still running; run `devfinity cleanup` before starting a new stack",
+                    pid_file.display()
+                );
+            }
+        }
+
+        if connect_tcp("127.0.0.1", self.ports.postgres).is_ok() {
+            bail!(
+                "tcp 127.0.0.1:{} is already accepting connections; stop the existing service or run `devfinity cleanup` before starting devfinity",
+                self.ports.postgres
+            );
+        }
+
+        Ok(())
     }
 
     fn start_process_compose_headless(&self) -> Result<ProcessComposeGuard<'_>> {
@@ -1532,6 +1568,24 @@ mod tests {
         assert!(yaml.contains("run-postgres.sh"));
         assert!(yaml.contains("psql -h 127.0.0.1"));
         assert!(!yaml.contains("postgres:16-alpine"));
+    }
+
+    #[test]
+    fn prepare_for_start_removes_previous_postgres_data() {
+        let state_dir =
+            std::env::temp_dir().join(format!("devfinity-test-prepare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+
+        let mut stack = Stack::new(state_dir.clone()).unwrap();
+        stack.ports.postgres = 0;
+        let data_dir = stack.postgres_data_dir();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(data_dir.join("sentinel"), "stale").unwrap();
+
+        stack.prepare_for_start().unwrap();
+
+        assert!(!data_dir.exists());
+        let _ = fs::remove_dir_all(state_dir);
     }
 
     #[test]

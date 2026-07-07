@@ -94,6 +94,11 @@ Important generated files:
 - `logs/`: process-compose and service logs.
 - `postgres/data/`: native Postgres data directory.
 
+`postgres/data/` is reset before each non-dry-run stack start. This preserves
+the old Docker-backed behavior where the Core database started clean for each
+`devfinity up` run. `--dry-run` only validates generated config and does not
+delete the database directory.
+
 The control API uses a Unix socket by default to avoid the default
 process-compose TCP port and keep the control plane local to the machine.
 

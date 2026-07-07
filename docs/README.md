@@ -19,6 +19,8 @@ commands against the owning source folder before relying on them.
   notes, and migration decisions.
 - [Local integration harness](local-integration-harness.md): `devfinity`,
   `process-compose`, and `just dev` usage.
+- [Devfinity architecture plan](devfinity-architecture-plan.md): plan for
+  evolving `devfinity` into a typed integration harness.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
   reference analysis used to calibrate Finite's Rust, Nix, command, docs,
   harness, CI, and quality-gate choices.
