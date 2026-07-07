@@ -24,7 +24,7 @@ struct Cli {
 enum Command {
     /// Generate config and run the local stack through process-compose.
     Up(UpArgs),
-    /// Print the current devfinity process, container, and service status.
+    /// Print the current devfinity process and service status.
     Status,
     /// Best-effort cleanup for orphaned devfinity processes.
     Cleanup,

@@ -447,7 +447,7 @@ Validation:
 Not run:
 
 - `just dev up` without `--dry-run`; it starts the long-running local stack
-  and depends on local Docker and dashboard Node/npm readiness.
+  and depends on dashboard Node/npm readiness.
 
 ## Later Repo Import: `finite-identity`
 
@@ -580,3 +580,19 @@ Result:
 - The root command surface now exposes `search` and `skills` modules.
 - Full root `just check` and `just test` pass after disabling inherited Git
   commit signing for Finite Sites synthetic test commits.
+
+## Devfinity Native Postgres
+
+Date: 2026-07-07
+
+Changes:
+
+- Added Postgres to the pinned Nix development shell.
+- Updated `devfinity` to generate `run-postgres.sh` under the active run
+  directory.
+- The generated script initializes a local Postgres data directory, starts
+  Postgres on the configured devfinity port, and creates `finite_saas_core`
+  when needed.
+- Updated `devfinity status` and `devfinity cleanup` to report and clean only
+  devfinity-managed processes, service probes, and control files.
+- Updated the local integration harness docs and phase 9 plan text.

@@ -52,21 +52,21 @@ the `just` recipe runs it through the wrapped-command path so it receives the
 same generated environment variables as any other devfinity integration test.
 
 `status` is read-only. It prints the generated state paths, process-compose
-socket state, devfinity pid-file process states, the local Postgres container
-state, and short TCP/HTTP checks for the configured services.
+socket state, devfinity pid-file process states, and short TCP/HTTP checks for
+the configured services.
 
 `cleanup` is a recovery command, not the normal shutdown path. It asks
 process-compose to stop the generated stack if the local Unix socket is still
 present, then checks devfinity pid files for any remaining managed process
-trees, removes devfinity-labeled Docker containers, removes Docker containers
-publishing devfinity's Postgres port, and removes stale control files. It
-intentionally avoids broad host process killing.
+trees and removes stale control files. It intentionally avoids broad host
+process killing.
 
 ## Initial Stack
 
 The first `devfinity` stack is intentionally narrow:
 
-- Local Postgres for `finite-saas-core`.
+- Native local Postgres for `finite-saas-core`, using the Postgres binaries from
+  the Nix development shell.
 - `finite-saas-core`.
 - Dashboard dev server with development auth enabled.
 - Local `finitechat-server` backed by SQLite.
@@ -89,8 +89,10 @@ Important generated files:
 - `env`: shell exports for local CLI tools.
 - `process-compose.yaml`: generated process-compose configuration.
 - `process-compose.sock`: local Unix socket for process-compose control.
+- `run-postgres.sh`: generated native Postgres launcher.
 - `urls.txt`: useful service URLs.
 - `logs/`: process-compose and service logs.
+- `postgres/data/`: native Postgres data directory.
 
 The control API uses a Unix socket by default to avoid the default
 process-compose TCP port and keep the control plane local to the machine.
@@ -101,7 +103,7 @@ Run from `nix develop` or otherwise provide:
 
 - Rust/Cargo.
 - `process-compose`.
-- Docker, for local Postgres.
+- Postgres client/server binaries from the Nix shell.
 - Node/npm, for the dashboard dev server.
 - `curl`, for the smoke script.
 

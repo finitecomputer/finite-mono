@@ -341,14 +341,14 @@ Initial runtime shape:
   Ctrl-C is the normal shutdown path.
 - `devfinity up --headless`: run the same stack with `process-compose -t=false`.
 - `devfinity cleanup`: best-effort recovery for orphaned process-compose
-  processes, devfinity-managed process trees, stale control files, and the
-  local Postgres container.
+  processes, devfinity-managed process trees, and stale control files.
 - `devfinity status`: read-only status for process-compose, devfinity pid
-  files, local Docker containers, and configured service endpoints.
+  files, and configured service endpoints.
 
 Initial process-compose services:
 
-- Local Postgres for `finite-saas-core`.
+- Native local Postgres for `finite-saas-core`, using the Postgres binaries from
+  the Nix development shell.
 - `finite-saas-core` on a deterministic local port.
 - Dashboard dev server with development auth enabled.
 - Local `finitechat-server` backed by SQLite state.
@@ -371,6 +371,7 @@ Tasks:
 - [x] Decide where the harness should live in `finite-mono`: a top-level
       `devfinity/` workspace crate.
 - [x] Add `process-compose` to the Nix development shell.
+- [x] Add Postgres to the Nix development shell and run local Postgres natively.
 - [x] Add `devfinity up`, `up --headless`, and `cleanup`.
 - [x] Generate process-compose YAML into `.local-state/devfinity/`.
 - [x] Add local state layout under `.local-state/` or another ignored root.

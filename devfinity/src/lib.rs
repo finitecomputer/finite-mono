@@ -67,7 +67,6 @@ pub struct Stack {
     pids_dir: PathBuf,
     process_compose_file: PathBuf,
     process_compose_socket: PathBuf,
-    postgres_container: String,
     ports: Ports,
     core_token: String,
 }
@@ -96,7 +95,6 @@ impl Stack {
             run_dir,
             logs_dir,
             pids_dir,
-            postgres_container: "devfinity-postgres".to_string(),
             ports: Ports {
                 core: 14200,
                 dashboard: 13002,
@@ -130,6 +128,7 @@ impl Stack {
     pub fn write_files(&self) -> Result<()> {
         self.ensure_dirs()?;
         self.write_env_file()?;
+        self.write_postgres_script()?;
         fs::write(&self.process_compose_file, self.process_compose_yaml())
             .with_context(|| format!("failed to write {}", self.process_compose_file.display()))?;
         fs::write(self.run_dir.join("urls.txt"), self.urls_text()).with_context(|| {
@@ -238,8 +237,6 @@ impl Stack {
 
         self.cleanup_managed_processes();
 
-        self.cleanup_docker_containers();
-
         let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
         for path in [&self.process_compose_socket, &process_compose_pid_file] {
             if path.exists() {
@@ -284,14 +281,6 @@ impl Stack {
                 status.process, status.state, status.detail
             );
         }
-        println!();
-
-        println!("containers:");
-        println!(
-            "  {:<24} {}",
-            self.postgres_container,
-            self.docker_container_status(&self.postgres_container)
-        );
         println!();
 
         println!("services:");
@@ -354,7 +343,6 @@ impl Stack {
 
     fn write_postgres(&self, yaml: &mut String) {
         let process = ManagedProcess::Postgres;
-        let password = "finite-local";
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -365,32 +353,71 @@ impl Stack {
         self.write_managed_command(
             yaml,
             process,
-            &[
-                self.remove_postgres_containers_shell(),
-                format!(
-                    "exec docker run --rm --name {} --label com.finite.devfinity=true --label com.finite.devfinity.run=default -e POSTGRES_PASSWORD={} -e POSTGRES_DB=finite_saas_core -p 127.0.0.1:{}:5432 postgres:16-alpine",
-                    self.postgres_container,
-                    shell_quote(password),
-                    self.ports.postgres
-                ),
-            ],
-            &[self.remove_postgres_containers_shell()],
+            &[format!(
+                "exec bash {}",
+                shell_quote(&self.postgres_script_path().display().to_string())
+            )],
+            &[],
         );
         let _ = writeln!(yaml, "    readiness_probe:");
         let _ = writeln!(yaml, "      exec:");
         let _ = writeln!(
             yaml,
-            "        command: \"docker exec {} pg_isready -U postgres -d finite_saas_core\"",
-            self.postgres_container
+            "        command: {}",
+            yaml_string(&format!(
+                "psql -h 127.0.0.1 -p {} -U postgres -d finite_saas_core -tAc 'select 1' >/dev/null",
+                self.ports.postgres
+            ))
         );
         self.write_probe_timing(yaml, 3, 2, 5, 30);
-        let _ = writeln!(yaml, "    shutdown:");
-        let _ = writeln!(
-            yaml,
-            "      command: \"docker rm -f {} >/dev/null 2>&1 || true\"",
-            self.postgres_container
+    }
+
+    fn write_postgres_script(&self) -> Result<()> {
+        let script = self.postgres_script_path();
+        let contents = format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+
+export PGDATA={pgdata}
+database=finite_saas_core
+port={port}
+
+mkdir -p "$PGDATA"
+
+if [ ! -s "$PGDATA/PG_VERSION" ]; then
+  initdb -D "$PGDATA" --username=postgres --auth=trust --no-locale --encoding=UTF8
+fi
+
+postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" &
+postgres_pid=$!
+
+shutdown() {{
+  set +e
+  kill "$postgres_pid" >/dev/null 2>&1 || true
+  wait "$postgres_pid" >/dev/null 2>&1 || true
+}}
+trap shutdown INT TERM
+
+until pg_isready -h 127.0.0.1 -p "$port" -U postgres >/dev/null 2>&1; do
+  if ! kill -0 "$postgres_pid" >/dev/null 2>&1; then
+    wait "$postgres_pid"
+    exit $?
+  fi
+  sleep 0.2
+done
+
+if ! psql -h 127.0.0.1 -p "$port" -U postgres -d postgres -tAc "select 1 from pg_database where datname = '$database'" | grep -q 1; then
+  createdb -h 127.0.0.1 -p "$port" -U postgres "$database"
+fi
+
+wait "$postgres_pid"
+"#,
+            pgdata = shell_quote(&self.postgres_data_dir().display().to_string()),
+            port = self.ports.postgres
         );
-        let _ = writeln!(yaml, "      timeout_seconds: 10");
+
+        fs::write(&script, contents)
+            .with_context(|| format!("failed to write {}", script.display()))
     }
 
     fn write_core(&self, yaml: &mut String) {
@@ -920,9 +947,8 @@ impl Stack {
                     ],
                     ManagedProcess::RustBuild => vec![String::from("cargo"), String::from("build")],
                     ManagedProcess::Postgres => vec![
-                        String::from("docker"),
-                        String::from("run"),
-                        self.postgres_container.clone(),
+                        String::from("bash"),
+                        self.postgres_script_path().display().to_string(),
                     ],
                     ManagedProcess::Core => vec![
                         String::from("cargo"),
@@ -948,59 +974,6 @@ impl Stack {
                 ManagedProcessSpec::new(process, self.pid_file(process), expected_fragments)
             })
             .collect()
-    }
-
-    fn cleanup_docker_containers(&self) {
-        let command = format!(
-            "for id in $(docker ps -aq --filter label=com.finite.devfinity=true 2>/dev/null); do docker rm -f \"$id\" >/dev/null 2>&1 || true; done; {};",
-            self.remove_postgres_containers_shell()
-        );
-        run_best_effort(
-            Command::new("sh").arg("-c").arg(command),
-            "remove devfinity Docker containers and Postgres port owners",
-        );
-    }
-
-    fn remove_postgres_containers_shell(&self) -> String {
-        format!(
-            "for id in $(docker ps -aq --filter publish={} 2>/dev/null); do docker rm -f \"$id\" >/dev/null 2>&1 || true; done; docker rm -f {} >/dev/null 2>&1 || true",
-            self.ports.postgres,
-            shell_quote(&self.postgres_container)
-        )
-    }
-
-    fn docker_container_status(&self, container: &str) -> String {
-        let output = Command::new("docker")
-            .args([
-                "ps",
-                "-a",
-                "--filter",
-                &format!("name=^/{container}$"),
-                "--format",
-                "{{.Names}}\t{{.Status}}",
-            ])
-            .output();
-
-        let output = match output {
-            Ok(output) => output,
-            Err(error) => return format!("unavailable: {error}"),
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = stderr.lines().next().unwrap_or("docker ps failed").trim();
-            return format!("unavailable: {detail}");
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        match stdout
-            .lines()
-            .next()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            Some(line) => line.replace('\t', " - "),
-            None => "not found".to_string(),
-        }
     }
 
     fn service_checks(&self) -> Vec<ServiceCheck> {
@@ -1075,6 +1048,14 @@ impl Stack {
 
     fn postgres_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::Postgres)
+    }
+
+    fn postgres_data_dir(&self) -> PathBuf {
+        self.postgres_dir().join("data")
+    }
+
+    fn postgres_script_path(&self) -> PathBuf {
+        self.run_dir.join("run-postgres.sh")
     }
 
     fn core_dir(&self) -> PathBuf {
@@ -1167,7 +1148,6 @@ impl ProcessComposeGuard<'_> {
             let _ = self.child.wait();
         }
         self.stack.cleanup_managed_processes();
-        self.stack.cleanup_docker_containers();
         remove_file_best_effort(&self.stack.process_compose_socket);
         remove_file_best_effort(&self.pid_file);
         Ok(())
@@ -1549,7 +1529,9 @@ mod tests {
         assert!(yaml.contains("process_healthy"));
         assert!(yaml.contains("DEVFINITY_MANAGED_PROCESS=1"));
         assert!(yaml.contains("pids/core.pid"));
-        assert!(yaml.contains("--label com.finite.devfinity=true"));
+        assert!(yaml.contains("run-postgres.sh"));
+        assert!(yaml.contains("psql -h 127.0.0.1"));
+        assert!(!yaml.contains("postgres:16-alpine"));
     }
 
     #[test]

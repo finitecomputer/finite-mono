@@ -44,5 +44,5 @@ checkout, then add shared workspace structure around them.
   and tear it down.
 - `just dev rust-smoke`: start the headless stack, run the ignored Rust
   integration smoke test, and tear it down.
-- `just dev status`: print devfinity process, container, and service status.
+- `just dev status`: print devfinity process and service status.
 - `just dev cleanup`: best-effort cleanup for orphaned local stack processes.
