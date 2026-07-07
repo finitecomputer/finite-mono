@@ -1,0 +1,13 @@
+[package]
+name = "finite-nostr"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable Nostr primitives for Finite Rust projects."
+license = "MIT"
+repository = "https://github.com/finitecomputer/finite-nostr"
+
+[dependencies]
+base64 = "0.22.1"
+nostr = { version = "0.45.0-alpha.2", features = ["nip44", "nip59", "nip98", "os-rng"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
