@@ -461,6 +461,61 @@ fn email_only_redeem_does_not_create_native_project_access() {
 }
 
 #[test]
+fn identity_verified_email_can_mint_git_credential_without_sites_email_key() {
+    let mut fx = fixture();
+    fx.engine
+        .init_project(
+            OWNER,
+            &project_request(
+                "finitechat-native",
+                "finitechat-native-mockup",
+                false,
+                false,
+            ),
+            remote("finitechat-native"),
+            NOW,
+        )
+        .unwrap();
+    fx.engine
+        .grant_project(
+            OWNER,
+            "finitechat-native",
+            &ProjectGrantRequest {
+                email: "skyler@example.com".to_string(),
+                role: "editor".to_string(),
+            },
+            NOW + 1,
+        )
+        .unwrap();
+
+    let native_without_email = fx.engine.mint_git_credential(
+        OTHER_OWNER,
+        "finitechat-native",
+        None,
+        remote("finitechat-native"),
+        NOW + 2,
+    );
+    assert!(matches!(
+        native_without_email,
+        Err(EngineError::NotAuthorized)
+    ));
+
+    let credential = fx
+        .engine
+        .mint_git_credential_for_verified_email(
+            OTHER_OWNER,
+            "finitechat-native",
+            "skyler@example.com",
+            remote("finitechat-native"),
+            NOW + 3,
+        )
+        .unwrap();
+    assert_eq!(credential.project_slug, "finitechat-native");
+    assert_eq!(credential.username, credential.credential_id);
+    assert_eq!(credential.password.len(), 64);
+}
+
+#[test]
 fn git_credential_requires_verified_editor_and_honors_revocation() {
     let mut fx = fixture();
     fx.engine

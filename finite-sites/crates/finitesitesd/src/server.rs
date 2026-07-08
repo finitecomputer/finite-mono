@@ -22,6 +22,7 @@ use tower::util::ServiceExt as _;
 use finitesites_engine::Engine;
 
 use crate::apps::Supervisor;
+use crate::identity::IdentityAuthority;
 use crate::limiter::{RateLimiter, WINDOW_SECONDS};
 use crate::mailer::Mailer;
 use crate::{ServeOptions, api, git, sites};
@@ -38,6 +39,7 @@ pub struct AppState {
     pub login_limiter: RateLimiter,
     pub api_url: String,
     pub git_base_url: String,
+    pub identity_authority: Option<IdentityAuthority>,
     pub base_domain: String,
     pub document_base_domain: String,
     pub data_dir: PathBuf,
@@ -200,6 +202,10 @@ pub async fn serve_on(
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
+        identity_authority: options
+            .identity_authority_url
+            .as_ref()
+            .map(IdentityAuthority::new),
         base_domain: options.base_domain.clone(),
         document_base_domain: options.document_base_domain.clone(),
         data_dir: options.data_dir.clone(),

@@ -642,6 +642,37 @@ impl Engine {
                     .ok_or(EngineError::NotAuthorized)?
             }
         };
+        self.mint_git_credential_for_collaborator(&project, &collaborator, git_remote_url, now)
+    }
+
+    pub fn mint_git_credential_for_verified_email(
+        &mut self,
+        actor_pubkey: &str,
+        project_slug: &str,
+        actor_email: &str,
+        git_remote_url: String,
+        now: u64,
+    ) -> Result<GitAuthResponse, EngineError> {
+        assert!(hex::is_hex32(actor_pubkey));
+        let project = self
+            .store
+            .project_by_slug(project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
+        let email = validate_email(actor_email)?;
+        let collaborator = self
+            .store
+            .active_project_collaborator_by_email(&project.id, &email)?
+            .ok_or(EngineError::NotAuthorized)?;
+        self.mint_git_credential_for_collaborator(&project, &collaborator, git_remote_url, now)
+    }
+
+    fn mint_git_credential_for_collaborator(
+        &mut self,
+        project: &ProjectRecord,
+        collaborator: &ProjectCollaboratorRecord,
+        git_remote_url: String,
+        now: u64,
+    ) -> Result<GitAuthResponse, EngineError> {
         if collaborator.role == ProjectCollaboratorRole::Viewer {
             return Err(EngineError::NotAuthorized);
         }
@@ -658,7 +689,7 @@ impl Engine {
             now,
         )?;
         Ok(GitAuthResponse {
-            project_slug: project.slug,
+            project_slug: project.slug.clone(),
             git_remote_url,
             credential_id: credential_id.clone(),
             username: credential_id,

@@ -75,6 +75,23 @@ copies the secret anywhere else.
 fsite auth status --output json
 ```
 
+### Email And Identity Authority
+
+When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
+`fsite auth login`, `fsite auth link-email`, and `fsite auth redeem` use that
+authority for email proof and Nostr key ownership instead of Sites-local email
+keys.
+
+For `@finite.vip` addresses, redeeming after `fsite auth link-email EMAIL` or
+redeeming with `--link-native` binds the email to the shared User Key in
+finite-identity. That is the path that lets finite-identity own the user's
+Nostr keypair and NIP-05 identity. For non-`@finite.vip` addresses, redeeming
+preserves the email-only collaborator flow: the email can satisfy an email
+grant, but it does not become a native Finite VIP identity.
+
+Sites keeps its legacy `/api/v1/email-auth/*` endpoints for self-hosted and
+transition deployments that do not configure `FINITE_IDENTITY_AUTHORITY`.
+
 ### Migrating an existing key
 
 Older `fsite` releases stored the key at `~/.config/finite-sites/identity.env`.

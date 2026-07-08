@@ -399,18 +399,46 @@ async fn auth_git(
     let request: GitAuthRequest = parse_json_body(&body)?;
     let git_remote_url = git_remote_url(&state, &slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
-        .mint_git_credential(
-            &actor,
-            &slug,
-            request.email.as_deref(),
-            git_remote_url,
-            now_unix(),
-        )
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
+    let response = if let (Some(email), Some(identity_authority)) =
+        (request.email.as_deref(), state.identity_authority.as_ref())
+    {
+        let satisfied = identity_authority
+            .satisfies_grant(email, &actor)
+            .map_err(|error| {
+                eprintln!("finitesitesd identity authority error: {error}");
+                internal_error("identity authority failure")
+            })?;
+        if !satisfied {
+            return Err(ApiError::unauthorized(
+                "identity authority did not resolve actor for email grant",
+            ));
+        }
+        engine
+            .mint_git_credential_for_verified_email(
+                &actor,
+                &slug,
+                email,
+                git_remote_url,
+                now_unix(),
+            )
+            .map_err(|error| {
+                log_if_internal(&error);
+                ApiError::from(error)
+            })?
+    } else {
+        engine
+            .mint_git_credential(
+                &actor,
+                &slug,
+                request.email.as_deref(),
+                git_remote_url,
+                now_unix(),
+            )
+            .map_err(|error| {
+                log_if_internal(&error);
+                ApiError::from(error)
+            })?
+    };
     Ok(Json(response))
 }
 

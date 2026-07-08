@@ -1,7 +1,8 @@
 # Finite Sites on the SaaS box, alongside finite-saas-core/web.
 # Install: copy to /etc/systemd/system/finite-saas-sites.service
-# Secrets (RESEND_API_KEY) live in /etc/finite-saas/sites.env, operator-created,
-# never written by deploys — same convention as core.env/web.env.
+# Secrets and deploy-local URLs (RESEND_API_KEY, FINITE_IDENTITY_AUTHORITY) live
+# in /etc/finite-saas/sites.env, operator-created, never written by deploys —
+# same convention as core.env/web.env.
 #
 # The `--app-runner kata` mode REQUIRES the kata drop-in
 # (finite-saas-sites-kata.conf) which relaxes the filesystem hardening below
