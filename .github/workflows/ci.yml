@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - migration-integration
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FC_CORE_POSTGRES_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: finitecomputer-v2/apps/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: finitecomputer-v2/apps/dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint dashboard
+        run: npm run lint
+
+      - name: Test dashboard
+        run: npm test
+
+      - name: Build dashboard
+        run: npm run build
+
+  hermes-bridge:
+    name: finitechat Hermes bridge
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: finitechat
+    env:
+      FINITE_HERMES_AGENT_VERSION: "0.17.0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Hermes sidecar smoke
+        run: scripts/hermes-sidecar-smoke.sh
+
+      - name: Install Python tooling
+        run: python3 -m pip install basedpyright==1.39.8 "hermes-agent==${FINITE_HERMES_AGENT_VERSION}" ruff==0.15.17
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: BasedPyright
+        run: basedpyright
+
+      - name: Hermes adapter regression report
+        run: scripts/hermes-adapter-regression-report.py --report "$CARGO_TARGET_DIR/hermes-adapter-regressions/report.json"
+
+      - name: Hermes platform adapter tests
+        run: python3 -m unittest discover -s tests -p '*test*.py'
+
+  nix-checks:
+    name: Skills + search static checks (nix shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - name: Skills check
+        run: nix develop --command just skills check
+      - name: Search check
+        run: nix develop --command just search check
+
+  devfinity-smoke:
+    name: devfinity full-stack smoke
+    runs-on: ubuntu-latest
+    # Not yet a required gate: first runs on hosted runners may surface
+    # missing dev-shell deps (e.g. Node for the dashboard). Promote to
+    # blocking once it has a green history.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: Swatinem/rust-cache@v2
+      - name: devfinity smoke
+        run: nix develop --command just dev smoke

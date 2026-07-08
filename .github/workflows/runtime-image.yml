@@ -1,28 +1,22 @@
 name: Agent Runtime Image
 
+# Monorepo adaptation of finitecomputer-v2's runtime-image workflow.
+# The old workflow cloned finitechat / finite-sites / finite-brain as sibling
+# checkouts at arbitrary refs; in finite-mono they ARE siblings in this tree,
+# all pinned by the single checkout SHA — so the multi-clone (and the whole
+# per-repo ref input surface) disappears.
+#
+# NOTE: runs on the self-hosted finite-lat-2 runner, which must be registered
+# against this repo (see infra/hosts/lat2/runners.md for the cutover checklist).
+
 run-name: Publish agent runtime ${{ inputs.version }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version tag, for example 2026-07-02.1"
+        description: "Image version tag, for example 2026-07-08.1"
         required: true
-        type: string
-      finitechat_ref:
-        description: "finitecomputer/finitechat ref to package"
-        required: true
-        default: "main"
-        type: string
-      finite_sites_ref:
-        description: "finitecomputer/finite-sites ref to package"
-        required: true
-        default: "main"
-        type: string
-      finite_brain_ref:
-        description: "finitecomputer/finite-brain ref to package"
-        required: true
-        default: "main"
         type: string
       hermes_agent_version:
         description: "hermes-agent package version"
@@ -46,29 +40,7 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout finitecomputer-v2
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-
-      - name: Checkout finitechat
-        run: |
-          rm -rf ../finitechat
-          git clone https://github.com/finitecomputer/finitechat.git ../finitechat
-          git -C ../finitechat checkout "${{ inputs.finitechat_ref }}"
-          git -C ../finitechat rev-parse HEAD
-
-      - name: Checkout finite-sites
-        run: |
-          rm -rf ../finite-sites
-          git clone https://github.com/finitecomputer/finite-sites.git ../finite-sites
-          git -C ../finite-sites checkout "${{ inputs.finite_sites_ref }}"
-          git -C ../finite-sites rev-parse HEAD
-
-      - name: Checkout finite-brain
-        run: |
-          rm -rf ../finite-brain
-          git clone https://github.com/finitecomputer/finite-brain.git ../finite-brain
-          git -C ../finite-brain checkout "${{ inputs.finite_brain_ref }}"
-          git -C ../finite-brain rev-parse HEAD
+      - uses: actions/checkout@v4
 
       - name: Log in to GHCR
         env:
@@ -78,6 +50,7 @@ jobs:
 
       - name: Build and push runtime image
         id: build
+        working-directory: finitecomputer-v2
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/finite-agent-runtime
           VERSION: ${{ inputs.version }}
@@ -106,12 +79,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runtime-image-report
-          path: runtime-image-report.json
+          path: finitecomputer-v2/runtime-image-report.json
 
       - name: Summarize
         env:
           PINNED: ${{ steps.build.outputs.pinned }}
         run: |
-          echo "Pinned runtime image:" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pinned runtime image (source commit ${GITHUB_SHA}):" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"

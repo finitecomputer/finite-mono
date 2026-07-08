@@ -1,9 +1,16 @@
 name: Release finitechat
 
+# Component-scoped release: tag `finitechat/vX.Y.Z` on finite-mono.
+# Asset names are a product contract — agents in the field install from
+# `releases/latest/download/finitechat-<platform>.tar.gz`; do not rename.
+# The mirror job republishes the same assets to the legacy
+# finitecomputer/finitechat repo (as tag vX.Y.Z) so existing install
+# URLs keep working until every installer points at finite-mono.
+
 on:
   push:
     tags:
-      - "v*"
+      - "finitechat/v*"
 
 permissions:
   contents: write
@@ -72,4 +79,30 @@ jobs:
             gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
+          fi
+
+  mirror:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Mirror release to finitecomputer/finitechat
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::RELEASE_MIRROR_TOKEN not configured; skipping mirror release."
+            exit 0
+          fi
+          repo=finitecomputer/finitechat
+          tag="${GITHUB_REF_NAME#finitechat/}"
+          notes="Mirror of finite-mono release ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Canonical: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME//\//%2F}"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$repo" --clobber
+          else
+            gh release create "$tag" release-assets/* --repo "$repo" --title "$tag" --notes "$notes"
           fi

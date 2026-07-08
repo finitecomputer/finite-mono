@@ -1,9 +1,13 @@
 name: Release fbrain
 
+# Component-scoped release: tag `fbrain/vX.Y.Z` on finite-mono.
+# The mirror job republishes to the legacy finitecomputer/finite-brain repo
+# (tag vX.Y.Z) until every installer points at finite-mono.
+
 on:
   push:
     tags:
-      - "v*"
+      - "fbrain/v*"
 
 permissions:
   contents: write
@@ -32,8 +36,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
           rustup target add "${{ matrix.target }}"
 
       - name: Build fbrain
@@ -72,4 +76,30 @@ jobs:
             gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
+          fi
+
+  mirror:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Mirror release to finitecomputer/finite-brain
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::RELEASE_MIRROR_TOKEN not configured; skipping mirror release."
+            exit 0
+          fi
+          repo=finitecomputer/finite-brain
+          tag="${GITHUB_REF_NAME#fbrain/}"
+          notes="Mirror of finite-mono release ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Canonical: https://github.com/${GITHUB_REPOSITORY}/releases"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$repo" --clobber
+          else
+            gh release create "$tag" release-assets/* --repo "$repo" --title "$tag" --notes "$notes"
           fi
