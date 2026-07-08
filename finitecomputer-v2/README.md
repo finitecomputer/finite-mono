@@ -43,7 +43,9 @@ These stay separate repos:
 - `finite-skills`: Finite-managed agent skills.
 - `finite-brain`: future brain/knowledgebase sharing.
 
-v2 should deploy and integrate those services, not vendor their code.
+v2 deploys and integrates those services. Since the finite-mono cutover they
+are sibling directories in this repo — consume them through the root Cargo
+workspace and `infra/`, never by copying their code into `finitecomputer-v2/`.
 
 ## Hard-Cut Rules
 

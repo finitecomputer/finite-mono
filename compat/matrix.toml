@@ -1,0 +1,37 @@
+# Compatibility matrix: what finite-mono cannot see from one checkout.
+#
+# Inside the monorepo, same-commit compatibility is automatic. This file
+# exists for the artifacts already OUT THERE — released binaries installed on
+# user machines and hosted agents running older runtime images — so a change
+# that would strand them is a deliberate, reviewed act (edit this file in the
+# same PR) instead of an accident.
+#
+# Maintained by hand at release time. Each release checklist in
+# infra/runbooks/ includes "update compat/matrix.toml".
+
+[field.finitechat-cli]
+# Released CLI versions believed installed in the field (hosted agents use
+# releases/latest at install time).
+released = ["v0.1.0", "v0.1.1", "v0.1.2"]
+install_url = "https://github.com/finitecomputer/finitechat/releases/latest/download/"
+notes = "Install URL is a product contract; mirror releases keep it working. Server must keep accepting these clients until a deprecation is announced through the update manifest."
+
+[field.fsite-cli]
+released = ["v0.3.1"]
+install_url = "https://github.com/finitecomputer/finite-sites/releases/latest/download/"
+
+[field.fbrain-cli]
+released = []
+notes = "No public release yet; champagne test used a PR-branch build."
+
+[field.agent-runtime-image]
+# Hosted agents pinned at launch time; they do NOT auto-update.
+image = "ghcr.io/finitecomputer/finite-agent-runtime"
+deployed = ["2026-07-04.1", "2026-07-06.1"]
+notes = "Runner launches whatever tag its env pins. Old CVMs keep their image until relaunched."
+
+[servers]
+finitechat_server = { host = "clawland (chat.finite.computer)", deployed_from = "pre-mono finitechat", contract = "GET /health reports source_commit + source_dirty" }
+finite_saas_core = { host = "lat1 k3s", deployed_from = "on-host podman build (deprecated; see infra/hosts/lat1/deploy.md)" }
+finitesitesd = { host = "lat2", deployed_from = "on-box cargo build v0.2.16 (deprecated; see infra/hosts/lat2/deploy.md)" }
+finite_brain = { host = "smoke", deployed_from = "legacy fleet nix packaging 0.1.2-6466fcc" }
