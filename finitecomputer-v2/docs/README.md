@@ -14,6 +14,9 @@
   runtime.
 - [Runtime control contract](runtime-control-contract.md): dashboard/Core
   lifecycle controls, runner operations, and known-good chat recovery.
+- [Runtime recovery and observability plan](runtime-recovery-and-observability-plan.md):
+  phased startup reports, plugin/config audits, recover-chat boot mode,
+  rollback, break-glass export, logs policy, and recovery material.
 - [Auth and key custody brief](auth-key-custody-brief.md): shareable decision
   brief for WorkOS account auth, `finite-auth`, Agent Root Secret, and user
   recovery key decisions.

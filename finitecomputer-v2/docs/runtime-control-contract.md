@@ -134,7 +134,7 @@ Current v2 runtime image expectations:
 
 - `/runtime` is immutable image state.
 - local Docker, remote Docker, and Phala mount durable state at `/data`.
-- generated Hermes config enables the `finite-platform` plugin and tool-loop
+- generated Hermes config enables the `finitechat` plugin and tool-loop
   hard-stop guardrails.
 - the runtime refuses OpenRouter or any other fallback when Finite Private is
   the requested default profile and no key is present.
