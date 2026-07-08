@@ -36,9 +36,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
+        # Floating stable, matching finitecomputer-v2's pre-mono CI: several
+        # crates are clean under current clippy but trip lints that were
+        # default-on in older releases (e.g. uninlined_format_args on 1.88).
+        # MSRV (rust-version 1.88) is still exercised by the release builds.
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -88,7 +91,10 @@ jobs:
         working-directory: finitechat
     env:
       FINITE_HERMES_AGENT_VERSION: "0.17.0"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # The hermes scripts resolve reports and built binaries relative to the
+      # finitechat/ working directory (target/...); point cargo there too so
+      # the two agree, exactly like the pre-mono repo layout.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/finitechat/target
     steps:
       - uses: actions/checkout@v4
 
@@ -149,5 +155,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v9
       - uses: Swatinem/rust-cache@v2
+      - name: Prebuild stack binaries
+        # devfinity's readiness window is shorter than a cold compile of the
+        # whole stack on a hosted runner; build first so the preflight is a
+        # no-op and the 180s wait measures actual service startup.
+        run: nix develop --command cargo build --locked -p devfinity -p finite-saas-core -p finitechat-server -p finitesitesd
       - name: devfinity smoke
         run: nix develop --command just dev smoke
