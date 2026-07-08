@@ -31,6 +31,7 @@ fi
 service_addr="${FINITECHAT_HERMES_SERVICE_ADDR:-127.0.0.1:0}"
 poll_timeout_secs="${FINITECHAT_HERMES_POLL_TIMEOUT_SECS:-1}"
 poll_limit="${FINITECHAT_HERMES_POLL_LIMIT:-10}"
+title_generation_timeout_secs="${FINITECHAT_HERMES_TITLE_TIMEOUT_SECS:-2}"
 workspace="${FINITECHAT_WORKSPACE:-/workspace}"
 
 export FINITECHAT_HOME="$agent_home"
@@ -91,6 +92,38 @@ else
     cp "$invite_file" /tmp/finitechat-invite.json
 fi
 
+# The hosted runtime starts with one user-facing room. Make that room the
+# default Hermes home channel unless the agent already has one. Without this,
+# first contact can get stuck behind a repeated "type /sethome" onboarding
+# prompt even though the gateway is otherwise healthy.
+invite_room_id="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("room_id") or "")' "$invite_file")"
+if "$finitechat_bin" hermes --home "$agent_home" home-channel show \
+    | python -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("home_channel") else 1)' \
+    >/dev/null 2>&1; then
+    :
+else
+    if [[ -n "$invite_room_id" ]]; then
+        "$finitechat_bin" hermes --home "$agent_home" home-channel set \
+            --room-id "$invite_room_id" \
+            >/dev/null \
+            || echo "FINITE_AGENT_HOME_CHANNEL_WARN failed_to_set room_id=$invite_room_id" >&2
+    fi
+fi
+if [[ -n "$invite_room_id" ]]; then
+    # Hermes core uses this env var for first-contact onboarding notices, while
+    # cron/handoff delivery reads the gateway platform home_channel below. Keep
+    # both pointed at the same hosted invite room.
+    export FINITECHAT_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-$invite_room_id}"
+fi
+
+gateway_home_channel_yaml=""
+if [[ -n "${FINITECHAT_HOME_CHANNEL:-}" ]]; then
+    gateway_home_channel_yaml="      home_channel:
+        platform: finitechat
+        chat_id: ${FINITECHAT_HOME_CHANNEL}
+        name: Finite Chat Home"
+fi
+
 cat >"${hermes_home}/config.yaml" <<EOF
 model:
   default: ${model}
@@ -101,6 +134,9 @@ ${api_key_yaml}
 plugins:
   enabled:
     - ${plugin_name}
+auxiliary:
+  title_generation:
+    timeout: ${title_generation_timeout_secs}
 gateway:
   platforms:
     finitechat:
@@ -112,6 +148,7 @@ gateway:
         service_addr: ${service_addr}
         poll_timeout_secs: ${poll_timeout_secs}
         poll_limit: ${poll_limit}
+${gateway_home_channel_yaml}
 terminal:
   backend: local
   cwd: ${workspace}

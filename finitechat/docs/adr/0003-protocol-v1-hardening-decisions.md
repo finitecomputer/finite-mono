@@ -25,11 +25,13 @@ replays the whole op log) is debt against this ADR.
    form factors (CLI, Electron, native iOS) will diverge in supported
    features, and update rollout needs a version to coordinate on. Copy
    Marmot's shapes where they fit; do not import their registry machinery.
-2. **Admin authority.** `admins: BTreeSet<AccountId>` on the room-membership
-   projection, creator-initialized. Cross-account adds/removes require admin;
-   same-account linking and removal never do. Admins may revoke other admins,
-   never the last one. No anyone-may-invite toggle in v1. Direct rooms: both
-   accounts implicitly admin.
+2. **Relay authority boundary.** The server validates relay invariants for
+   typed commits (room, epoch, active sender, caps, duplicate adds, and
+   structurally valid membership deltas) but does not enforce social authority
+   over encrypted rooms. Any active room member may create invite sessions and
+   submit structurally valid membership commits, including cross-account adds.
+   Admin metadata may exist only as advisory client/product state; it must not
+   gate `/invites` or `/commits`.
 3. **Leave-group, whole-account.** A typed leave closes all of the account's
    device intervals at the accepted seq (server-recognized immediately); the
    MLS remove commit follows asynchronously from an admin device. Per-device

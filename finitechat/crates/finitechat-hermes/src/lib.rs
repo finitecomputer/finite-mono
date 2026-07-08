@@ -1,7 +1,7 @@
 use finitechat_proto::{
-    ActivityId, ActivityKind, AttachmentBlobReferenceV1, ConversationId, EphemeralActivityActionV1,
-    FINITECHAT_ACTIVITY_KIND_WORKING, MAX_ATTACHMENT_BLOB_URL_BYTES, MAX_ATTACHMENT_FILENAME_BYTES,
-    MAX_ATTACHMENT_MIME_TYPE_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES,
+    ActivityId, ActivityKind, AttachmentBlobReferenceV1, ConversationId, ConversationSegmentId,
+    EphemeralActivityActionV1, FINITECHAT_ACTIVITY_KIND_WORKING, MAX_ATTACHMENT_BLOB_URL_BYTES,
+    MAX_ATTACHMENT_FILENAME_BYTES, MAX_ATTACHMENT_MIME_TYPE_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES,
     MAX_EPHEMERAL_ACTIVITY_DECRYPTED_PAYLOAD_BYTES, MAX_EPHEMERAL_ACTIVITY_EXPIRY_MILLIS,
     MAX_OBJECT_ID_BYTES, MAX_SYNC_PAGE_ENTRIES, MessageId, ProtocolLimitError, RoomId, Seq,
     validate_bytes_len, validate_bytes_non_empty, validate_item_count, validate_room_id,
@@ -167,6 +167,8 @@ pub struct HermesPollEventV1 {
     pub seq: Seq,
     pub message_id: MessageId,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub text: String,
     pub message_type: HermesMessageTypeV1,
     pub source: HermesSourceV1,
@@ -204,6 +206,8 @@ pub struct HermesAckRequestV1 {
 pub struct HermesSendRequestV1 {
     pub room_id: RoomId,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub text: String,
     pub kind: HermesSendKindV1,
     pub status: HermesMessageStatusV1,
@@ -223,6 +227,8 @@ pub struct HermesSendResponseV1 {
 pub struct HermesEditRequestV1 {
     pub room_id: RoomId,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub message_id: MessageId,
     pub text: String,
     pub status: HermesMessageStatusV1,
@@ -235,6 +241,8 @@ pub struct HermesEditRequestV1 {
 pub struct HermesActivityRequestV1 {
     pub room_id: RoomId,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub activity_kind: ActivityKind,
     pub activity_id: Option<ActivityId>,
     pub action: EphemeralActivityActionV1,
@@ -374,6 +382,7 @@ impl HermesPollEventV1 {
             seq,
             message_id: message_id.into(),
             conversation_id: None,
+            segment_id: None,
             text: text.into(),
             message_type: HermesMessageTypeV1::Text,
             source: HermesSourceV1 {
@@ -406,6 +415,11 @@ impl HermesPollEventV1 {
         validate_optional_string(
             "hermes.poll_event.conversation_id",
             self.conversation_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.poll_event.segment_id",
+            self.segment_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
         validate_string_bytes("hermes.poll_event.text", &self.text, MAX_HERMES_TEXT_BYTES)?;
@@ -512,6 +526,7 @@ impl HermesSendRequestV1 {
         let request = Self {
             room_id: chat_id.into(),
             conversation_id,
+            segment_id: None,
             text: content.into(),
             kind,
             status,
@@ -528,6 +543,11 @@ impl HermesSendRequestV1 {
         validate_optional_string(
             "hermes.send.conversation_id",
             self.conversation_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.send.segment_id",
+            self.segment_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
         validate_string_bytes("hermes.send.text", &self.text, MAX_HERMES_TEXT_BYTES)?;
@@ -561,6 +581,11 @@ impl HermesEditRequestV1 {
             self.conversation_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
+        validate_optional_string(
+            "hermes.edit.segment_id",
+            self.segment_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
         validate_message_id(&self.message_id)?;
         validate_string_bytes("hermes.edit.text", &self.text, MAX_HERMES_TEXT_BYTES)?;
         validate_json_value_bytes(
@@ -581,6 +606,7 @@ impl HermesActivityRequestV1 {
         let request = Self {
             room_id: room_id.into(),
             conversation_id: conversation_id.map(Into::into),
+            segment_id: None,
             activity_kind: FINITECHAT_ACTIVITY_KIND_WORKING.to_string(),
             activity_id: None,
             action,
@@ -596,6 +622,11 @@ impl HermesActivityRequestV1 {
         validate_optional_string(
             "hermes.activity.conversation_id",
             self.conversation_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.activity.segment_id",
+            self.segment_id.as_deref(),
             MAX_OBJECT_ID_BYTES,
         )?;
         validate_bytes_non_empty("hermes.activity.kind", self.activity_kind.len())?;
@@ -743,6 +774,8 @@ pub struct HermesMessagePayloadV1 {
     pub payload_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub text: String,
     pub kind: HermesSendKindV1,
     pub status: HermesMessageStatusV1,
@@ -766,6 +799,7 @@ impl HermesMessagePayloadV1 {
         Self {
             payload_type: HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
             conversation_id: request.conversation_id.clone(),
+            segment_id: request.segment_id.clone(),
             text: request.text.clone(),
             kind: request.kind,
             status: request.status,
@@ -781,6 +815,7 @@ impl HermesMessagePayloadV1 {
         Self {
             payload_type: HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
             conversation_id: request.conversation_id.clone(),
+            segment_id: request.segment_id.clone(),
             text: request.text.clone(),
             kind: HermesSendKindV1::Message,
             status: request.status,
@@ -814,6 +849,18 @@ impl HermesMessagePayloadV1 {
     pub fn validate_limits(&self) -> Result<(), HermesBridgeError> {
         validate_string_bytes("hermes.payload.text", &self.text, MAX_HERMES_TEXT_BYTES)
             .map_err(HermesBridgeError::from)?;
+        validate_optional_string(
+            "hermes.payload.conversation_id",
+            self.conversation_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(HermesBridgeError::from)?;
+        validate_optional_string(
+            "hermes.payload.segment_id",
+            self.segment_id.as_deref(),
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(HermesBridgeError::from)?;
         validate_item_count(
             "hermes.payload.attachments",
             self.attachments.len(),
@@ -849,6 +896,7 @@ impl HermesMessagePayloadV1 {
             seq,
             message_id: message_id.into(),
             conversation_id: self.conversation_id.clone(),
+            segment_id: self.segment_id.clone(),
             text: self.text,
             message_type,
             source: HermesSourceV1 {
@@ -858,7 +906,7 @@ impl HermesMessagePayloadV1 {
                 chat_type: HermesChatTypeV1::Group,
                 user_id: Some(sender_account_id),
                 user_name: self.sender_name,
-                thread_id: self.conversation_id,
+                thread_id: self.segment_id.clone().or(self.conversation_id.clone()),
                 chat_topic: None,
                 user_id_alt: Some(sender_device_id.into()),
                 chat_id_alt: None,
@@ -1084,6 +1132,7 @@ mod tests {
             seq: 7,
             message_id: "message-7".to_string(),
             conversation_id: Some("topic-build".to_string()),
+            segment_id: None,
             text: "hello".to_string(),
             message_type: HermesMessageTypeV1::Text,
             source: HermesSourceV1::finite_chat(

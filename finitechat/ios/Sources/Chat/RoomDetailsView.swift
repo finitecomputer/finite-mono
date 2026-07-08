@@ -5,7 +5,6 @@ struct RoomDetailsView: View {
     let details: AppRoomDetailsState?
     let mediaItems: [ChatMediaGalleryItem]
     let onDownloadAttachment: (ChatMediaGalleryItem) -> Void
-    let onCreateInvite: () -> Void
     let onAddPeople: () -> Void
     let onRefreshDevices: () -> Void
     let onRevokeDevice: (AppDeviceSummary) -> Void
@@ -25,7 +24,6 @@ struct RoomDetailsView: View {
         details: AppRoomDetailsState?,
         mediaItems: [ChatMediaGalleryItem],
         onDownloadAttachment: @escaping (ChatMediaGalleryItem) -> Void,
-        onCreateInvite: @escaping () -> Void,
         onAddPeople: @escaping () -> Void,
         onRefreshDevices: @escaping () -> Void,
         onRevokeDevice: @escaping (AppDeviceSummary) -> Void,
@@ -35,7 +33,6 @@ struct RoomDetailsView: View {
         self.details = details
         self.mediaItems = mediaItems
         self.onDownloadAttachment = onDownloadAttachment
-        self.onCreateInvite = onCreateInvite
         self.onAddPeople = onAddPeople
         self.onRefreshDevices = onRefreshDevices
         self.onRevokeDevice = onRevokeDevice
@@ -93,20 +90,13 @@ struct RoomDetailsView: View {
                         }
                         .accessibilityIdentifier("RoomDetailsMediaGalleryLink")
 
-                        if details.canCreateInvite {
+                        if details.state == .connected {
                             Button {
                                 onAddPeople()
                             } label: {
                                 Label("Add People", systemImage: "person.badge.plus")
                             }
                             .accessibilityIdentifier("RoomDetailsAddPeopleButton")
-
-                            Button {
-                                onCreateInvite()
-                            } label: {
-                                Label("Invite", systemImage: "qrcode")
-                            }
-                            .accessibilityIdentifier("RoomDetailsInviteButton")
                         }
                     }
 

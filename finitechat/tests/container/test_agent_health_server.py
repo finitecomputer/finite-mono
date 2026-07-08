@@ -2,7 +2,7 @@
 
 The health server is a thin shim over `finitechat hermes invite` /
 `finitechat hermes invite-status`; these tests fake the CLI binary and
-assert the shim's serve/refresh/paired decisions and its cache writes.
+assert the shim's serve/refresh/admission decisions and its cache writes.
 """
 
 from __future__ import annotations
@@ -156,7 +156,7 @@ class AgentHealthServerInviteTest(unittest.TestCase):
         self.assertEqual(mint[mint.index("--ttl-ms") + 1], "3600000")
         self.assertIn("--room-name", mint)
 
-    def test_consumed_invite_reports_paired_without_url_and_never_remints(self) -> None:
+    def test_consumed_invite_reports_pending_admission_without_url_and_never_remints(self) -> None:
         (self.agent_home / "current-invite.json").write_text(
             json.dumps(minted_invite()), encoding="utf-8"
         )
@@ -167,20 +167,35 @@ class AgentHealthServerInviteTest(unittest.TestCase):
         payload = self.health.invite()
 
         self.assertTrue(payload["ready"])
-        self.assertTrue(payload["paired"])
+        self.assertFalse(payload["paired"])
         self.assertNotIn("url", payload)
-        self.assertEqual(payload["invite_state"], "consumed")
+        self.assertEqual(payload["invite_state"], "consumed_pending_admission")
         self.assertEqual(payload["room_id"], "room-1")
-        self.assertTrue(self.cached_invite()["paired"])
+        self.assertEqual(self.cached_invite()["invite_state"], "consumed_pending_admission")
+        self.assertNotIn("paired", self.cached_invite())
 
-        # The paired verdict is durable: later probes skip the status query
-        # and never mint, even if the server would now report the session
-        # missing.
+        # The spent verdict is durable enough to avoid re-minting, but it does
+        # not claim pairing. Until finitechat can prove room admission from MLS
+        # member state, the dashboard must keep showing a non-paired state.
         self.set_statuses(["fail"])
         repeat = self.health.invite()
-        self.assertTrue(repeat["paired"])
+        self.assertFalse(repeat["paired"])
         self.assertNotIn("url", repeat)
+        self.assertEqual(repeat["invite_state"], "consumed_pending_admission")
         self.assertEqual(self.mint_calls(), [])
+
+    def test_legacy_cached_paired_flag_is_downgraded_to_pending_admission(self) -> None:
+        cached = minted_invite()
+        cached["paired"] = True
+        (self.agent_home / "current-invite.json").write_text(json.dumps(cached), encoding="utf-8")
+
+        payload = self.health.invite()
+
+        self.assertTrue(payload["ready"])
+        self.assertFalse(payload["paired"])
+        self.assertNotIn("url", payload)
+        self.assertEqual(payload["invite_state"], "consumed_pending_admission")
+        self.assertEqual(self.calls(), [["auth", "status"]])
 
     def test_expired_unconsumed_invite_remints_for_the_same_room(self) -> None:
         (self.agent_home / "current-invite.json").write_text(

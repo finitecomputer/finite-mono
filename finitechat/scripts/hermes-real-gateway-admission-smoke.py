@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Smoke the real Hermes 0.17 gateway admission path.
+"""Smoke the real Hermes gateway admission path.
 
 This is intentionally stronger than the adapter echo tests:
 
   finitechat-server
   -> finitechat hermes serve
-  -> hermes-agent 0.17 `gateway run --replace`
+  -> hermes-agent `gateway run --replace`
   -> throwaway finitechat client joins via invite URL
 
 The pass condition is that Hermes admits the pending join through the
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hermes-package",
-        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", "hermes-agent==0.17.0"),
+        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", "hermes-agent==0.18.0"),
     )
     parser.add_argument(
         "--skip-build", action="store_true", help="Use existing target/debug binaries."
@@ -214,6 +214,7 @@ def main() -> int:
     state_root = Path(state_ctx.name)
     agent_home = state_root / "agent-home"
     user_home = state_root / "user-home"
+    user_device_id = "electron-Pauls-MacBook-Pro-2.local"
     hermes_home = state_root / "hermes-home"
     server_port = free_port()
     service_port = free_port()
@@ -239,6 +240,9 @@ def main() -> int:
         "timeout_ms": args.timeout_ms,
         "steps": [],
     }
+    base_env = os.environ.copy()
+    agent_env = {**base_env, "FINITE_HOME": str(agent_home), "FINITECHAT_HOME": str(agent_home)}
+    user_env = {**base_env, "FINITE_HOME": str(user_home), "FINITECHAT_HOME": str(user_home)}
 
     def step(name: str, **facts: Any) -> None:
         report["steps"].append(
@@ -267,6 +271,7 @@ def main() -> int:
                 "--server",
                 server_url,
             ],
+            env=agent_env,
             timeout=30,
         )
         user_init = run_json(
@@ -278,14 +283,21 @@ def main() -> int:
                 "init",
                 "--server",
                 server_url,
+                "--device-id",
+                user_device_id,
             ],
+            env=user_env,
             timeout=30,
         )
         report["agent"] = {
             "account_id": agent_init.get("account_id"),
             "npub": agent_init.get("npub"),
         }
-        report["user"] = {"account_id": user_init.get("account_id"), "npub": user_init.get("npub")}
+        report["user"] = {
+            "account_id": user_init.get("account_id"),
+            "npub": user_init.get("npub"),
+            "device_id": user_device_id,
+        }
         step("homes.initialized")
 
         install = run_json(
@@ -298,7 +310,7 @@ def main() -> int:
                 "--plugins-dir",
                 str(hermes_home / "plugins"),
                 "--plugin-name",
-                "finite",
+                "finitechat",
                 "--finitechat-bin",
                 str(finitechat_bin),
                 "--service-url",
@@ -306,6 +318,7 @@ def main() -> int:
                 "--force",
                 "--json",
             ],
+            env=agent_env,
             timeout=30,
         )
         report["plugin_install"] = install
@@ -328,6 +341,7 @@ def main() -> int:
                 "Hermes Gateway Admission Smoke",
                 "--json",
             ],
+            env=agent_env,
             timeout=30,
         )
         report["invite"] = {
@@ -337,11 +351,12 @@ def main() -> int:
         }
         step("invite.created", room_id=invite.get("room_id"))
 
-        env = os.environ.copy()
+        env = agent_env.copy()
         env.update(
             {
                 "HERMES_HOME": str(hermes_home),
                 "FINITECHAT_HOME": str(agent_home),
+                "FINITE_HOME": str(agent_home),
                 "FINITE_AGENT_HOME": str(agent_home),
                 "FINITECHAT_BIN": str(finitechat_bin),
                 "FINITECHAT_HERMES_INBOUND_STREAM": "1",
@@ -415,6 +430,7 @@ def main() -> int:
                 "--timeout-ms",
                 str(args.timeout_ms),
             ],
+            env=user_env,
             timeout=max(30, args.timeout_ms / 1000 + 20),
         )
         report["join"] = join

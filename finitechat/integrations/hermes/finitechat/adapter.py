@@ -14,6 +14,8 @@ import logging
 import os
 import shlex
 import shutil
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,14 +32,18 @@ LOCAL_ENV_FILE = "finitechat.env"
 DEFAULT_POLL_LIMIT = 10
 DEFAULT_POLL_TIMEOUT_SECS = 20
 DEFAULT_ACTIVITY_REFRESH_SECS = 30.0
+DEFAULT_ACTIVITY_START_GRACE_SECS = 0.1
 ACTIVE_TURN_POLL_TIMEOUT_MILLIS = 100
 DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
+BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
 SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
 MAX_OUTBOUND_MESSAGE_ROUTES = 256
 STREAM_RECONNECT_BACKOFF_SECS = 2.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
+ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
+PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 
 
 def _load_local_env_defaults(path: Path | None = None) -> None:
@@ -137,8 +143,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._delivered_event_keys: set[str] = set()
         self._delivered_event_order: list[str] = []
         self._activity_conversations: dict[str, str | None] = {}
+        self._activity_segments: dict[str, str | None] = {}
         self._outbound_message_conversations: dict[str, str | None] = {}
+        self._outbound_message_segments: dict[str, str | None] = {}
         self._outbound_message_order: list[str] = []
+        self._inbound_chat_topics: dict[tuple[str, str], str | None] = {}
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
         if not self.home:
@@ -152,6 +161,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         await self._recover_interrupted_turns()
         await self._surface_invite()
         self._mark_connected()
+        self._write_bridge_status("connected")
         if self.inbound_stream and self.service_url:
             self._poll_task = asyncio.create_task(self._stream_loop())
         else:
@@ -223,6 +233,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         await self._stop_service()
         await self.cancel_background_tasks()
         self._mark_disconnected()
+        self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
 
     async def send(
@@ -238,7 +249,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=result.error, retryable=result.retryable)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
         if message_id:
-            self._remember_outbound_message_conversation(message_id, payload["conversation_id"])
+            self._remember_outbound_message_route(
+                message_id,
+                payload["conversation_id"],
+                payload.get("segment_id"),
+            )
         return SendResult(
             success=True,
             message_id=message_id,
@@ -254,9 +269,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         finalize: bool = False,
     ) -> SendResult:
         conversation_id = self._outbound_message_conversations.get(str(message_id))
+        segment_id = self._outbound_message_segments.get(str(message_id))
         payload = {
             "room_id": self._room_id(chat_id),
             "conversation_id": conversation_id,
+            "segment_id": segment_id,
             "message_id": str(message_id),
             "text": str(content),
             "status": "complete" if finalize else "running",
@@ -267,9 +284,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
         edited_message_id = str(result.data.get("message_id") or message_id)
-        self._remember_outbound_message_conversation(str(message_id), conversation_id)
+        self._remember_outbound_message_route(str(message_id), conversation_id, segment_id)
         if edited_message_id:
-            self._remember_outbound_message_conversation(edited_message_id, conversation_id)
+            self._remember_outbound_message_route(edited_message_id, conversation_id, segment_id)
         return SendResult(
             success=True,
             message_id=edited_message_id,
@@ -279,25 +296,31 @@ class FiniteChatAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         payload = self._activity_payload(chat_id, metadata, action="set")
         self._activity_conversations[payload["room_id"]] = payload["conversation_id"]
+        self._activity_segments[payload["room_id"]] = payload["segment_id"]
         await self._finitechat_json("activity", payload, timeout=15)
 
     async def stop_typing(self, chat_id: str, metadata=None) -> None:
         room_id = self._room_id(chat_id)
         conversation_id = None
+        segment_id = None
         has_remembered_conversation = room_id in self._activity_conversations
         if metadata is None and has_remembered_conversation:
             conversation_id = self._activity_conversations[room_id]
+            segment_id = self._activity_segments.get(room_id)
         payload = self._activity_payload(
             chat_id,
             metadata,
             action="clear",
             conversation_id=conversation_id,
+            segment_id=segment_id,
         )
         if (
             has_remembered_conversation
             and self._activity_conversations.get(room_id) == payload["conversation_id"]
+            and self._activity_segments.get(room_id) == payload["segment_id"]
         ):
             self._activity_conversations.pop(room_id, None)
+            self._activity_segments.pop(room_id, None)
         await self._finitechat_json("activity", payload, timeout=15)
 
     async def _keep_typing(
@@ -307,7 +330,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata=None,
         stop_event: asyncio.Event | None = None,
     ) -> None:
-        grace_deadline = asyncio.get_running_loop().time() + 0.75
+        grace_deadline = asyncio.get_running_loop().time() + DEFAULT_ACTIVITY_START_GRACE_SECS
         while asyncio.get_running_loop().time() < grace_deadline:
             if stop_event is not None and stop_event.is_set():
                 return
@@ -422,8 +445,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         if not result.ok:
             logger.warning("[finitechat] poll failed: %s", result.error)
+            self._write_bridge_status("poll_error", result.error)
             return False
         await self._process_poll_payload(result.data)
+        self._write_bridge_status("connected")
         return True
 
     async def _stream_loop(self) -> None:
@@ -432,18 +457,38 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 if not await self._poll_once():
                     await asyncio.sleep(STREAM_RECONNECT_BACKOFF_SECS)
                 continue
-            result = await asyncio.to_thread(
-                _finitechat_service_inbound,
-                self.service_url,
-                self._inbound_request_payload(),
-                self.poll_timeout_secs + 15,
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[_FiniteChatResult] = asyncio.Queue()
+            stop_event = threading.Event()
+            service_url = self.service_url
+            worker = threading.Thread(
+                target=_finitechat_service_stream_worker,
+                args=(
+                    service_url,
+                    self._inbound_request_payload(),
+                    self.poll_timeout_secs + 15,
+                    loop,
+                    queue,
+                    stop_event,
+                ),
+                daemon=True,
             )
-            if result.ok:
-                await self._process_inbound_records(result.data.get("records") or [])
-                continue
-            logger.warning("[finitechat] inbound stream failed: %s", result.error)
-            if result.transport_error:
-                self.service_url = ""
+            worker.start()
+            try:
+                while self.is_connected and self.service_url == service_url:
+                    result = await queue.get()
+                    if result.ok:
+                        await self._process_inbound_records(result.data.get("records") or [])
+                        self._write_bridge_status("connected")
+                        continue
+                    logger.warning("[finitechat] inbound stream failed: %s", result.error)
+                    self._write_bridge_status("stream_error", result.error)
+                    if result.transport_error:
+                        self.service_url = ""
+                    break
+            finally:
+                stop_event.set()
+                await asyncio.to_thread(worker.join, 0.5)
             await asyncio.sleep(STREAM_RECONNECT_BACKOFF_SECS)
 
     def _inbound_request_payload(self) -> dict[str, Any]:
@@ -509,6 +554,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         raw_source = raw_event.get("source")
         source_data: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
+        segment_id = _string_or_none(raw_event.get("segment_id"))
+        self._remember_inbound_chat_topic(room_id, segment_id, conversation_id)
         raw_attachments = raw_event.get("attachments")
         attachments: list[Any] = raw_attachments if isinstance(raw_attachments, list) else []
         media_urls, media_types = _event_media(attachments)
@@ -518,7 +565,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             chat_type=str(source_data.get("chat_type") or "dm"),
             user_id=_string_or_none(source_data.get("user_id")) or "finite-user",
             user_name=_string_or_none(source_data.get("user_name")) or "Finite user",
-            thread_id=_string_or_none(source_data.get("thread_id")) or conversation_id,
+            thread_id=segment_id or _string_or_none(source_data.get("thread_id")) or conversation_id,
             chat_topic=_string_or_none(source_data.get("chat_topic")),
             user_id_alt=_string_or_none(source_data.get("user_id_alt")),
             chat_id_alt=_string_or_none(source_data.get("chat_id_alt")),
@@ -539,10 +586,49 @@ class FiniteChatAdapter(BasePlatformAdapter):
             channel_prompt=_string_or_none(raw_event.get("channel_prompt")),
             internal=bool(raw_event.get("internal") or False),
         )
-        await self.handle_message(event)
-        if event_key:
-            self._remember_delivered_event(event_key)
-        await self._ack_finitechat_event(room_id, seq, message_id)
+        activity_metadata = self._route_metadata(conversation_id, segment_id)
+        activity_set = await self._set_processing_activity(room_id, activity_metadata)
+        try:
+            await self.handle_message(event)
+            if event_key:
+                self._remember_delivered_event(event_key)
+            await self._ack_finitechat_event(room_id, seq, message_id)
+        except Exception:
+            if activity_set:
+                await self._clear_processing_activity(room_id, activity_metadata)
+            raise
+
+    async def _set_processing_activity(
+        self,
+        room_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> bool:
+        payload = self._activity_payload(room_id, metadata, action="set")
+        payload["expires_in_millis"] = PROCESSING_ACTIVITY_TTL_MILLIS
+        return await self._run_activity_control(
+            "set",
+            self._finitechat_json("activity", payload, timeout=15),
+        )
+
+    async def _clear_processing_activity(
+        self,
+        room_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        await self._run_activity_control(
+            "clear",
+            self.stop_typing(room_id, metadata=metadata),
+        )
+
+    async def _run_activity_control(self, action: str, operation: Any) -> bool:
+        try:
+            result = await asyncio.wait_for(operation, timeout=ACTIVITY_CONTROL_TIMEOUT_SECS)
+            return bool(getattr(result, "ok", True))
+        except TimeoutError:
+            logger.debug("[finitechat] timed out during activity %s", action)
+        except Exception as exc:
+            logger.debug("[finitechat] activity %s failed: %s", action, exc)
+        return False
 
     async def _ack_finitechat_event(self, room_id: str, seq: Any, message_id: str) -> None:
         if not isinstance(seq, int):
@@ -564,19 +650,46 @@ class FiniteChatAdapter(BasePlatformAdapter):
             evicted = self._delivered_event_order.pop(0)
             self._delivered_event_keys.discard(evicted)
 
-    def _remember_outbound_message_conversation(
+    def _remember_inbound_chat_topic(
+        self,
+        room_id: str,
+        segment_id: str | None,
+        conversation_id: str | None,
+    ) -> None:
+        if not segment_id:
+            return
+        self._inbound_chat_topics[(room_id, segment_id)] = conversation_id
+
+    @staticmethod
+    def _route_metadata(
+        conversation_id: str | None,
+        segment_id: str | None,
+    ) -> dict[str, str] | None:
+        metadata: dict[str, str] = {}
+        if conversation_id:
+            metadata["conversation_id"] = conversation_id
+        if segment_id:
+            metadata["segment_id"] = segment_id
+            metadata["thread_id"] = segment_id
+        return metadata or None
+
+    def _remember_outbound_message_route(
         self,
         message_id: str,
         conversation_id: str | None,
+        segment_id: str | None,
     ) -> None:
         if message_id in self._outbound_message_conversations:
             self._outbound_message_conversations[message_id] = conversation_id
+            self._outbound_message_segments[message_id] = segment_id
             return
         self._outbound_message_conversations[message_id] = conversation_id
+        self._outbound_message_segments[message_id] = segment_id
         self._outbound_message_order.append(message_id)
         while len(self._outbound_message_order) > MAX_OUTBOUND_MESSAGE_ROUTES:
             evicted = self._outbound_message_order.pop(0)
             self._outbound_message_conversations.pop(evicted, None)
+            self._outbound_message_segments.pop(evicted, None)
 
     async def _send_media(
         self,
@@ -602,15 +715,17 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
         meta = self._message_metadata(metadata)
-        conversation_id = self._conversation_id(meta)
+        room_id = self._room_id(chat_id)
+        conversation_id, segment_id = self._route_from_metadata(room_id, meta)
         attachments = meta.pop("attachments", [])
         explicit_kind = meta.pop("_finitechat_kind", None)
         explicit_status = meta.pop("_finitechat_status", None)
         kind = str(explicit_kind or ("media" if attachments else _infer_finitechat_kind(content)))
         status = str(explicit_status or _infer_finitechat_status(content))
         return {
-            "room_id": self._room_id(chat_id),
+            "room_id": room_id,
             "conversation_id": conversation_id,
+            "segment_id": segment_id,
             "text": str(content),
             "kind": kind,
             "status": status,
@@ -626,13 +741,17 @@ class FiniteChatAdapter(BasePlatformAdapter):
         *,
         action: str,
         conversation_id: str | None = None,
+        segment_id: str | None = None,
     ) -> dict[str, Any]:
         meta = self._message_metadata(metadata)
+        room_id = self._room_id(chat_id)
+        metadata_conversation_id, metadata_segment_id = self._route_from_metadata(room_id, meta)
         return {
-            "room_id": self._room_id(chat_id),
+            "room_id": room_id,
             "conversation_id": conversation_id
             if conversation_id is not None
-            else self._conversation_id(meta),
+            else metadata_conversation_id,
+            "segment_id": segment_id if segment_id is not None else metadata_segment_id,
             "activity_kind": "working",
             "activity_id": None,
             "action": action,
@@ -647,13 +766,31 @@ class FiniteChatAdapter(BasePlatformAdapter):
     def _room_id(self, chat_id: str | None) -> str:
         return str(chat_id or self.room_id).strip() or self.room_id
 
-    @staticmethod
-    def _conversation_id(metadata: dict[str, Any] | None) -> str | None:
+    def _route_from_metadata(
+        self,
+        room_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[str | None, str | None]:
         if not isinstance(metadata, dict):
-            return None
-        return _string_or_none(metadata.pop("thread_id", None)) or _string_or_none(
-            metadata.pop("conversation_id", None)
+            return None, None
+        thread_id = _string_or_none(metadata.pop("thread_id", None))
+        conversation_id = _string_or_none(metadata.pop("conversation_id", None))
+        segment_id = _string_or_none(metadata.pop("segment_id", None)) or _string_or_none(
+            metadata.pop("chat_id", None)
         )
+        if segment_id is None and thread_id is not None:
+            routed_conversation_id = self._inbound_chat_topics.get((room_id, thread_id))
+            if routed_conversation_id is not None or (room_id, thread_id) in self._inbound_chat_topics:
+                segment_id = thread_id
+                if conversation_id is None:
+                    conversation_id = routed_conversation_id
+            elif conversation_id is None:
+                conversation_id = thread_id
+            else:
+                segment_id = thread_id
+        if conversation_id is None and segment_id is not None:
+            conversation_id = self._inbound_chat_topics.get((room_id, segment_id))
+        return conversation_id, segment_id
 
     @staticmethod
     def _message_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -834,6 +971,28 @@ class FiniteChatAdapter(BasePlatformAdapter):
             proc.kill()
             await proc.wait()
 
+    def _write_bridge_status(self, status: str, error: str | None = None) -> None:
+        if not self.home:
+            return
+        payload: dict[str, Any] = {
+            "status": status,
+            "ok": not status.endswith("_error"),
+            "updated_at_ms": int(time.time() * 1000),
+            "inbound_stream": bool(self.inbound_stream),
+        }
+        if self.service_url:
+            payload["service_url"] = self.service_url
+        if error:
+            payload["error"] = str(error)
+        path = Path(self.home) / BRIDGE_STATUS_FILE
+        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            logger.debug("[finitechat] could not write bridge status: %s", exc)
+
 
 class _FiniteChatResult:
     def __init__(
@@ -904,11 +1063,14 @@ def _finitechat_service_json(
         )
 
 
-def _finitechat_service_inbound(
+def _finitechat_service_stream_worker(
     service_url: str,
     payload: dict[str, Any],
     timeout: int,
-) -> _FiniteChatResult:
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue,
+    stop_event: threading.Event,
+) -> None:
     query = urllib.parse.urlencode(
         {key: value for key, value in payload.items() if value is not None and value != ""}
     )
@@ -922,37 +1084,66 @@ def _finitechat_service_inbound(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            while not stop_event.is_set():
+                raw_line = response.readline()
+                if not raw_line:
+                    _put_stream_result(
+                        loop,
+                        queue,
+                        _FiniteChatResult(
+                            False, {}, "finitechat inbound stream ended", True, True
+                        ),
+                    )
+                    return
+                stripped = raw_line.decode("utf-8", errors="replace").strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    _put_stream_result(
+                        loop,
+                        queue,
+                        _FiniteChatResult(
+                            False,
+                            {},
+                            f"finitechat inbound stream returned invalid JSON: {exc}",
+                            False,
+                            False,
+                        ),
+                    )
+                    return
+                _put_stream_result(
+                    loop,
+                    queue,
+                    _FiniteChatResult(True, {"records": [record]}, None, False, False),
+                )
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace").strip()
-        return _FiniteChatResult(
-            False,
-            {},
-            _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
-            _is_retryable_cli_error(body),
-            False,
-        )
-    except TimeoutError as exc:
-        return _FiniteChatResult(False, {}, str(exc), True, False)
-    except (urllib.error.URLError, OSError) as exc:
-        return _FiniteChatResult(False, {}, str(exc), True, True)
-
-    records: list[Any] = []
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            return _FiniteChatResult(
+        _put_stream_result(
+            loop,
+            queue,
+            _FiniteChatResult(
                 False,
                 {},
-                f"finitechat inbound stream returned invalid JSON: {exc}",
+                _service_error_body(body) or f"finitechat service returned HTTP {exc.code}",
+                _is_retryable_cli_error(body),
                 False,
-            )
-        records.append(record)
-    return _FiniteChatResult(True, {"records": records}, None, False)
+            ),
+        )
+    except TimeoutError as exc:
+        _put_stream_result(loop, queue, _FiniteChatResult(False, {}, str(exc), True, False))
+    except (urllib.error.URLError, OSError) as exc:
+        _put_stream_result(loop, queue, _FiniteChatResult(False, {}, str(exc), True, True))
+
+
+def _put_stream_result(
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue,
+    result: _FiniteChatResult,
+) -> None:
+    with contextlib.suppress(RuntimeError):
+        loop.call_soon_threadsafe(queue.put_nowait, result)
 
 
 def _service_error_body(body: str) -> str | None:

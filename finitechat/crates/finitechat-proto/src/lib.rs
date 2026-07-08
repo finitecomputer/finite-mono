@@ -71,16 +71,7 @@ pub const MAX_EPHEMERAL_ACTIVITY_DECRYPTED_PAYLOAD_BYTES: u32 = 64 * 1024;
 pub const MAX_EPHEMERAL_ACTIVITY_PROJECTION_ENTRIES: u32 = 4096;
 pub const MAX_EPHEMERAL_ACTIVITY_EXPIRY_MILLIS: u64 = 30 * 60 * 1000;
 pub const MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE: u32 = 64;
-pub const MAX_INVITE_JOIN_REQUESTS_PER_SESSION: u32 = 64;
-pub const MAX_OPEN_INVITE_SESSIONS_PER_ACCOUNT: u32 = 256;
-pub const MAX_INVITE_MAX_JOINS: u32 = 64;
-pub const MAX_INVITE_TTL_MILLIS: u64 = 7 * 24 * 60 * 60 * 1000;
-pub const MAX_INVITE_DISPLAY_NAME_BYTES: u32 = 128;
 pub const MAX_CHAT_REACTION_EMOJI_BYTES: u32 = 32;
-pub const INVITE_JOIN_PROOF_HEX_BYTES: u32 = 64;
-pub const INVITE_TOKEN_BYTES: u32 = 16;
-pub const INVITE_CODE_VERSION_V1: u32 = 1;
-pub const INVITE_JOIN_PROOF_DOMAIN: &[u8] = b"finite-join-proof-v1";
 pub const MAX_IDEMPOTENCY_KEY_BYTES: u32 = 128;
 pub const MAX_ACCOUNT_ID_BYTES: u32 = 128;
 pub const MAX_DEVICE_ID_BYTES: u32 = 128;
@@ -112,14 +103,7 @@ const _: () = {
     assert!(MAX_WELCOME_PAYLOAD_BYTES > 0);
     assert!(MAX_RATCHET_TREE_PAYLOAD_BYTES > 0);
     assert!(MAX_LINK_SESSION_PAYLOAD_BYTES > 0);
-    assert!(MAX_INVITE_JOIN_REQUESTS_PER_SESSION > 0);
-    assert!(MAX_INVITE_MAX_JOINS <= MAX_INVITE_JOIN_REQUESTS_PER_SESSION);
-    assert!(MAX_OPEN_INVITE_SESSIONS_PER_ACCOUNT > 0);
-    assert!(MAX_INVITE_TTL_MILLIS > 0);
-    assert!(MAX_INVITE_DISPLAY_NAME_BYTES > 0);
     assert!(MAX_CHAT_REACTION_EMOJI_BYTES > 0);
-    assert!(INVITE_JOIN_PROOF_HEX_BYTES == 64);
-    assert!(INVITE_TOKEN_BYTES == 16);
     assert!(MAX_ATTACHMENT_PLAINTEXT_BYTES > MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_ATTACHMENT_CIPHERTEXT_BYTES > MAX_ATTACHMENT_PLAINTEXT_BYTES);
     assert!(MAX_ATTACHMENT_BLOB_URL_BYTES >= MAX_OBJECT_ID_BYTES);
@@ -401,6 +385,8 @@ pub struct StreamFinishV1 {
 pub struct DecryptedApplicationEventV1 {
     pub kind: DurableAppEventKind,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     #[serde(with = "bytes_as_vec")]
     pub payload: Vec<u8>,
 }
@@ -1436,6 +1422,10 @@ impl ConversationProjection {
         self.entries.is_empty()
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &ConversationProjectionEntry> {
+        self.entries.values()
+    }
+
     fn ensure_entry(
         &mut self,
         room_id: &str,
@@ -2200,6 +2190,10 @@ impl DecryptedApplicationEventV1 {
             validate_bytes_non_empty("conversation_id", conversation_id.len())?;
             validate_string_bytes("conversation_id", conversation_id, MAX_OBJECT_ID_BYTES)?;
         }
+        if let Some(segment_id) = &self.segment_id {
+            validate_bytes_non_empty("segment_id", segment_id.len())?;
+            validate_string_bytes("segment_id", segment_id, MAX_OBJECT_ID_BYTES)?;
+        }
         let max_payload = if self.kind == DurableAppEventKind::RuntimeStateSnapshot {
             MAX_RUNTIME_STATE_SNAPSHOT_PAYLOAD_BYTES
         } else {
@@ -2929,6 +2923,7 @@ mod tests {
         let event = DecryptedApplicationEventV1 {
             kind: DurableAppEventKind::ChatMessage,
             conversation_id: Some(String::new()),
+            segment_id: None,
             payload: b"hello".to_vec(),
         };
 
@@ -5623,6 +5618,7 @@ mod tests {
         DecryptedApplicationEventV1 {
             kind,
             conversation_id: conversation_id.map(str::to_string),
+            segment_id: None,
             payload: payload.to_vec(),
         }
     }
@@ -5650,5 +5646,5 @@ mod tests {
 }
 mod runtime;
 pub use runtime::*;
-mod invite;
-pub use invite::*;
+mod nostr;
+pub use nostr::*;

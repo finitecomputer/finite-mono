@@ -24,7 +24,9 @@ Before any phone or TestFlight build is handed to testers:
 
 ```sh
 export FINITECHAT_RELEASE_COMMIT="$(git rev-parse --short=12 HEAD)"
-cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer health
+scripts/server-contract-gate.py \
+  --server https://chat.finite.computer \
+  --expected-source "$FINITECHAT_RELEASE_COMMIT"
 ```
 
 The deployed health response must include:
@@ -32,6 +34,7 @@ The deployed health response must include:
 ```json
 {
   "status": "ok",
+  "server_contract_version": 3,
   "server_version": "0.1.0",
   "source_commit": "<finite-chat commit>",
   "source_dirty": false
@@ -41,12 +44,23 @@ The deployed health response must include:
 The release is blocked when any of these are true:
 
 - `/health` omits `source_commit` or `server_version`;
+- `/health` omits `server_contract_version`;
+- `server_contract_version` is not the exact contract version expected by the
+  app, CLI, Hermes bridge, and runtime image being shipped;
 - `source_commit` is not the finite-chat commit expected by the app build;
 - `source_dirty` is `true`;
 - a server-side route or DTO changed but production still reports an older
   compatible-looking build;
 - the app requires a companion service change such as `push-drain`, blob
   storage policy, or Hermes bridge behavior that has not been deployed.
+
+This deploy gate is intentionally stricter than normal client/server
+interoperability. The gate proves production is running the exact finitechat
+server build selected for a release. Runtime clients should treat
+`server_contract_version` as a minimum server-visible transport/admission
+contract: a newer server may be accepted when it still preserves the older
+delivery behavior. Encrypted app-message protocol compatibility belongs to the
+clients in the room, not to the server health check.
 
 ## Handoff To finitecomputer-v2
 
@@ -83,6 +97,9 @@ After Paul deploys the server, run:
 
 ```sh
 cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer health
+scripts/server-contract-gate.py \
+  --server https://chat.finite.computer \
+  --expected-source "$(git rev-parse --short=12 HEAD)"
 cargo test -p finitechat-server --test http_routes
 cargo test -p finitechat-server --test http_persistence
 ```

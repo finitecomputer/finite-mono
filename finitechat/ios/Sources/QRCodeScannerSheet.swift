@@ -177,7 +177,7 @@ struct QRCodeScannerPanel: View {
         ContentUnavailableView(
             "Camera Unavailable",
             systemImage: "camera.fill",
-            description: Text("Paste the invite or profile code instead.")
+            description: Text("Paste the profile code instead.")
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.secondarySystemGroupedBackground))
@@ -217,7 +217,7 @@ private struct CameraPermissionUnavailableView: View {
         ContentUnavailableView {
             Label("Camera Permission Needed", systemImage: "camera.fill")
         } description: {
-            Text("Allow camera access in Settings to scan invite and profile QR codes.")
+            Text("Allow camera access in Settings to scan profile QR codes.")
         } actions: {
             Button("Open Settings") {
                 openSettings()

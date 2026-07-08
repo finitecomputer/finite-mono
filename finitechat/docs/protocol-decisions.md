@@ -51,34 +51,28 @@ different forms (CLI, Electron, native iOS) and may support different
 features; rollout coordination is the real driver. Don't overengineer; copy
 Marmot's shapes where they serve us.
 
-## 2. Admin authority for group rooms
+## 2. Relay authority boundary for rooms
 
-**Context.** Typed `/commits` validates structure (epochs, caps, duplicates,
-direct-room pairs) but not authority: today any active member can add or
-remove any device in a group room. Marmot gates membership/profile/policy
-changes on an admin pubkey list (one entry per account, across all device
-leaves); Pika shipped a binary per-member admin flag.
+**Context.** Typed `/commits` validates relay invariants (epochs, caps,
+duplicates, membership shape, active sender) but must not make the server room
+authority. The relay orders encrypted events and stores enough projection state
+to route/sync safely; it does not decide who is socially allowed to invite or
+add a participant.
 
-**Proposal.**
-- The room-membership projection gains `admins: BTreeSet<AccountId>`,
-  initialized to the creator's account at typed bootstrap.
-- Typed `/commits` authority rule: adds/removes touching **another account's
-  devices** require `sender.account_id ∈ admins`. Same-account operations stay
-  open to any active member: linking your own device (the fanout path) and
-  removing your own devices never require admin.
-- Direct rooms: both accounts are implicitly admins; existing third-account
-  rejection already covers the rest.
-- Admin changes ride a new typed commit-adjacent event `AdminChangeV1`
-  (grant/revoke an account), sendable only by admins; revoking the last admin
-  is rejected.
-- Self-update commits (key rotation) require no authority.
+**Decision.**
+- Any active room member may create an invite session.
+- Any active room member may submit a structurally valid membership commit,
+  including cross-account adds. MLS/client state remains responsible for
+  producing valid commits; product UX may layer human-facing permission affordances
+  later, but the relay must not veto room evolution based on social authority.
+- Server-side admin metadata, if present for legacy or UX experiments, is
+  advisory only and cannot gate `/invites` or `/commits`.
+- Self-update commits (key rotation) require no special authority.
 
-**Rejected alternative.** Per-device admin (Pika's shape): conflicts with our
-account/device model — authority is an account property; devices come and go
-via linking.
-
-**DECIDED: admins yes; no anyone-may-invite toggle for v1.** Admins may
-revoke other admins, never the last one.
+**Rejected alternative.** Server-enforced admins: this made the relay an
+authority over encrypted rooms, broke the intended Electron/iOS/Hermes
+multiplayer flow, and failed when an agent-created room left the human client
+as a non-admin member.
 
 ## 3. Leaving a group
 
@@ -206,7 +200,7 @@ have the machinery; it has just never been named as the recovery path.
 | # | Decision | Blocking for | Outcome |
 | - | --- | --- | --- |
 | 1 | Versioning slots | any external client | accepted; per-room capabilities |
-| 2 | Admin authority | any external client | accepted; no invite toggle |
+| 2 | Relay authority boundary | any external client | accepted; active-member relay invariants |
 | 3 | Leave-group | first real users | accepted; whole-account |
 | 4 | Retention/horizon | Phase E compaction | accepted; server-deleted |
 | 5 | Push wake contract | mobile clients | accepted; client-computed badges |

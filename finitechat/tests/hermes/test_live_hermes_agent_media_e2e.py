@@ -219,9 +219,16 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
         smoke.fact("adapter_inbound_stream", bool(getattr(adapter, "inbound_stream", False)))
         smoke.fact("adapter_service_url_present", bool(getattr(adapter, "service_url", "")))
         try:
-            pin_info = await asyncio.to_thread(
+            invite = await asyncio.to_thread(
                 run_json,
-                [str(FINITECHAT_BIN), "hermes", "--home", str(agent_home), "pin"],
+                [
+                    str(FINITECHAT_BIN),
+                    "hermes",
+                    "--home",
+                    str(agent_home),
+                    "invite",
+                    "--json",
+                ],
             )
             await asyncio.to_thread(
                 run_json,
@@ -245,11 +252,7 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                     str(user_home),
                     "join",
                     "--url",
-                    pin_info["url"],
-                    "--pin",
-                    pin_info["pin"],
-                    "--name",
-                    "Hermes Media User",
+                    invite["url"],
                     "--timeout-ms",
                     "30000",
                 ],

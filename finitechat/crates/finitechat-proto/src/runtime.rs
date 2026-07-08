@@ -685,6 +685,24 @@ fn device_membership_key(device: &DeviceRef) -> String {
     )
 }
 
+/// Compact delivery-layer route id for a Finite device.
+///
+/// The HTTP delivery service treats member ids as opaque routing bytes with a
+/// hard size bound. Keep typed Finite identity in protocol payloads and
+/// projections; use this compact projection only when addressing delivery
+/// inboxes or KeyPackage owners.
+pub fn delivery_member_id_for_device(device: &DeviceRef) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"finitechat-device-member-v1");
+    hash_length_prefixed_string(&mut hasher, &device.account_id);
+    hash_length_prefixed_string(&mut hasher, &device.device_id);
+    let digest = hasher.finalize();
+
+    let mut route = b"fcdev1:".to_vec();
+    route.extend_from_slice(hex_lower(&digest).as_bytes());
+    route
+}
+
 pub fn validate_activity_expiry(
     received_at_ms: u64,
     expires_at_ms: u64,
@@ -736,6 +754,11 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+fn hash_length_prefixed_string(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
 pub fn device(account_id: impl Into<AccountId>, device_id: impl Into<DeviceId>) -> DeviceRef {
     DeviceRef {
         account_id: account_id.into(),
@@ -758,5 +781,34 @@ pub fn envelope(
         sender,
         kind,
         payload: payload.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_member_id_is_compact_for_long_device_ids() {
+        let device = DeviceRef::new(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "electron-Pauls-MacBook-Pro-2.local",
+        );
+
+        let route = delivery_member_id_for_device(&device);
+
+        assert_eq!(route.len(), 71);
+        assert!(route.starts_with(b"fcdev1:"));
+    }
+
+    #[test]
+    fn delivery_member_id_is_not_ambiguous() {
+        let left = DeviceRef::new("ab", "c");
+        let right = DeviceRef::new("a", "bc");
+
+        assert_ne!(
+            delivery_member_id_for_device(&left),
+            delivery_member_id_for_device(&right)
+        );
     }
 }

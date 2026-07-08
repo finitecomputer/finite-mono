@@ -39,11 +39,10 @@ preserve interop.
    accounts; multiple named pair rooms are a feature (per-topic rooms with a
    person or agent), so server-enforced pair uniqueness protected a
    preference we do not hold. Lanes within a room remain **Topics**
-   (CONTEXT.md). Admin policy governs membership uniformly:
-   **creator-only admin by default in every room** — this amends ADR 0003 §2,
-   whose "direct rooms: both accounts implicitly admin" clause is dropped
-   with the concept. Your DM counterpart cannot add members unless granted
-   admin.
+   (CONTEXT.md). Membership authority stays out of the relay: any active
+   member may create invite sessions and submit structurally valid membership
+   commits. Product surfaces may choose how to present people/contact controls,
+   but the server must not make itself the room authority.
 5. **Scoped idempotency capacity rule deleted now.** The
    `MAX_IDEMPOTENCY_RECORDS_PER_ROOM_DEVICE` check permanently blocked a
    sender after 4,096 lifetime messages in a room (records never expire) — a
@@ -75,5 +74,6 @@ removal, not welcome state).
 Execution order (each step keeps the suite green): 5 (delete capacity rule),
 3 (merge event routes + client policy plumbing), 6 (drop failed-ack state),
 2 (gate + remove raw route surface), 4 (dissolve direct rooms), 1 (delete
-fanout surface). Admin authority (ADR 0003 §2, as amended here) should land
-before or with step 4, since dissolved direct rooms lean on it.
+fanout surface). The relay authority boundary (ADR 0003 §2, as amended here)
+should land before or with step 4, since dissolved direct rooms rely on
+active-member relay invariants rather than server-enforced room admins.

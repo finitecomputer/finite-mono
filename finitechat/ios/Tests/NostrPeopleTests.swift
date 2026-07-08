@@ -13,7 +13,7 @@ final class NostrPeopleTests: XCTestCase {
             about: "available for finite chat",
             pictureURL: "https://example.com/alice.jpg",
             relayHint: "wss://relay.example",
-            inviteAvailability: .available
+            keyPackageAvailability: .available
         )
 
         let profile = follow.appProfileSummary
@@ -37,7 +37,7 @@ final class NostrPeopleTests: XCTestCase {
             about: nil,
             pictureURL: nil,
             relayHint: nil,
-            inviteAvailability: .unknown
+            keyPackageAvailability: .unknown
         )
 
         let profile = follow.appProfileSummary
@@ -46,29 +46,29 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertTrue(profile.stale)
     }
 
-    func testInviteAvailabilityUsesHumanReadableStatusText() {
+    func testKeyPackageAvailabilityUsesHumanReadableStatusText() {
         XCTAssertEqual(
-            InviteAvailability.available.userStatusText,
+            KeyPackageAvailability.available.userStatusText,
             "Ready to message"
         )
         XCTAssertEqual(
-            InviteAvailability.unavailable.userStatusText,
+            KeyPackageAvailability.unavailable.userStatusText,
             "Needs Finite Chat open"
         )
         XCTAssertEqual(
-            InviteAvailability.unknown.userStatusText,
+            KeyPackageAvailability.unknown.userStatusText,
             "Checking availability"
         )
     }
 
-    func testInviteAvailabilityServiceChunksAndMergesResponses() async throws {
+    func testKeyPackageAvailabilityServiceChunksAndMergesResponses() async throws {
         let ids = [
             String(repeating: "a", count: 64),
             String(repeating: "b", count: 64),
             String(repeating: "c", count: 64),
         ]
-        let recorder = InviteAvailabilityChunkRecorder()
-        let service = FiniteInviteAvailabilityService(
+        let recorder = KeyPackageAvailabilityChunkRecorder()
+        let service = FiniteKeyPackageAvailabilityService(
             chunkSize: 2,
             availabilityLoader: { serverURL, accountIDs in
                 XCTAssertEqual(serverURL, "https://chat.example")
@@ -91,7 +91,7 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertEqual(availability[ids[2]], true)
     }
 
-    func testPeopleModelAppliesInviteAvailabilityWithoutResortingProfiles() async throws {
+    func testPeopleModelAppliesKeyPackageAvailabilityWithoutResortingProfiles() async throws {
         let material = try createNostrIdentity()
         let owner = material.accountId
         let amy = String(repeating: "a", count: 64)
@@ -131,7 +131,7 @@ final class NostrPeopleTests: XCTestCase {
                 return []
             }
         )
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 Dictionary(uniqueKeysWithValues: accountIDs.map { accountID in
                     (accountID, accountID == zed)
@@ -140,7 +140,7 @@ final class NostrPeopleTests: XCTestCase {
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService
+            keyPackageAvailabilityService: availabilityService
         )
 
         await model.refresh(
@@ -149,7 +149,7 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Amy", "Zed"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.unavailable, .available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.unavailable, .available])
     }
 
     func testPeopleModelLoadsFollowsFromAccountIDWithoutNostrIdentity() async throws {
@@ -191,7 +191,7 @@ final class NostrPeopleTests: XCTestCase {
         let cache = NostrPeopleCache(directory: temporaryCacheDirectory())
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: FiniteInviteAvailabilityService(
+            keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService(
                 availabilityLoader: { _, accountIDs in
                     Dictionary(uniqueKeysWithValues: accountIDs.map { ($0, true) })
                 }
@@ -205,14 +205,14 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Runtime Bob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
         XCTAssertEqual(
             model.statusText,
             "Loaded 1 of 1 follows from 1 relays."
         )
     }
 
-    func testPeopleModelRechecksInviteAvailabilityForOneProfile() async throws {
+    func testPeopleModelRechecksKeyPackageAvailabilityForOneProfile() async throws {
         let material = try createNostrIdentity()
         let owner = material.accountId
         let bob = String(repeating: "b", count: 64)
@@ -233,32 +233,32 @@ final class NostrPeopleTests: XCTestCase {
                 return []
             }
         )
-        let availability = InviteAvailabilitySequence(accountID: bob)
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availability = KeyPackageAvailabilitySequence(accountID: bob)
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 await availability.next(for: accountIDs)
             }
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService
+            keyPackageAvailabilityService: availabilityService
         )
 
         await model.refresh(
             identity: AppNostrIdentity(material: material),
             serverURL: "https://chat.example"
         )
-        XCTAssertEqual(model.profiles[0].inviteAvailability, .unavailable)
+        XCTAssertEqual(model.profiles[0].keyPackageAvailability, .unavailable)
 
-        let updated = try await model.recheckInviteAvailability(
+        let updated = try await model.recheckKeyPackageAvailability(
             for: model.profiles[0],
             serverURL: "https://chat.example"
         )
 
         XCTAssertEqual(updated.pubkey, bob)
-        XCTAssertEqual(updated.inviteAvailability, .available)
+        XCTAssertEqual(updated.keyPackageAvailability, .available)
         XCTAssertEqual(model.profiles[0].pubkey, bob)
-        XCTAssertEqual(model.profiles[0].inviteAvailability, .available)
+        XCTAssertEqual(model.profiles[0].keyPackageAvailability, .available)
     }
 
     func testPeopleModelShowsCachedProfilesBeforeBackgroundRefresh() async throws {
@@ -277,7 +277,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: "cached",
                         pictureURL: "https://example.com/cached.jpg",
                         relayHint: nil,
-                        inviteAvailability: .available
+                        keyPackageAvailability: .available
                     ),
                 ],
                 relayCount: 1,
@@ -315,14 +315,14 @@ final class NostrPeopleTests: XCTestCase {
                 return []
             }
         )
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 Dictionary(uniqueKeysWithValues: accountIDs.map { ($0, true) })
             }
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService,
+            keyPackageAvailabilityService: availabilityService,
             cache: cache
         )
 
@@ -332,12 +332,12 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Cached Bob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.unknown])
 
         try await Task.sleep(nanoseconds: 1_100_000_000)
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Fresh Bob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
     }
 
     func testPeopleCacheIsAccountScopedAndAvailabilityNeutral() async throws {
@@ -355,7 +355,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: nil,
                         pictureURL: "https://example.com/bob.jpg",
                         relayHint: nil,
-                        inviteAvailability: .available
+                        keyPackageAvailability: .available
                     ),
                 ],
                 relayCount: 1,
@@ -371,7 +371,7 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded?.profiles.map(\.displayName), ["Cached Bob"])
-        XCTAssertEqual(loaded?.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(loaded?.profiles.map(\.keyPackageAvailability), [.unknown])
     }
 
     func testPeopleCacheLoadsSingleProfileMetadata() async throws {
@@ -386,7 +386,7 @@ final class NostrPeopleTests: XCTestCase {
                 about: "cached profile",
                 pictureURL: "https://example.com/paul.jpg",
                 relayHint: nil,
-                inviteAvailability: .unknown
+                keyPackageAvailability: .unknown
             )
         )
 
@@ -397,7 +397,7 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertEqual(loaded?.username, "paul")
         XCTAssertEqual(loaded?.about, "cached profile")
         XCTAssertEqual(loaded?.pictureURL, "https://example.com/paul.jpg")
-        XCTAssertEqual(loaded?.inviteAvailability, .available)
+        XCTAssertEqual(loaded?.keyPackageAvailability, .available)
     }
 
     func testPeopleCachePrefersNonEmptyLegacyCacheOverEmptyCurrentCache() async throws {
@@ -428,7 +428,7 @@ final class NostrPeopleTests: XCTestCase {
         let loaded = await cache.load(accountID: owner, serverURL: serverURL)
 
         XCTAssertEqual(loaded?.profiles.map(\.pubkey), [bob, carol])
-        XCTAssertEqual(loaded?.profiles.map(\.inviteAvailability), [.unknown, .unknown])
+        XCTAssertEqual(loaded?.profiles.map(\.keyPackageAvailability), [.unknown, .unknown])
         XCTAssertEqual(loaded?.followedPubkeyCount, 467)
     }
 
@@ -479,7 +479,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: nil,
                         pictureURL: nil,
                         relayHint: nil,
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -519,7 +519,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: "cached profile",
                         pictureURL: "https://example.com/cached.jpg",
                         relayHint: "wss://relay.example",
-                        inviteAvailability: .available
+                        keyPackageAvailability: .available
                     ),
                 ],
                 relayCount: 1,
@@ -539,7 +539,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: nil,
                         pictureURL: nil,
                         relayHint: "wss://relay.example",
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -555,7 +555,7 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertEqual(loaded?.profiles.map(\.username), ["cachedbob"])
         XCTAssertEqual(loaded?.profiles.map(\.about), ["cached profile"])
         XCTAssertEqual(loaded?.profiles.map(\.pictureURL), ["https://example.com/cached.jpg"])
-        XCTAssertEqual(loaded?.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(loaded?.profiles.map(\.keyPackageAvailability), [.unknown])
     }
 
     func testPeopleCacheMergesPartialProfileMetadataRefresh() async throws {
@@ -573,7 +573,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: "cached profile",
                         pictureURL: "https://example.com/cached.jpg",
                         relayHint: nil,
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -593,7 +593,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: nil,
                         pictureURL: nil,
                         relayHint: nil,
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -623,14 +623,14 @@ final class NostrPeopleTests: XCTestCase {
                 await sequence.events(for: filter)
             }
         )
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 Dictionary(uniqueKeysWithValues: accountIDs.map { ($0, true) })
             }
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService,
+            keyPackageAvailabilityService: availabilityService,
             cache: NostrPeopleCache(directory: temporaryCacheDirectory())
         )
 
@@ -640,7 +640,7 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Fresh Bob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
 
         await model.refresh(
             identity: AppNostrIdentity(material: material),
@@ -648,7 +648,7 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Fresh Bob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
         XCTAssertEqual(model.statusText, "Showing cached people. Refresh found no follows across 1 Nostr relays.")
     }
 
@@ -668,7 +668,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: "cached profile",
                         pictureURL: "https://example.com/cached.jpg",
                         relayHint: nil,
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -695,14 +695,14 @@ final class NostrPeopleTests: XCTestCase {
                 return []
             }
         )
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 Dictionary(uniqueKeysWithValues: accountIDs.map { ($0, true) })
             }
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService,
+            keyPackageAvailabilityService: availabilityService,
             cache: cache
         )
 
@@ -715,7 +715,7 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertEqual(model.profiles.map(\.username), ["cachedbob"])
         XCTAssertEqual(model.profiles.map(\.about), ["cached profile"])
         XCTAssertEqual(model.profiles.map(\.pictureURL), ["https://example.com/cached.jpg"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
         XCTAssertEqual(model.statusText, "Loaded 1 of 1 follows from 1 relays.")
     }
 
@@ -757,7 +757,7 @@ final class NostrPeopleTests: XCTestCase {
         let cache = NostrPeopleCache(directory: temporaryCacheDirectory())
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: FiniteInviteAvailabilityService(
+            keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService(
                 availabilityLoader: { _, accountIDs in
                     Dictionary(uniqueKeysWithValues: accountIDs.map { ($0, true) })
                 }
@@ -774,7 +774,7 @@ final class NostrPeopleTests: XCTestCase {
         await metadataGate.waitUntilEntered()
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Bobby"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.unknown])
         XCTAssertEqual(
             model.statusText,
             "Loaded 1 of 1 follows from 1 relays. Updating profiles..."
@@ -784,14 +784,14 @@ final class NostrPeopleTests: XCTestCase {
             serverURL: "https://chat.example"
         )
         XCTAssertEqual(cachedBeforeMetadata?.profiles.map(\.displayName), ["Bobby"])
-        XCTAssertEqual(cachedBeforeMetadata?.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(cachedBeforeMetadata?.profiles.map(\.keyPackageAvailability), [.unknown])
 
         await metadataGate.release()
         await refresh.value
 
         XCTAssertEqual(model.profiles.map(\.displayName), ["Fresh Bob"])
         XCTAssertEqual(model.profiles.map(\.username), ["freshbob"])
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
         XCTAssertEqual(model.statusText, "Loaded 1 of 1 follows from 1 relays.")
     }
 
@@ -806,7 +806,7 @@ final class NostrPeopleTests: XCTestCase {
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: FiniteInviteAvailabilityService(
+            keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService(
                 availabilityLoader: { _, _ in [:] }
             ),
             cache: NostrPeopleCache(directory: temporaryCacheDirectory())
@@ -855,14 +855,14 @@ final class NostrPeopleTests: XCTestCase {
                 return []
             }
         )
-        let availabilityService = FiniteInviteAvailabilityService(
+        let availabilityService = FiniteKeyPackageAvailabilityService(
             availabilityLoader: { _, accountIDs in
                 await availabilityGate.enterAndWait(for: accountIDs)
             }
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: availabilityService,
+            keyPackageAvailabilityService: availabilityService,
             cache: cache
         )
 
@@ -880,11 +880,11 @@ final class NostrPeopleTests: XCTestCase {
         )
 
         XCTAssertEqual(cached?.profiles.map(\.displayName), ["Fresh Bob"])
-        XCTAssertEqual(cached?.profiles.map(\.inviteAvailability), [.unknown])
+        XCTAssertEqual(cached?.profiles.map(\.keyPackageAvailability), [.unknown])
 
         await availabilityGate.release()
         await refresh.value
-        XCTAssertEqual(model.profiles.map(\.inviteAvailability), [.available])
+        XCTAssertEqual(model.profiles.map(\.keyPackageAvailability), [.available])
     }
 
     func testPeopleModelUsesCachedProfilesWhenRefreshFails() async throws {
@@ -903,7 +903,7 @@ final class NostrPeopleTests: XCTestCase {
                         about: nil,
                         pictureURL: nil,
                         relayHint: nil,
-                        inviteAvailability: .unknown
+                        keyPackageAvailability: .unknown
                     ),
                 ],
                 relayCount: 1,
@@ -920,7 +920,7 @@ final class NostrPeopleTests: XCTestCase {
         )
         let model = NostrPeopleModel(
             service: relayService,
-            inviteAvailabilityService: FiniteInviteAvailabilityService(
+            keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService(
                 availabilityLoader: { _, _ in [:] }
             ),
             cache: cache
@@ -1030,7 +1030,7 @@ final class NostrPeopleTests: XCTestCase {
         XCTAssertEqual(profile?.username, "paul")
         XCTAssertEqual(profile?.about, "Finite")
         XCTAssertEqual(profile?.pictureURL, "https://example.com/paul.jpg")
-        XCTAssertEqual(profile?.inviteAvailability, .available)
+        XCTAssertEqual(profile?.keyPackageAvailability, .available)
     }
 
     func testFetchFollowProfileSeedsDoesNotWaitForMetadata() async throws {
@@ -1495,7 +1495,7 @@ private func sparsePeopleProfile(pubkey: String, npub: String) -> [String: Any] 
     [
         "pubkey": pubkey,
         "npub": npub,
-        "inviteAvailability": InviteAvailability.unknown.rawValue,
+        "keyPackageAvailability": KeyPackageAvailability.unknown.rawValue,
     ]
 }
 
@@ -1510,7 +1510,7 @@ private func legacyPeopleCacheFilename(accountID: String, serverURL: String) -> 
     return "\(accountKey)-\(serverKey).json"
 }
 
-private actor InviteAvailabilityChunkRecorder {
+private actor KeyPackageAvailabilityChunkRecorder {
     private var chunks: [[String]] = []
 
     func record(_ chunk: [String]) {
@@ -1620,7 +1620,7 @@ private actor FollowRefreshSequence {
     }
 }
 
-private actor InviteAvailabilitySequence {
+private actor KeyPackageAvailabilitySequence {
     private let accountID: String
     private var calls = 0
 

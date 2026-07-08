@@ -1,0 +1,38 @@
+{
+  "name": "finitechat-electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "dev:electron": "FINITECHAT_RENDERER_URL=http://127.0.0.1:5173 electron .",
+    "build": "vite build",
+    "electron": "electron .",
+    "play": "npm run build && electron .",
+    "smoke:hermes": "npm run build && node scripts/e2e-hermes-smoke.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "electron": "^38.0.0",
+    "lucide-react": "^1.7.0",
+    "radix-ui": "^1.4.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.10.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.5.0",
+    "typescript": "^5.0.0",
+    "vaul": "^1.1.2",
+    "vite": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "playwright": "^1.60.0"
+  }
+}

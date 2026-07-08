@@ -134,8 +134,8 @@ must use a namespaced value such as `finitecomputer.indexing` or
   application events. Ephemeral activity events must not occupy `seq`, create
   cursor gaps, or block durable sync.
 - Ephemeral activity events must be rejected unless the sending device is
-  active, non-revoked, and currently a member at the room head. Pending invited
-  devices and removed devices cannot send activity.
+  active, non-revoked, and currently a member at the room head. Devices waiting
+  to activate a Welcome and removed devices cannot send activity.
 - `conversation_id` is optional server-visible routing/index metadata scoped to
   a room. It must not grant access, define identity, replace MLS membership, or
   carry activity semantics.
@@ -270,7 +270,7 @@ material while room removals fan out.
 KeyPackages:
 
 - `POST /v1/key-packages`
-- `POST /v1/key-packages/invite-availability`
+- `POST /v1/key-packages/availability`
 - `GET /v1/devices/{account_id}/{device_id}/key-packages/inventory`
 - `POST /v1/key-packages/claim`
 - `POST /v1/accounts/{account_id}/key-packages/claim`
@@ -281,6 +281,24 @@ Uploaded KeyPackages include opaque serialized MLS KeyPackage bytes plus the
 metadata the server uses for routing/cache checks. Claiming a KeyPackage returns
 those exact bytes to the adding client; clients parse and verify MLS credential
 identity locally.
+
+Delivery-layer `MemberId` values are compact opaque route ids derived from the
+typed `DeviceRef` with the versioned `fcdev1` projection. They are not identity
+proof and must not be JSON-encoded `DeviceRef` blobs. Server paths that need
+typed Finite identity must read it from Finite payloads, KeyPackage metadata,
+Welcome records, or room-membership projections, then verify the compact route
+id matches where relevant. This keeps routing under the HTTP id size bound for
+real desktop/iOS device ids and prevents product device-name length from
+changing protocol validity.
+
+The room server is a delivery/admission service, not an application-protocol
+interpreter. It may validate server-visible envelopes, limits, ordering,
+membership intervals, KeyPackage metadata, Welcome routing, idempotency, and
+push policy. It must store and route encrypted durable and ephemeral application
+payloads without understanding their inner client protocol version. Two clients
+that share an encrypted application protocol version should keep working through
+any server whose advertised transport/admission contract is at least the minimum
+they require.
 
 Each device has a bounded KeyPackage inventory. The cap counts available
 packages plus leased packages because both are unconsumed server-held material;
@@ -296,17 +314,17 @@ does not need a persisted counter.
 
 Account fanout claim returns at most one available KeyPackage per registered
 device for the target account, ordered deterministically by device id and
-KeyPackage id. This is the invite primitive for multi-device users: the server
-routes packages to devices, but the adding client still verifies every
-Nostr-rooted MLS credential before constructing the Commit.
+KeyPackage id. This is the Add/Welcome admission primitive for multi-device
+users: the server routes packages to devices, but the adding client still
+verifies every Nostr-rooted MLS credential before constructing the Commit.
 
-Invite availability is a read-only batch projection over account KeyPackage
-inventory. Given account ids, the home server returns whether each account has
-at least one available KeyPackage for a non-revoked device. It never returns
-device ids, KeyPackage ids, or KeyPackage bytes, and it never claims or leases
-inventory. Product UI uses this to distinguish people who can currently be
-invited to a Room from Nostr follows who do not yet have Finite Chat invite
-material.
+KeyPackage availability is a read-only batch projection over account
+KeyPackage inventory. Given account ids, the home server returns whether each
+account has at least one available KeyPackage for a non-revoked device. It
+never returns device ids, KeyPackage ids, or KeyPackage bytes, and it never
+claims or leases inventory. Product UI uses this to distinguish people who can
+currently be added to a Room from Nostr follows who do not yet have Finite Chat
+KeyPackages.
 
 Device fanout claim returns one available KeyPackage for a specific target
 device, ordered deterministically by KeyPackage id. The runtime link-fanout
@@ -372,9 +390,10 @@ newly added device may sync the add Commit and later room entries, including
 messages sent before it acked its Welcome, but the room server must not replay
 pre-membership room log entries as ordinary history for that device.
 
-Pre-invite history recovery is a separate product protocol. It must be provided
-by encrypted backup or an explicit member-to-member history-share message, not
-by making the server authoritative over old plaintext or hidden key access.
+Pre-membership history recovery is a separate product protocol. It must be
+provided by encrypted backup or an explicit member-to-member history-share
+message, not by making the server authoritative over old plaintext or hidden
+key access.
 
 ## Message Ids
 
@@ -813,7 +832,7 @@ linked to the accepted Commit. It validates ids, sizes, and one-to-one matching
 with membership adds; it does not parse or trust the MLS contents. Claiming a
 Welcome returns these exact bytes to the recipient device.
 
-For multi-device invites, one MLS Commit may add several devices from the same
+For multi-device adds, one MLS Commit may add several devices from the same
 account. Each added device receives its own Welcome record, but the opaque MLS
 Welcome bytes may be the same batch Welcome containing secrets for all added
 leaves. A device becomes a member interval at the accepted Commit seq even
