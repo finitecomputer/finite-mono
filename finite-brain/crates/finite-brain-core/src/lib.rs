@@ -40,18 +40,26 @@ pub struct DefaultVaultPage {
 
 const DEFAULT_AGENTS_MARKDOWN: &str = r#"# AGENTS.md
 
-This is a FiniteBrain vault. Treat every readable Folder as its own encrypted,
-syncable LLM wiki scope.
+This is a FiniteBrain vault. Start with [[Getting Started]], then use
+[[How FiniteBrain Works]] and [[Access And Folders]] to understand the
+product model. Treat every readable Folder as its own encrypted, syncable
+LLM wiki scope.
 
 ## Operating Model
 
-FiniteBrain stores encrypted Vault state on the server. Trusted clients and agent runtimes open Folder Key Grants locally, decrypt accessible Pages and Assets, edit ordinary files, then sync encrypted changes back.
+FiniteBrain stores encrypted Vault state on the server. Trusted clients and
+agent runtimes open Folder Key Grants locally, decrypt accessible Pages and
+Assets, edit ordinary files, then sync encrypted changes back. See
+[[How FiniteBrain Works]] for the technical spine and [[Access And Folders]] for
+the privacy boundary.
 
 Agents act as the user. They do not have independent Vault membership, Folder access, or attribution unless explicitly modeled as a separate user.
 
 A Vault is not one giant wiki with folders. It is a namespace of many
 Folder-scoped LLM wikis. Folder access determines which wiki scopes can be read
-or written.
+or written. The local scope contract lives in [[Getting Started Config]],
+with navigation in [[Getting Started Index]] and maintenance history in
+[[Getting Started Log]].
 
 ## Use `fbrain`
 
@@ -85,8 +93,9 @@ Before editing:
 1. Sync.
 2. Unlock readable folders.
 3. Read this file.
-4. Read `HUMANS.md`.
-5. Read `_index.md`, `index.md`, `log.md`, `config.md`, or `SCHEMA.md` when present.
+4. Read [[HUMANS.md]].
+5. Read [[Getting Started Index]], [[Getting Started Config]],
+   [[Getting Started Log]], `index.md`, or `SCHEMA.md` when present.
 6. Search before creating new pages.
 
 Only edit readable content. Do not edit `.finitebrain/`, encrypted sync evidence, locked metadata-only folders, generated state files, auth files, or key material.
@@ -104,19 +113,17 @@ Resolve conflicts before reporting done.
 
 Use each readable Folder as a durable LLM wiki scope.
 
-- The default `getting-started` Folder is the shared orientation scope for users
-  and agents.
-- The default `restricted` Folder is the starter tighter-boundary scope for
-  sensitive work.
+- The default `getting-started` Folder is the shared orientation scope for users and agents. Its starter map is [[Getting Started]].
+- The default `restricted` Folder is the starter tighter-boundary scope for sensitive work. If readable, its starter note is [[Restricted Folder Example]].
 - Keep raw sources immutable under that Folder's `raw/`.
 - Store non-Markdown source files under that Folder's `raw/assets/`.
 - Pair every Asset with a Markdown Source Note that records provenance, content type, hash or extraction status when known.
 - Cite Source Notes from synthesized wiki pages; do not make the blob itself the knowledge surface.
 - Put synthesized durable knowledge in that Folder's `wiki/`.
 - Prefer updating existing pages over creating duplicates.
-- Use `[[wikilinks]]` for internal relationships.
-- Keep the Folder-local `_index.md` current.
-- Append only to the Folder-local `log.md` after meaningful writes in that Folder.
+- Use wikilinks for internal relationships.
+- Keep the Folder-local `_index.md` current; this starter scope uses [[Getting Started Index]].
+- Append only to the Folder-local `log.md` after meaningful writes in that Folder; this starter scope uses [[Getting Started Log]].
 - Use `inventory/` for source candidates, open questions, watch items, and next actions.
 - Use `datasets/` for manifests, schemas, samples, and query recipes.
 - Use `output/` for reports, plans, summaries, and deliverables.
@@ -141,7 +148,8 @@ output/
 archive/
 ```
 
-Local folder instructions may override this layout.
+Local folder instructions may override this layout. Human-facing context is in
+[[HUMANS.md]], and the seeded graph hub is [[Getting Started]].
 
 ## Final Report
 
@@ -161,10 +169,12 @@ const DEFAULT_HUMANS_MARKDOWN: &str = r#"# HUMANS.md
 
 This vault is your private, encrypted knowledge workspace.
 
-FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back.
+FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back. [[How FiniteBrain Works]] explains that flow.
 
 A FiniteBrain vault is a namespace of wiki scopes. Each top-level Folder is its
-own LLM wiki with its own `_index.md`, `config.md`, and `log.md`.
+own LLM wiki with its own `_index.md`, `config.md`, and `log.md`. The
+starter orientation scope is mapped in [[Getting Started Index]], configured
+by [[Getting Started Config]], and recorded in [[Getting Started Log]].
 
 Inside a Folder:
 
@@ -181,12 +191,20 @@ The default `getting-started` Folder is for orientation and shared operating
 rules. The default `restricted` Folder demonstrates a tighter access boundary
 for private work.
 
-Agents should read `AGENTS.md` first, sync before editing, avoid duplicates, preserve sources, create Source Notes for assets, and keep the wiki useful for future work.
+Read [[Getting Started]] for the first-page map, [[Access And Folders]] for
+sharing rules, and [[AGENTS.md]] for agent operating instructions. Agents
+should sync before editing, avoid duplicates, preserve sources, create Source
+Notes for assets, and keep the wiki useful for future work.
 "#;
 
-const DEFAULT_SCOPE_CONFIG_MARKDOWN: &str = r#"# Wiki Scope Config
+const DEFAULT_GETTING_STARTED_SCOPE_CONFIG_MARKDOWN: &str = r#"# Getting Started Config
 
 This Folder is an independent FiniteBrain LLM wiki scope.
+
+Use [[Getting Started Index]] as the local navigation hub and append meaningful
+maintenance to [[Getting Started Log]]. Shared product orientation starts at
+[[Getting Started]], with related model notes in [[How FiniteBrain Works]]
+and [[Access And Folders]].
 
 Use this Folder's `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`
 directories for knowledge that belongs inside this access boundary. Keep this
@@ -197,19 +215,83 @@ Markdown Source Note in this Folder.
 
 Do not summarize restricted sibling Folder contents here unless the user
 explicitly chooses this Folder as an equal-or-more-restricted destination.
+
+Related default scope: `restricted`. Keep cross-Folder synthesis access-safe.
 "#;
 
-const DEFAULT_SCOPE_INDEX_MARKDOWN: &str = r#"# Folder Index
+const DEFAULT_GETTING_STARTED_SCOPE_INDEX_MARKDOWN: &str = r#"# Getting Started Index
 
-This index maps this Folder's local wiki scope.
+This index maps the shared orientation wiki scope.
 
-Add durable pages, Source Notes, outputs, and open questions here as this Folder
-grows. Do not list private titles, summaries, or activity from sibling Folders.
+## Local Pages
+
+- [[Getting Started]] is the first-page map for a new Vault.
+- [[How FiniteBrain Works]] explains the trusted-client and encrypted-server model.
+- [[Access And Folders]] explains Folder-scoped access boundaries.
+- [[AGENTS.md]] gives agent operating rules.
+- [[HUMANS.md]] gives human-facing orientation.
+- [[Getting Started Config]] defines this scope's wiki conventions.
+- [[Getting Started Log]] records meaningful writes in this Folder only.
+
+## Boundaries
+
+Do not list private titles, summaries, source hints, assets, or activity from
+sibling Folders here. Link out only to product-safe default orientation.
 "#;
 
-const DEFAULT_SCOPE_LOG_MARKDOWN: &str = r#"# Folder Log
+const DEFAULT_GETTING_STARTED_SCOPE_LOG_MARKDOWN: &str = r#"# Getting Started Log
 
-Append meaningful changes in this Folder only.
+Append meaningful changes in this Folder only. Keep [[Getting Started Index]] in
+sync with durable pages and follow [[Getting Started Config]] for scope rules.
+
+Do not record activity from sibling Folders here.
+"#;
+
+const DEFAULT_RESTRICTED_SCOPE_CONFIG_MARKDOWN: &str = r#"# Restricted Config
+
+This Folder is an independent FiniteBrain LLM wiki scope.
+
+Use [[Restricted Index]] as the local navigation hub and append meaningful
+maintenance to [[Restricted Log]]. Shared product orientation starts at
+[[Getting Started]], with related model notes in [[How FiniteBrain Works]]
+and [[Access And Folders]].
+
+Use this Folder's `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`
+directories for knowledge that belongs inside this access boundary. Keep this
+Folder's `_index.md` and `log.md` scoped only to pages in this Folder.
+
+Store non-Markdown source files in `raw/assets/` and pair each one with a
+Markdown Source Note in this Folder.
+
+Do not summarize restricted sibling Folder contents here unless the user
+explicitly chooses this Folder as an equal-or-more-restricted destination.
+
+Related default scope: `getting-started`. Keep cross-Folder synthesis access-safe.
+"#;
+
+const DEFAULT_RESTRICTED_SCOPE_INDEX_MARKDOWN: &str = r#"# Restricted Index
+
+This index maps the restricted starter wiki scope. It should describe only
+content that belongs inside this Folder's access boundary.
+
+## Local Pages
+
+- [[Restricted Folder Example]] explains this default tighter-boundary Folder.
+- [[Restricted Config]] defines the local wiki conventions.
+- [[Restricted Log]] records meaningful writes in this Folder only.
+
+## Related Orientation
+
+- [[Getting Started]] is the shared starter map.
+- [[How FiniteBrain Works]] explains trusted-client encryption and sync.
+- [[Access And Folders]] explains why restricted content must stay inside an equal-or-more-restricted destination.
+- [[AGENTS.md]] gives agent operating rules.
+"#;
+
+const DEFAULT_RESTRICTED_SCOPE_LOG_MARKDOWN: &str = r#"# Restricted Log
+
+Append meaningful changes in this Folder only. Keep [[Restricted Index]] in
+sync with durable pages and follow [[Restricted Config]] for scope rules.
 
 Do not record activity from sibling Folders here.
 "#;
@@ -217,6 +299,10 @@ Do not record activity from sibling Folders here.
 const DEFAULT_GETTING_STARTED_README_MARKDOWN: &str = r#"# Getting Started
 
 This Folder explains the default FiniteBrain vault layout.
+
+For humans, read [[HUMANS.md]]. For agents, read [[AGENTS.md]]. For the local
+scope map, use [[Getting Started Index]], [[Getting Started Config]], and
+[[Getting Started Log]].
 
 Default Folders:
 
@@ -226,6 +312,12 @@ Default Folders:
   copy restricted titles, summaries, source notes, assets, or logs back here
   unless the intended audience is allowed to read them.
 
+Core starter pages:
+
+- [[How FiniteBrain Works]] explains encrypted server state, local Folder Keys, Pages, Assets, and sync.
+- [[Access And Folders]] explains why every Folder is its own wiki boundary.
+- [[Restricted Folder Example]] is readable only when that Folder's key is open.
+
 Inside any Folder, keep non-Markdown source files as encrypted Assets under
 `raw/assets/`. Pair each Asset with a Markdown Source Note in the same Folder.
 Agents and synthesized wiki pages cite the Source Note; the Asset preserves the
@@ -233,6 +325,9 @@ original bytes.
 
 Keep durable knowledge inside Folder-scoped `wiki/` pages, and keep private or
 sensitive work inside a Folder with an equal or tighter access boundary.
+
+Backlinks to keep this starter graph connected: [[HUMANS.md]], [[AGENTS.md]],
+[[Getting Started Index]], [[How FiniteBrain Works]], and [[Access And Folders]].
 "#;
 
 const DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN: &str = r#"# How FiniteBrain Works
@@ -241,6 +336,10 @@ FiniteBrain stores encrypted Vault data on the server. The client or agent
 opens Folder Keys locally, decrypts the Pages and Assets it can access, edits
 ordinary files, and syncs encrypted updates back.
 
+This is the technical companion to [[Getting Started]] and should stay
+consistent with [[Access And Folders]], [[Getting Started Config]], and
+[[AGENTS.md]].
+
 Non-Markdown source files are encrypted as Assets and kept under `raw/assets/`.
 Agents use Markdown Source Notes to describe those Assets before synthesizing
 durable wiki pages from them.
@@ -248,11 +347,20 @@ durable wiki pages from them.
 Each top-level Folder is an LLM wiki scope. A Folder has its own `config.md`,
 `_index.md`, and `log.md`, so activity and summaries stay inside the same
 access boundary as the content they describe.
+
+Graph View and backlinks are client-side projections over decrypted Pages. The
+server stores encrypted objects and sync records; it does not need plaintext
+page titles, links, backlinks, or wiki indexes.
+
+Related pages: [[Getting Started]], [[Access And Folders]], [[Getting Started Index]], [[HUMANS.md]], and [[AGENTS.md]].
 "#;
 
 const DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN: &str = r#"# Access And Folders
 
 Access is Folder-scoped.
+
+Read this with [[How FiniteBrain Works]]: Folder Keys are why the wiki graph
+is built from readable local Pages instead of server-side plaintext indexing.
 
 - `getting-started` is the default shared orientation Folder.
 - `restricted` is the default example of a tighter access boundary.
@@ -261,11 +369,20 @@ Access is Folder-scoped.
   people.
 - Do not copy restricted titles, summaries, Source Notes, Assets, or log entries
   into a less-restricted Folder.
+
+Use [[Getting Started]] and [[Getting Started Index]] for shared orientation.
+Use [[Restricted Folder Example]] only when the restricted Folder is readable.
+Agent rules live in [[AGENTS.md]], and human-facing orientation lives in
+[[HUMANS.md]].
 "#;
 
 const DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN: &str = r#"# Restricted Folder Example
 
 This Folder demonstrates a tighter access boundary.
+
+It is the restricted counterpart to [[Getting Started]]. Keep local navigation
+in [[Restricted Index]], local rules in [[Restricted Config]], and local history
+in [[Restricted Log]].
 
 In an organization Vault, this Folder starts with access for admins only. Add
 specific members later when the work in this Folder should be shared with them.
@@ -273,6 +390,9 @@ specific members later when the work in this Folder should be shared with them.
 Keep this Folder's `_index.md` and `log.md` local to this Folder. Do not
 summarize this Folder into `getting-started` unless the user explicitly chooses
 that destination and the audience is allowed to see the summary.
+
+Related shared pages: [[Access And Folders]], [[How FiniteBrain Works]],
+[[AGENTS.md]], and [[HUMANS.md]].
 "#;
 
 const DEFAULT_PRIMARY_SCOPE_PAGES: [DefaultVaultPage; 5] = [
@@ -292,46 +412,42 @@ const DEFAULT_PRIMARY_SCOPE_PAGES: [DefaultVaultPage; 5] = [
         folder_id: "getting-started",
         object_id: "obj_default_getting-started_scope_config",
         path: "config.md",
-        markdown: DEFAULT_SCOPE_CONFIG_MARKDOWN,
+        markdown: DEFAULT_GETTING_STARTED_SCOPE_CONFIG_MARKDOWN,
     },
     DefaultVaultPage {
         folder_id: "getting-started",
         object_id: "obj_default_getting-started_scope_index",
         path: "_index.md",
-        markdown: DEFAULT_SCOPE_INDEX_MARKDOWN,
+        markdown: DEFAULT_GETTING_STARTED_SCOPE_INDEX_MARKDOWN,
     },
     DefaultVaultPage {
         folder_id: "getting-started",
         object_id: "obj_default_getting-started_scope_log",
         path: "log.md",
-        markdown: DEFAULT_SCOPE_LOG_MARKDOWN,
+        markdown: DEFAULT_GETTING_STARTED_SCOPE_LOG_MARKDOWN,
     },
 ];
 
-macro_rules! default_scope_pages {
-    ($folder_id:literal, $object_prefix:literal) => {
-        [
-            DefaultVaultPage {
-                folder_id: $folder_id,
-                object_id: concat!("obj_default_", $object_prefix, "_scope_config"),
-                path: "config.md",
-                markdown: DEFAULT_SCOPE_CONFIG_MARKDOWN,
-            },
-            DefaultVaultPage {
-                folder_id: $folder_id,
-                object_id: concat!("obj_default_", $object_prefix, "_scope_index"),
-                path: "_index.md",
-                markdown: DEFAULT_SCOPE_INDEX_MARKDOWN,
-            },
-            DefaultVaultPage {
-                folder_id: $folder_id,
-                object_id: concat!("obj_default_", $object_prefix, "_scope_log"),
-                path: "log.md",
-                markdown: DEFAULT_SCOPE_LOG_MARKDOWN,
-            },
-        ]
-    };
-}
+const RESTRICTED_SCOPE_PAGES: [DefaultVaultPage; 3] = [
+    DefaultVaultPage {
+        folder_id: "restricted",
+        object_id: "obj_default_restricted_scope_config",
+        path: "config.md",
+        markdown: DEFAULT_RESTRICTED_SCOPE_CONFIG_MARKDOWN,
+    },
+    DefaultVaultPage {
+        folder_id: "restricted",
+        object_id: "obj_default_restricted_scope_index",
+        path: "_index.md",
+        markdown: DEFAULT_RESTRICTED_SCOPE_INDEX_MARKDOWN,
+    },
+    DefaultVaultPage {
+        folder_id: "restricted",
+        object_id: "obj_default_restricted_scope_log",
+        path: "log.md",
+        markdown: DEFAULT_RESTRICTED_SCOPE_LOG_MARKDOWN,
+    },
+];
 
 const GETTING_STARTED_GUIDE_PAGES: [DefaultVaultPage; 3] = [
     DefaultVaultPage {
@@ -370,9 +486,9 @@ const PERSONAL_DEFAULT_VAULT_PAGES: [DefaultVaultPage; 12] = [
     GETTING_STARTED_GUIDE_PAGES[0],
     GETTING_STARTED_GUIDE_PAGES[1],
     GETTING_STARTED_GUIDE_PAGES[2],
-    default_scope_pages!("restricted", "restricted")[0],
-    default_scope_pages!("restricted", "restricted")[1],
-    default_scope_pages!("restricted", "restricted")[2],
+    RESTRICTED_SCOPE_PAGES[0],
+    RESTRICTED_SCOPE_PAGES[1],
+    RESTRICTED_SCOPE_PAGES[2],
     RESTRICTED_GUIDE_PAGE,
 ];
 
@@ -1997,6 +2113,21 @@ mod tests {
         assert!(pages[1].markdown.contains("Source Notes"));
         assert!(pages[2].markdown.contains("raw/assets/"));
         assert!(pages[2].markdown.contains("Source Note"));
+        assert!(pages[2].markdown.contains("# Getting Started Config"));
+        assert!(pages[3].markdown.contains("# Getting Started Index"));
+        assert!(pages[4].markdown.contains("# Getting Started Log"));
+        assert_eq!(
+            pages
+                .iter()
+                .filter(|page| page.markdown.contains("[["))
+                .count(),
+            pages.len()
+        );
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.markdown.contains("[[wikilinks]]"))
+        );
         let organization_pages = default_vault_pages(VaultKind::Organization);
         assert_eq!(organization_pages.len(), 12);
         assert_eq!(
@@ -2022,6 +2153,11 @@ mod tests {
                 .iter()
                 .any(|page| page.folder_id == "restricted"
                     && page.path == "wiki/restricted-folder-example.md")
+        );
+        assert!(
+            organization_pages[9]
+                .markdown
+                .contains("# Restricted Index")
         );
         assert_eq!(
             default_vault_pages_folder_id(VaultKind::Personal),

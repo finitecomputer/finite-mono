@@ -26,6 +26,9 @@ const FiniteBrainProductClient = (() => {
     lastShareLinkId: null,
     lastVaultInvitationCode: null,
     lastVaultInvitationId: null,
+    lastEmailInviteSecret: null,
+    lastEmailInviteUrl: null,
+    lastEmailInvitePostProof: null,
     vaultInvitations: null,
     folderShareLinks: null,
     folderShareLinksFolderId: null,
@@ -66,18 +69,26 @@ const FiniteBrainProductClient = (() => {
     [
       "# AGENTS.md",
       "",
-      "This is a FiniteBrain vault. Treat every readable Folder as its own encrypted,",
-      "syncable LLM wiki scope.",
+      "This is a FiniteBrain vault. Start with [[Getting Started]], then use",
+      "[[How FiniteBrain Works]] and [[Access And Folders]] to understand the",
+      "product model. Treat every readable Folder as its own encrypted, syncable",
+      "LLM wiki scope.",
       "",
       "## Operating Model",
       "",
-      "FiniteBrain stores encrypted Vault state on the server. Trusted clients and agent runtimes open Folder Key Grants locally, decrypt accessible Pages and Assets, edit ordinary files, then sync encrypted changes back.",
+      "FiniteBrain stores encrypted Vault state on the server. Trusted clients and",
+      "agent runtimes open Folder Key Grants locally, decrypt accessible Pages and",
+      "Assets, edit ordinary files, then sync encrypted changes back. See",
+      "[[How FiniteBrain Works]] for the technical spine and [[Access And Folders]] for",
+      "the privacy boundary.",
       "",
       "Agents act as the user. They do not have independent Vault membership, Folder access, or attribution unless explicitly modeled as a separate user.",
       "",
       "A Vault is not one giant wiki with folders. It is a namespace of many",
       "Folder-scoped LLM wikis. Folder access determines which wiki scopes can be read",
-      "or written.",
+      "or written. The local scope contract lives in [[Getting Started Config]],",
+      "with navigation in [[Getting Started Index]] and maintenance history in",
+      "[[Getting Started Log]].",
       "",
       "## Use `fbrain`",
       "",
@@ -111,8 +122,9 @@ const FiniteBrainProductClient = (() => {
       "1. Sync.",
       "2. Unlock readable folders.",
       "3. Read this file.",
-      "4. Read `HUMANS.md`.",
-      "5. Read `_index.md`, `index.md`, `log.md`, `config.md`, or `SCHEMA.md` when present.",
+      "4. Read [[HUMANS.md]].",
+      "5. Read [[Getting Started Index]], [[Getting Started Config]],",
+      "   [[Getting Started Log]], `index.md`, or `SCHEMA.md` when present.",
       "6. Search before creating new pages.",
       "",
       "Only edit readable content. Do not edit `.finitebrain/`, encrypted sync evidence, locked metadata-only folders, generated state files, auth files, or key material.",
@@ -130,17 +142,17 @@ const FiniteBrainProductClient = (() => {
       "",
       "Use each readable Folder as a durable LLM wiki scope.",
       "",
-      "- The default `getting-started` Folder is the shared orientation scope for users and agents.",
-      "- The default `restricted` Folder is the starter tighter-boundary scope for sensitive work.",
+      "- The default `getting-started` Folder is the shared orientation scope for users and agents. Its starter map is [[Getting Started]].",
+      "- The default `restricted` Folder is the starter tighter-boundary scope for sensitive work. If readable, its starter note is [[Restricted Folder Example]].",
       "- Keep raw sources immutable under that Folder's `raw/`.",
       "- Store non-Markdown source files under that Folder's `raw/assets/`.",
       "- Pair every Asset with a Markdown Source Note that records provenance, content type, hash or extraction status when known.",
       "- Cite Source Notes from synthesized wiki pages; do not make the blob itself the knowledge surface.",
       "- Put synthesized durable knowledge in that Folder's `wiki/`.",
       "- Prefer updating existing pages over creating duplicates.",
-      "- Use `[[wikilinks]]` for internal relationships.",
-      "- Keep the Folder-local `_index.md` current.",
-      "- Append only to the Folder-local `log.md` after meaningful writes in that Folder.",
+      "- Use wikilinks for internal relationships.",
+      "- Keep the Folder-local `_index.md` current; this starter scope uses [[Getting Started Index]].",
+      "- Append only to the Folder-local `log.md` after meaningful writes in that Folder; this starter scope uses [[Getting Started Log]].",
       "- Use `inventory/` for source candidates, open questions, watch items, and next actions.",
       "- Use `datasets/` for manifests, schemas, samples, and query recipes.",
       "- Use `output/` for reports, plans, summaries, and deliverables.",
@@ -164,14 +176,15 @@ const FiniteBrainProductClient = (() => {
       "archive/",
       "```",
       "",
-      "Local folder instructions may override this layout.",
+      "Local folder instructions may override this layout. Human-facing context is in",
+      "[[HUMANS.md]], and the seeded graph hub is [[Getting Started]].",
       "",
       "## Final Report",
       "",
       "When finished, report:",
       "",
       "- working tree path",
-      "- acting npub, if relevant",
+      "- acting email, if relevant",
       "- folders readable or locked",
       "- pages or sources created/updated/moved/deleted",
       "- index/log updates",
@@ -185,10 +198,12 @@ const FiniteBrainProductClient = (() => {
       "",
       "This vault is your private, encrypted knowledge workspace.",
       "",
-      "FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back.",
+      "FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back. [[How FiniteBrain Works]] explains that flow.",
       "",
       "A FiniteBrain vault is a namespace of wiki scopes. Each top-level Folder is its",
-      "own LLM wiki with its own `_index.md`, `config.md`, and `log.md`.",
+      "own LLM wiki with its own `_index.md`, `config.md`, and `log.md`. The",
+      "starter orientation scope is mapped in [[Getting Started Index]], configured",
+      "by [[Getting Started Config]], and recorded in [[Getting Started Log]].",
       "",
       "Inside a Folder:",
       "",
@@ -205,13 +220,24 @@ const FiniteBrainProductClient = (() => {
       "rules. The default `restricted` Folder demonstrates a tighter access boundary",
       "for private work.",
       "",
-      "Agents should read `AGENTS.md` first, sync before editing, avoid duplicates, preserve sources, create Source Notes for assets, and keep the wiki useful for future work.",
+      "Read [[Getting Started]] for the first-page map, [[Access And Folders]] for",
+      "sharing rules, and [[AGENTS.md]] for agent operating instructions. Agents",
+      "should sync before editing, avoid duplicates, preserve sources, create Source",
+      "Notes for assets, and keep the wiki useful for future work.",
     ].join("\n") + "\n";
-  const DEFAULT_SCOPE_CONFIG_MARKDOWN =
+  const defaultScopeConfigMarkdown = (folderId) => {
+    const label = folderId === "restricted" ? "Restricted" : "Getting Started";
+    const peerLabel = folderId === "restricted" ? "Getting Started" : "Restricted";
+    return (
     [
-      "# Wiki Scope Config",
+      `# ${label} Config`,
       "",
       "This Folder is an independent FiniteBrain LLM wiki scope.",
+      "",
+      `Use [[${label} Index]] as the local navigation hub and append meaningful`,
+      `maintenance to [[${label} Log]]. Shared product orientation starts at`,
+      "[[Getting Started]], with related model notes in [[How FiniteBrain Works]]",
+      "and [[Access And Folders]].",
       "",
       "Use this Folder's `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`",
       "directories for knowledge that belongs inside this access boundary. Keep this",
@@ -222,29 +248,80 @@ const FiniteBrainProductClient = (() => {
       "",
       "Do not summarize restricted sibling Folder contents here unless the user",
       "explicitly chooses this Folder as an equal-or-more-restricted destination.",
-    ].join("\n") + "\n";
-  const DEFAULT_SCOPE_INDEX_MARKDOWN =
+      "",
+      `Related default scope: ${peerLabel === "Restricted" ? "`restricted`" : "`getting-started`"}. Keep cross-Folder synthesis access-safe.`,
+    ].join("\n") + "\n"
+    );
+  };
+  const defaultScopeIndexMarkdown = (folderId) => {
+    if (folderId === "restricted") {
+      return (
+        [
+          "# Restricted Index",
+          "",
+          "This index maps the restricted starter wiki scope. It should describe only",
+          "content that belongs inside this Folder's access boundary.",
+          "",
+          "## Local Pages",
+          "",
+          "- [[Restricted Folder Example]] explains this default tighter-boundary Folder.",
+          "- [[Restricted Config]] defines the local wiki conventions.",
+          "- [[Restricted Log]] records meaningful writes in this Folder only.",
+          "",
+          "## Related Orientation",
+          "",
+          "- [[Getting Started]] is the shared starter map.",
+          "- [[How FiniteBrain Works]] explains trusted-client encryption and sync.",
+          "- [[Access And Folders]] explains why restricted content must stay inside an equal-or-more-restricted destination.",
+          "- [[AGENTS.md]] gives agent operating rules.",
+        ].join("\n") + "\n"
+      );
+    }
+    return (
+      [
+        "# Getting Started Index",
+        "",
+        "This index maps the shared orientation wiki scope.",
+        "",
+        "## Local Pages",
+        "",
+        "- [[Getting Started]] is the first-page map for a new Vault.",
+        "- [[How FiniteBrain Works]] explains the trusted-client and encrypted-server model.",
+        "- [[Access And Folders]] explains Folder-scoped access boundaries.",
+        "- [[AGENTS.md]] gives agent operating rules.",
+        "- [[HUMANS.md]] gives human-facing orientation.",
+        "- [[Getting Started Config]] defines this scope's wiki conventions.",
+        "- [[Getting Started Log]] records meaningful writes in this Folder only.",
+        "",
+        "## Boundaries",
+        "",
+        "Do not list private titles, summaries, source hints, assets, or activity from",
+        "sibling Folders here. Link out only to product-safe default orientation.",
+      ].join("\n") + "\n"
+    );
+  };
+  const defaultScopeLogMarkdown = (folderId) => {
+    const label = folderId === "restricted" ? "Restricted" : "Getting Started";
+    return (
     [
-      "# Folder Index",
+      `# ${label} Log`,
       "",
-      "This index maps this Folder's local wiki scope.",
-      "",
-      "Add durable pages, Source Notes, outputs, and open questions here as this Folder",
-      "grows. Do not list private titles, summaries, or activity from sibling Folders.",
-    ].join("\n") + "\n";
-  const DEFAULT_SCOPE_LOG_MARKDOWN =
-    [
-      "# Folder Log",
-      "",
-      "Append meaningful changes in this Folder only.",
+      `Append meaningful changes in this Folder only. Keep [[${label} Index]] in`,
+      `sync with durable pages and follow [[${label} Config]] for scope rules.`,
       "",
       "Do not record activity from sibling Folders here.",
-    ].join("\n") + "\n";
+    ].join("\n") + "\n"
+    );
+  };
   const DEFAULT_GETTING_STARTED_README_MARKDOWN =
     [
       "# Getting Started",
       "",
       "This Folder explains the default FiniteBrain vault layout.",
+      "",
+      "For humans, read [[HUMANS.md]]. For agents, read [[AGENTS.md]]. For the local",
+      "scope map, use [[Getting Started Index]], [[Getting Started Config]], and",
+      "[[Getting Started Log]].",
       "",
       "Default Folders:",
       "",
@@ -254,6 +331,12 @@ const FiniteBrainProductClient = (() => {
       "  copy restricted titles, summaries, source notes, assets, or logs back here",
       "  unless the intended audience is allowed to read them.",
       "",
+      "Core starter pages:",
+      "",
+      "- [[How FiniteBrain Works]] explains encrypted server state, local Folder Keys, Pages, Assets, and sync.",
+      "- [[Access And Folders]] explains why every Folder is its own wiki boundary.",
+      "- [[Restricted Folder Example]] is readable only when that Folder's key is open.",
+      "",
       "Inside any Folder, keep non-Markdown source files as encrypted Assets under",
       "`raw/assets/`. Pair each Asset with a Markdown Source Note in the same Folder.",
       "Agents and synthesized wiki pages cite the Source Note; the Asset preserves the",
@@ -261,6 +344,9 @@ const FiniteBrainProductClient = (() => {
       "",
       "Keep durable knowledge inside Folder-scoped `wiki/` pages, and keep private or",
       "sensitive work inside a Folder with an equal or tighter access boundary.",
+      "",
+      "Backlinks to keep this starter graph connected: [[HUMANS.md]], [[AGENTS.md]],",
+      "[[Getting Started Index]], [[How FiniteBrain Works]], and [[Access And Folders]].",
     ].join("\n") + "\n";
   const DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN =
     [
@@ -270,6 +356,10 @@ const FiniteBrainProductClient = (() => {
       "opens Folder Keys locally, decrypts the Pages and Assets it can access, edits",
       "ordinary files, and syncs encrypted updates back.",
       "",
+      "This is the technical companion to [[Getting Started]] and should stay",
+      "consistent with [[Access And Folders]], [[Getting Started Config]], and",
+      "[[AGENTS.md]].",
+      "",
       "Non-Markdown source files are encrypted as Assets and kept under `raw/assets/`.",
       "Agents use Markdown Source Notes to describe those Assets before synthesizing",
       "durable wiki pages from them.",
@@ -277,12 +367,21 @@ const FiniteBrainProductClient = (() => {
       "Each top-level Folder is an LLM wiki scope. A Folder has its own `config.md`,",
       "`_index.md`, and `log.md`, so activity and summaries stay inside the same",
       "access boundary as the content they describe.",
+      "",
+      "Graph View and backlinks are client-side projections over decrypted Pages. The",
+      "server stores encrypted objects and sync records; it does not need plaintext",
+      "page titles, links, backlinks, or wiki indexes.",
+      "",
+      "Related pages: [[Getting Started]], [[Access And Folders]], [[Getting Started Index]], [[HUMANS.md]], and [[AGENTS.md]].",
     ].join("\n") + "\n";
   const DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN =
     [
       "# Access And Folders",
       "",
       "Access is Folder-scoped.",
+      "",
+      "Read this with [[How FiniteBrain Works]]: Folder Keys are why the wiki graph",
+      "is built from readable local Pages instead of server-side plaintext indexing.",
       "",
       "- `getting-started` is the default shared orientation Folder.",
       "- `restricted` is the default example of a tighter access boundary.",
@@ -291,6 +390,11 @@ const FiniteBrainProductClient = (() => {
       "  people.",
       "- Do not copy restricted titles, summaries, Source Notes, Assets, or log entries",
       "  into a less-restricted Folder.",
+      "",
+      "Use [[Getting Started]] and [[Getting Started Index]] for shared orientation.",
+      "Use [[Restricted Folder Example]] only when the restricted Folder is readable.",
+      "Agent rules live in [[AGENTS.md]], and human-facing orientation lives in",
+      "[[HUMANS.md]].",
     ].join("\n") + "\n";
   const DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN =
     [
@@ -298,12 +402,19 @@ const FiniteBrainProductClient = (() => {
       "",
       "This Folder demonstrates a tighter access boundary.",
       "",
+      "It is the restricted counterpart to [[Getting Started]]. Keep local navigation",
+      "in [[Restricted Index]], local rules in [[Restricted Config]], and local history",
+      "in [[Restricted Log]].",
+      "",
       "In an organization Vault, this Folder starts with access for admins only. Add",
       "specific members later when the work in this Folder should be shared with them.",
       "",
       "Keep this Folder's `_index.md` and `log.md` local to this Folder. Do not",
       "summarize this Folder into `getting-started` unless the user explicitly chooses",
       "that destination and the audience is allowed to see the summary.",
+      "",
+      "Related shared pages: [[Access And Folders]], [[How FiniteBrain Works]],",
+      "[[AGENTS.md]], and [[HUMANS.md]].",
     ].join("\n") + "\n";
   const defaultPage = (folderId, objectId, path, markdown) =>
     Object.freeze({ folderId, objectId, path, markdown });
@@ -312,10 +423,10 @@ const FiniteBrainProductClient = (() => {
       folderId,
       `obj_default_${folderId}_scope_config`,
       "config.md",
-      DEFAULT_SCOPE_CONFIG_MARKDOWN
+      defaultScopeConfigMarkdown(folderId)
     ),
-    defaultPage(folderId, `obj_default_${folderId}_scope_index`, "_index.md", DEFAULT_SCOPE_INDEX_MARKDOWN),
-    defaultPage(folderId, `obj_default_${folderId}_scope_log`, "log.md", DEFAULT_SCOPE_LOG_MARKDOWN),
+    defaultPage(folderId, `obj_default_${folderId}_scope_index`, "_index.md", defaultScopeIndexMarkdown(folderId)),
+    defaultPage(folderId, `obj_default_${folderId}_scope_log`, "log.md", defaultScopeLogMarkdown(folderId)),
   ];
   const defaultPrimaryScopePages = (folderId) => [
     defaultPage(folderId, "obj_default_agents", "AGENTS.md", DEFAULT_AGENTS_MARKDOWN),
@@ -441,8 +552,61 @@ const FiniteBrainProductClient = (() => {
     return state.identityByNpub.get(value) || null;
   }
 
+  function looksLikeEmailIdentity(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+  }
+
+  function identityEmailDisplay(identity) {
+    if (!identity) return null;
+    if (identity.nip05) return identity.nip05;
+    if (looksLikeEmailIdentity(identity.display)) return identity.display;
+    if (looksLikeEmailIdentity(identity.name)) return identity.name;
+    if (looksLikeEmailIdentity(identity.displayName)) return identity.displayName;
+    if (looksLikeEmailIdentity(identity.display_name)) return identity.display_name;
+    return null;
+  }
+
+  function identityMetadataForNpub(npub) {
+    const value = String(npub || "");
+    const identity = identityForNpub(value);
+    const email = identityEmailDisplay(identity);
+    const display = email || shortKey(value);
+    const status = email
+      ? "Email or NIP-05 metadata resolved"
+      : "No email or NIP-05 metadata loaded";
+    const details = [
+      {
+        label: "Email / NIP-05",
+        value: email || "Not resolved in this client",
+      },
+      {
+        label: "Public key",
+        value: identity?.npub || value || "-",
+      },
+    ];
+    if (identity?.hex) {
+      details.push({ label: "Hex key", value: identity.hex });
+    }
+    if (identity?.relays?.length) {
+      details.push({ label: "Relays", value: identity.relays.join(", ") });
+    }
+    if (identity?.verifiedAt) {
+      details.push({ label: "Verified", value: identity.verifiedAt });
+    }
+    return {
+      details,
+      display,
+      email,
+      npub: identity?.npub || value,
+      status,
+      tooltip: email
+        ? `${email}. Public key: ${shortKey(identity?.npub || value)}`
+        : `Showing public key fallback. ${status}.`,
+    };
+  }
+
   function identityDisplay(npub) {
-    return identityForNpub(npub)?.display || shortKey(npub);
+    return identityMetadataForNpub(npub).display;
   }
 
   async function resolveIdentityInputValue(input, message) {
@@ -619,6 +783,19 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function signEventAdapter(options = {}) {
+    if (options.signEvent) return options.signEvent;
+    const provider = options.provider || window.nostr;
+    if (typeof provider?.signEvent !== "function") return null;
+    return (event) => provider.signEvent.call(provider, event);
+  }
+
+  function requireNip07SignEvent(options = {}) {
+    const signEvent = signEventAdapter(options);
+    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    return signEvent;
+  }
+
   function normalizeAccessValue(access) {
     const value = String(access || "unknown")
       .trim()
@@ -752,8 +929,8 @@ const FiniteBrainProductClient = (() => {
   function applyAccessIntentChrome(row) {
     const intent = accessIntentValue(state.activeAccessIntent);
     const advancedSection = $("accessAdvancedSection");
+    const addPanel = $("accessAddPersonPanel");
     const addForm = $("accessAddPersonForm");
-    const manageToggle = $("accessManageToggle");
     if (!row || normalizeAccessView(state.activeAccessView) !== "folder") return;
 
     if (intent === "links" && advancedSection) {
@@ -761,13 +938,13 @@ const FiniteBrainProductClient = (() => {
     }
 
     const canManage =
-      row.access === "restricted" &&
+      folderAllowsDirectGrant(row) &&
       hasOpenedAccessFolderKey(row) &&
       state.signerStatus === "connected";
-    if (intent === "people" && canManage && addForm && manageToggle) {
+    if (intent === "people" && canManage && addPanel && addForm) {
+      addPanel.hidden = false;
+      addPanel.open = true;
       addForm.hidden = false;
-      manageToggle.setAttribute("aria-expanded", "true");
-      setText("accessManageToggleLabel", "Cancel");
     }
   }
 
@@ -861,22 +1038,32 @@ const FiniteBrainProductClient = (() => {
 
   function accessPeopleHint(row, metadata) {
     if (!row) return "Choose a Folder first.";
+    if (row.access === "all_members") {
+      return "All Vault members have access; use Add when a late member needs this Folder Key.";
+    }
     if (row.access !== "restricted") return "Direct people grants are only needed for restricted Folders.";
     if (metadata?.kind === "organization") return "Admins can open it; add explicit people when needed.";
-    return "Personal restricted Folders start owner-only; grant one npub when sharing is intentional.";
+    return "Personal restricted Folders start owner-only; grant one email when sharing is intentional.";
+  }
+
+  function folderAllowsDirectGrant(row) {
+    return row?.access === "restricted" || row?.access === "all_members";
   }
 
   function accessFlowHint(row, mode, keyOpen) {
     if (!row) return "Choose a Folder to manage access.";
-    if (mode === "people" && row.access !== "restricted") {
+    if (mode === "people" && !folderAllowsDirectGrant(row)) {
       return "This Folder uses Vault-level access, so there is no direct people list to edit.";
     }
     if (mode === "links" && row.access !== "restricted") {
       return "Create links from restricted Folders so the link carries a bounded Folder Key Grant.";
     }
     if (!keyOpen) return "Open this Folder key before creating grants or links.";
-    if (mode === "people") return "Grant adds one npub. Remove rotates the Folder Key and re-encrypts readable Pages.";
-    if (mode === "links") return "Create a single-use link for a target identity, or accept an existing link.";
+    if (mode === "people" && row.access === "all_members") {
+      return "Grant sends the current Folder Key to an existing Vault member.";
+    }
+    if (mode === "people") return "Grant adds one email. Remove rotates the Folder Key and re-encrypts readable Pages.";
+    if (mode === "links") return "Create a single-use link for a target email, or accept an existing link.";
     return "Choose People or Links when this Folder needs an access change.";
   }
 
@@ -923,6 +1110,418 @@ const FiniteBrainProductClient = (() => {
 
   function bytesToHex(bytes) {
     return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function concatBytes(...parts) {
+    const length = parts.reduce((sum, part) => sum + part.length, 0);
+    const output = new Uint8Array(length);
+    let offset = 0;
+    for (const part of parts) {
+      output.set(part, offset);
+      offset += part.length;
+    }
+    return output;
+  }
+
+  function bytesToBigInt(bytes) {
+    const hex = bytesToHex(bytes);
+    return hex ? BigInt(`0x${hex}`) : 0n;
+  }
+
+  function bigIntToBytes(value, length = 32) {
+    let hex = value.toString(16);
+    if (hex.length > length * 2) throw new Error("integer does not fit target byte length");
+    hex = hex.padStart(length * 2, "0");
+    return hexToBytes(hex);
+  }
+
+  const SECP_P = BigInt("0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
+  const SECP_N = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+  const SECP_G = {
+    x: BigInt("0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+    y: BigInt("0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"),
+  };
+
+  function mod(value, modulo = SECP_P) {
+    const result = value % modulo;
+    return result >= 0n ? result : result + modulo;
+  }
+
+  function powMod(base, exponent, modulo = SECP_P) {
+    let result = 1n;
+    let value = mod(base, modulo);
+    let power = exponent;
+    while (power > 0n) {
+      if (power & 1n) result = mod(result * value, modulo);
+      value = mod(value * value, modulo);
+      power >>= 1n;
+    }
+    return result;
+  }
+
+  function invertMod(value, modulo = SECP_P) {
+    let low = mod(value, modulo);
+    let high = modulo;
+    let lm = 1n;
+    let hm = 0n;
+    while (low > 1n) {
+      const ratio = high / low;
+      [lm, hm] = [hm - lm * ratio, lm];
+      [low, high] = [high - low * ratio, low];
+    }
+    return mod(lm, modulo);
+  }
+
+  function secpPointAdd(left, right) {
+    if (!left) return right;
+    if (!right) return left;
+    if (left.x === right.x) {
+      if (mod(left.y + right.y) === 0n) return null;
+      const slope = mod(3n * left.x * left.x * invertMod(2n * left.y));
+      const x = mod(slope * slope - 2n * left.x);
+      return { x, y: mod(slope * (left.x - x) - left.y) };
+    }
+    const slope = mod((right.y - left.y) * invertMod(right.x - left.x));
+    const x = mod(slope * slope - left.x - right.x);
+    return { x, y: mod(slope * (left.x - x) - left.y) };
+  }
+
+  function secpPointMultiply(point, scalar) {
+    let n = mod(scalar, SECP_N);
+    if (!point || n === 0n) return null;
+    let result = null;
+    let addend = point;
+    while (n > 0n) {
+      if (n & 1n) result = secpPointAdd(result, addend);
+      addend = secpPointAdd(addend, addend);
+      n >>= 1n;
+    }
+    return result;
+  }
+
+  function secpLiftX(x) {
+    if (x < 0n || x >= SECP_P) throw new Error("secp256k1 x coordinate is out of range");
+    const y2 = mod(x * x * x + 7n);
+    let y = powMod(y2, (SECP_P + 1n) / 4n);
+    if (mod(y * y) !== y2) throw new Error("secp256k1 point is not on curve");
+    if (y & 1n) y = SECP_P - y;
+    return { x, y };
+  }
+
+  function normalizeInviteSecretBytes(secretHex) {
+    const secretBytes = hexToBytes(String(secretHex || "").trim());
+    if (secretBytes.length !== 32) throw new Error("Invite Secret must be a 32-byte hex key");
+    const scalar = bytesToBigInt(secretBytes);
+    if (scalar <= 0n || scalar >= SECP_N) throw new Error("Invite Secret is outside secp256k1 range");
+    return secretBytes;
+  }
+
+  function inviteUnwrapKeypairFromSecret(secretHex) {
+    const secretBytes = normalizeInviteSecretBytes(secretHex);
+    const scalar = bytesToBigInt(secretBytes);
+    const publicPoint = secpPointMultiply(SECP_G, scalar);
+    if (!publicPoint) throw new Error("Invite Secret did not produce a public key");
+    const publicKeyHex = bytesToHex(bigIntToBytes(publicPoint.x));
+    return {
+      npub: npubFromHex(publicKeyHex),
+      publicKeyHex,
+      secretBytes,
+      secretHex: bytesToHex(secretBytes),
+    };
+  }
+
+  function randomInviteSecretBytes() {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const secretBytes = crypto.getRandomValues(new Uint8Array(32));
+      const scalar = bytesToBigInt(secretBytes);
+      if (scalar > 0n && scalar < SECP_N) return secretBytes;
+    }
+    throw new Error("Unable to generate Invite Secret");
+  }
+
+  function createInviteUnwrapKeypair() {
+    return inviteUnwrapKeypairFromSecret(bytesToHex(randomInviteSecretBytes()));
+  }
+
+  async function sha256Bytes(bytes) {
+    return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  }
+
+  async function taggedHash(tag, ...messages) {
+    const tagBytes = new TextEncoder().encode(tag);
+    const tagHash = await sha256Bytes(tagBytes);
+    return sha256Bytes(concatBytes(tagHash, tagHash, ...messages));
+  }
+
+  function xorBytes(left, right) {
+    if (left.length !== right.length) throw new Error("byte arrays must have equal length");
+    const output = new Uint8Array(left.length);
+    for (let index = 0; index < left.length; index += 1) output[index] = left[index] ^ right[index];
+    return output;
+  }
+
+  async function schnorrSign(message32, secretBytes, auxBytes = crypto.getRandomValues(new Uint8Array(32))) {
+    if (message32.length !== 32) throw new Error("Schnorr signing requires a 32-byte message hash");
+    if (auxBytes.length !== 32) throw new Error("Schnorr aux randomness must be 32 bytes");
+    const d0 = bytesToBigInt(secretBytes);
+    const point = secpPointMultiply(SECP_G, d0);
+    if (!point) throw new Error("Schnorr private key is invalid");
+    const d = point.y & 1n ? SECP_N - d0 : d0;
+    const publicKey = bigIntToBytes(point.x);
+    const t = xorBytes(bigIntToBytes(d), await taggedHash("BIP0340/aux", auxBytes));
+    const k0 = bytesToBigInt(await taggedHash("BIP0340/nonce", t, publicKey, message32)) % SECP_N;
+    if (k0 === 0n) throw new Error("Schnorr nonce is invalid");
+    const noncePoint = secpPointMultiply(SECP_G, k0);
+    const k = noncePoint.y & 1n ? SECP_N - k0 : k0;
+    const r = bigIntToBytes(noncePoint.x);
+    const e = bytesToBigInt(await taggedHash("BIP0340/challenge", r, publicKey, message32)) % SECP_N;
+    const s = bigIntToBytes(mod(k + e * d, SECP_N));
+    return bytesToHex(concatBytes(r, s));
+  }
+
+  async function signEventWithInviteSecret(eventTemplate, inviteSecret, options = {}) {
+    const keypair = inviteUnwrapKeypairFromSecret(inviteSecret);
+    const event = {
+      ...eventTemplate,
+      pubkey: keypair.publicKeyHex,
+    };
+    event.id = await sha256Hex(canonicalNostrEventIdInput(event));
+    event.sig = await schnorrSign(
+      hexToBytes(event.id),
+      keypair.secretBytes,
+      options.auxBytes || crypto.getRandomValues(new Uint8Array(32))
+    );
+    return event;
+  }
+
+  async function hmacSha256(keyBytes, messageBytes) {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    return new Uint8Array(await crypto.subtle.sign("HMAC", key, messageBytes));
+  }
+
+  async function hkdfExtract(salt, ikm) {
+    return hmacSha256(salt, ikm);
+  }
+
+  async function hkdfExpand(prk, info, length) {
+    const blocks = [];
+    let previous = new Uint8Array();
+    let outputLength = 0;
+    for (let counter = 1; outputLength < length; counter += 1) {
+      previous = await hmacSha256(prk, concatBytes(previous, info, Uint8Array.of(counter)));
+      blocks.push(previous);
+      outputLength += previous.length;
+    }
+    return concatBytes(...blocks).slice(0, length);
+  }
+
+  async function nip44ConversationKey(secretHex, peerHex) {
+    const secretBytes = normalizeInviteSecretBytes(secretHex);
+    const peerPoint = secpLiftX(bytesToBigInt(hexToBytes(peerHex)));
+    const shared = secpPointMultiply(peerPoint, bytesToBigInt(secretBytes));
+    if (!shared) throw new Error("NIP-44 shared point is invalid");
+    return hkdfExtract(new TextEncoder().encode("nip44-v2"), bigIntToBytes(shared.x));
+  }
+
+  async function nip44MessageKeys(conversationKey, nonce) {
+    if (conversationKey.length !== 32 || nonce.length !== 32) {
+      throw new Error("NIP-44 key derivation requires 32-byte inputs");
+    }
+    const keys = await hkdfExpand(conversationKey, nonce, 76);
+    return {
+      chachaKey: keys.slice(0, 32),
+      chachaNonce: keys.slice(32, 44),
+      hmacKey: keys.slice(44, 76),
+    };
+  }
+
+  function readU32Le(bytes, offset) {
+    return (
+      (bytes[offset] |
+        (bytes[offset + 1] << 8) |
+        (bytes[offset + 2] << 16) |
+        (bytes[offset + 3] << 24)) >>>
+      0
+    );
+  }
+
+  function writeU32Le(bytes, offset, value) {
+    bytes[offset] = value & 0xff;
+    bytes[offset + 1] = (value >>> 8) & 0xff;
+    bytes[offset + 2] = (value >>> 16) & 0xff;
+    bytes[offset + 3] = (value >>> 24) & 0xff;
+  }
+
+  function rotateLeft32(value, bits) {
+    return ((value << bits) | (value >>> (32 - bits))) >>> 0;
+  }
+
+  function chachaQuarterRound(state, a, b, c, d) {
+    state[a] = (state[a] + state[b]) >>> 0;
+    state[d] = rotateLeft32(state[d] ^ state[a], 16);
+    state[c] = (state[c] + state[d]) >>> 0;
+    state[b] = rotateLeft32(state[b] ^ state[c], 12);
+    state[a] = (state[a] + state[b]) >>> 0;
+    state[d] = rotateLeft32(state[d] ^ state[a], 8);
+    state[c] = (state[c] + state[d]) >>> 0;
+    state[b] = rotateLeft32(state[b] ^ state[c], 7);
+  }
+
+  function chacha20Block(key, nonce, counter) {
+    const state = new Uint32Array(16);
+    state[0] = 0x61707865;
+    state[1] = 0x3320646e;
+    state[2] = 0x79622d32;
+    state[3] = 0x6b206574;
+    for (let index = 0; index < 8; index += 1) state[4 + index] = readU32Le(key, index * 4);
+    state[12] = counter >>> 0;
+    state[13] = readU32Le(nonce, 0);
+    state[14] = readU32Le(nonce, 4);
+    state[15] = readU32Le(nonce, 8);
+    const working = new Uint32Array(state);
+    for (let round = 0; round < 10; round += 1) {
+      chachaQuarterRound(working, 0, 4, 8, 12);
+      chachaQuarterRound(working, 1, 5, 9, 13);
+      chachaQuarterRound(working, 2, 6, 10, 14);
+      chachaQuarterRound(working, 3, 7, 11, 15);
+      chachaQuarterRound(working, 0, 5, 10, 15);
+      chachaQuarterRound(working, 1, 6, 11, 12);
+      chachaQuarterRound(working, 2, 7, 8, 13);
+      chachaQuarterRound(working, 3, 4, 9, 14);
+    }
+    const output = new Uint8Array(64);
+    for (let index = 0; index < 16; index += 1) {
+      writeU32Le(output, index * 4, (working[index] + state[index]) >>> 0);
+    }
+    return output;
+  }
+
+  function chacha20Xor(key, nonce, data) {
+    if (key.length !== 32 || nonce.length !== 12) throw new Error("invalid ChaCha20 key or nonce");
+    const output = new Uint8Array(data.length);
+    let counter = 0;
+    for (let offset = 0; offset < data.length; offset += 64) {
+      const block = chacha20Block(key, nonce, counter);
+      counter += 1;
+      for (let index = 0; index < Math.min(64, data.length - offset); index += 1) {
+        output[offset + index] = data[offset + index] ^ block[index];
+      }
+    }
+    return output;
+  }
+
+  function timingSafeEqual(left, right) {
+    if (left.length !== right.length) return false;
+    let diff = 0;
+    for (let index = 0; index < left.length; index += 1) diff |= left[index] ^ right[index];
+    return diff === 0;
+  }
+
+  function nip44PaddedLength(length) {
+    if (length <= 32) return 32;
+    const nextPower = 2 ** (Math.floor(Math.log2(length - 1)) + 1);
+    const chunk = nextPower <= 256 ? 32 : nextPower / 8;
+    return chunk * (Math.floor((length - 1) / chunk) + 1);
+  }
+
+  function nip44Unpad(padded) {
+    if (padded.length < 34) throw new Error("NIP-44 padding is invalid");
+    const firstTwo = (padded[0] << 8) | padded[1];
+    let plaintextLength;
+    let prefixLength;
+    if (firstTwo === 0) {
+      if (padded.length < 6) throw new Error("NIP-44 extended padding is invalid");
+      plaintextLength =
+        padded[2] * 0x1000000 + ((padded[3] << 16) | (padded[4] << 8) | padded[5]);
+      if (plaintextLength < 65536) throw new Error("NIP-44 padding is invalid");
+      prefixLength = 6;
+    } else {
+      plaintextLength = firstTwo;
+      prefixLength = 2;
+    }
+    const paddedLength = nip44PaddedLength(plaintextLength);
+    if (!plaintextLength || padded.length !== prefixLength + paddedLength) {
+      throw new Error("NIP-44 padding is invalid");
+    }
+    return new TextDecoder().decode(padded.slice(prefixLength, prefixLength + plaintextLength));
+  }
+
+  function nip44Pad(plaintext) {
+    const plaintextBytes = new TextEncoder().encode(String(plaintext ?? ""));
+    const paddedLength = nip44PaddedLength(plaintextBytes.length);
+    let prefixLength;
+    if (plaintextBytes.length < 65536) {
+      prefixLength = 2;
+    } else {
+      prefixLength = 6;
+    }
+    const padded = new Uint8Array(prefixLength + paddedLength);
+    if (prefixLength === 2) {
+      padded[0] = (plaintextBytes.length >>> 8) & 0xff;
+      padded[1] = plaintextBytes.length & 0xff;
+    } else {
+      padded[2] = (plaintextBytes.length >>> 24) & 0xff;
+      padded[3] = (plaintextBytes.length >>> 16) & 0xff;
+      padded[4] = (plaintextBytes.length >>> 8) & 0xff;
+      padded[5] = plaintextBytes.length & 0xff;
+    }
+    padded.set(plaintextBytes, prefixLength);
+    return padded;
+  }
+
+  async function nip44EncryptWithSecret(inviteSecret, recipientHex, plaintext, options = {}) {
+    const nonce = options.nonceBytes || crypto.getRandomValues(new Uint8Array(32));
+    if (nonce.length !== 32) throw new Error("NIP-44 nonce must be 32 bytes");
+    const conversationKey = await nip44ConversationKey(inviteSecret, recipientHex);
+    const keys = await nip44MessageKeys(conversationKey, nonce);
+    const ciphertext = chacha20Xor(keys.chachaKey, keys.chachaNonce, nip44Pad(plaintext));
+    const mac = await hmacSha256(keys.hmacKey, concatBytes(nonce, ciphertext));
+    return bytesToBase64(concatBytes(Uint8Array.of(2), nonce, ciphertext, mac));
+  }
+
+  async function nip44DecryptWithSecret(inviteSecret, senderHex, payload) {
+    const value = String(payload || "");
+    if (!value || value[0] === "#" || value.length < 132) throw new Error("NIP-44 payload is invalid");
+    const data = base64ToBytes(value);
+    if (data.length < 99 || data[0] !== 2) throw new Error("NIP-44 payload version is unsupported");
+    const nonce = data.slice(1, 33);
+    const ciphertext = data.slice(33, data.length - 32);
+    const mac = data.slice(data.length - 32);
+    const conversationKey = await nip44ConversationKey(inviteSecret, senderHex);
+    const keys = await nip44MessageKeys(conversationKey, nonce);
+    const calculatedMac = await hmacSha256(keys.hmacKey, concatBytes(nonce, ciphertext));
+    if (!timingSafeEqual(calculatedMac, mac)) throw new Error("NIP-44 payload MAC is invalid");
+    return nip44Unpad(chacha20Xor(keys.chachaKey, keys.chachaNonce, ciphertext));
+  }
+
+  function inviteSecretDecryptAdapter(inviteSecret) {
+    return (senderHex, ciphertext) => nip44DecryptWithSecret(inviteSecret, senderHex, ciphertext);
+  }
+
+  function createLocalNip07ProviderFromSecret(secretHex, options = {}) {
+    const keypair = inviteUnwrapKeypairFromSecret(secretHex);
+    return {
+      async getPublicKey() {
+        return keypair.publicKeyHex;
+      },
+      async signEvent(eventTemplate) {
+        return signEventWithInviteSecret(eventTemplate, secretHex, options);
+      },
+      nip44: {
+        async encrypt(peerHex, plaintext) {
+          return nip44EncryptWithSecret(secretHex, peerHex, plaintext);
+        },
+        async decrypt(peerHex, ciphertext) {
+          return nip44DecryptWithSecret(secretHex, peerHex, ciphertext);
+        },
+      },
+    };
   }
 
   function convertBits(data, fromBits, toBits, pad) {
@@ -1253,20 +1852,34 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  async function plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub = null, options = {}) {
-    if (!grant?.wrappedEventJson) throw new Error("Folder Key Grant wrapper is missing");
+  async function openGiftWrappedRumorContent(wrappedEventJson, expectedRecipientNpub = null, options = {}, label = "Folder Key Grant") {
+    if (!wrappedEventJson) throw new Error(`${label} wrapper is missing`);
     const decrypt = nip44DecryptAdapter(options);
     if (!decrypt) throw new Error("NIP-44 decryption is unavailable");
     const expectedRecipientHex = expectedRecipientNpub ? npubToHex(expectedRecipientNpub) : null;
-    const giftWrap = parseJsonObject(grant.wrappedEventJson, "Folder Key Grant wrapper");
+    const giftWrap = parseJsonObject(wrappedEventJson, `${label} wrapper`);
     validateGiftWrapShell(giftWrap, expectedRecipientHex);
     const sealPlaintext = await decrypt(requireHex64(giftWrap.pubkey, "gift wrap pubkey"), giftWrap.content);
-    const seal = parseJsonObject(sealPlaintext, "Folder Key Grant seal");
+    const seal = parseJsonObject(sealPlaintext, `${label} seal`);
     validateSealEvent(seal);
     const sealIssuerHex = requireHex64(seal.pubkey, "seal pubkey");
     const rumorPlaintext = await decrypt(sealIssuerHex, seal.content);
-    const rumor = parseJsonObject(rumorPlaintext, "Folder Key Grant rumor");
+    const rumor = parseJsonObject(rumorPlaintext, `${label} rumor`);
     await validateRumorEvent(rumor, sealIssuerHex);
+    return {
+      giftWrap,
+      rumor,
+      seal,
+    };
+  }
+
+  async function plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub = null, options = {}) {
+    const { rumor } = await openGiftWrappedRumorContent(
+      grant?.wrappedEventJson,
+      expectedRecipientNpub,
+      options,
+      "Folder Key Grant"
+    );
     const plaintext = parseJsonObject(rumor.content, "Folder Key Grant plaintext");
     return validateFolderKeyGrantPlaintext(plaintext, expectedRecipientNpub, grant);
   }
@@ -1697,6 +2310,10 @@ const FiniteBrainProductClient = (() => {
     return page.title || pageTitleFromText(page.text ?? "", pageTitleFromPath(page.path, page.objectId));
   }
 
+  function pageKeyForPage(page) {
+    return page.key || pageKey(page.folderId, page.objectId);
+  }
+
   function normalizePageReference(value) {
     return String(value || "")
       .trim()
@@ -1718,6 +2335,35 @@ const FiniteBrainProductClient = (() => {
       if (!/^https?:\/\//i.test(target)) links.add(normalizePageReference(target));
     }
     return [...links].filter(Boolean);
+  }
+
+  function pageReferencesForPage(page) {
+    return [
+      pageTitleForPage(page),
+      page.path || `${page.objectId}.md`,
+      String(page.path || `${page.objectId}.md`).split("/").pop(),
+    ]
+      .map(normalizePageReference)
+      .filter(Boolean);
+  }
+
+  function pageReferenceMap(pages = readablePages()) {
+    const byReference = new Map();
+    for (const page of pages.filter(isReadablePage)) {
+      for (const reference of pageReferencesForPage(page)) {
+        if (!byReference.has(reference)) byReference.set(reference, page);
+      }
+    }
+    return byReference;
+  }
+
+  function pageForReference(reference, pages = readablePages()) {
+    return pageReferenceMap(pages).get(normalizePageReference(reference)) || null;
+  }
+
+  function pageKeyForReference(reference, pages = readablePages()) {
+    const page = pageForReference(reference, pages);
+    return page ? pageKeyForPage(page) : null;
   }
 
   function inlineLinkSegments(text) {
@@ -2780,24 +3426,10 @@ const FiniteBrainProductClient = (() => {
 
   function pageLinkContext(page, pages = readablePages()) {
     if (!isReadablePage(page)) return { backlinks: [], outgoing: [] };
-    const keyForPage = (candidate) => candidate.key || pageKey(candidate.folderId, candidate.objectId);
     const readable = [...pages].filter(isReadablePage);
-    const referencesForPage = (candidate) =>
-      [
-        pageTitleForPage(candidate),
-        candidate.path || `${candidate.objectId}.md`,
-        String(candidate.path || `${candidate.objectId}.md`).split("/").pop(),
-      ]
-        .map(normalizePageReference)
-        .filter(Boolean);
-    const byReference = new Map();
-    for (const candidate of readable) {
-      for (const reference of referencesForPage(candidate)) {
-        if (!byReference.has(reference)) byReference.set(reference, candidate);
-      }
-    }
-    const currentKey = keyForPage(page);
-    const currentReferences = new Set(referencesForPage(page));
+    const byReference = pageReferenceMap(readable);
+    const currentKey = pageKeyForPage(page);
+    const currentReferences = new Set(pageReferencesForPage(page));
     const outgoing = extractPageLinks(page.text).map((targetRef) => {
       const target = byReference.get(targetRef);
       if (!target) {
@@ -2810,19 +3442,19 @@ const FiniteBrainProductClient = (() => {
       }
       return {
         detail: target.folderId,
-        key: keyForPage(target),
+        key: pageKeyForPage(target),
         label: pageTitleForPage(target),
         status: "resolved",
       };
     });
     const backlinks = readable
-      .filter((candidate) => keyForPage(candidate) !== currentKey)
+      .filter((candidate) => pageKeyForPage(candidate) !== currentKey)
       .filter((candidate) =>
         extractPageLinks(candidate.text).some((targetRef) => currentReferences.has(targetRef))
       )
       .map((candidate) => ({
         detail: candidate.folderId,
-        key: keyForPage(candidate),
+        key: pageKeyForPage(candidate),
         label: pageTitleForPage(candidate),
         status: "resolved",
       }))
@@ -3186,6 +3818,41 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
+  function linkElementFromEventTarget(target) {
+    const node = target?.nodeType === 3 ? target.parentElement : target;
+    return node?.closest?.(".internal-link, .external-link") || null;
+  }
+
+  function openInternalPageReference(reference) {
+    const key = pageKeyForReference(reference);
+    if (!key) return false;
+    selectReaderPage(key);
+    return true;
+  }
+
+  function activatePageContentLink(event) {
+    const link = linkElementFromEventTarget(event?.target);
+    const content = $("readerPageContent");
+    if (!link || !content?.contains?.(link)) return false;
+    const target = link.dataset?.target || "";
+    if (!target) return false;
+    event.preventDefault?.();
+    if (String(link.className || "").includes("external-link")) {
+      window.open?.(target, "_blank", "noopener,noreferrer");
+      return true;
+    }
+    if (openInternalPageReference(target)) return true;
+    state.lastError = `Page link not found: ${target}`;
+    log("Page link target was not found.", { target });
+    render();
+    return true;
+  }
+
+  function handlePageContentLinkKeydown(event) {
+    if (event.key !== "Enter" && event.key !== " ") return false;
+    return activatePageContentLink(event);
+  }
+
   function existingPagesForImport() {
     const pages = [];
     for (const [key, draft] of state.projection.localDrafts.entries()) {
@@ -3423,6 +4090,8 @@ const FiniteBrainProductClient = (() => {
       link.className = segment.kind === "external" ? "external-link" : "internal-link";
       appendFormattedText(link, segment.text || segment.target);
       if (segment.target) link.dataset.target = segment.target;
+      link.tabIndex = 0;
+      link.setAttribute?.("role", "link");
       parent.appendChild(link);
     }
   }
@@ -4412,8 +5081,17 @@ const FiniteBrainProductClient = (() => {
     if (!$("vaultInviteExpiresAtInput").value) {
       $("vaultInviteExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
     }
+    if ($("vaultInviteEmailProofCreatedAtInput") && !$("vaultInviteEmailProofCreatedAtInput").value) {
+      $("vaultInviteEmailProofCreatedAtInput").value = dateTimeLocalFromIso(new Date().toISOString());
+    }
     if (state.lastVaultInvitationCode && !$("vaultInviteCodeInput").value) {
       $("vaultInviteCodeInput").value = state.lastVaultInvitationCode;
+    }
+    if (state.lastEmailInviteSecret && $("vaultInviteSecretInput") && !$("vaultInviteSecretInput").value) {
+      $("vaultInviteSecretInput").value = state.lastEmailInviteSecret;
+    }
+    if (state.lastEmailInviteUrl && $("vaultInviteUrlInput")) {
+      $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
     }
     const connected = state.signerStatus === "connected";
     const busy = state.accessBusy;
@@ -4422,18 +5100,26 @@ const FiniteBrainProductClient = (() => {
     const codeAvailable = Boolean(invitationInput);
     const codeHint = vaultInvitationIdentifierHint(invitationInput);
     const inviteCodeUsable = codeAvailable && !codeHint;
+    const emailClaimReady = Boolean(
+      inviteCodeUsable &&
+        $("vaultInviteEmailInput")?.value.trim() &&
+        $("vaultInviteSecretInput")?.value.trim()
+    );
+    safeSetHidden("vaultInviteConnectSignerButton", connected);
+    setOptionalDisabled("vaultInviteConnectSignerButton", busy || !deriveSignerState(window.nostr).canConnect);
     $("createVaultInvitationButton").disabled = !connected || busy || !state.activeVaultId || !organizationVault;
     $("getVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
+    setOptionalDisabled("getEmailInviteInstructionsButton", !connected || busy || !emailClaimReady);
     $("acceptVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
     $("revokeVaultInvitationButton").disabled = !connected || busy || !codeAvailable || !organizationVault;
     if (!connected) {
       setText("vaultInvitationHint", "Connect signer");
     } else if (codeHint) {
       setText("vaultInvitationHint", codeHint);
-    } else if (state.metadata?.kind === "organization") {
-      setText("vaultInvitationHint", activeSignerInviteDetail());
+    } else if (inviteCodeUsable) {
+      setText("vaultInvitationHint", "Ready to join");
     } else {
-      setText("vaultInvitationHint", activeSignerInviteDetail());
+      setText("vaultInvitationHint", "Accept invite code");
     }
   }
 
@@ -4615,48 +5301,40 @@ const FiniteBrainProductClient = (() => {
       {
         done: Boolean(organizationLoaded && isAdmin),
         id: "admin",
-        label: "Use a Vault admin npub",
+        label: "Use a Vault admin email",
       },
     ];
   }
 
   function vaultPeopleRows(metadata) {
     if (!metadata) return [];
+    const vaultPersonRow = (npub, role, type, removable) => {
+      const identity = identityMetadataForNpub(npub);
+      return {
+        details: identity.details,
+        id: npub,
+        name: identity.display,
+        npub: identity.npub,
+        role,
+        status: identity.status,
+        tooltip: identity.tooltip,
+        type,
+        removable,
+      };
+    };
     if (metadata.kind === "personal") {
       const owner = metadata.ownerUserId || metadata.owner_user_id || null;
-      return owner
-        ? [
-            {
-              id: owner,
-              name: accessPersonName(owner),
-              role: "owner",
-              type: "owner",
-              removable: false,
-            },
-          ]
-        : [];
+      return owner ? [vaultPersonRow(owner, "owner", "owner", false)] : [];
     }
     const rows = [];
     const admins = uniqueNpubs(metadata.admins || []);
     const members = uniqueNpubs(metadata.members || []);
     for (const admin of admins) {
-      rows.push({
-        id: admin,
-        name: accessPersonName(admin),
-        role: "admin",
-        type: "admin",
-        removable: true,
-      });
+      rows.push(vaultPersonRow(admin, "admin", "admin", true));
     }
     for (const member of members) {
       if (admins.includes(member)) continue;
-      rows.push({
-        id: member,
-        name: accessPersonName(member),
-        role: "member",
-        type: "member",
-        removable: true,
-      });
+      rows.push(vaultPersonRow(member, "member", "member", true));
     }
     return rows;
   }
@@ -4753,15 +5431,31 @@ const FiniteBrainProductClient = (() => {
   function renderVaultManagementPanel(metadata) {
     const signerConnected = state.signerStatus === "connected";
     const organizationVault = hasOrganizationVaultControls(metadata);
+    const inviteInProgress = Boolean(
+      state.lastVaultInvitationCode ||
+        $("vaultInviteCodeInput")?.value.trim() ||
+        $("vaultInviteSecretInput")?.value.trim()
+    );
     setText("vaultManagementTitle", "Vaults");
     setText("vaultManagementSummary", vaultManagementSummary(metadata));
     renderVaultSwitchList();
     safeSetHidden("accessConnectSignerButton", signerConnected);
     safeSetHidden("accessCreateOrganizationPanel", !showsCreateOrganizationControl(metadata));
+    safeSetElement("vaultPeopleActionPanel", (panel) => {
+      panel.hidden = !organizationVault;
+      if (!organizationVault) panel.open = false;
+    });
     safeSetHidden("vaultPeopleSection", !organizationVault);
     safeSetHidden("vaultInvitationListSection", !organizationVault);
     safeSetHidden("sharedFolderSection", !organizationVault);
-    safeSetHidden("vaultInvitationPanel", !organizationVault);
+    safeSetElement("vaultInvitationPanel", (panel) => {
+      panel.hidden = !(organizationVault || inviteInProgress);
+      if (panel.hidden) {
+        panel.open = false;
+      } else if (inviteInProgress) {
+        panel.open = true;
+      }
+    });
     setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
     setOptionalDisabled("accessLoadVaultButton", !canLoadVault());
     setOptionalDisabled(
@@ -4806,19 +5500,48 @@ const FiniteBrainProductClient = (() => {
       personInfo.appendChild(roleSpan);
       item.appendChild(personInfo);
 
-      if (!person.removable || !canManage) return;
-      const removeButton = document.createElement("button");
-      removeButton.className = "access-remove-person vault-person-action";
-      removeButton.type = "button";
-      removeButton.textContent = person.type === "admin" ? "Remove admin" : "Remove";
-      removeButton.addEventListener("click", () => {
-        const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
-        action(person.id).catch((error) => {
-          state.lastError = error.message;
-          log("Failed to update Vault people.", { error: error.message });
-        });
+      const detailButton = document.createElement("button");
+      detailButton.className = "access-person-info-button";
+      detailButton.type = "button";
+      detailButton.title = person.tooltip;
+      detailButton.setAttribute("aria-expanded", "false");
+      detailButton.setAttribute("aria-label", `Show identity details for ${person.name}`);
+      detailButton.innerHTML =
+        '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></svg>';
+
+      const detailPanel = document.createElement("dl");
+      detailPanel.className = "access-person-detail-panel";
+      detailPanel.hidden = true;
+      for (const detail of person.details || []) {
+        const term = document.createElement("dt");
+        term.textContent = detail.label;
+        const value = document.createElement("dd");
+        value.textContent = detail.value;
+        detailPanel.appendChild(term);
+        detailPanel.appendChild(value);
+      }
+      detailButton.addEventListener("click", () => {
+        const isOpen = !detailPanel.hidden;
+        detailPanel.hidden = isOpen;
+        detailButton.setAttribute("aria-expanded", String(!isOpen));
       });
-      item.appendChild(removeButton);
+      item.appendChild(detailButton);
+
+      if (person.removable && canManage) {
+        const removeButton = document.createElement("button");
+        removeButton.className = "access-remove-person vault-person-action";
+        removeButton.type = "button";
+        removeButton.textContent = person.type === "admin" ? "Remove admin" : "Remove";
+        removeButton.addEventListener("click", () => {
+          const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
+          action(person.id).catch((error) => {
+            state.lastError = error.message;
+            log("Failed to update Vault people.", { error: error.message });
+          });
+        });
+        item.appendChild(removeButton);
+      }
+      item.appendChild(detailPanel);
     });
   }
 
@@ -4834,6 +5557,7 @@ const FiniteBrainProductClient = (() => {
           ? "Admins must already be Vault members."
           : "Only Vault admins can change organization members and admins.";
     setText("vaultPeopleHint", hint);
+    setText("vaultPeopleActionHint", canManage ? "Invite, add, promote" : "Admin-only");
   }
 
   function linkRowActionButton(label, onClick, options = {}) {
@@ -4906,7 +5630,7 @@ const FiniteBrainProductClient = (() => {
     const pendingCount = rows.filter((row) => row.status === "pending").length;
     setPill("vaultInvitationCount", `${pendingCount}`, pendingCount ? "ready" : "muted");
     const emptyText = canLoadVaultAdminLists()
-      ? "No invitations yet. Create one under Vault invitations below."
+      ? "No invitations yet. Create one under Give Vault access."
       : "Vault admins see pending invitations here.";
     setList("vaultInvitationList", rows, emptyText, (item, row) => {
       linkRowInfo(item, identityDisplay(row.targetNpub), row.status, `expires ${row.expiresAt.slice(0, 10)}`);
@@ -5045,6 +5769,7 @@ const FiniteBrainProductClient = (() => {
       setText("accessSummaryLine", "Load a Vault and select a Folder to inspect access.");
       renderWhoHasAccessList(null, metadata, openedFolders);
       renderAccessFlowPanel(null);
+      updateAdvancedOptions(null, metadata, openedFolders);
       return;
     }
 
@@ -5075,21 +5800,38 @@ const FiniteBrainProductClient = (() => {
 
   function renderWhoHasAccessList(row, metadata, openedFolders) {
     const list = $("accessWhoHasList");
+    const addPanel = $("accessAddPersonPanel");
     const manageToggle = $("accessManageToggle");
     const addForm = $("accessAddPersonForm");
 
     if (!row) {
       list.innerHTML = '<li class="access-empty-state">No access information available</li>';
-      manageToggle.hidden = true;
-      addForm.hidden = true;
+      if (addPanel) {
+        addPanel.hidden = true;
+        addPanel.open = false;
+      }
+      if (manageToggle) manageToggle.hidden = true;
+      if (addForm) addForm.hidden = true;
       return;
     }
 
-    const canManage = row.access === "restricted" && hasOpenedAccessFolderKey(row) && state.signerStatus === "connected";
-    manageToggle.hidden = !canManage;
-    if (!canManage) addForm.hidden = true;
-    setText("accessManageToggleLabel", addForm.hidden ? "Manage" : "Cancel");
-    manageToggle.setAttribute("aria-expanded", String(!addForm.hidden));
+    const canManage =
+      folderAllowsDirectGrant(row) &&
+      hasOpenedAccessFolderKey(row) &&
+      state.signerStatus === "connected";
+    if (addPanel) {
+      addPanel.hidden = false;
+    }
+    if (addForm) {
+      addForm.hidden = false;
+      addForm.classList.toggle("is-ready", canManage);
+      addForm.classList.toggle("is-locked", !canManage);
+    }
+    if (manageToggle) {
+      manageToggle.hidden = !canManage;
+      setText("accessManageToggleLabel", addForm?.hidden ? "Manage" : "Cancel");
+      manageToggle.setAttribute("aria-expanded", String(!addForm?.hidden));
+    }
 
     const accessList = buildAccessList(row, metadata);
 
@@ -5138,7 +5880,7 @@ const FiniteBrainProductClient = (() => {
       });
     }
 
-    manageToggle.onclick = () => {
+    if (manageToggle && addForm) manageToggle.onclick = () => {
       const isShowing = !addForm.hidden;
       addForm.hidden = isShowing;
       setText("accessManageToggleLabel", isShowing ? "Manage" : "Cancel");
@@ -5157,12 +5899,7 @@ const FiniteBrainProductClient = (() => {
   function accessPersonName(person) {
     if (!person) return "-";
     if (typeof person === "string") return identityDisplay(person);
-    return (
-      person.name ||
-      person.displayName ||
-      person.display_name ||
-      identityDisplay(accessPersonId(person))
-    );
+    return identityEmailDisplay(person) || identityDisplay(accessPersonId(person));
   }
 
   function addAccessListPerson(accessList, person, role, type, removable = false) {
@@ -5228,14 +5965,20 @@ const FiniteBrainProductClient = (() => {
     const addInput = $("accessAddPersonInput");
     const addButton = $("accessAddPersonButton");
     const addHint = $("accessAddPersonHint");
+    const keyOpen = hasOpenedAccessFolderKey(row);
+    const canManage =
+      folderAllowsDirectGrant(row) &&
+      keyOpen &&
+      state.signerStatus === "connected";
 
-    addButton.disabled = state.accessBusy || state.signerStatus !== "connected";
+    addButton.disabled = state.accessBusy || !canManage;
+    addInput.disabled = state.accessBusy || !canManage;
 
     addButton.onclick = () => {
-      const npub = addInput.value.trim();
-      if (npub && row) {
+      const email = addInput.value.trim();
+      if (email && row) {
         // Set the target field that the existing function expects
-        $("accessTargetNpubInput").value = npub;
+        $("accessTargetNpubInput").value = email;
         state.activeAccessIntent = "people";
         grantFolderAccessFromPanel();
         addInput.value = "";
@@ -5248,7 +5991,15 @@ const FiniteBrainProductClient = (() => {
       }
     };
 
-    setText("accessAddPersonHint", `Enter npub to grant access to "${row.path}"`);
+    if (state.signerStatus !== "connected") {
+      addHint.textContent = "Connect a signer to grant access to this Folder.";
+    } else if (!folderAllowsDirectGrant(row) || !keyOpen) {
+      addHint.textContent = accessFlowHint(row, "people", keyOpen);
+    } else {
+      addHint.textContent = row.access === "all_members"
+        ? `Enter an existing Vault member email to send the Folder Key for "${row.path}"`
+        : `Enter an email to grant access to "${row.path}"`;
+    }
   }
 
   function removePersonAccess(personId, folderId) {
@@ -5262,41 +6013,62 @@ const FiniteBrainProductClient = (() => {
 
   function updateAdvancedOptions(row, metadata, openedFolders) {
     const section = $("accessAdvancedSection");
+    const linkListSection = $("folderShareLinkListSection");
     const shareForm = $("accessShareForm");
     const shareHint = $("accessShareHint");
     const createShareButton = $("createShareLinkButton");
     const acceptShareButton = $("acceptShareLinkButton");
     const revokeShareButton = $("revokeShareLinkButton");
+    const shareTargetInput = $("accessShareTargetInput");
+    const shareExpiresInput = $("accessShareExpiresAtInput");
+    const shareMountInput = $("accessShareMountInput");
+    const shareMountHint = $("accessShareMountHint");
 
     if (!row) {
       section.hidden = true;
+      section.open = false;
+      if (linkListSection) linkListSection.hidden = true;
       return;
     }
 
     section.hidden = false;
+    if (linkListSection) linkListSection.hidden = false;
 
     // Update share link controls
     const keyOpen = hasOpenedAccessFolderKey(row);
-    const canShare = keyOpen && !state.accessBusy && state.signerStatus === "connected";
+    const isRestricted = row.access === "restricted";
+    const canCreateShare =
+      isRestricted &&
+      keyOpen &&
+      !state.accessBusy &&
+      state.signerStatus === "connected";
 
-    createShareButton.disabled = !canShare;
+    createShareButton.disabled = !canCreateShare;
     acceptShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
     revokeShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
+    shareTargetInput.disabled = !canCreateShare;
+    shareExpiresInput.disabled = !canCreateShare;
+    shareMountInput.disabled = !canCreateShare;
 
     if (shareForm) {
-      shareForm.classList.toggle("is-ready", canShare);
-      shareForm.classList.toggle("is-locked", !canShare);
+      shareForm.classList.toggle("is-ready", canCreateShare);
+      shareForm.classList.toggle("is-locked", !canCreateShare);
     }
     if (shareHint) {
       if (state.signerStatus !== "connected") {
         shareHint.textContent = "Connect a signer to create or accept share links.";
       } else if (!keyOpen) {
         shareHint.textContent = accessFlowHint(row, "links", keyOpen);
-      } else if (row.access !== "restricted") {
-        shareHint.textContent = accessFlowHint(row, "links", keyOpen);
+      } else if (!isRestricted) {
+        shareHint.textContent = "Share links are for restricted Folders. Choose a restricted Folder to create one.";
       } else {
-        shareHint.textContent = "Target npub receives a single-use Folder Key Grant through the link.";
+        shareHint.textContent = "Target email receives a single-use Folder Key Grant through the link.";
       }
+    }
+    if (shareMountHint) {
+      shareMountHint.textContent = canCreateShare
+        ? "When accepted, this adds the shared Folder to their Vault sidebar. It does not copy data or grant extra access."
+        : "Available when creating a restricted Folder share link.";
     }
 
     // Setup expiry defaults if not set
@@ -5462,12 +6234,12 @@ const FiniteBrainProductClient = (() => {
 
   async function signAuthHeader(path, options = {}) {
     if (!state.config) throw new Error("Product Client config has not loaded");
-    if (!window.nostr?.signEvent) throw new Error("NIP-07 signer is unavailable");
+    const signEvent = requireNip07SignEvent();
     const method = options.method || "GET";
     const bodyText = options.body || "";
     const url = `${state.config.publicBaseUrl.replace(/\/$/, "")}${path}`;
     const eventTemplate = await buildAuthEventTemplate(method, url, bodyText);
-    const signed = await window.nostr.signEvent(eventTemplate);
+    const signed = await signEvent(eventTemplate);
     return `${state.config.authScheme} ${utf8Base64(JSON.stringify(signed))}`;
   }
 
@@ -5551,7 +6323,7 @@ const FiniteBrainProductClient = (() => {
     if (!input?.vaultId) throw new Error("Vault bootstrap needs a Vault id");
     if (!input?.kind) throw new Error("Vault bootstrap needs a Vault kind");
     const actorNpub = input.actorNpub || currentActorNpub();
-    const signEvent = input.signEvent || ((event) => window.nostr.signEvent(event));
+    const signEvent = requireNip07SignEvent(input);
     const keyring = input.keyring || createSessionKeyring();
     const bootstrapGrants = [];
     const folderKeys = new Map();
@@ -5590,7 +6362,7 @@ const FiniteBrainProductClient = (() => {
     if (!input?.keyring) throw new Error("Default Vault Pages need an opened keyring");
     if (!input?.vaultId) throw new Error("Default Vault Pages need a Vault id");
     const actorNpub = input.actorNpub || currentActorNpub();
-    const signEvent = input.signEvent || ((event) => window.nostr.signEvent(event));
+    const signEvent = requireNip07SignEvent(input);
     const pages = input.pages || defaultVaultPages(input.kind);
     const writes = [];
     let pageIndex = 0;
@@ -5698,9 +6470,11 @@ const FiniteBrainProductClient = (() => {
     if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
     const vaultId = vaultIdFromName("org", name);
     const metadata = await createVault(vaultId, "organization", name);
+    const createdKeyring = state.keyring;
     if (input) input.value = "";
     rememberVisibleVault(metadata);
     setActiveVaultId(metadata.vaultId);
+    state.keyring = createdKeyring;
     state.metadata = metadata;
     await loadVisibleVaults();
     log("Created organization Vault.", { vaultId: metadata.vaultId });
@@ -5739,9 +6513,9 @@ const FiniteBrainProductClient = (() => {
     if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId) {
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
-    setText("signerDetail", `Connected as ${shortKey(pubkey)}.`);
+    setText("signerDetail", "Signer connected.");
     setText("authDetail", "Signed requests are ready for protected Vault routes.");
-    log("Connected NIP-07 signer.", { pubkey: shortKey(pubkey) });
+    log("Connected signer.", { status: "connected" });
     await loadVisibleVaults().catch((error) => {
       state.lastError = error.message;
       log("Failed to load visible Vaults.", { error: error.message });
@@ -5749,10 +6523,12 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
-  async function loadVaultMetadata() {
-    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
-    await ensureInvitedVaultAcceptedForActiveSelection();
-    await ensurePersonalVaultForActiveSelection();
+  async function loadVaultMetadata(options = {}) {
+    if (!options.preserveActive) {
+      setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
+      await ensureInvitedVaultAcceptedForActiveSelection();
+      await ensurePersonalVaultForActiveSelection();
+    }
     const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/metadata`;
     const metadata = await protectedRequest(path);
     state.metadata = metadata;
@@ -6004,6 +6780,15 @@ const FiniteBrainProductClient = (() => {
     return row;
   }
 
+  function requireGrantableAccessRow() {
+    const row = activeAccessRow();
+    if (!row) throw new Error("Select a Folder first");
+    if (!folderAllowsDirectGrant(row)) {
+      throw new Error("Folder key grants are available for restricted or all-members Folders");
+    }
+    return row;
+  }
+
   function openedAccessFolderKey(row) {
     const keyVersion = row.currentKeyVersion || currentFolderKeyVersion(row.id);
     const key = state.keyring?.keys.get(folderKeyId(state.activeVaultId, row.id, keyVersion));
@@ -6018,7 +6803,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function normalizedTargetNpub() {
-    return normalizedNpubInput("accessTargetNpubInput", "Paste a target identity first");
+    return normalizedNpubInput("accessTargetNpubInput", "Paste an email first");
   }
 
   async function normalizedNpubInput(inputId, message) {
@@ -6030,7 +6815,21 @@ const FiniteBrainProductClient = (() => {
   function defaultShareExpiryDateTimeLocal() {
     const date = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     date.setSeconds(0, 0);
-    return date.toISOString().slice(0, 16);
+    return dateTimeLocalValue(date);
+  }
+
+  function dateTimeLocalFromIso(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw new Error("Timestamp is invalid");
+    date.setSeconds(0, 0);
+    return dateTimeLocalValue(date);
+  }
+
+  function dateTimeLocalValue(date) {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+      date.getHours()
+    )}:${pad(date.getMinutes())}`;
   }
 
   function slugFromFolderName(name) {
@@ -6153,6 +6952,18 @@ const FiniteBrainProductClient = (() => {
     return date.toISOString();
   }
 
+  function emailProofCreatedAtIso() {
+    const value = $("vaultInviteEmailProofCreatedAtInput")?.value.trim();
+    if (!value) return new Date().toISOString();
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw new Error("Email proof timestamp is invalid");
+    const now = new Date();
+    if (now.getTime() >= date.getTime() && now.getTime() - date.getTime() < 60 * 1000) {
+      return now.toISOString();
+    }
+    return date.toISOString();
+  }
+
   function initialVaultInvitationFolders(value = $("vaultInviteFoldersInput").value) {
     return uniqueValues(
       String(value || "")
@@ -6207,7 +7018,7 @@ const FiniteBrainProductClient = (() => {
 
   function activeSignerInviteDetail() {
     if (state.signerStatus !== "connected" || !state.pubkeyHex) return "Connect signer";
-    return `Active signer ${shortKey(npubFromHex(state.pubkeyHex))}. Invites are bound to the target identity.`;
+    return "Active signer connected. Invites are bound to the target email.";
   }
 
   function vaultInvitationCreatePath(vaultId) {
@@ -6304,8 +7115,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function buildAdminAccessChangeEvent(input) {
-    const signEvent = input.signEvent || window.nostr?.signEvent;
-    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    const signEvent = requireNip07SignEvent(input);
     const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
     const createdAt = accessChangeCreatedAt(createdAtUnix);
     const adminNpub = input.adminNpub || currentActorNpub();
@@ -6340,8 +7150,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function buildFolderKeyGrantRequest(input) {
-    const signEvent = input.signEvent || window.nostr?.signEvent;
-    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    const signEvent = requireNip07SignEvent(input);
     const encrypt = nip44EncryptAdapter(input);
     if (!encrypt && !input.allowPlaintextDevelopmentGrant) {
       throw new Error("NIP-44 encryption is unavailable");
@@ -6419,6 +7228,368 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function inviteEmailLike(value) {
+    return looksLikeEmailIdentity(value);
+  }
+
+  function finiteVipEmail(value) {
+    return /@finite\.vip$/i.test(String(value || "").trim());
+  }
+
+  function canonicalInviteEmail(value) {
+    const email = String(value || "").trim().toLowerCase();
+    if (!inviteEmailLike(email)) throw new Error("Email invite target must be an email address");
+    if (/[\u0000-\u001f\u007f]/.test(email)) {
+      throw new Error("Email invite target must be printable");
+    }
+    return email;
+  }
+
+  function emailInviteScope(metadata, selectedFolders) {
+    const selectedValues = Array.isArray(selectedFolders)
+      ? selectedFolders
+      : initialVaultInvitationFolders(selectedFolders || "");
+    const selected = new Set(uniqueValues(selectedValues));
+    const seenSelected = new Set();
+    const scope = [];
+    for (const folder of metadataFolderRows(metadata)) {
+      const selectedFolder = selected.has(folder.id);
+      if (selectedFolder) seenSelected.add(folder.id);
+      if (folder.access === "all_members" || (folder.access === "restricted" && selectedFolder)) {
+        scope.push({
+          folderId: folder.id,
+          access: folder.access,
+          keyVersion: folder.currentKeyVersion || 1,
+        });
+        continue;
+      }
+      if (selectedFolder) {
+        throw new Error("Email invite bootstrap can include all-members and selected restricted Folders only");
+      }
+    }
+    if (seenSelected.size !== selected.size) throw new Error("Folder not found");
+    return scope;
+  }
+
+  function emailInviteScopeJson(scope) {
+    return (scope || []).map((folder) => ({
+      folderId: folder.folderId,
+      access: folder.access,
+      keyVersion: Number(folder.keyVersion),
+    }));
+  }
+
+  function canonicalEmailInviteAuthorizationPayload(input) {
+    return JSON.stringify({
+      version: "finite-email-invite-bootstrap-authorization-v1",
+      vaultId: input.vaultId,
+      invitedEmail: input.invitedEmail,
+      inviteUnwrapNpub: input.inviteUnwrapNpub,
+      bootstrapPayloadHash: input.bootstrapPayloadHash,
+      expiresAt: input.expiresAt,
+      folders: emailInviteScopeJson(input.scope),
+    });
+  }
+
+  function emailInviteAuthorizationTags(input) {
+    return [
+      ["d", `finite-email-invite-bootstrap-authorization:${input.vaultId}:${input.invitedEmail}`],
+      ["vault", input.vaultId],
+      ["email", input.invitedEmail],
+    ];
+  }
+
+  async function buildEmailInviteAuthorizationEvent(input) {
+    const signEvent = requireNip07SignEvent(input);
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    return signEvent({
+      kind: APP_EVENT_KIND,
+      created_at: createdAtUnix,
+      tags: emailInviteAuthorizationTags(input),
+      content: canonicalEmailInviteAuthorizationPayload(input),
+    });
+  }
+
+  function emailInviteBootstrapPayload(input) {
+    return {
+      version: "finite-email-invite-bootstrap-payload-v1",
+      vaultId: input.vaultId,
+      invitedEmail: input.invitedEmail,
+      inviteUnwrapNpub: input.inviteUnwrapNpub,
+      folders: emailInviteScopeJson(input.scope),
+      grants: input.grants,
+    };
+  }
+
+  async function buildEmailInviteBootstrapWrappedEvent(input) {
+    const signEvent = requireNip07SignEvent(input);
+    const encrypt = nip44EncryptAdapter(input);
+    if (!encrypt) throw new Error("NIP-44 encryption is unavailable");
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const issuerNpub = input.issuerNpub || currentActorNpub();
+    const issuerHex = npubToHex(issuerNpub);
+    const recipientHex = npubToHex(input.inviteUnwrapNpub);
+    const rumor = {
+      pubkey: issuerHex,
+      created_at: createdAtUnix,
+      kind: APP_EVENT_KIND,
+      tags: [
+        ["d", `finite-email-invite-bootstrap:${input.vaultId}`],
+        ["vault", input.vaultId],
+      ],
+      content: input.bootstrapPayloadJson,
+    };
+    rumor.id = await sha256Hex(canonicalNostrEventIdInput(rumor));
+    const sealContent = await encrypt(recipientHex, JSON.stringify(rumor));
+    const seal = await signEvent({
+      kind: 13,
+      created_at: createdAtUnix,
+      tags: [],
+      content: sealContent,
+    });
+    const wrappedContent = await encrypt(recipientHex, JSON.stringify(seal));
+    const wrapped = await signEvent({
+      kind: 1059,
+      created_at: createdAtUnix,
+      tags: [["p", recipientHex]],
+      content: wrappedContent,
+    });
+    return JSON.stringify(wrapped);
+  }
+
+  function openedKeyForScopeItem(keyring, vaultId, item) {
+    const key = keyring?.keys?.get(folderKeyId(vaultId, item.folderId, item.keyVersion));
+    if (!key) throw new Error(`Open Folder Key for ${item.folderId} v${item.keyVersion} before creating the invite`);
+    return key;
+  }
+
+  async function buildEmailVaultInvitationRequest(keyring, input) {
+    const invitedEmail = canonicalInviteEmail(input.target || input.invitedEmail);
+    const vaultId = input.vaultId || state.activeVaultId;
+    const issuerNpub = input.issuerNpub || currentActorNpub();
+    const signEvent = requireNip07SignEvent(input);
+    const inviteKeypair = input.inviteKeypair || createInviteUnwrapKeypair();
+    const inviteUnwrapNpub = inviteKeypair.npub || inviteKeypair.inviteUnwrapNpub;
+    const inviteSecret = inviteKeypair.secretHex || inviteKeypair.inviteSecret;
+    const scope = input.scope || emailInviteScope(input.metadata || state.metadata, input.initialFolderAccess || []);
+    const initialFolderAccess =
+      input.initialFolderAccess === undefined || input.initialFolderAccess === null
+        ? scope.filter((folder) => folder.access === "restricted").map((folder) => folder.folderId)
+        : initialVaultInvitationFolders(input.initialFolderAccess || "");
+    const bootstrapGrants = [];
+    for (const item of scope) {
+      const key = openedKeyForScopeItem(keyring, vaultId, item);
+      bootstrapGrants.push({
+        folderId: item.folderId,
+        grant: await buildFolderKeyGrantRequest({
+          id: input.grantIdFactory ? input.grantIdFactory(item) : undefined,
+          vaultId,
+          folderId: item.folderId,
+          keyVersion: item.keyVersion,
+          folderKey: bytesToBase64(key.rawKey),
+          issuerNpub,
+          provider: input.provider,
+          recipientNpub: inviteUnwrapNpub,
+          signEvent,
+          createdAtUnix: input.createdAtUnix,
+        }),
+      });
+    }
+    const bootstrapPayload = emailInviteBootstrapPayload({
+      vaultId,
+      invitedEmail,
+      inviteUnwrapNpub,
+      scope,
+      grants: bootstrapGrants,
+    });
+    const bootstrapPayloadJson = JSON.stringify(bootstrapPayload);
+    const bootstrapPayloadHash = `sha256:${await sha256Hex(bootstrapPayloadJson)}`;
+    const bootstrapWrappedEventJson = await buildEmailInviteBootstrapWrappedEvent({
+      ...input,
+      vaultId,
+      issuerNpub,
+      inviteUnwrapNpub,
+      bootstrapPayloadJson,
+      signEvent,
+    });
+    const bootstrapAuthorizationEventJson = JSON.stringify(
+      await buildEmailInviteAuthorizationEvent({
+        ...input,
+        vaultId,
+        invitedEmail,
+        inviteUnwrapNpub,
+        bootstrapPayloadHash,
+        expiresAt: input.expiresAt,
+        scope,
+        signEvent,
+      })
+    );
+    return {
+      body: {
+        target: invitedEmail,
+        initialFolderAccess,
+        expiresAt: input.expiresAt,
+        inviteUnwrapNpub,
+        bootstrapPayloadHash,
+        bootstrapWrappedEventJson,
+        bootstrapAuthorizationEventJson,
+      },
+      bootstrapPayloadJson,
+      inviteSecret,
+      inviteUnwrapNpub,
+      scope,
+    };
+  }
+
+  function emailInviteBootstrapPath(code) {
+    return `${vaultInvitationLinkPath(code)}/bootstrap`;
+  }
+
+  function emailInviteInstructionsPath(code) {
+    return `${vaultInvitationLinkPath(code)}/instructions`;
+  }
+
+  function emailInviteClaimPath(code) {
+    return `${vaultInvitationLinkPath(code)}/claim`;
+  }
+
+  function emailInviteClientUrl(input) {
+    const inviteCode = String(input.inviteCode || "").trim();
+    const inviteSecret = String(input.inviteSecret || "").trim();
+    if (!inviteCode) throw new Error("Email invite URL needs an invite code");
+    if (!inviteSecret) throw new Error("Email invite URL needs an Invite Secret");
+    const base = String(input.publicBaseUrl || state.config?.publicBaseUrl || window.location.origin).replace(/\/$/, "");
+    const fragment = [`inviteCode=${encodeURIComponent(inviteCode)}`];
+    if (input.invitedEmail) fragment.push(`inviteEmail=${encodeURIComponent(canonicalInviteEmail(input.invitedEmail))}`);
+    fragment.push(`inviteSecret=${encodeURIComponent(inviteSecret)}`);
+    return `${base}/client#${fragment.join("&")}`;
+  }
+
+  function emailInviteClaimProofPayload(input) {
+    return JSON.stringify({
+      version: "finite-email-invite-bootstrap-claim-proof-v1",
+      vaultId: input.vaultId,
+      inviteCode: input.inviteCode,
+      invitedEmail: input.invitedEmail,
+      claimantNpub: input.claimantNpub,
+      bootstrapPayloadHash: input.bootstrapPayloadHash,
+      emailProofCreatedAt: input.emailProofCreatedAt,
+    });
+  }
+
+  async function buildEmailInviteClaimProofEvent(input) {
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    return signEventWithInviteSecret(
+      {
+        kind: APP_EVENT_KIND,
+        created_at: createdAtUnix,
+        tags: [],
+        content: emailInviteClaimProofPayload(input),
+      },
+      input.inviteSecret,
+      input
+    );
+  }
+
+  function validateEmailBootstrapPayload(payload, payloadJson, invitation, input) {
+    if (payload.version !== "finite-email-invite-bootstrap-payload-v1") {
+      throw new Error("Unsupported Email Invite Bootstrap payload version");
+    }
+    const invitedEmail = canonicalInviteEmail(input.invitedEmail || input.email);
+    if (payload.vaultId !== invitation.vaultId) throw new Error("Email Invite Bootstrap Vault mismatch");
+    if (canonicalInviteEmail(payload.invitedEmail) !== invitedEmail) {
+      throw new Error("Email Invite Bootstrap email mismatch");
+    }
+    if (payload.inviteUnwrapNpub !== invitation.inviteUnwrapNpub) {
+      throw new Error("Email Invite Bootstrap unwrap npub mismatch");
+    }
+    const expectedScope = JSON.stringify(emailInviteScopeJson(invitation.bootstrapScope || []));
+    if (JSON.stringify(emailInviteScopeJson(payload.folders || [])) !== expectedScope) {
+      throw new Error("Email Invite Bootstrap scope mismatch");
+    }
+    return sha256Hex(payloadJson).then((hash) => {
+      if (`sha256:${hash}` !== invitation.bootstrapPayloadHash) {
+        throw new Error("Email Invite Bootstrap payload hash mismatch");
+      }
+      return payload;
+    });
+  }
+
+  async function openEmailInviteBootstrap(invitation, input) {
+    const inviteSecret = String(input.inviteSecret || "").trim();
+    const inviteKeypair = inviteUnwrapKeypairFromSecret(inviteSecret);
+    if (inviteKeypair.npub !== invitation.inviteUnwrapNpub) {
+      throw new Error("Invite Secret does not match this email invitation");
+    }
+    const inviteDecrypt = input.inviteDecrypt || inviteSecretDecryptAdapter(inviteSecret);
+    const { rumor } = await openGiftWrappedRumorContent(
+      invitation.bootstrapWrappedEventJson,
+      invitation.inviteUnwrapNpub,
+      { decrypt: inviteDecrypt },
+      "Email Invite Bootstrap"
+    );
+    const payloadJson = rumor.content;
+    const payload = parseJsonObject(payloadJson, "Email Invite Bootstrap payload");
+    await validateEmailBootstrapPayload(payload, payloadJson, invitation, input);
+    return { payload, payloadJson };
+  }
+
+  async function buildEmailInviteClaimRequest(input) {
+    const inviteSecret = String(input.inviteSecret || "").trim();
+    const invitation = input.invitation;
+    const claimantNpub = input.claimantNpub || currentActorNpub();
+    const { payload } = await openEmailInviteBootstrap(invitation, input);
+    const inviteDecrypt = input.inviteDecrypt || inviteSecretDecryptAdapter(inviteSecret);
+    const keyring = input.keyring || createSessionKeyring();
+    const grants = [];
+    for (const entry of payload.grants || []) {
+      const plaintext = await plaintextGrantFromGiftWrappedExportGrant(
+        entry.grant,
+        invitation.inviteUnwrapNpub,
+        { decrypt: inviteDecrypt }
+      );
+      await openFolderKeyGrantPlaintext(keyring, plaintext);
+      grants.push({
+        folderId: entry.folderId,
+        grant: await buildFolderKeyGrantRequest({
+          id: input.claimGrantIdFactory ? input.claimGrantIdFactory(entry, plaintext) : undefined,
+          vaultId: plaintext.vaultId,
+          folderId: plaintext.folderId,
+          keyVersion: plaintext.keyVersion,
+          folderKey: plaintext.folderKey,
+          issuerNpub: claimantNpub,
+          provider: input.provider,
+          recipientNpub: claimantNpub,
+          signEvent: requireNip07SignEvent(input),
+          createdAtUnix: input.createdAtUnix,
+        }),
+      });
+    }
+    const inviteUnwrapProofEventJson = JSON.stringify(
+      await buildEmailInviteClaimProofEvent({
+        inviteSecret,
+        vaultId: invitation.vaultId,
+        inviteCode: invitation.inviteCode,
+        invitedEmail: canonicalInviteEmail(input.invitedEmail || input.email),
+        claimantNpub,
+        bootstrapPayloadHash: invitation.bootstrapPayloadHash,
+        emailProofCreatedAt: input.emailProofCreatedAt,
+        createdAtUnix: input.createdAtUnix,
+        auxBytes: input.auxBytes,
+      })
+    );
+    return {
+      body: {
+        email: canonicalInviteEmail(input.invitedEmail || input.email),
+        emailProofCreatedAt: input.emailProofCreatedAt,
+        inviteUnwrapProofEventJson,
+        grants,
+      },
+      keyring,
+      openedGrantCount: grants.length,
+    };
+  }
+
   function setAccessResult(tone, title, detail, meta = null) {
     state.accessResult = { tone, title, detail, meta };
     render();
@@ -6457,7 +7628,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function addVaultMemberFromPanel() {
-    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member identity first");
+    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member email first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -6480,7 +7651,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function addVaultAdminFromPanel() {
-    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin identity first");
+    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin email first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -6577,8 +7748,7 @@ const FiniteBrainProductClient = (() => {
     const folderKey = bytesToBase64(newRawKey);
     const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
     const actorNpub = input.actorNpub || currentActorNpub();
-    const signEvent = input.signEvent || window.nostr?.signEvent;
-    if (!signEvent) throw new Error("NIP-07 signer is unavailable");
+    const signEvent = requireNip07SignEvent(input);
     await importFolderKey(keyring, {
       vaultId,
       folderId: row.id,
@@ -6644,7 +7814,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function grantFolderAccessFromPanel() {
-    const row = requireRestrictedAccessRow();
+    const row = requireGrantableAccessRow();
     const targetNpub = await normalizedTargetNpub();
     state.accessBusy = true;
     state.accessResult = null;
@@ -6667,10 +7837,11 @@ const FiniteBrainProductClient = (() => {
         { method: "POST", body }
       );
       state.metadata = metadata;
-      setAccessResult("ready", "Access granted", `${identityDisplay(targetNpub)} can open ${row.path}.`, {
+      const title = row.access === "all_members" ? "Folder key granted" : "Access granted";
+      setAccessResult("ready", title, `${identityDisplay(targetNpub)} can open ${row.path}.`, {
         grantId: grant.id,
       });
-      log("Granted restricted Folder access.", { folderId: row.id, targetNpub: identityDisplay(targetNpub) });
+      log("Granted Folder key/access.", { folderId: row.id, targetNpub: identityDisplay(targetNpub) });
     } catch (error) {
       setAccessResult("error", "Grant failed", error.message);
       throw error;
@@ -6732,7 +7903,7 @@ const FiniteBrainProductClient = (() => {
 
   async function createShareLinkFromPanel() {
     const row = requireRestrictedAccessRow();
-    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target identity first");
+    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target email first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -6833,18 +8004,58 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createVaultInvitationFromPanel() {
-    const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite identity first");
+    const targetInput = $("vaultInviteTargetNpubInput").value.trim();
+    if (!targetInput) throw new Error("Paste an invite email first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
     try {
-      const body = JSON.stringify(
-        buildVaultInvitationRequest({
-          targetNpub,
-          initialFolderAccess: $("vaultInviteFoldersInput").value,
-          expiresAt: vaultInvitationExpiryIso(),
-        })
-      );
+      let body;
+      let localInviteSecret = null;
+      let targetLabel = targetInput;
+      if (inviteEmailLike(targetInput)) {
+        let resolvedNpub = null;
+        if (finiteVipEmail(targetInput)) {
+          try {
+            resolvedNpub = (await resolveIdentityInputValue(targetInput, "Paste an invite email first")).npub;
+          } catch (_) {
+            resolvedNpub = null;
+          }
+        }
+        if (resolvedNpub) {
+          body = JSON.stringify(
+            buildVaultInvitationRequest({
+              targetNpub: resolvedNpub,
+              initialFolderAccess: $("vaultInviteFoldersInput").value,
+              expiresAt: vaultInvitationExpiryIso(),
+            })
+          );
+          targetLabel = identityDisplay(resolvedNpub);
+        } else {
+          if (!state.keyring) state.keyring = createSessionKeyring();
+          await openAvailableFolderKeyGrants();
+          const request = await buildEmailVaultInvitationRequest(state.keyring, {
+            target: targetInput,
+            metadata: state.metadata,
+            initialFolderAccess: $("vaultInviteFoldersInput").value,
+            expiresAt: vaultInvitationExpiryIso(),
+            vaultId: state.activeVaultId,
+          });
+          body = JSON.stringify(request.body);
+          localInviteSecret = request.inviteSecret;
+          targetLabel = canonicalInviteEmail(targetInput);
+        }
+      } else {
+        const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite email first");
+        body = JSON.stringify(
+          buildVaultInvitationRequest({
+            targetNpub,
+            initialFolderAccess: $("vaultInviteFoldersInput").value,
+            expiresAt: vaultInvitationExpiryIso(),
+          })
+        );
+        targetLabel = identityDisplay(targetNpub);
+      }
       const invitation = await protectedRequest(
         vaultInvitationCreatePath(state.activeVaultId),
         { method: "POST", body }
@@ -6852,14 +8063,37 @@ const FiniteBrainProductClient = (() => {
       state.lastVaultInvitationId = invitation.id;
       state.lastVaultInvitationCode = invitation.inviteCode;
       $("vaultInviteCodeInput").value = invitation.inviteCode;
-      setAccessResult("ready", "Invitation created", `${identityDisplay(invitation.userId)} can join ${invitation.vaultId}.`, {
+      if (localInviteSecret && invitation.targetKind === "email_bootstrap") {
+        const invitedEmail = invitation.invitedEmail || canonicalInviteEmail(targetInput);
+        state.lastEmailInviteSecret = localInviteSecret;
+        state.lastEmailInviteUrl = emailInviteClientUrl({
+          publicBaseUrl: state.config.publicBaseUrl,
+          inviteCode: invitation.inviteCode,
+          invitedEmail,
+          inviteSecret: localInviteSecret,
+        });
+        $("vaultInviteSecretInput").value = localInviteSecret;
+        $("vaultInviteEmailInput").value = invitedEmail;
+        $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
+      } else {
+        state.lastEmailInviteSecret = null;
+        state.lastEmailInviteUrl = null;
+        $("vaultInviteUrlInput").value = "";
+      }
+      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}.`, {
         inviteCode: invitation.inviteCode,
         invitationId: invitation.id,
         acceptPath: invitation.acceptPath,
+        publicInstructions: invitation.publicInstructionsUrl || invitation.publicInstructionsPath || "none",
         expiresAt: invitation.expiresAt,
-        "target identity": identityDisplay(invitation.userId),
+        target: invitation.invitedEmail || targetLabel,
+        delivery: invitation.deliveryStatus || "manual",
       });
-      log("Created Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
+      log("Created Vault invitation.", {
+        invitationId: invitation.id,
+        targetKind: invitation.targetKind,
+        vaultId: invitation.vaultId,
+      });
       await refreshVaultAdminLists();
     } catch (error) {
       setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
@@ -6884,8 +8118,8 @@ const FiniteBrainProductClient = (() => {
         vaultId: invitation.vaultId,
         invitationId: invitation.id,
         acceptPath: invitation.acceptPath,
-        "target identity": identityDisplay(invitation.userId),
-        signer: state.pubkeyHex ? shortKey(npubFromHex(state.pubkeyHex)) : "none",
+        "target email": identityDisplay(invitation.userId),
+        signer: state.pubkeyHex ? "connected" : "none",
       });
       log("Loaded Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
       return invitation;
@@ -6898,8 +8132,59 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  async function loadEmailInviteInstructionsFromPanel() {
+    const code = currentVaultInvitationCode();
+    const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
+    const inviteSecret = $("vaultInviteSecretInput").value.trim();
+    if (!inviteSecret) throw new Error("Paste the client-only Invite Secret first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const body = JSON.stringify({
+        email,
+        emailProofCreatedAt: emailProofCreatedAtIso(),
+      });
+      const invitation = await protectedRequest(emailInviteBootstrapPath(code), {
+        method: "POST",
+        body,
+      });
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      state.lastEmailInvitePostProof = invitation;
+      await openEmailInviteBootstrap(invitation, {
+        inviteSecret,
+        invitedEmail: email,
+      });
+      const folderScope = (invitation.bootstrapScope || [])
+        .map((folder) => `${folder.folderId} v${folder.keyVersion}`)
+        .join(", ");
+      setAccessResult("ready", "Email scope loaded", `${email} can claim ${invitation.vaultId}.`, {
+        inviteCode: invitation.inviteCode,
+        scope: folderScope || "none",
+        status: invitation.status,
+      });
+      log("Loaded post-proof email invitation scope.", {
+        invitationId: invitation.id,
+        vaultId: invitation.vaultId,
+      });
+      return invitation;
+    } catch (error) {
+      setAccessResult("error", "Email scope failed", vaultInvitationUnavailableDetail(error));
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
   async function acceptVaultInvitationFromPanel() {
     const code = currentVaultInvitationCode();
+    const email = $("vaultInviteEmailInput")?.value.trim();
+    const inviteSecret = $("vaultInviteSecretInput")?.value.trim();
+    if (email || inviteSecret) {
+      return claimEmailVaultInvitationFromPanel(code);
+    }
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -6911,7 +8196,7 @@ const FiniteBrainProductClient = (() => {
       state.lastVaultInvitationCode = invitation.inviteCode;
       setActiveVaultId(invitation.vaultId);
       $("vaultInviteCodeInput").value = invitation.inviteCode;
-      await loadVaultMetadata();
+      await loadVaultMetadata({ preserveActive: true });
       await loadVisibleVaults();
       setAccessResult(
         "ready",
@@ -6919,13 +8204,80 @@ const FiniteBrainProductClient = (() => {
         `${invitation.vaultId} is now available to this signer.`,
         {
           status: invitation.status,
-          "folders granted": (invitation.initialFolderAccess || []).join(", ") || "none",
-          signer: state.pubkeyHex ? shortKey(npubFromHex(state.pubkeyHex)) : "none",
+          "initial access metadata": (invitation.initialFolderAccess || []).join(", ") || "none",
+          "folder keys": "grant or share separately",
+          signer: state.pubkeyHex ? "connected" : "none",
         }
       );
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
       setAccessResult("error", "Accept failed", vaultInvitationUnavailableDetail(error));
+      throw error;
+    } finally {
+      state.accessBusy = false;
+      render();
+    }
+  }
+
+  async function claimEmailVaultInvitationFromPanel(code) {
+    const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
+    const inviteSecret = $("vaultInviteSecretInput").value.trim();
+    if (!inviteSecret) throw new Error("Paste the client-only Invite Secret first");
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+    try {
+      const proofCreatedAt = emailProofCreatedAtIso();
+      const proofBody = JSON.stringify({
+        email,
+        emailProofCreatedAt: proofCreatedAt,
+      });
+      const invitation =
+        state.lastEmailInvitePostProof?.inviteCode === code
+          ? state.lastEmailInvitePostProof
+          : await protectedRequest(emailInviteBootstrapPath(code), {
+              method: "POST",
+              body: proofBody,
+            });
+      const claimantNpub = currentActorNpub();
+      if (!state.keyring) state.keyring = createSessionKeyring();
+      const claimRequest = await buildEmailInviteClaimRequest({
+        claimantNpub,
+        email,
+        emailProofCreatedAt: proofCreatedAt,
+        invitation,
+        inviteSecret,
+        keyring: state.keyring,
+      });
+      const claimed = await protectedRequest(emailInviteClaimPath(code), {
+        method: "POST",
+        body: JSON.stringify(claimRequest.body),
+      });
+      state.lastVaultInvitationId = claimed.id;
+      state.lastVaultInvitationCode = claimed.inviteCode;
+      state.lastEmailInvitePostProof = null;
+      setActiveVaultId(claimed.vaultId);
+      $("vaultInviteCodeInput").value = claimed.inviteCode;
+      await loadVaultMetadata({ preserveActive: true });
+      const grants = await openAvailableFolderKeyGrants();
+      await pullSyncBootstrap();
+      selectDefaultReaderTargets();
+      setAccessResult(
+        "ready",
+        claimed.duplicateAccept ? "Email invite already claimed" : "Email invite claimed",
+        `${claimed.vaultId} is now available to this signer.`,
+        {
+          status: claimed.status,
+          openedKeys: String(grants.opened.length + claimRequest.openedGrantCount),
+          signer: state.pubkeyHex ? "connected" : "none",
+        }
+      );
+      log("Claimed email Vault invitation.", {
+        invitationId: claimed.id,
+        vaultId: claimed.vaultId,
+      });
+    } catch (error) {
+      setAccessResult("error", "Claim failed", vaultInvitationUnavailableDetail(error));
       throw error;
     } finally {
       state.accessBusy = false;
@@ -7447,10 +8799,23 @@ const FiniteBrainProductClient = (() => {
         log("Failed to inspect Vault invitation.", { error: error.message });
       });
     });
+    onOptionalClick("getEmailInviteInstructionsButton", () => {
+      loadEmailInviteInstructionsFromPanel().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to load email Vault invitation scope.", { error: error.message });
+      });
+    });
     onOptionalClick("acceptVaultInvitationButton", () => {
       acceptVaultInvitationFromPanel().catch((error) => {
         state.lastError = error.message;
         log("Failed to accept Vault invitation.", { error: error.message });
+      });
+    });
+    onOptionalClick("vaultInviteConnectSignerButton", () => {
+      connectSigner().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to connect signer for Vault invitation.", { error: error.message });
+        render();
       });
     });
     onOptionalClick("revokeVaultInvitationButton", () => {
@@ -7493,7 +8858,11 @@ const FiniteBrainProductClient = (() => {
         refreshEditorSlashMenu();
       }
     });
+    $("readerPageContent").addEventListener("click", (event) => {
+      activatePageContentLink(event);
+    });
     $("readerPageContent").addEventListener("keydown", (event) => {
+      if (handlePageContentLinkKeydown(event)) return;
       handleEditorSlashKeydown(event);
     });
     $("pageDraftInput").addEventListener("input", () => {
@@ -7594,9 +8963,48 @@ const FiniteBrainProductClient = (() => {
     });
   }
 
+  function populateInviteFromHash() {
+    const hash = String(window.location?.hash || "");
+    if (!hash.includes("invite")) return;
+    const params = new URLSearchParams(hash.replace(/^#/, ""));
+    let populated = false;
+    const inviteCode = params.get("inviteCode") || params.get("code");
+    if (inviteCode) {
+      state.lastVaultInvitationCode = inviteCode;
+      if ($("vaultInviteCodeInput")) $("vaultInviteCodeInput").value = inviteCode;
+      populated = true;
+    }
+    const inviteEmail = params.get("inviteEmail") || params.get("email");
+    if (inviteEmail) {
+      try {
+        const email = canonicalInviteEmail(inviteEmail);
+        if ($("vaultInviteEmailInput")) $("vaultInviteEmailInput").value = email;
+        populated = true;
+      } catch (error) {
+        state.lastError = error.message;
+      }
+    }
+    const inviteSecret = params.get("inviteSecret");
+    if (inviteSecret) {
+      state.lastEmailInviteSecret = inviteSecret;
+      if ($("vaultInviteSecretInput")) $("vaultInviteSecretInput").value = inviteSecret;
+      populated = true;
+    }
+    if (!populated) return;
+    state.activeSidebarMode = "access";
+    state.activeAccessView = "folder";
+    try {
+      const cleanUrl = `${window.location.pathname || ""}${window.location.search || ""}`;
+      window.history?.replaceState?.(null, "", cleanUrl || window.location.href.split("#")[0]);
+    } catch (_) {
+      // Fragment cleanup is best-effort; invite data is already in client state.
+    }
+  }
+
   async function start() {
     bind();
     setEditorDraftText($("pageDraftInput").value);
+    populateInviteFromHash();
     await loadConfig();
     await detectSigner();
   }
@@ -7615,26 +9023,41 @@ const FiniteBrainProductClient = (() => {
     buildAuthEventTemplate,
     buildDefaultVaultPageWrites,
     buildFolderAccessRemovalRequest,
+    buildEmailInviteAuthorizationEvent,
+    buildEmailInviteClaimProofEvent,
+    buildEmailInviteClaimRequest,
+    buildEmailVaultInvitationRequest,
     buildVaultInvitationRequest,
     buildVaultBootstrapPlan,
     buildGraphProjection,
     buildReplayFrames,
     canonicalAdminAccessChangePayload,
+    canonicalEmailInviteAuthorizationPayload,
+    canonicalInviteEmail,
     commandPaletteCommands,
     commandPaletteRows,
     contextMenuItemsForTarget,
     createClientProjection,
+    createLocalNip07ProviderFromSecret,
     createSessionKeyring,
     deriveSignerState,
     defaultVaultBootstrapFolderIds,
     defaultVaultPages,
     defaultVaultPagesFolderId,
+    emailInviteAuthorizationTags,
+    emailInviteBootstrapPath,
+    emailInviteClaimPath,
+    emailInviteClientUrl,
+    emailInviteInstructionsPath,
+    emailInviteScope,
+    emailInviteScopeJson,
     decodeFolderObjectPlaintext,
     encryptFolderObject,
     encodeFolderObjectAssetPlaintext,
     encodeFolderObjectPagePlaintext,
     editorSlashCommandRows,
     extractPageLinks,
+    folderAllowsDirectGrant,
     folderShareLinkRows,
     graphEmptyStateCopy,
     graphLayout,
@@ -7642,6 +9065,9 @@ const FiniteBrainProductClient = (() => {
     graphStats,
     inlineLinkSegments,
     initialVaultInvitationFolders,
+    inviteUnwrapKeypairFromSecret,
+    nip44DecryptWithSecret,
+    nip44EncryptWithSecret,
     markdownFromEditorElement,
     markdownPreviewBlocks,
     mergeSyncProjection,
@@ -7655,12 +9081,15 @@ const FiniteBrainProductClient = (() => {
     npubFromHex,
     npubToHex,
     openFolderKeyGrants,
+    openEmailInviteBootstrap,
     openDevelopmentFolderKeyGrants,
     openFolderKeyGrantPlaintext,
     openFolderObject,
     openSyncObjects,
     parseOkfBundle,
+    pageKeyForReference,
     pageLinkContext,
+    pageReferencesForPage,
     pagePathLabel,
     pageStatsForText,
     personalVaultIdForPubkey,
@@ -7683,6 +9112,7 @@ const FiniteBrainProductClient = (() => {
     shortKey,
     start,
     rememberIdentity,
+    identityMetadataForNpub,
     identityDisplay,
     visibleVaultOptions,
     vaultHealthBadges,

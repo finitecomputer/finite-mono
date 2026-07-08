@@ -52,6 +52,14 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 6)? {
+            tx.execute_batch(SCHEMA_V6)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![6, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -329,6 +337,64 @@ CREATE TABLE identity_aliases (
 CREATE UNIQUE INDEX identity_aliases_preferred_nip05
     ON identity_aliases(preferred_nip05)
     WHERE preferred_nip05 IS NOT NULL;
+"#;
+
+const SCHEMA_V6: &str = r#"
+DROP INDEX IF EXISTS vault_invitations_pending_target;
+
+ALTER TABLE vault_invitations RENAME TO vault_invitations_old;
+
+CREATE TABLE vault_invitations (
+    id TEXT PRIMARY KEY NOT NULL,
+    vault_id TEXT NOT NULL,
+    user_id TEXT,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('npub', 'email_bootstrap')),
+    invited_email TEXT,
+    invite_unwrap_npub TEXT,
+    bootstrap_payload_hash TEXT,
+    bootstrap_wrapped_event_json TEXT,
+    bootstrap_authorization_event_json TEXT,
+    bootstrap_scope_json TEXT NOT NULL DEFAULT '[]',
+    claimed_by_npub TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+    invite_code TEXT NOT NULL UNIQUE,
+    accept_path TEXT NOT NULL,
+    initial_folder_access_json TEXT NOT NULL,
+    created_by_npub TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    accepted_at TEXT,
+    CHECK (
+        (target_kind = 'npub' AND user_id IS NOT NULL AND invited_email IS NULL) OR
+        (target_kind = 'email_bootstrap' AND invited_email IS NOT NULL)
+    ),
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+);
+
+INSERT INTO vault_invitations (
+    id, vault_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+    bootstrap_payload_hash, bootstrap_wrapped_event_json,
+    bootstrap_authorization_event_json, bootstrap_scope_json, claimed_by_npub,
+    status, invite_code, accept_path, initial_folder_access_json,
+    created_by_npub, expires_at, created_at, updated_at, accepted_at
+)
+SELECT
+    id, vault_id, user_id, 'npub', NULL, NULL,
+    NULL, NULL, NULL, '[]', NULL,
+    status, invite_code, accept_path, initial_folder_access_json,
+    created_by_npub, expires_at, created_at, updated_at, accepted_at
+FROM vault_invitations_old;
+
+DROP TABLE vault_invitations_old;
+
+CREATE UNIQUE INDEX vault_invitations_pending_npub_target
+    ON vault_invitations(vault_id, user_id)
+    WHERE status = 'pending' AND target_kind = 'npub';
+
+CREATE UNIQUE INDEX vault_invitations_pending_email_target
+    ON vault_invitations(vault_id, invited_email)
+    WHERE status = 'pending' AND target_kind = 'email_bootstrap';
 "#;
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {

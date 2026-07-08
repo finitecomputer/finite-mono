@@ -92,6 +92,19 @@ jq -r .secretKey "$FBRAIN_CONFIG_DIR/auth.json" | fbrain auth import
 rm "$FBRAIN_CONFIG_DIR/auth.json"
 ```
 
+### Email Proof
+
+When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
+`fbrain auth login EMAIL` requests an email challenge and
+`fbrain auth redeem EMAIL TOKEN` proves that email with the shared Finite
+identity. For `@finite.vip` emails, redemption binds the email to the local
+User Key in finite-identity and returns the NIP-05 identifier for that email.
+
+External email redemption is recorded as email-only identity proof in
+finite-identity, but FiniteBrain folder sharing still requires an npub target
+for encrypted Folder Key Grants. Email-address folder grants are intentionally
+left for a future crypto-aware slice.
+
 ## Open A Vault Working Tree
 
 Use an explicit config directory in agent runtimes so fbrain state does not

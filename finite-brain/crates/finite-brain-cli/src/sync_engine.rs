@@ -2755,6 +2755,7 @@ mod tests {
             cwd: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
             now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
             finite_home: Some(temp.path().join("finite-home")),
         };
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
@@ -2997,6 +2998,7 @@ mod tests {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
             now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
         };
         let object_id = ObjectId::new("obj_remote000001").unwrap();
@@ -3092,6 +3094,7 @@ mod tests {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
             now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
         };
         let object_id = ObjectId::new("obj_mounted00001").unwrap();
@@ -3249,6 +3252,7 @@ mod tests {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
             now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
         };
         let export = CliEncryptedVaultExport {

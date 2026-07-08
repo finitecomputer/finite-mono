@@ -512,6 +512,7 @@ impl BrainStore {
     }
 
     /// Remove one destination member from a Shared Folder Connection with source key rotation.
+    #[allow(clippy::too_many_arguments)]
     pub fn remove_shared_folder_connection_member(
         &mut self,
         connection_id: &str,
@@ -520,6 +521,7 @@ impl BrainStore {
         new_key_version: u32,
         grants: &[FolderKeyGrantMetadata],
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
+        updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
         self.validate_destination_admin_for_connection(&connection, actor_npub)?;
@@ -540,6 +542,7 @@ impl BrainStore {
             new_key_version,
             grants,
             reencrypted_records,
+            updated_at,
         };
         self.rotate_shared_folder_access_removal(
             &connection,
@@ -579,6 +582,7 @@ impl BrainStore {
             new_key_version,
             grants,
             reencrypted_records,
+            updated_at,
         };
         self.rotate_shared_folder_access_removal(
             &connection,

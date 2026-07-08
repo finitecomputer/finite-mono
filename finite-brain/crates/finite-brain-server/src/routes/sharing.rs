@@ -451,6 +451,7 @@ pub(crate) async fn update_shared_folder_connection_members_handler(
                     new_key_version,
                     &grants,
                     &reencrypted_records,
+                    &now,
                 )?;
                 for grant in &grants {
                     append_folder_key_grant_record(&mut store, &connection.source_vault_id, grant)?;

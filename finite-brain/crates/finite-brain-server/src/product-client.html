@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FiniteBrain</title>
-    <link rel="stylesheet" href="/client/app.css?v=20260705-access-lists" />
+    <link rel="stylesheet" href="/client/app.css?v=20260707-share-mount-copy" />
   </head>
   <body>
     <div class="obsidian-shell" data-workspace-view="page">
@@ -216,55 +216,11 @@
             aria-labelledby="accessFolderViewButton"
             hidden
           >
-            <div class="access-folder-selector">
-              <div class="access-folder-picker">
-                <span class="access-selector-label section-title">Folder</span>
-                <button id="accessFolderButton" class="folder-selector-button" type="button" aria-haspopup="listbox" aria-expanded="false">
-                  <span id="accessFolderTitle">No Folder selected</span>
-                  <span id="accessFolderStatus" class="pill muted">empty</span>
-                  <svg class="icon selector-chevron" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M7 10l5 5 5-5" />
-                  </svg>
-                </button>
-              </div>
-              <div id="accessFolderDropdown" class="folder-dropdown" hidden>
-                <ol id="accessFolderList" class="folder-dropdown-list" role="listbox"></ol>
-              </div>
-            </div>
-
             <div id="accessInspector" class="access-inspector-new">
               <div id="accessBasicView" class="access-basic-view">
                 <div class="access-header">
                   <h3 id="accessCurrentFolder">No folder selected</h3>
                   <p id="accessSummaryLine" class="access-summary">Load a Vault and select a Folder to inspect access.</p>
-                </div>
-
-                <div id="accessWhoHasSection" class="access-who-has-section">
-                  <div class="access-section-header">
-                    <span class="section-title">Who has access</span>
-                    <button id="accessManageToggle" class="access-inline-button" type="button" aria-expanded="false" hidden>
-                      <span id="accessManageToggleLabel">Manage</span>
-                      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M12 5v14M5 12h14" />
-                      </svg>
-                    </button>
-                  </div>
-                  <ol id="accessWhoHasList" class="access-who-has-list">
-                    <li class="access-empty-state">No access information available</li>
-                  </ol>
-
-                  <div id="accessAddPersonForm" class="access-inline-form" hidden>
-                    <label class="access-inline-field">
-                      <input
-                        id="accessAddPersonInput"
-                        placeholder="name@example.com, npub1..., or hex"
-                        autocomplete="off"
-                        spellcheck="false"
-                      />
-                      <button id="accessAddPersonButton" type="button" class="access-add-button">Add</button>
-                    </label>
-                    <p id="accessAddPersonHint" class="access-field-hint">Enter NIP-05, npub, or hex to grant folder access</p>
-                  </div>
                 </div>
               </div>
 
@@ -274,24 +230,69 @@
               <div id="accessBadgeRow" hidden></div>
               <button id="grantFolderAccessButton" type="button" hidden>Grant</button>
               <button id="removeFolderAccessButton" type="button" hidden>Remove</button>
+            </div>
+
+            <div class="access-action-stack" aria-label="Access actions">
+              <details id="accessAddPersonPanel" class="access-advanced-section" hidden>
+                <summary class="access-advanced-summary">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z" />
+                    <path d="M12 14h6" />
+                    <path d="M15 11v6" />
+                  </svg>
+                  <span>Grant folder access</span>
+                  <small>Choose folder and person</small>
+                </summary>
+                <div class="access-advanced-content">
+                  <div class="access-folder-selector">
+                    <div class="access-folder-picker">
+                      <span class="access-selector-label section-title">Folder</span>
+                      <button id="accessFolderButton" class="folder-selector-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                        <span id="accessFolderTitle">No Folder selected</span>
+                        <span id="accessFolderStatus" class="pill muted">empty</span>
+                        <svg class="icon selector-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M7 10l5 5 5-5" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div id="accessFolderDropdown" class="folder-dropdown" hidden>
+                      <ol id="accessFolderList" class="folder-dropdown-list" role="listbox"></ol>
+                    </div>
+                  </div>
+
+                  <div id="accessAddPersonForm" class="access-inline-form" hidden>
+                    <label class="access-inline-field">
+                      <input
+                        id="accessAddPersonInput"
+                        placeholder="name@example.com"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                      <button id="accessAddPersonButton" type="button" class="access-add-button">Add</button>
+                    </label>
+                    <p id="accessAddPersonHint" class="access-field-hint">Enter an email to grant folder access</p>
+                  </div>
+                </div>
+              </details>
 
               <details id="accessAdvancedSection" class="access-advanced-section">
                 <summary class="access-advanced-summary">
-                  <span>Share links</span>
-                  <small>Single-use folder access</small>
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M10 13a5 5 0 0 0 7.07 0l1.43-1.43a5 5 0 0 0-7.07-7.07L10.4 5.53" />
+                    <path d="M14 11a5 5 0 0 0-7.07 0L5.5 12.43a5 5 0 0 0 7.07 7.07l1.03-1.03" />
+                  </svg>
+                  <span>Create share link</span>
+                  <small>Restricted folder link</small>
                 </summary>
                 <div class="access-advanced-content">
                   <div id="accessShareSection" class="access-subsection">
-                    <h4 class="access-subsection-title">Share with link</h4>
-                    <p class="access-subsection-desc">Create single-use access links for this folder</p>
-
                     <div id="accessShareForm" class="access-share-form">
                       <p id="accessShareHint" class="access-field-hint access-share-hint">Open this Folder key to create share links.</p>
                       <label class="access-field">
-                        <span>Target identity</span>
+                        <span>Email</span>
                         <input
                           id="accessShareTargetInput"
-                          placeholder="name@example.com, npub1..., or hex"
+                          placeholder="name@example.com"
                           autocomplete="off"
                           spellcheck="false"
                           aria-describedby="accessShareHint"
@@ -306,20 +307,13 @@
                         />
                       </label>
                       <label class="access-checkbox">
-                        <input id="accessShareMountInput" type="checkbox" />
-                        <span>Create personal mount</span>
+                        <input id="accessShareMountInput" type="checkbox" aria-describedby="accessShareMountHint" />
+                        <span>Show in recipient's Vault</span>
                       </label>
+                      <p id="accessShareMountHint" class="access-field-hint access-checkbox-hint">
+                        When accepted, this adds the shared Folder to their Vault sidebar. It does not copy data or grant extra access.
+                      </p>
                       <button id="createShareLinkButton" type="button" class="access-primary-button">Create share link</button>
-                    </div>
-
-                    <div class="access-share-list">
-                      <div class="access-section-header">
-                        <span class="section-title">Links for this Folder</span>
-                        <span id="folderShareLinkCount" class="pill muted">0</span>
-                      </div>
-                      <ol id="folderShareLinkList" class="access-who-has-list">
-                        <li class="access-empty-state">Vault admins see this Folder's share links here.</li>
-                      </ol>
                     </div>
 
                     <div class="access-share-existing">
@@ -340,121 +334,211 @@
                   </div>
                 </div>
               </details>
+
+              <details id="vaultPeopleActionPanel" class="access-vault-admin" hidden>
+                <summary class="access-admin-summary">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="9" cy="8" r="3" />
+                    <path d="M3 20c0-4 3-7 6-7s6 3 6 7" />
+                    <path d="M18 8v6" />
+                    <path d="M15 11h6" />
+                  </svg>
+                  <span>Give Vault access</span>
+                  <small id="vaultPeopleActionHint">Invite, add, promote</small>
+                </summary>
+                <div class="access-admin-content">
+                  <div class="vault-access-action-grid">
+                    <section class="access-admin-section vault-access-option primary">
+                      <div class="vault-access-option-heading">
+                        <h4>Invite by email</h4>
+                        <span class="pill ready">new person</span>
+                      </div>
+                      <label class="access-field">
+                        <span>Email</span>
+                        <input
+                          id="vaultInviteTargetNpubInput"
+                          placeholder="name@example.com"
+                          autocomplete="off"
+                          spellcheck="false"
+                        />
+                      </label>
+                      <label class="access-field">
+                        <span>Folders granted on join</span>
+                        <input
+                          id="vaultInviteFoldersInput"
+                          value="getting-started"
+                          autocomplete="off"
+                          spellcheck="false"
+                        />
+                      </label>
+                      <label class="access-field">
+                        <span>Expires</span>
+                        <input
+                          id="vaultInviteExpiresAtInput"
+                          type="datetime-local"
+                          autocomplete="off"
+                        />
+                      </label>
+                      <div class="access-button-row">
+                        <button id="createVaultInvitationButton" type="button">Create invite</button>
+                        <button id="revokeVaultInvitationButton" class="danger-action" type="button">Revoke invite</button>
+                      </div>
+                      <label class="access-field">
+                        <span>Client-only invite URL</span>
+                        <input
+                          id="vaultInviteUrlInput"
+                          type="password"
+                          autocomplete="off"
+                          spellcheck="false"
+                          readonly
+                        />
+                      </label>
+                    </section>
+
+                    <section class="access-admin-section vault-access-option">
+                      <div class="vault-access-option-heading">
+                        <h4>Add member now</h4>
+                        <span class="pill muted">existing identity</span>
+                      </div>
+                      <label class="access-inline-field">
+                        <input
+                          id="vaultMemberNpubInput"
+                          placeholder="name@example.com"
+                          autocomplete="off"
+                          spellcheck="false"
+                        />
+                        <button id="addVaultMemberButton" type="button" class="access-add-button">Add member</button>
+                      </label>
+                    </section>
+
+                    <section class="access-admin-section vault-access-option">
+                      <div class="vault-access-option-heading">
+                        <h4>Make admin</h4>
+                        <span class="pill muted">existing member</span>
+                      </div>
+                      <label class="access-inline-field">
+                        <input
+                          id="vaultAdminNpubInput"
+                          placeholder="name@example.com"
+                          autocomplete="off"
+                          spellcheck="false"
+                        />
+                        <button id="addVaultAdminButton" type="button" class="access-add-button">Add admin</button>
+                      </label>
+                      <p id="vaultPeopleHint" class="access-field-hint">Admins must already be Vault members.</p>
+                    </section>
+                  </div>
+                </div>
+              </details>
+
+              <details id="vaultInvitationPanel" class="access-vault-admin">
+                <summary class="access-admin-summary">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="3" y="5" width="18" height="14" rx="2" />
+                    <path d="M3 7l9 6 9-6" />
+                  </svg>
+                  <span>Join with invite</span>
+                  <small id="vaultInvitationHint">Accept invite code</small>
+                </summary>
+                <div class="access-admin-content">
+                  <div class="access-admin-section">
+                    <label class="access-field">
+                      <span>Invite code</span>
+                      <input
+                        id="vaultInviteCodeInput"
+                        placeholder="invite-..."
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <label class="access-field">
+                      <span>Invited email</span>
+                      <input
+                        id="vaultInviteEmailInput"
+                        placeholder="name@example.com"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <label class="access-field">
+                      <span>Email proof time</span>
+                      <input
+                        id="vaultInviteEmailProofCreatedAtInput"
+                        type="datetime-local"
+                        autocomplete="off"
+                      />
+                    </label>
+                    <label class="access-field">
+                      <span>Invite Secret</span>
+                      <input
+                        id="vaultInviteSecretInput"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <div class="access-button-row">
+                      <button id="vaultInviteConnectSignerButton" type="button">Connect signer</button>
+                      <button id="getVaultInvitationButton" type="button">Inspect invite</button>
+                      <button id="getEmailInviteInstructionsButton" type="button">Load email scope</button>
+                      <button id="acceptVaultInvitationButton" type="button">Accept invite</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
             </div>
 
-            <section id="vaultPeopleSection" class="vault-management-section">
-              <div class="access-section-header">
-                <span class="section-title">Vault people</span>
-                <span id="vaultPeopleCount" class="pill muted">0</span>
-              </div>
-              <ol id="vaultPeopleList" class="access-who-has-list">
-                <li class="access-empty-state">Load an organization Vault to manage people.</li>
-              </ol>
-              <div class="access-inline-form vault-people-form">
-                <label class="access-inline-field">
-                  <input
-                    id="vaultMemberNpubInput"
-                    placeholder="member NIP-05, npub, or hex"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button id="addVaultMemberButton" type="button" class="access-add-button">Add member</button>
-                </label>
-                <label class="access-inline-field">
-                  <input
-                    id="vaultAdminNpubInput"
-                    placeholder="admin NIP-05, npub, or hex"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button id="addVaultAdminButton" type="button" class="access-add-button">Add admin</button>
-                </label>
-                <p id="vaultPeopleHint" class="access-field-hint">Admins must already be Vault members.</p>
-              </div>
-            </section>
-
-            <section id="vaultInvitationListSection" class="vault-management-section">
-              <div class="access-section-header">
-                <span class="section-title">Invitations</span>
-                <span id="vaultInvitationCount" class="pill muted">0</span>
-              </div>
-              <ol id="vaultInvitationList" class="access-who-has-list">
-                <li class="access-empty-state">Vault admins see pending invitations here.</li>
-              </ol>
-            </section>
-
-            <section id="sharedFolderSection" class="vault-management-section">
-              <div class="access-section-header">
-                <span class="section-title">Shared folders</span>
-                <span id="sharedFolderCount" class="pill muted">0</span>
-              </div>
-              <ol id="sharedFolderList" class="access-who-has-list">
-                <li class="access-empty-state">Vault admins see cross-Vault shared Folders here.</li>
-              </ol>
-              <p class="access-field-hint">Connections mount a source Folder into this Vault. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
-            </section>
-
-            <details id="vaultInvitationPanel" class="access-vault-admin" open>
-              <summary class="access-admin-summary">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
-                </svg>
-                <span>Vault invitations</span>
-                <small id="vaultInvitationHint">Admin-only features</small>
-              </summary>
-              <div class="access-admin-content">
-                <div class="access-admin-section">
-                  <h4>Create vault invitation</h4>
-                  <label class="access-field">
-                    <span>Invite identity</span>
-                    <input
-                      id="vaultInviteTargetNpubInput"
-                      placeholder="name@example.com, npub1..., or hex"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-                  <label class="access-field">
-                    <span>Folders granted on join</span>
-                    <input
-                      id="vaultInviteFoldersInput"
-                      value="getting-started"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-                  <label class="access-field">
-                    <span>Expires</span>
-                    <input
-                      id="vaultInviteExpiresAtInput"
-                      type="datetime-local"
-                      autocomplete="off"
-                    />
-                  </label>
-                  <div class="access-button-row">
-                    <button id="createVaultInvitationButton" type="button">Create invite</button>
-                    <button id="revokeVaultInvitationButton" class="danger-action" type="button">Revoke invite</button>
-                  </div>
+            <div class="access-state-stack" aria-label="Access details">
+              <section id="accessWhoHasSection" class="access-who-has-section vault-management-section">
+                <div class="access-section-header">
+                  <span class="section-title">Who has access</span>
                 </div>
+                <ol id="accessWhoHasList" class="access-who-has-list">
+                  <li class="access-empty-state">No access information available</li>
+                </ol>
+              </section>
 
-                <div class="access-admin-section">
-                  <h4>Accept vault invitation</h4>
-                  <label class="access-field">
-                    <span>Invite code</span>
-                    <input
-                      id="vaultInviteCodeInput"
-                      placeholder="invite-..."
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-                  <div class="access-button-row">
-                    <button id="getVaultInvitationButton" type="button">Inspect invite</button>
-                    <button id="acceptVaultInvitationButton" type="button">Accept invite</button>
-                  </div>
+              <section id="folderShareLinkListSection" class="vault-management-section">
+                <div class="access-section-header">
+                  <span class="section-title">Folder share links</span>
+                  <span id="folderShareLinkCount" class="pill muted">0</span>
                 </div>
-              </div>
-            </details>
+                <ol id="folderShareLinkList" class="access-who-has-list">
+                  <li class="access-empty-state">Vault admins see this Folder's share links here.</li>
+                </ol>
+              </section>
+
+              <section id="vaultPeopleSection" class="vault-management-section">
+                <div class="access-section-header">
+                  <span class="section-title">Vault people</span>
+                  <span id="vaultPeopleCount" class="pill muted">0</span>
+                </div>
+                <ol id="vaultPeopleList" class="access-who-has-list">
+                  <li class="access-empty-state">Load an organization Vault to manage people.</li>
+                </ol>
+              </section>
+
+              <section id="vaultInvitationListSection" class="vault-management-section">
+                <div class="access-section-header">
+                  <span class="section-title">Invitations</span>
+                  <span id="vaultInvitationCount" class="pill muted">0</span>
+                </div>
+                <ol id="vaultInvitationList" class="access-who-has-list">
+                  <li class="access-empty-state">Vault admins see pending invitations here.</li>
+                </ol>
+              </section>
+
+              <section id="sharedFolderSection" class="vault-management-section">
+                <div class="access-section-header">
+                  <span class="section-title">Shared folders</span>
+                  <span id="sharedFolderCount" class="pill muted">0</span>
+                </div>
+                <ol id="sharedFolderList" class="access-who-has-list">
+                  <li class="access-empty-state">Vault admins see cross-Vault shared Folders here.</li>
+                </ol>
+                <p class="access-field-hint">Connections mount a source Folder into this Vault. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
+              </section>
+            </div>
           </div>
 
           <div
@@ -625,6 +709,6 @@ Start writing here.</textarea>
       </div>
     </div>
 
-    <script src="/client/app.js?v=20260705-access-lists"></script>
+    <script src="/client/app.js?v=20260707-share-mount-copy"></script>
   </body>
 </html>

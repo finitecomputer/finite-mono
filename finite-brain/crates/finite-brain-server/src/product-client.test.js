@@ -151,6 +151,10 @@ assert.equal(
 assert.equal(client.accessActionRoute("delete-folder", { folderId: "restricted" }), null);
 assert.equal(client.accessIntentValue("share"), "links");
 assert.equal(client.accessIntentValue("manage"), "people");
+assert.equal(client.folderAllowsDirectGrant(folderRows[0]), true);
+assert.equal(client.folderAllowsDirectGrant(folderRows[1]), true);
+assert.equal(client.folderAllowsDirectGrant({ access: "admin_only" }), false);
+assert.equal(client.folderAllowsDirectGrant({ access: "owner" }), false);
 assert.equal(client.accessPanelState("links", folderRows[1]).status, "restricted");
 assert.equal(client.accessPanelState("links", folderRows[1]).mode, "links");
 assert.equal(client.accessPanelState("people", folderRows[1]).title, "Restricted");
@@ -164,12 +168,31 @@ assert.equal(
   "2 members"
 );
 assert.match(htmlSource, /id="accessFolderButton"/);
+assert.equal((htmlSource.match(/id="accessFolderButton"/g) || []).length, 1);
+assert.equal((htmlSource.match(/id="accessFolderDropdown"/g) || []).length, 1);
+assert.equal((htmlSource.match(/id="accessFolderList"/g) || []).length, 1);
+assert.match(htmlSource, /id="accessAddPersonPanel"[\s\S]*class="access-folder-selector"[\s\S]*id="accessAddPersonForm"/);
+assert.doesNotMatch(htmlSource, /class="access-folder-selector"[\s\S]*id="accessInspector"/);
 assert.match(htmlSource, /id="loadVaultButton"[^>]*>\s*Load\s*<\/button>/s);
 assert.doesNotMatch(htmlSource, /id="loadVaultButton"[^>]*compact-icon-button/);
 assert.match(htmlSource, /id="accessWhoHasList"/);
+assert.match(htmlSource, /class="access-action-stack"/);
+assert.match(htmlSource, /class="access-state-stack"/);
+assert.match(htmlSource, /id="accessAddPersonPanel"/);
+assert.match(htmlSource, />\s*Grant folder access\s*</);
+assert.match(htmlSource, />\s*Choose folder and person\s*</);
 assert.match(htmlSource, /id="accessAdvancedSection"/);
+assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
 assert.match(htmlSource, /id="accessShareHint"/);
+assert.match(htmlSource, /id="accessShareMountHint"/);
+assert.match(htmlSource, />\s*Show in recipient's Vault\s*</);
+assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
+assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
+assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
+assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
+assert.match(htmlSource, /placeholder="name@example\.com"/);
+assert.doesNotMatch(htmlSource, /placeholder="[^"]*(npub|hex|NIP-05)/);
 assert.match(htmlSource, /role="tablist"/);
 assert.match(htmlSource, /id="accessFolderViewButton"/);
 assert.match(htmlSource, /id="accessVaultViewButton"/);
@@ -180,7 +203,21 @@ assert.match(htmlSource, /id="accessVaultPanel"/);
 assert.match(htmlSource, /id="vaultSwitchList"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
-assert.match(htmlSource, /class="access-inline-form vault-people-form"/);
+assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
+assert.match(htmlSource, /class="vault-access-action-grid"/);
+assert.match(htmlSource, />\s*Give Vault access\s*</);
+assert.match(htmlSource, />\s*Invite, add, promote\s*</);
+assert.match(htmlSource, />\s*Invite by email\s*</);
+assert.match(htmlSource, />\s*Add member now\s*</);
+assert.match(htmlSource, />\s*Make admin\s*</);
+assert.match(htmlSource, />\s*Join with invite\s*</);
+assert.match(htmlSource, />\s*Accept invite code\s*</);
+assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
+assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
+assert.doesNotMatch(source, /Invite, add, or promote/);
+assert.doesNotMatch(source, /Accept received invite/);
+assert.doesNotMatch(source, /Admin-only controls/);
+assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
 assert.match(htmlSource, /id="accessCreateOrganizationPanel"/);
@@ -188,20 +225,33 @@ assert.match(htmlSource, /id="vaultCreateDetails"/);
 assert.match(htmlSource, /id="accessShareTargetInput"/);
 assert.match(htmlSource, /id="addVaultMemberButton"/);
 assert.match(htmlSource, /id="addVaultAdminButton"/);
+assert.match(htmlSource, /id="vaultInvitationPanel" class="access-vault-admin"/);
+assert.doesNotMatch(htmlSource, /id="vaultInvitationPanel"[^>]*open/);
 assert.doesNotMatch(htmlSource, /id="accessChangeMode"/);
+assert.doesNotMatch(htmlSource, /id="accessManageToggle"/);
 assert.doesNotMatch(htmlSource, /id="accessManageSection"/);
 assert.match(cssSource, /\[hidden\]\s*\{[^}]*display: none !important;/s);
 assert.match(cssSource, /\.access-view-switch/);
+assert.match(cssSource, /\.access-action-stack\s*\{[^}]*gap:\s*8px;/s);
+assert.match(cssSource, /\.access-state-stack\s*\{[^}]*gap:\s*12px;/s);
+assert.match(cssSource, /\.access-advanced-summary,\s*\.access-admin-summary\s*\{[^}]*grid-template-areas:/s);
+assert.match(cssSource, /\.access-advanced-summary \.icon,\s*\.access-admin-summary \.icon\s*\{/s);
+assert.match(cssSource, /#accessAddPersonPanel\s+\.access-folder-selector\s*\{[^}]*margin:\s*0;/s);
+assert.match(cssSource, /#accessAddPersonPanel\s+\.access-advanced-content\s*\{[^}]*display:\s*grid;[^}]*gap:\s*12px;/s);
+assert.match(cssSource, /\.access-checkbox-hint\s*\{[^}]*margin:\s*-6px 0 0 23px;/s);
 assert.match(cssSource, /\.vault-management-section/);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*overflow-x:\s*hidden;/s);
-assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*12px;/s);
+assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*10px;/s);
 assert.match(cssSource, /\.access-mode-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /\.access-who-has-list\s+li\s*\{[^}]*flex-wrap:\s*wrap;/s);
 assert.match(cssSource, /\.access-button-row\s*\{[^}]*display:\s*grid;/s);
 assert.doesNotMatch(cssSource, /\.vault-person-action\s*\{[^}]*min-width:\s*max-content/s);
 assert.match(cssSource, /\.vault-management-section\s+\.access-who-has-list\s+li\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
-assert.match(cssSource, /#vaultPeopleSection\s+\.vault-people-form\s*\{[^}]*box-shadow:\s*none;/s);
-assert.match(cssSource, /#vaultPeopleSection\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(108px,\s*116px\);/s);
+assert.match(cssSource, /\.vault-access-action-grid\s*\{[^}]*gap:\s*10px;/s);
+assert.match(cssSource, /\.vault-access-option\.primary\s*\{[^}]*rgba\(124,\s*108,\s*255,\s*0\.055\)/s);
+assert.match(cssSource, /#vaultPeopleActionPanel\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+assert.match(cssSource, /#vaultPeopleSection\s+\.access-person-name\s*\{[^}]*white-space:\s*normal;/s);
+assert.match(cssSource, /#vaultInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
 assert.match(cssSource, /\.vault-switch-list/);
 assert.match(cssSource, /\.vault-switch-button/);
 assert.match(cssSource, /\.access-vault-create/);
@@ -220,17 +270,26 @@ assert.equal(client.hasOrganizationVaultControls({ kind: "personal" }), false);
 assert.equal(client.hasOrganizationVaultControls({ kind: "organization" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "personal" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "organization" }), false);
+const unresolvedOrgPeopleRows = client.vaultPeopleRows({
+  kind: "organization",
+  members: ["npub-admin", "npub-member"],
+  admins: ["npub-admin"],
+});
 assert.equal(
-  JSON.stringify(client.vaultPeopleRows({
-    kind: "organization",
-    members: ["npub-admin", "npub-member"],
-    admins: ["npub-admin"],
-  })),
+  JSON.stringify(unresolvedOrgPeopleRows.map(({ id, name, role, status, type, removable }) => ({
+    id,
+    name,
+    role,
+    status,
+    type,
+    removable,
+  }))),
   JSON.stringify([
     {
       id: "npub-admin",
       name: "npub-admin",
       role: "admin",
+      status: "No email or NIP-05 metadata loaded",
       type: "admin",
       removable: true,
     },
@@ -238,21 +297,38 @@ assert.equal(
       id: "npub-member",
       name: "npub-member",
       role: "member",
+      status: "No email or NIP-05 metadata loaded",
       type: "member",
       removable: true,
     },
   ])
 );
 assert.equal(
-  JSON.stringify(client.vaultPeopleRows({
-    kind: "personal",
-    ownerUserId: "npub-owner",
-  })),
+  JSON.stringify(unresolvedOrgPeopleRows[0].details.slice(0, 2)),
+  JSON.stringify([
+    { label: "Email / NIP-05", value: "Not resolved in this client" },
+    { label: "Public key", value: "npub-admin" },
+  ])
+);
+const unresolvedOwnerRows = client.vaultPeopleRows({
+  kind: "personal",
+  ownerUserId: "npub-owner",
+});
+assert.equal(
+  JSON.stringify(unresolvedOwnerRows.map(({ id, name, role, status, type, removable }) => ({
+    id,
+    name,
+    role,
+    status,
+    type,
+    removable,
+  }))),
   JSON.stringify([
     {
       id: "npub-owner",
       name: "npub-owner",
       role: "owner",
+      status: "No email or NIP-05 metadata loaded",
       type: "owner",
       removable: false,
     },
@@ -360,6 +436,7 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
     verifiedAt: "2026-07-06T00:00:00Z",
   });
   assert.equal(client.identityDisplay(authorNpub), "alice@example.com");
+  assert.equal(client.identityDisplay(otherNpub), client.shortKey(otherNpub));
   assert.equal(
     client.vaultPeopleRows({
       kind: "organization",
@@ -367,6 +444,14 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
       admins: [authorNpub],
     })[0].name,
     "alice@example.com"
+  );
+  assert.equal(
+    client.vaultPeopleRows({
+      kind: "organization",
+      members: [authorNpub, otherNpub],
+      admins: [authorNpub],
+    })[1].name,
+    client.shortKey(otherNpub)
   );
 
   const devGrant = {
@@ -443,6 +528,30 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
     if (!String(ciphertext).startsWith("nip44:")) throw new Error("bad fake ciphertext");
     return Buffer.from(String(ciphertext).slice("nip44:".length), "base64url").toString("utf8");
   };
+  const localSignerSecret = "1".padStart(64, "0");
+  const peerSignerSecret = "2".padStart(64, "0");
+  const localSigner = client.createLocalNip07ProviderFromSecret(localSignerSecret);
+  const peerSigner = client.createLocalNip07ProviderFromSecret(peerSignerSecret);
+  const localPublicKey = await localSigner.getPublicKey();
+  const peerPublicKey = await peerSigner.getPublicKey();
+  assert.equal(localPublicKey, client.inviteUnwrapKeypairFromSecret(localSignerSecret).publicKeyHex);
+  const localSigned = await localSigner.signEvent({
+    kind: 27235,
+    created_at: 1780000000,
+    tags: [["u", "http://finite.test/_admin/vaults"]],
+    content: "",
+  });
+  assert.equal(localSigned.pubkey, localPublicKey);
+  assert.match(localSigned.id, /^[0-9a-f]{64}$/);
+  assert.match(localSigned.sig, /^[0-9a-f]{128}$/);
+  const localToPeer = await localSigner.nip44.encrypt(peerPublicKey, "hello peer");
+  assert.equal(await peerSigner.nip44.decrypt(localPublicKey, localToPeer), "hello peer");
+  const peerToLocal = await peerSigner.nip44.encrypt(localPublicKey, "hello local");
+  assert.equal(await localSigner.nip44.decrypt(peerPublicKey, peerToLocal), "hello local");
+  assert.equal(
+    await client.nip44DecryptWithSecret(peerSignerSecret, localPublicKey, localToPeer),
+    "hello peer"
+  );
   let grantSignedIndex = 0;
   context.window.nostr = {
     signEvent: async (template) => ({
@@ -463,6 +572,29 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
   assert.equal(accessEvent.kind, 30078);
   assert.equal(JSON.stringify(accessEvent.tags), JSON.stringify(client.adminAccessChangeTags(accessPayload)));
   assert.equal(accessEvent.content, client.canonicalAdminAccessChangePayload(accessPayload));
+  let providerBoundSignCalls = 0;
+  const providerBoundSigner = {
+    signEvent(template) {
+      if (this !== providerBoundSigner) {
+        throw new TypeError("Cannot read properties of undefined (reading 'enable')");
+      }
+      providerBoundSignCalls += 1;
+      return {
+        ...template,
+        id: "provider-bound-access-change",
+        pubkey: "00".repeat(32),
+        sig: "provider-bound-signature",
+      };
+    },
+  };
+  const providerSignedAccessEvent = await client.buildAdminAccessChangeEvent({
+    ...accessPayload,
+    changeId: "access-change-provider-bound",
+    provider: providerBoundSigner,
+    createdAtUnix: Date.parse(accessPayload.createdAt) / 1000,
+  });
+  assert.equal(providerBoundSignCalls, 1);
+  assert.equal(providerSignedAccessEvent.id, "provider-bound-access-change");
 
   assert.equal(
     JSON.stringify(client.initialVaultInvitationFolders("getting-started restricted getting-started")),
@@ -485,6 +617,18 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
   assert.equal(client.vaultInvitationCreatePath("smoke org"), "/_admin/vaults/smoke%20org/invitations");
   assert.equal(client.vaultInvitationLinkPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode");
   assert.equal(client.vaultInvitationAcceptPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/accept");
+  assert.equal(client.emailInviteBootstrapPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/bootstrap");
+  assert.equal(client.emailInviteInstructionsPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/instructions");
+  assert.equal(client.emailInviteClaimPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/claim");
+  assert.equal(
+    client.emailInviteClientUrl({
+      publicBaseUrl: "https://finite.test/app/",
+      inviteCode: "invite/code",
+      invitedEmail: "Friend@Example.com",
+      inviteSecret: "secret-value",
+    }),
+    "https://finite.test/app/client#inviteCode=invite%2Fcode&inviteEmail=friend%40example.com&inviteSecret=secret-value"
+  );
   assert.equal(client.vaultInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
   assert.match(
     client.vaultInvitationIdentifierHint("invitation-4f82a37c1b82bcdd54973c466cdde914"),
@@ -498,6 +642,321 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
   assert.equal(
     client.vaultInvitationRevokePath("smoke org", "invitation/one"),
     "/_admin/vaults/smoke%20org/invitations/invitation%2Fone"
+  );
+  assert.match(htmlSource, /id="vaultInviteUrlInput"/);
+  assert.match(htmlSource, /id="vaultInviteEmailInput"/);
+  assert.match(htmlSource, /id="vaultInviteEmailProofCreatedAtInput"/);
+  assert.match(htmlSource, /id="vaultInviteSecretInput"/);
+  assert.match(htmlSource, /id="vaultInviteConnectSignerButton"/);
+  assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
+
+  const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
+  assert.equal(
+    await client.nip44DecryptWithSecret(
+      "1".padStart(64, "0"),
+      nip44VectorSender.publicKeyHex,
+      "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb"
+    ),
+    "a"
+  );
+
+  const emailMetadata = {
+    folders: [
+      {
+        id: "getting-started",
+        path: "Getting Started",
+        access: "all_members",
+        currentKeyVersion: 1,
+      },
+      {
+        id: "restricted",
+        path: "Restricted",
+        access: "restricted",
+        currentKeyVersion: 3,
+      },
+      {
+        id: "vault-ops",
+        path: "Vault Ops",
+        access: "admin_only",
+        currentKeyVersion: 1,
+      },
+    ],
+  };
+  assert.equal(client.canonicalInviteEmail(" Friend@Example.COM "), "friend@example.com");
+  assert.equal(
+    JSON.stringify(
+      client.emailInviteScope(emailMetadata, "restricted").map((folder) => [
+        folder.folderId,
+        folder.access,
+        folder.keyVersion,
+      ])
+    ),
+    JSON.stringify([
+      ["getting-started", "all_members", 1],
+      ["restricted", "restricted", 3],
+    ])
+  );
+  assert.throws(() => client.emailInviteScope(emailMetadata, "vault-ops"), /all-members and selected restricted/);
+
+  const emailKeyring = client.createSessionKeyring();
+  const restrictedEmailFolderKey = Buffer.alloc(32, 8).toString("base64");
+  await client.openFolderKeyGrantPlaintext(emailKeyring, {
+    version: "finite-folder-key-grant-v1",
+    vaultId: "smoke",
+    folderId: "getting-started",
+    keyVersion: 1,
+    issuerNpub: authorNpub,
+    recipientNpub: authorNpub,
+    folderKey,
+    issuedAt: "2026-06-24T00:00:00.000Z",
+  });
+  await client.openFolderKeyGrantPlaintext(emailKeyring, {
+    version: "finite-folder-key-grant-v1",
+    vaultId: "smoke",
+    folderId: "restricted",
+    keyVersion: 3,
+    issuerNpub: authorNpub,
+    recipientNpub: authorNpub,
+    folderKey: restrictedEmailFolderKey,
+    issuedAt: "2026-06-24T00:00:00.000Z",
+  });
+  const inviteKeypair = client.inviteUnwrapKeypairFromSecret("3".padStart(64, "0"));
+  let emailInviteSignedIndex = 0;
+  const emailInviteSigner = async (template) => ({
+    ...template,
+    id: `email-invite-signed-${++emailInviteSignedIndex}`,
+    pubkey: "00".repeat(32),
+    sig: "email-invite-signature",
+  });
+  const emailInviteRequest = await client.buildEmailVaultInvitationRequest(emailKeyring, {
+    createdAtUnix: 1780000400,
+    expiresAt: "2026-07-04T00:00:00.000Z",
+    grantIdFactory: (item) => `bootstrap-${item.folderId}`,
+    initialFolderAccess: "restricted",
+    inviteKeypair,
+    issuerNpub: authorNpub,
+    metadata: emailMetadata,
+    provider: { signEvent: emailInviteSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
+    signEvent: emailInviteSigner,
+    target: "FRIEND@EXAMPLE.COM",
+    vaultId: "smoke",
+  });
+  assert.equal(emailInviteRequest.body.target, "friend@example.com");
+  assert.equal(emailInviteRequest.body.inviteUnwrapNpub, inviteKeypair.npub);
+  assert.match(emailInviteRequest.body.bootstrapPayloadHash, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(emailInviteRequest.body.initialFolderAccess), JSON.stringify(["restricted"]));
+  assert.equal(
+    JSON.stringify(emailInviteRequest.scope.map((folder) => [folder.folderId, folder.access, folder.keyVersion])),
+    JSON.stringify([
+      ["getting-started", "all_members", 1],
+      ["restricted", "restricted", 3],
+    ])
+  );
+  assert.doesNotMatch(JSON.stringify(emailInviteRequest.body), /inviteSecret/i);
+  const scopedEmailInviteRequest = await client.buildEmailVaultInvitationRequest(emailKeyring, {
+    createdAtUnix: 1780000401,
+    expiresAt: "2026-07-04T00:00:00.000Z",
+    grantIdFactory: (item) => `scoped-bootstrap-${item.folderId}`,
+    inviteKeypair,
+    issuerNpub: authorNpub,
+    provider: { signEvent: emailInviteSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
+    scope: emailInviteRequest.scope,
+    signEvent: emailInviteSigner,
+    target: "friend@example.com",
+    vaultId: "smoke",
+  });
+  assert.equal(JSON.stringify(scopedEmailInviteRequest.body.initialFolderAccess), JSON.stringify(["restricted"]));
+
+  const emailInvitation = {
+    vaultId: "smoke",
+    inviteCode: "invite-email",
+    inviteUnwrapNpub: inviteKeypair.npub,
+    bootstrapPayloadHash: emailInviteRequest.body.bootstrapPayloadHash,
+    bootstrapWrappedEventJson: emailInviteRequest.body.bootstrapWrappedEventJson,
+    bootstrapScope: emailInviteRequest.scope,
+  };
+  const openedEmailBootstrap = await client.openEmailInviteBootstrap(emailInvitation, {
+    email: "friend@example.com",
+    inviteSecret: emailInviteRequest.inviteSecret,
+    inviteDecrypt: fakeDecrypt,
+  });
+  assert.equal(
+    JSON.stringify(openedEmailBootstrap.payload.grants.map((entry) => entry.folderId)),
+    JSON.stringify(["getting-started", "restricted"])
+  );
+  await assert.rejects(
+    () =>
+      client.openEmailInviteBootstrap(emailInvitation, {
+        email: "friend@example.com",
+        inviteSecret: "4".padStart(64, "0"),
+        inviteDecrypt: fakeDecrypt,
+      }),
+    /Invite Secret does not match/
+  );
+  await assert.rejects(
+    () =>
+      client.openEmailInviteBootstrap(emailInvitation, {
+        email: "other@example.com",
+        inviteSecret: emailInviteRequest.inviteSecret,
+        inviteDecrypt: fakeDecrypt,
+      }),
+    /email mismatch/
+  );
+  await assert.rejects(
+    () =>
+      client.openEmailInviteBootstrap(
+        {
+          ...emailInvitation,
+          bootstrapPayloadHash: "sha256:" + "0".repeat(64),
+        },
+        {
+          email: "friend@example.com",
+          inviteSecret: emailInviteRequest.inviteSecret,
+          inviteDecrypt: fakeDecrypt,
+        }
+      ),
+    /payload hash mismatch/
+  );
+  await assert.rejects(
+    () =>
+      client.openEmailInviteBootstrap(
+        {
+          ...emailInvitation,
+          bootstrapScope: emailInvitation.bootstrapScope.slice(0, 1),
+        },
+        {
+          email: "friend@example.com",
+          inviteSecret: emailInviteRequest.inviteSecret,
+          inviteDecrypt: fakeDecrypt,
+        }
+      ),
+    /scope mismatch/
+  );
+  await assert.rejects(
+    () =>
+      client.openEmailInviteBootstrap(
+        {
+          ...emailInvitation,
+          inviteUnwrapNpub: client.inviteUnwrapKeypairFromSecret("5".padStart(64, "0")).npub,
+        },
+        {
+          email: "friend@example.com",
+          inviteSecret: emailInviteRequest.inviteSecret,
+          inviteDecrypt: fakeDecrypt,
+        }
+      ),
+    /Invite Secret does not match/
+  );
+  let emailClaimSignedIndex = 0;
+  const emailClaimSigner = async (template) => ({
+    ...template,
+    id: `email-claim-signed-${++emailClaimSignedIndex}`,
+    pubkey: "11".repeat(32),
+    sig: "email-claim-signature",
+  });
+  const emailClaimRequest = await client.buildEmailInviteClaimRequest({
+    claimantNpub: otherNpub,
+    claimGrantIdFactory: (entry) => `claim-${entry.folderId}`,
+    createdAtUnix: 1780000500,
+    email: "friend@example.com",
+    emailProofCreatedAt: "2026-06-23T00:00:00.000Z",
+    invitation: emailInvitation,
+    inviteDecrypt: fakeDecrypt,
+    inviteSecret: emailInviteRequest.inviteSecret,
+    provider: { signEvent: emailClaimSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
+    signEvent: emailClaimSigner,
+  });
+  assert.equal(emailClaimRequest.openedGrantCount, 2);
+  assert.equal(emailClaimRequest.body.email, "friend@example.com");
+  assert.equal(
+    JSON.stringify(emailClaimRequest.body.grants.map((entry) => [entry.folderId, entry.grant.id, entry.grant.recipientNpub])),
+    JSON.stringify([
+      ["getting-started", "claim-getting-started", otherNpub],
+      ["restricted", "claim-restricted", otherNpub],
+    ])
+  );
+  const inviteProof = JSON.parse(emailClaimRequest.body.inviteUnwrapProofEventJson);
+  assert.equal(inviteProof.pubkey, inviteKeypair.publicKeyHex);
+  assert.match(inviteProof.content, /finite-email-invite-bootstrap-claim-proof-v1/);
+  assert.doesNotMatch(JSON.stringify(emailClaimRequest.body), new RegExp(emailInviteRequest.inviteSecret, "i"));
+  assert.doesNotMatch(JSON.stringify(emailClaimRequest.body), /folderKey/);
+
+  const claimedKeyring = client.createSessionKeyring();
+  const claimedOpen = await client.openFolderKeyGrants(
+    claimedKeyring,
+    {
+      keyGrants: emailClaimRequest.body.grants.map((entry) => ({
+        ...entry.grant,
+        folderId: entry.folderId,
+      })),
+    },
+    otherNpub,
+    { decrypt: fakeDecrypt }
+  );
+  assert.equal(claimedOpen.opened.length, 2);
+  assert.equal(claimedOpen.skipped.length, 0);
+  assert.equal(claimedKeyring.keys.has("smoke:getting-started:1"), true);
+  assert.equal(claimedKeyring.keys.has("smoke:restricted:3"), true);
+  assert.equal(claimedKeyring.keys.has("smoke:vault-ops:1"), false);
+
+  const claimedSharedWrite = await client.buildPageWriteRequest(claimedKeyring, {
+    authorNpub: otherNpub,
+    baseRevision: null,
+    createdAtUnix: 1780000600,
+    folderId: "getting-started",
+    keyVersion: 1,
+    nonceBytes: new Uint8Array(12).fill(4),
+    objectId: "obj_email_shared01",
+    plaintext: "# Shared Email Invite Page\n\nOpened through the claimed all-members grant.",
+    signEvent: emailClaimSigner,
+    vaultId: "smoke",
+  });
+  const openedClaimedShared = await client.openFolderObject(claimedKeyring, {
+    vaultId: "smoke",
+    folderId: "getting-started",
+    objectId: "obj_email_shared01",
+    revision: 1,
+    ciphertext: claimedSharedWrite.ciphertext,
+  });
+  assert.equal(openedClaimedShared.status, "ready");
+  assert.match(openedClaimedShared.text, /claimed all-members grant/);
+
+  const claimedRestrictedWrite = await client.buildPageWriteRequest(claimedKeyring, {
+    authorNpub: otherNpub,
+    baseRevision: null,
+    createdAtUnix: 1780000601,
+    folderId: "restricted",
+    keyVersion: 3,
+    nonceBytes: new Uint8Array(12).fill(5),
+    objectId: "obj_email_restricted01",
+    plaintext: "# Restricted Email Invite Page\n\nOpened through the selected restricted grant.",
+    signEvent: emailClaimSigner,
+    vaultId: "smoke",
+  });
+  const openedClaimedRestricted = await client.openFolderObject(claimedKeyring, {
+    vaultId: "smoke",
+    folderId: "restricted",
+    objectId: "obj_email_restricted01",
+    revision: 1,
+    ciphertext: claimedRestrictedWrite.ciphertext,
+  });
+  assert.equal(openedClaimedRestricted.status, "ready");
+  assert.match(openedClaimedRestricted.text, /selected restricted grant/);
+  await assert.rejects(
+    () =>
+      client.buildPageWriteRequest(claimedKeyring, {
+        authorNpub: otherNpub,
+        baseRevision: null,
+        createdAtUnix: 1780000602,
+        folderId: "vault-ops",
+        keyVersion: 1,
+        nonceBytes: new Uint8Array(12).fill(6),
+        objectId: "obj_email_locked01",
+        plaintext: "# Locked\n\nThis should not encrypt.",
+        signEvent: emailClaimSigner,
+        vaultId: "smoke",
+      }),
+    /No Folder Key opened/
   );
 
   const accessGrant = await client.buildFolderKeyGrantRequest({
@@ -666,6 +1125,29 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
   assert.match(defaultPages[1].markdown, /Source Notes/);
   assert.match(defaultPages[2].markdown, /raw\/assets\//);
   assert.match(defaultPages[2].markdown, /Source Note/);
+  const seedGraphPages = defaultPages.map((page) => ({
+    ...page,
+    key: `${page.folderId}/${page.objectId}`,
+    status: "ready",
+    text: page.markdown,
+  }));
+  const missingSeedLinks = seedGraphPages.flatMap((page) =>
+    client
+      .pageLinkContext(page, seedGraphPages)
+      .outgoing.filter((row) => row.status !== "resolved")
+      .map((row) => `${page.folderId}/${page.path}->${row.label}`)
+  );
+  assert.equal(JSON.stringify(missingSeedLinks), JSON.stringify([]));
+  assert.equal(
+    seedGraphPages.filter((page) => client.extractPageLinks(page.markdown).length > 0).length,
+    defaultPages.length
+  );
+  assert.equal(
+    seedGraphPages.filter((page) => client.pageLinkContext(page, seedGraphPages).backlinks.length > 0).length,
+    defaultPages.length
+  );
+  assert.match(defaultPages[3].markdown, /# Getting Started Index/);
+  assert.match(defaultPages[9].markdown, /# Restricted Index/);
 
   let bootstrapSignedIndex = 0;
   const bootstrapSigner = async (template) => ({
@@ -1592,6 +2074,39 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
     JSON.stringify(linkContext.backlinks.map((row) => [row.label, row.key])),
     JSON.stringify([["Beta", "general/beta"]])
   );
+  assert.equal(client.pageKeyForReference("Beta", [
+    {
+      folderId: "general",
+      key: "general/beta",
+      objectId: "beta",
+      path: "wiki/beta.md",
+      status: "ready",
+      text: "# Beta\n\nBack to [[Alpha]].",
+      title: "Beta",
+    },
+  ]), "general/beta");
+  assert.equal(client.pageKeyForReference("wiki/beta.md", [
+    {
+      folderId: "general",
+      key: "general/beta",
+      objectId: "beta",
+      path: "wiki/beta.md",
+      status: "ready",
+      text: "# Beta\n\nBack to [[Alpha]].",
+      title: "Beta",
+    },
+  ]), "general/beta");
+  assert.equal(client.pageKeyForReference("Locked", [
+    {
+      folderId: "restricted",
+      key: "restricted/locked",
+      objectId: "locked",
+      path: "locked.md",
+      status: "locked",
+      text: "# Locked",
+      title: "Locked",
+    },
+  ]), null);
   const pathLinkContext = client.pageLinkContext(
     {
       folderId: "docs",

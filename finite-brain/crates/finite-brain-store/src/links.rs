@@ -1,5 +1,14 @@
 use crate::*;
 
+const VAULT_INVITATION_SELECT: &str = r#"
+    SELECT id, vault_id, user_id, status, invite_code, accept_path,
+           initial_folder_access_json, created_by_npub, expires_at,
+           created_at, updated_at, accepted_at, target_kind, invited_email,
+           invite_unwrap_npub, bootstrap_payload_hash, bootstrap_wrapped_event_json,
+           bootstrap_authorization_event_json, claimed_by_npub, bootstrap_scope_json
+    FROM vault_invitations
+"#;
+
 impl BrainStore {
     /// Create one npub-bound singleton Vault Invitation.
     #[allow(clippy::too_many_arguments)]
@@ -43,16 +52,119 @@ impl BrainStore {
             .execute(
                 r#"
                 INSERT INTO vault_invitations (
-                    id, vault_id, user_id, status, invite_code, accept_path,
+                    id, vault_id, user_id, target_kind, status, invite_code, accept_path,
                     initial_folder_access_json, created_by_npub, expires_at,
-                    created_at, updated_at
+                    created_at, updated_at, bootstrap_scope_json
                 )
-                VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                VALUES (?1, ?2, ?3, 'npub', 'pending', ?4, ?5, ?6, ?7, ?8, ?9, ?9, '[]')
                 "#,
                 params![
                     id,
                     vault_id.as_str(),
                     user_id.as_str(),
+                    invite_code,
+                    accept_path,
+                    initial_folder_access_json,
+                    created_by_npub.as_str(),
+                    expires_at,
+                    created_at
+                ],
+            )
+            .map_err(map_insert_error("vault_invitation_id", id))?;
+
+        self.load_vault_invitation(id)
+    }
+
+    /// Create one email-targeted Vault Invitation with encrypted bootstrap material.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_email_vault_invitation(
+        &mut self,
+        vault_id: &VaultId,
+        id: &str,
+        invited_email: &str,
+        invite_unwrap_npub: &UserId,
+        bootstrap_payload_hash: &str,
+        bootstrap_wrapped_event_json: &str,
+        bootstrap_authorization_event_json: &str,
+        invite_code: &str,
+        accept_path: &str,
+        selected_restricted_folder_access: &[FolderId],
+        created_by_npub: &UserId,
+        expires_at: &str,
+        created_at: &str,
+    ) -> Result<StoredVaultInvitation, StoreError> {
+        let vault = self.load_core_vault(vault_id)?;
+        if vault.kind != VaultKind::Organization {
+            return Err(StoreError::BrokenInvariant {
+                reason: "email vault invitations require an organization vault".to_owned(),
+            });
+        }
+        if !vault.admins.contains(created_by_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "email vault invitations must be created by a vault admin".to_owned(),
+            });
+        }
+        validate_link_id("vault_invitation_id", id)?;
+        validate_link_id("invite_code", invite_code)?;
+        validate_link_timestamp("expiresAt", expires_at)?;
+        let invited_email = canonical_invited_email(invited_email)?;
+        validate_required_text("bootstrapPayloadHash", bootstrap_payload_hash)?;
+        validate_required_text("bootstrapWrappedEventJson", bootstrap_wrapped_event_json)?;
+        validate_required_text(
+            "bootstrapAuthorizationEventJson",
+            bootstrap_authorization_event_json,
+        )?;
+        let bootstrap_scope = email_bootstrap_scope(&vault, selected_restricted_folder_access)?;
+        let initial_folder_access = bootstrap_scope
+            .iter()
+            .map(|scope| scope.folder_id.clone())
+            .collect::<Vec<_>>();
+        let initial_folder_access_json = folder_id_vec_json(&initial_folder_access)?;
+        let bootstrap_scope_json = serde_json::to_string(&bootstrap_scope).map_err(|error| {
+            StoreError::BrokenInvariant {
+                reason: format!("email bootstrap scope did not serialize: {error}"),
+            }
+        })?;
+
+        self.conn.execute(
+            r#"
+            UPDATE vault_invitations
+            SET status = 'revoked',
+                bootstrap_wrapped_event_json = NULL,
+                updated_at = ?3
+            WHERE vault_id = ?1
+              AND target_kind = 'email_bootstrap'
+              AND invited_email = ?2
+              AND status = 'pending'
+            "#,
+            params![vault_id.as_str(), invited_email, created_at],
+        )?;
+
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO vault_invitations (
+                    id, vault_id, user_id, target_kind, invited_email, invite_unwrap_npub,
+                    bootstrap_payload_hash, bootstrap_wrapped_event_json,
+                    bootstrap_authorization_event_json, bootstrap_scope_json,
+                    status, invite_code, accept_path, initial_folder_access_json,
+                    created_by_npub, expires_at, created_at, updated_at
+                )
+                VALUES (
+                    ?1, ?2, NULL, 'email_bootstrap', ?3, ?4,
+                    ?5, ?6, ?7, ?8,
+                    'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?14
+                )
+                "#,
+                params![
+                    id,
+                    vault_id.as_str(),
+                    invited_email,
+                    invite_unwrap_npub.as_str(),
+                    bootstrap_payload_hash,
+                    bootstrap_wrapped_event_json,
+                    bootstrap_authorization_event_json,
+                    bootstrap_scope_json,
                     invite_code,
                     accept_path,
                     initial_folder_access_json,
@@ -73,14 +185,25 @@ impl BrainStore {
     ) -> Result<StoredVaultInvitation, StoreError> {
         self.conn
             .query_row(
-                r#"
-                SELECT id, vault_id, user_id, status, invite_code, accept_path,
-                       initial_folder_access_json, created_by_npub, expires_at,
-                       created_at, updated_at, accepted_at
-                FROM vault_invitations
-                WHERE id = ?1
-                "#,
+                &format!("{VAULT_INVITATION_SELECT} WHERE id = ?1"),
                 params![invitation_id],
+                vault_invitation_from_row,
+            )
+            .optional()?
+            .ok_or(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            })
+    }
+
+    /// Load one Vault Invitation by invite code without applying recipient availability rules.
+    pub fn load_vault_invitation_by_code(
+        &self,
+        invite_code: &str,
+    ) -> Result<StoredVaultInvitation, StoreError> {
+        self.conn
+            .query_row(
+                &format!("{VAULT_INVITATION_SELECT} WHERE invite_code = ?1"),
+                params![invite_code],
                 vault_invitation_from_row,
             )
             .optional()?
@@ -95,17 +218,10 @@ impl BrainStore {
         vault_id: &VaultId,
     ) -> Result<Vec<StoredVaultInvitation>, StoreError> {
         self.require_vault_exists(vault_id)?;
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT id, vault_id, user_id, status, invite_code, accept_path,
-                   initial_folder_access_json, created_by_npub, expires_at,
-                   created_at, updated_at, accepted_at
-            FROM vault_invitations
-            WHERE vault_id = ?1
-            ORDER BY created_at DESC, id
-            LIMIT ?2
-            "#,
-        )?;
+        let query = format!(
+            "{VAULT_INVITATION_SELECT} WHERE vault_id = ?1 ORDER BY created_at DESC, id LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map(
             params![vault_id.as_str(), MAX_LINK_LIST_ROWS],
             vault_invitation_from_row,
@@ -115,6 +231,23 @@ impl BrainStore {
             invitations.push(row?);
         }
         Ok(invitations)
+    }
+
+    fn tombstone_email_bootstrap_ciphertext(
+        &mut self,
+        invitation_id: &str,
+        updated_at: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            r#"
+            UPDATE vault_invitations
+            SET bootstrap_wrapped_event_json = NULL,
+                updated_at = ?2
+            WHERE id = ?1 AND target_kind = 'email_bootstrap'
+            "#,
+            params![invitation_id, updated_at],
+        )?;
+        Ok(())
     }
 
     /// Load a pending Vault Invitation by invite code for its target user only.
@@ -127,13 +260,7 @@ impl BrainStore {
         let invitation = self
             .conn
             .query_row(
-                r#"
-                SELECT id, vault_id, user_id, status, invite_code, accept_path,
-                       initial_folder_access_json, created_by_npub, expires_at,
-                       created_at, updated_at, accepted_at
-                FROM vault_invitations
-                WHERE invite_code = ?1
-                "#,
+                &format!("{VAULT_INVITATION_SELECT} WHERE invite_code = ?1"),
                 params![invite_code],
                 vault_invitation_from_row,
             )
@@ -166,7 +293,16 @@ impl BrainStore {
             });
         }
         self.conn.execute(
-            "UPDATE vault_invitations SET status = 'revoked', updated_at = ?3 WHERE vault_id = ?1 AND id = ?2",
+            r#"
+            UPDATE vault_invitations
+            SET status = 'revoked',
+                bootstrap_wrapped_event_json = CASE
+                    WHEN target_kind = 'email_bootstrap' THEN NULL
+                    ELSE bootstrap_wrapped_event_json
+                END,
+                updated_at = ?3
+            WHERE vault_id = ?1 AND id = ?2
+            "#,
             params![vault_id.as_str(), invitation_id, updated_at],
         )?;
         self.load_vault_invitation(invitation_id)
@@ -182,13 +318,7 @@ impl BrainStore {
         let mut invitation = self
             .conn
             .query_row(
-                r#"
-                SELECT id, vault_id, user_id, status, invite_code, accept_path,
-                       initial_folder_access_json, created_by_npub, expires_at,
-                       created_at, updated_at, accepted_at
-                FROM vault_invitations
-                WHERE invite_code = ?1
-                "#,
+                &format!("{VAULT_INVITATION_SELECT} WHERE invite_code = ?1"),
                 params![invite_code],
                 vault_invitation_from_row,
             )
@@ -197,7 +327,9 @@ impl BrainStore {
                 kind: "vault invitation",
             })?;
 
-        if invitation.user_id != *user_id {
+        if invitation.target_kind != VaultInvitationTargetKind::Npub
+            || invitation.user_id.as_ref() != Some(user_id)
+        {
             return Err(StoreError::UnavailableLink {
                 kind: "vault invitation",
             });
@@ -208,9 +340,23 @@ impl BrainStore {
         }
         ensure_invitation_available(&invitation, user_id, now)?;
         let already_member = self.member_exists(&invitation.vault_id, user_id)?;
+        let vault = self.load_core_vault(&invitation.vault_id)?;
+        let restricted_initial_folder_access = invitation
+            .initial_folder_access
+            .iter()
+            .filter(|folder_id| {
+                vault.folders.iter().any(|folder| {
+                    folder.id == **folder_id && folder.access == FolderAccessMode::Restricted
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
 
         let tx = self.conn.transaction()?;
         insert_member_if_missing(&tx, &invitation.vault_id, user_id)?;
+        for folder_id in restricted_initial_folder_access {
+            insert_folder_access_if_missing(&tx, &invitation.vault_id, &folder_id, user_id)?;
+        }
         tx.execute(
             r#"
             UPDATE vault_invitations
@@ -224,6 +370,105 @@ impl BrainStore {
         let mut invitation = self.load_vault_invitation(&invitation.id)?;
         invitation.duplicate_accept = already_member;
         Ok(invitation)
+    }
+
+    /// Claim a pending Email Invite Bootstrap into durable npub-bound access.
+    pub fn claim_email_vault_invitation_by_code(
+        &mut self,
+        invite_code: &str,
+        invited_email: &str,
+        claimant: &UserId,
+        grants: &[FolderKeyGrantMetadata],
+        now: &str,
+    ) -> Result<StoredVaultInvitation, StoreError> {
+        let mut invitation = self
+            .conn
+            .query_row(
+                &format!("{VAULT_INVITATION_SELECT} WHERE invite_code = ?1"),
+                params![invite_code],
+                vault_invitation_from_row,
+            )
+            .optional()?
+            .ok_or(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            })?;
+
+        if invitation.target_kind != VaultInvitationTargetKind::EmailBootstrap {
+            return Err(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            });
+        }
+        if invitation.status == LinkStatus::Accepted {
+            if invitation.claimed_by_npub.as_ref() == Some(claimant) {
+                invitation.duplicate_accept = true;
+                return Ok(invitation);
+            }
+            return Err(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            });
+        }
+        if invitation.status != LinkStatus::Pending {
+            return Err(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            });
+        }
+        if timestamp_expired(&invitation.expires_at, now) {
+            self.tombstone_email_bootstrap_ciphertext(&invitation.id, now)?;
+            return Err(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            });
+        }
+        let invited_email = canonical_invited_email(invited_email)?;
+        if invitation.invited_email.as_deref() != Some(invited_email.as_str()) {
+            return Err(StoreError::UnavailableLink {
+                kind: "vault invitation",
+            });
+        }
+
+        let stored = self.load_vault(&invitation.vault_id)?;
+        if email_bootstrap_scope_stale(&stored.vault, &invitation.bootstrap_scope)? {
+            self.tombstone_email_bootstrap_ciphertext(&invitation.id, now)?;
+            return Err(StoreError::BrokenInvariant {
+                reason: "email bootstrap scope is stale for current Folder Key versions".to_owned(),
+            });
+        }
+        validate_email_claim_grants(&stored.vault, &invitation.bootstrap_scope, claimant, grants)?;
+        let restricted_scope = invitation
+            .bootstrap_scope
+            .iter()
+            .filter(|scope| scope.access == FolderAccessMode::Restricted)
+            .map(|scope| scope.folder_id.clone())
+            .collect::<Vec<_>>();
+
+        let tx = self.conn.transaction()?;
+        insert_member_if_missing(&tx, &invitation.vault_id, claimant)?;
+        for folder_id in restricted_scope {
+            insert_folder_access_if_missing(&tx, &invitation.vault_id, &folder_id, claimant)?;
+        }
+        for grant in grants {
+            insert_grant(&tx, &invitation.vault_id, grant)?;
+        }
+        tx.execute(
+            r#"
+            UPDATE vault_invitations
+            SET status = 'accepted',
+                user_id = ?3,
+                claimed_by_npub = ?3,
+                bootstrap_wrapped_event_json = NULL,
+                updated_at = ?4,
+                accepted_at = ?4
+            WHERE vault_id = ?1 AND id = ?2 AND status = 'pending'
+            "#,
+            params![
+                invitation.vault_id.as_str(),
+                invitation.id,
+                claimant.as_str(),
+                now
+            ],
+        )?;
+        tx.commit()?;
+
+        self.load_vault_invitation(&invitation.id)
     }
 
     /// Create one npub-bound singleton Share Link for a restricted Folder.
