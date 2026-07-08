@@ -36,12 +36,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        # Floating stable, matching finitecomputer-v2's pre-mono CI: several
-        # crates are clean under current clippy but trip lints that were
-        # default-on in older releases (e.g. uninlined_format_args on 1.88).
+        # Pinned to 1.93: 1.88's clippy trips uninlined_format_args on v2
+        # crates, and floating stable (1.96 today) trips new let-chain lints
+        # in devfinity. 1.93 is verified clean across the whole workspace.
+        # Bump deliberately (run clippy locally first), don't float.
         # MSRV (rust-version 1.88) is still exercised by the release builds.
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.93"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
