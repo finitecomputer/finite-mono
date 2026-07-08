@@ -52,12 +52,27 @@ jobs:
           tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" fsite
           shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
 
+      # The lat2 server deploy (infra/hosts/lat2/deploy.md) installs the
+      # finitesitesd daemon from this release instead of building on the box.
+      - name: Build and package finitesitesd (linux only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" --package finitesitesd --bin finitesitesd
+          mkdir -p dist-daemon
+          cp "target/${{ matrix.target }}/release/finitesitesd" dist-daemon/finitesitesd
+          tar -C dist-daemon -czf "finitesitesd-linux-x86_64.tar.gz" finitesitesd
+          shasum -a 256 "finitesitesd-linux-x86_64.tar.gz" > "finitesitesd-linux-x86_64.tar.gz.sha256"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.tar.gz.sha256
+            finitesitesd-linux-x86_64.tar.gz
+            finitesitesd-linux-x86_64.tar.gz.sha256
+          if-no-files-found: ignore
 
   publish:
     needs: build
