@@ -85,7 +85,7 @@ Core reads `FC_CORE_ADMIN_EMAILS` at router construction:
 - empty, missing, or whitespace-only means **no admins**: every
   `/api/core/v1/admin/*` request fails closed with 403
 
-`deploy/finite-computer/k8s/core.yaml` wires it from the
+`../infra/hosts/lat1/k8s/core.yaml` wires it from the
 `finite-computer-config` ConfigMap (`optional: true`, empty default in
 `configmap.yaml`). Set it to the operator emails to enable Admin Ops in a
 deployment.

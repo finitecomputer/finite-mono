@@ -6,7 +6,12 @@ finite-lat-1; keeping tenant-facing serving off the Core box removes the
 shared blast radius entirely. Cloudflare holds the `finite.chat` zone and
 proxies both names, hiding the box IP and absorbing floods.
 
-Unit, Caddyfile, and env example live in `deploy/finite-lat-2/`.
+Unit, Caddyfile, and env example live in `infra/hosts/lat2/` at the
+finite-mono root (moved 2026-07-08 from this crate's `deploy/finite-lat-2/`;
+units under `systemd/`, Caddyfile at `caddy/Caddyfile`). They are no longer
+inside the sites source tree, so they are NOT part of the `~/finite-sites`
+rsync — copy them to the box from the mono checkout when they change. See
+`infra/hosts/lat2/deploy.md` for the target (non-build-on-box) flow.
 
 **Status (2026-06-09): FULLY LIVE for site/API/Git.** Box setup (3–4), the
 Cloudflare zone (proxied `*` and `api` A records), the Origin CA cert
@@ -126,8 +131,10 @@ sudo useradd --system --home /var/lib/finite-sites --shell /usr/sbin/nologin fin
 sudo install -d -o finite-sites -g finite-sites /var/lib/finite-sites
 sudo install -d /etc/finite-saas
 echo "# RESEND_API_KEY=" | sudo tee /etc/finite-saas/sites.env && sudo chmod 0640 /etc/finite-saas/sites.env
-sudo install -m 0644 deploy/finite-lat-2/finite-saas-sites.service /etc/systemd/system/
-# /etc/caddy/Caddyfile from deploy/finite-lat-2/Caddyfile-sites (tls internal bootstrap)
+# unit + Caddyfile now live in the mono repo, not the synced source tree:
+# copy infra/hosts/lat2/systemd/finite-saas-sites.service to the box, then
+sudo install -m 0644 finite-saas-sites.service /etc/systemd/system/
+# /etc/caddy/Caddyfile from infra/hosts/lat2/caddy/Caddyfile (tls internal bootstrap)
 sudo systemctl daemon-reload && sudo systemctl enable --now finite-saas-sites && sudo systemctl reload caddy
 ```
 
@@ -178,9 +185,9 @@ requirements, all in place:
 
 - runtimes on the root filesystem (apps cannot read /home): node (apt),
   `/usr/local/bin/bun`, `/usr/local/bin/uv`
-- `deploy/finite-lat-2/finite-app@.service` ->
+- `infra/hosts/lat2/systemd/finite-app@.service` (mono root) ->
   `/etc/systemd/system/finite-app@.service`
-- polkitd installed, `deploy/finite-lat-2/50-finite-sites.rules` ->
+- polkitd installed, `infra/hosts/lat2/systemd/50-finite-sites.rules` ->
   `/etc/polkit-1/rules.d/` (lets the finite-sites user manage
   `finite-app@*` units over D-Bus; sudo cannot work because the daemon
   runs with NoNewPrivileges)
@@ -213,9 +220,9 @@ place on finite-lat-2 (KVM present, nested virt on):
   `$DATA_DIR`, survives stop/start) — this is the Kata-runner backup scope.
 - **Privilege wiring** (the one delicate part): the Kata runner shells
   `sudo nerdctl` because CNI bridge setup needs CAP_NET_ADMIN. Install
-  `deploy/finite-lat-2/finite-sites-nerdctl-sudoers` ->
+  `infra/hosts/lat2/systemd/finite-sites-nerdctl-sudoers` ->
   `/etc/sudoers.d/finite-sites-nerdctl`, and the drop-in
-  `deploy/finite-lat-2/finite-saas-sites-kata.conf` ->
+  `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf` ->
   `/etc/systemd/system/finite-saas-sites.service.d/kata.conf` (relaxes the
   daemon's own fs sandbox so nerdctl can run; tenant isolation is now the
   microVM boundary). Then the unit's ExecStart uses `--app-runner kata`.
@@ -308,10 +315,14 @@ If the rollout changes Caddy files or systemd unit files, install those files
 explicitly before `daemon-reload`, then reload Caddy after the service restart:
 
 ```sh
+# These files live in the mono repo (infra/hosts/lat2/), not in the synced
+# ~/finite-sites source tree. Run from the finite-mono root:
+scp infra/hosts/lat2/systemd/finite-saas-sites.service finite-lat-2:/tmp/
+scp infra/hosts/lat2/caddy/Caddyfile finite-lat-2:/tmp/Caddyfile-sites
 ssh finite-lat-2 \
-  'cd ~/finite-sites && sudo install -m 0644 deploy/finite-lat-2/finite-saas-sites.service /etc/systemd/system/'
+  'sudo install -m 0644 /tmp/finite-saas-sites.service /etc/systemd/system/'
 ssh finite-lat-2 \
-  'cd ~/finite-sites && sudo install -m 0644 deploy/finite-lat-2/Caddyfile-sites /etc/caddy/Caddyfile'
+  'sudo install -m 0644 /tmp/Caddyfile-sites /etc/caddy/Caddyfile'
 ssh finite-lat-2 \
   'sudo systemctl daemon-reload && sudo systemctl restart finite-saas-sites && sudo systemctl reload caddy'
 ```

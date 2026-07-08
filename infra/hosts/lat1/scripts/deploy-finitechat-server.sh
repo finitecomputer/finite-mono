@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
+# Deploys the finitechat server to its FUTURE home on lat1 (finite-lat-1,
+# 64.34.82.77). The LIVE server today runs on clawland (15.204.108.57 —
+# chat.finite.computer resolves there). The 2026-07-07 lat1 deploy attempt
+# was rolled back after ~2 minutes; leftovers remain in /var/lib/finite-chat
+# on lat1 (see ../README.md, captured-state appendix).
+#
+# Known host mismatches (from the 2026-07-08 capture) — this script was
+# written for a NixOS/Traefik host, and lat1 is neither:
+#   - the remote build uses `nix shell`; lat1 has no /nix (the Jul 7 run
+#     built with cargo directly, so the script actually piped that day
+#     differed from this copy)
+#   - it applies Traefik IngressRoute CRDs; lat1 k3s runs --disable=traefik
+#     and has no IngressRoute CRD (edge is host Caddy)
+#   - the finite-chat user shell /run/current-system/sw/bin/nologin is a
+#     dangling NixOS path on Ubuntu
+# Reconcile these before the real migration.
+#
+# Formerly finitecomputer-v2/scripts/deploy_finitechat_server_lat1.sh
+# (paths below adapted for the new location under infra/hosts/lat1/scripts/).
 set -euo pipefail
 
-workspace_rel="${1:-deploy/finite-chat/lat1}"
+workspace_rel="${1:-finitecomputer-v2/deploy/finite-chat/lat1}"
 git_ref="${2:-}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# finite-mono root (this script lives at infra/hosts/lat1/scripts/).
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 workspace_root="${repo_root}/${workspace_rel}"
 if [[ -n "${FINITECHAT_REPO_PATH:-}" ]]; then
   chat_repo="${FINITECHAT_REPO_PATH}"
-elif [[ -d "${repo_root}/../finite-chat-darkmatter/.git" ]]; then
-  chat_repo="${repo_root}/../finite-chat-darkmatter"
+elif [[ -d "${repo_root}/finite-chat-darkmatter/.git" ]]; then
+  chat_repo="${repo_root}/finite-chat-darkmatter"
 else
-  chat_repo="${repo_root}/../finitechat"
+  chat_repo="${repo_root}/finitechat"
 fi
 git_url="${FINITECHAT_GIT_URL:-https://github.com/finitecomputer/finitechat.git}"
 

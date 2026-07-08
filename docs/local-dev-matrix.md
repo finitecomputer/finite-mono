@@ -45,10 +45,11 @@ Documented tools:
   `finite-private-limiter`, and copied `finite-core` support code.
 - Next.js dashboard under `apps/dashboard`, using npm and `package-lock.json`.
 - WorkOS/AuthKit for SaaS auth when configured.
-- Deployment manifests under `deploy/finite-computer`, which still need v2
+- Deployment manifests under `deploy/finite-computer` (host-specific k8s and
+  systemd files have moved to `infra/hosts/lat1/`), which still need v2
   renaming and pruning.
 - Hosted Finite Chat deploy script under
-  `scripts/deploy_finitechat_server_lat1.sh`.
+  `infra/hosts/lat1/scripts/deploy-finitechat-server.sh`.
 - Runtime image build path for the Agent Runtime, currently packaging
   `finitechat`, the Hermes `finitechat` plugin, `fsite`, and `fbrain`.
 

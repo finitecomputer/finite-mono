@@ -78,12 +78,9 @@ The current v2 deployment lane is documented in
 `../finitecomputer-v2/docs/finite-stack-deployment.md` and currently uses:
 
 ```sh
-(
-  cd ../finitecomputer-v2
-  scripts/deploy_finitechat_server_lat1.sh \
-    deploy/finite-chat/lat1 \
-    <finitechat-commit>
-)
+../infra/hosts/lat1/scripts/deploy-finitechat-server.sh \
+  finitecomputer-v2/deploy/finite-chat/lat1 \
+  <finitechat-commit>
 ```
 
 Treat the exact deploy command as owned by v2. The required finite-chat

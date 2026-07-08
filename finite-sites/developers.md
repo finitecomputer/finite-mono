@@ -134,7 +134,8 @@ registry, blob, and git repository state.
 Runbook and deploy files:
 
 - `docs/deploy-finite-lat-2.md`
-- `deploy/finite-lat-2/`
+- `infra/hosts/lat2/` (mono root — unit files, Caddyfile, and env example;
+  moved from `deploy/finite-lat-2/`)
 - `docs/technical-debt-ledger.md`
 
 Important production rule: use `fsite` for agent-facing publishing and editor

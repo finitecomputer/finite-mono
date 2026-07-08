@@ -3246,7 +3246,7 @@ mod tests {
 
     #[test]
     fn production_runner_systemd_preserves_provider_runtimes() {
-        let unit = read_repo_file("deploy/finite-computer/systemd/finite-saas-runner.service");
+        let unit = read_repo_file("../infra/hosts/lat1/systemd/finite-saas-runner.service");
 
         assert!(unit.contains("KillMode=process"));
     }

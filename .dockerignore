@@ -1,0 +1,11 @@
+.git
+.import-sync
+.local-state
+target
+**/target
+**/node_modules
+**/.next
+**/__pycache__
+**/.DS_Store
+**/.direnv
+finitechat/ios/.build

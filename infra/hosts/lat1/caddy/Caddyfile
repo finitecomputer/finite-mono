@@ -1,0 +1,15 @@
+# Lives at /etc/caddy/Caddyfile on finite-lat-1 (64.34.82.77).
+# Loaded by the stock Ubuntu caddy.service (caddy run --config /etc/caddy/Caddyfile).
+# Captured verbatim 2026-07-08 (132 bytes on host, mtime May 26 22:40).
+#
+# WARNING: 10.43.237.180 is the hardcoded ClusterIP of Service
+# finite-system/finite-saas-core. It only works because Caddy runs on the
+# single k3s node and can reach the service CIDR; it breaks silently if the
+# Service is ever recreated. See ../README.md.
+finite.computer {
+  handle /internal/finite-private/* {
+    reverse_proxy 10.43.237.180:4200
+  }
+
+  reverse_proxy 127.0.0.1:30080
+}

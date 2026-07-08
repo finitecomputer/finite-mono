@@ -1,3 +1,8 @@
+# finite-saas-dashboard image (Next.js standalone).
+# Moved from finitecomputer-v2/deploy/finite-computer/images/. Build context:
+# finitecomputer-v2/ (COPY paths are relative to it). Built ONLY by
+# .github/workflows/service-images.yml.
+
 FROM node:22-bookworm-slim AS deps
 
 WORKDIR /src/apps/dashboard
