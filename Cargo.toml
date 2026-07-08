@@ -20,6 +20,7 @@ members = [
     "finitechat/crates/finitechat-cli",
     "finitechat/crates/finitechat-client",
     "finitechat/crates/finitechat-core",
+    "finitechat/crates/finitechat-daemon",
     "finitechat/crates/finitechat-delivery",
     "finitechat/crates/finitechat-hermes",
     "finitechat/crates/finitechat-http",

@@ -596,3 +596,34 @@ Changes:
 - Updated `devfinity status` and `devfinity cleanup` to report and clean only
   devfinity-managed processes, service probes, and control files.
 - Updated the local integration harness docs and phase 9 plan text.
+
+## Full Re-Sync Before Cutover
+
+Date: 2026-07-08
+
+All drifted source repos were re-synced into the monorepo on branch
+`migration-integration`, using a three-way merge per repo
+(base = recorded import SHA, ours = mono copy, theirs = source `origin/main`).
+Mono-side deliberate edits (deleted sub-workspace `Cargo.toml`/`Cargo.lock`,
+path-dep retargets to workspace-local `finite-identity`/`finite-nostr`) were
+preserved; all source drift was imported. The procedure is now scripted as
+`scripts/import-sync`, with per-repo provenance in `scripts/import-sync.toml`.
+
+Synced (one commit per repo on the branch):
+
+| Repo | Range | Notes |
+| --- | --- | --- |
+| `finitecomputer-v2` | `862e6bf..0150dd9` | merged clean |
+| `finite-identity` | `54a6936..0750e8c` | nip98 + authority work; supersedes the git-rev pins that `finite-sites`/`finite-brain` bumped in their source repos (both use the workspace path dep in mono) |
+| `finite-sites` | `768a0b8..a6d03e9` | source's only root-manifest change was the finite-identity rev bump (moot in mono) |
+| `finite-brain` | `8e1033c..7c66177` | carried source's workspace version bump as explicit `0.1.2` on all five crates; kept mono's workspace-dep retargets in `finite-brain-cli` |
+| `finitechat` | `f13c973..6bde2cc` | 13 commits (~18k insertions incl. Electron app, `finitechat-daemon`); new crate added to root workspace members |
+
+No drift (source `origin/main` == recorded import SHA):
+`finite-nostr`, `finite-search`, `finite-skills`, `finite-auth`.
+Note: earlier drift worries about these repos were an artifact of stale local
+checkouts — the "mono-only" nip05/searxng-proxy/skills changes were in fact
+pushed to the source repos by the import work.
+
+Validation: `cargo check --workspace` passes; root `Cargo.lock` regenerated
+(new crate `finitechat-daemon`, updated deps from finitechat drift).
