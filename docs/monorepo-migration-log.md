@@ -627,3 +627,39 @@ pushed to the source repos by the import work.
 
 Validation: `cargo check --workspace` passes; root `Cargo.lock` regenerated
 (new crate `finitechat-daemon`, updated deps from finitechat drift).
+
+## Infra Root, Root CI, and Doctrine Flip
+
+Date: 2026-07-08 (branch `migration-integration`, same day as the full re-sync)
+
+- Added `infra/` as the single deploy root, authored from read-only SSH
+  captures of the production hosts taken this day. Key corrections vs prior
+  belief: no Traefik on lat1 (host Caddy edge); the live finitechat server
+  runs on clawland-ovh (15.204.108.57), not lat1; the real ovh-vps-smoke is
+  15.204.56.61; finite-brain is NixOS-managed by the legacy fleet flow.
+- Moved deploy assets into `infra/`: v2's k8s manifests + runner units +
+  finitechat-server deploy script (→ `infra/hosts/lat1/`), finite-sites'
+  lat-2 units/Caddyfile (→ `infra/hosts/lat2/`). All in-repo references
+  updated; capture-vs-repo divergences recorded in per-host README appendices.
+- Moved service image definitions to `infra/images/` (core, dashboard,
+  private-limiter), adapted for the mono build context. The limiter image
+  building from THIS repo closes the legacy-repo split-brain.
+- Added root `.github/workflows/`: ci.yml (fmt/clippy/test vs Postgres,
+  dashboard, Hermes bridge, nix checks, devfinity smoke), component-scoped
+  release workflows with legacy mirror jobs, service-images, runtime-image
+  (single-checkout adaptation), hermes-runtime-smoke. Superseded component
+  `.github/workflows` files deleted (they never executed in mono).
+- Doctrine flip: `docs/monorepo-doctrine.md` added; root AGENTS.md/README
+  rewritten; CONTRIBUTING.md and `compat/matrix.toml` added; the old
+  workspace-level "not a monorepo" orientation files updated outside this
+  repo.
+- Validation: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  --locked -D warnings`, `cargo test --workspace --locked` (276 tests),
+  dashboard `npm test` (101 tests) all green locally. Secrets scan (gitleaks
+  over full history + targeted greps): 6 findings, all benign fixtures or
+  placeholders — cleared for the public visibility flip.
+
+Manual follow-ups this log deliberately leaves open: re-register a lat-2
+GitHub Actions runner against finite-mono; set `RELEASE_MIRROR_TOKEN`; first
+mono-cut releases proven in the field before archiving source repos; the
+clawland→lat1 finitechat-server cutover; smoke-host backups + bind fix.
