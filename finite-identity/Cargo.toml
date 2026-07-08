@@ -10,13 +10,20 @@ repository = "https://github.com/finitecomputer/finite-identity"
 name = "finite_identity"
 
 [dependencies]
+# HTTP Identity Authority.
+axum = "0.8"
+base64 = "0.22"
 # Key material, BIP340 Schnorr signing, and keygen (rand) with a process-global context.
 secp256k1 = { version = "0.29", features = ["rand-std", "global-context"] }
 # npub display form (NIP-19); same crate/version as finitesites-proto and finitechat-proto.
 bech32 = "0.11"
+# SQLite storage for identity-owned public state.
+rusqlite = { version = "0.37", features = ["bundled"] }
 # identity.json wire format.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Nostr event ids, NIP-98 payload hashes, and Email Challenge token hashes.
+sha2 = "0.10"
 # $HOME resolution per platform.
 dirs = "6"
 # Exclusive advisory lock on <identity-root>/.lock for mint-if-absent.
@@ -24,9 +31,13 @@ fs4 = { version = "0.13", features = ["sync"] }
 thiserror = "2"
 # RFC3339 created_at timestamps.
 time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Production Identity Authority mail delivery via Resend/Postmark JSON APIs.
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"
 # Integration tests verify signatures and the default home-dir path directly.
 secp256k1 = { version = "0.29", features = ["global-context"] }
 dirs = "6"
+tower = { version = "0.5", features = ["util"] }

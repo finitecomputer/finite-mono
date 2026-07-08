@@ -8,6 +8,12 @@ runs first mints the key, and every other tool finds it. See
 [CLI-CONVENTIONS.md](./CLI-CONVENTIONS.md) for the `auth status` /
 `auth import` verbs every Finite CLI exposes on top of this crate.
 
+This repo also contains the v1 Identity Authority: an HTTP service that owns
+Finite VIP Email bindings, NIP-05 serving, Email Challenges, Email-Only
+Principals, Principal Resolution, and operator inspect/disable actions. See
+[docs/identity-authority.md](./docs/identity-authority.md) for deployment and
+product-integration guidance.
+
 ## Convention over configuration
 
 There are no per-tool flags or environment variables for the identity
@@ -59,6 +65,50 @@ fn main() -> Result<(), finite_identity::Error> {
     Ok(())
 }
 ```
+
+## Identity Authority
+
+Run the development authority locally with:
+
+```sh
+finite-identityd serve \
+  --data ./.dev/finite-identity \
+  --external-base-url http://127.0.0.1:8790 \
+  --listen 127.0.0.1:8790 \
+  --operator-token dev-operator-token \
+  --dev-print-email-tokens yes
+```
+
+The `--dev-print-email-tokens yes` flag intentionally gates the built-in
+development mailer, which prints challenge tokens to stderr. Production
+deployments should select a real Mailer Adapter instead:
+
+```sh
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+finite-identityd serve \
+  --data /var/lib/finite-identity \
+  --external-base-url https://identity.finite.vip \
+  --listen 127.0.0.1:8790 \
+  --operator-token "$FINITE_IDENTITY_OPERATOR_TOKEN" \
+  --mailer resend \
+  --mail-from "Finite Identity <identity@finite.chat>"
+```
+
+Postmark is also supported with `--mailer postmark` and
+`POSTMARK_SERVER_TOKEN`. Challenge creation, hashing, expiry, redemption, and
+replay rejection remain inside Finite Identity; only delivery changes.
+
+The service exposes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /.well-known/nostr.json?name=<localpart>` | Serve Finite VIP NIP-05 `names` JSON |
+| `POST /api/v1/email-challenges` | Issue an Email Challenge for a Finite VIP Email or Invited Email |
+| `POST /api/v1/vip-email-bindings/redeem` | Bind a Finite VIP Email to the NIP-98 signer |
+| `POST /api/v1/email-only-principals/redeem` | Verify an Invited Email as an Email-Only Principal |
+| `POST /api/v1/principal-resolution/satisfies-grant` | Resolve whether a pubkey satisfies a Product Grant |
+| `POST /api/v1/operator/inspect` | Inspect public identity state with an operator token |
+| `POST /api/v1/operator/disable-binding` | Disable a binding without reassignment or recovery |
 
 ### Importing an existing secret
 
