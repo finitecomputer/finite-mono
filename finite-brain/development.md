@@ -40,7 +40,7 @@ Current hosted smoke service:
 Repository and releases:
 
 - Source: `https://github.com/finitecomputer/finite-brain`
-- Release downloads: `https://github.com/finitecomputer/finite-brain/releases/latest`
+- Release downloads: `https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
 
 No production FiniteBrain URL is canonized in this repository yet. Do not
 invent one in docs, skills, tests, or agent instructions.

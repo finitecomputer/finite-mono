@@ -1,8 +1,10 @@
 name: Release fbrain
 
 # Component-scoped release: tag `fbrain/vX.Y.Z` on finite-mono.
-# The mirror job republishes to the legacy finitecomputer/finite-brain repo
-# (tag vX.Y.Z) until every installer points at finite-mono.
+# Installers use the rolling alias release `fbrain-latest` (repo-wide
+# `releases/latest` is meaningless in a multi-component repo):
+#   https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/<asset>
+# Hard-cut 2026-07-08: no mirror releases to the archived legacy repos.
 
 on:
   push:
@@ -91,31 +93,21 @@ jobs:
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
+            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes --latest=false
           fi
 
-  mirror:
-    needs: publish
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-
-      - name: Mirror release to finitecomputer/finite-brain
+      - name: Refresh fbrain-latest rolling alias
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_MIRROR_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::RELEASE_MIRROR_TOKEN not configured; skipping mirror release."
-            exit 0
-          fi
-          repo=finitecomputer/finite-brain
-          tag="${GITHUB_REF_NAME#fbrain/}"
-          notes="Mirror of finite-mono release ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Canonical: https://github.com/${GITHUB_REPOSITORY}/releases"
-          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --repo "$repo" --clobber
+          alias=fbrain-latest
+          notes="Rolling alias for the newest fbrain release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
+          if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
           else
-            gh release create "$tag" release-assets/* --repo "$repo" --title "$tag" --notes "$notes"
+            gh release create "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "fbrain (latest)" --notes "$notes" --latest=false
           fi

@@ -23,12 +23,14 @@ pre-mono world and are void.
    (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
    `finite-private-limiter`). One repo, many independently versioned
    artifacts. Release asset names are product contracts — never rename them.
-4. **Release-URL compatibility is honored until deliberately retired.**
-   Agents in the field install from the legacy repos'
-   `releases/latest/download/...` URLs. Release workflows mirror assets to the
-   legacy repos (via `RELEASE_MIRROR_TOKEN`). A legacy repo is archived only
-   after its mirror is no longer needed — or kept unarchived solely as a
-   release mirror (archived repos cannot receive releases).
+4. **finite-mono is the only release host (hard cut, 2026-07-08).** With no
+   live users, legacy release URLs were cut over rather than mirrored: every
+   installer, README, and manifest points at finite-mono. Because one repo
+   hosts many components, `releases/latest` is meaningless — installers use
+   per-component rolling alias releases (`finitechat-latest`, `fsite-latest`,
+   `fbrain-latest`) that the release workflows refresh on every versioned
+   release. Legacy repos are archived once their first mono-built release is
+   verified installed (see infra/runbooks/release-cli.md).
 5. **`infra/` is the single deploy root.** Nothing is built on a prod box;
    images are CI-built and digest-pinned; deploys are scripts/runbooks in this
    tree. See `infra/README.md`.
@@ -56,6 +58,4 @@ pre-mono world and are void.
 
 If you are reading a checkout of a pre-mono repo: stop and check whether the
 work belongs in finite-mono. The old `dev/finite/AGENTS.md` orientation file
-now points here. Per-repo checkouts remain useful only for reading history
-and for emergency fixes to already-released artifacts before their mirror
-lane exists.
+now points here. Per-repo checkouts remain useful only for reading history.

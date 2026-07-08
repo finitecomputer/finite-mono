@@ -19,7 +19,7 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finitechat"
+repo="finitecomputer/finite-mono"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -31,7 +31,7 @@ case "$os:$arch" in
   *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
-base="https://github.com/$repo/releases/latest/download"
+base="https://github.com/$repo/releases/download/finitechat-latest"
 curl -fsSL "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz"
 curl -fsSL "$base/$asset.tar.gz.sha256" -o "$tmp/$asset.tar.gz.sha256"
 

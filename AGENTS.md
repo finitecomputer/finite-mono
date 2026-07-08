@@ -19,8 +19,9 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   source repo is merged in with `scripts/import-sync <name>`.
 - **Releases are component-scoped tags**: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
   `fbrain/vX.Y.Z`; images version via workflow dispatch. Release asset names
-  are product contracts — never rename them. Mirror releases keep legacy
-  install URLs alive (see `docs/monorepo-doctrine.md` §4).
+  are product contracts — never rename them. Installers use the per-component
+  rolling alias releases (`finitechat-latest` etc.), refreshed by the release
+  workflows — this repo is the ONLY release host (doctrine §4).
 - **Deploys are defined in `infra/`** — per-host trees, CI-built digest-pinned
   images, runbooks. Nothing is built on a prod box.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep

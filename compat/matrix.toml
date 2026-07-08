@@ -13,12 +13,12 @@
 # Released CLI versions believed installed in the field (hosted agents use
 # releases/latest at install time).
 released = ["v0.1.0", "v0.1.1", "v0.1.2"]
-install_url = "https://github.com/finitecomputer/finitechat/releases/latest/download/"
-notes = "Install URL is a product contract; mirror releases keep it working. Server must keep accepting these clients until a deprecation is announced through the update manifest."
+install_url = "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/"
+notes = "Hard-cut 2026-07-08: installers point at the finite-mono rolling alias. The pre-cut releases listed above were installed from the legacy repo URL; no live users depend on it. Server must keep accepting these clients until a deprecation is announced."
 
 [field.fsite-cli]
 released = ["v0.3.1"]
-install_url = "https://github.com/finitecomputer/finite-sites/releases/latest/download/"
+install_url = "https://github.com/finitecomputer/finite-mono/releases/download/fsite-latest/"
 
 [field.fbrain-cli]
 released = []

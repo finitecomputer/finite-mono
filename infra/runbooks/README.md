@@ -13,7 +13,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 
 | Runbook | Covers |
 |---|---|
-| [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, mirror releases, field-install verify) |
+| [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
 | [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard to lat1 k3s |
 | [deploy-sites.md](deploy-sites.md) | finitesitesd / fsite to lat2 |
 | [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 Postgres — highest-priority runbook in this tree |
