@@ -5,10 +5,18 @@
 # - /_admin is now ALSO gated (smoke's IngressRoute skipped oauth there —
 #   flagged risk in infra/hosts/smoke/README.md).
 # - auth happens on the brain vhost itself (no separate auth.smoke host).
-{ ... }:
+{ pkgs, ... }:
 {
   services.oauth2-proxy = {
     enable = true;
+    # The pinned nixpkgs (2026-06-30) defaults Go to 1.25, but oauth2-proxy
+    # 7.15.3's go.mod requires >= 1.26 — the stock package fails to build in
+    # the sandbox (GOTOOLCHAIN=local can't fetch a newer Go). Build it with
+    # go_1_26, which the same nixpkgs already provides. Drop this override
+    # when a nixpkgs bump makes the default Go >= 1.26.
+    package = pkgs.oauth2-proxy.override {
+      buildGoModule = pkgs.buildGoModule.override { go = pkgs.go_1_26; };
+    };
     provider = "google";
     httpAddress = "http://127.0.0.1:4180";
     reverseProxy = true;
