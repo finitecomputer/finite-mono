@@ -4,18 +4,17 @@
 #   ESP: capture shows /dev/nvme2n1p1 mounted at /boot/efi -> we put the ESP
 #   on the first root-pair member and a spare (unmounted) ESP on the second.
 #
-# Device names VERIFIED against the live box 2026-07-09 (lsblk + /proc/mdstat):
-#   md0 = nvme2n1p2 + nvme0n1p2 (447.1G disks; ESP on nvme2n1p1)
-#   md1 = nvme3n1p1 + nvme1n1p1 (1.7T disks)
-# Still re-run `lsblk` from the rescue env before nixos-anywhere — device
-# enumeration can change across reboots/kernel versions.
+# Devices addressed by /dev/disk/by-id/ (serial-stable) so the installer
+# kernel's enumeration order cannot mismatch them (verified 2026-07-09):
+#   md0 (root, 447G Micron): ...E53F (ESP carrier) + ...E531
+#   md1 (data, 1.7T Samsung): ...510146 + ...510141
 { ... }:
 {
   disko.devices = {
     disk = {
       root0 = {
         type = "disk";
-        device = "/dev/nvme2n1"; # verified: carries the live ESP (nvme2n1p1)
+        device = "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F"; # was nvme2n1 (ESP carrier)
         content = {
           type = "gpt";
           partitions = {
@@ -41,7 +40,7 @@
       };
       root1 = {
         type = "disk";
-        device = "/dev/nvme0n1"; # verified: second md0 member (447.1G)
+        device = "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E531"; # was nvme0n1 (447G Micron)
         content = {
           type = "gpt";
           partitions = {
@@ -63,7 +62,7 @@
       };
       data0 = {
         type = "disk";
-        device = "/dev/nvme3n1"; # verified: first md1 member (1.7T)
+        device = "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146"; # was nvme3n1 (1.7T Samsung)
         content = {
           type = "gpt";
           partitions = {
@@ -79,7 +78,7 @@
       };
       data1 = {
         type = "disk";
-        device = "/dev/nvme1n1"; # verified: second md1 member (1.7T)
+        device = "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510141"; # was nvme1n1 (1.7T Samsung)
         content = {
           type = "gpt";
           partitions = {
