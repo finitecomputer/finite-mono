@@ -51,3 +51,8 @@ last_import_sha = "02d7628922e418405c059753ceaf3449e40a24e7"
 mono_dir = "finite-skills"
 source_url = "https://github.com/finitecomputer/finite-skills"
 last_import_sha = "80ada39d477d645eaaacb624e89e0010d3e4aedc"
+
+[finite-specialization]
+mono_dir = "finite-specialization"
+source_url = "https://github.com/finitecomputer/finite-specialization"
+last_import_sha = "54a87aedc2f43dfb794a9ca9b654e42f45c97ecd"

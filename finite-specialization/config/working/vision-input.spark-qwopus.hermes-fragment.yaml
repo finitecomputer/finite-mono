@@ -1,0 +1,75 @@
+# First verified Finite specialization fragment.
+#
+# Capability: vision-input
+# Surface: auxiliary.vision
+# Backing: Spark public beta front door, via the shared finite specialization worker
+# Verified: 2026-07-07
+#
+# This fragment is intentionally not a full Hermes config and intentionally
+# contains no live API key. Materialize it by putting the shared worker bearer
+# token in the target environment's secret store.
+
+specialization:
+  id: vision-input.spark-qwopus
+  status: verified_first_working_specialization
+  verified_at: "2026-07-07"
+  capability_id: vision-input
+  target_agent_profile: glm52-text-agent
+  hermes_surface: auxiliary.vision
+  backing_plane: spark-public-beta
+
+spark_route:
+  base_url: https://inference.finite.computer/v1
+  model: qwopus3-6-35b-a3b-v1-q5-k-m-gguf-fast
+  required_capabilities:
+    images: true
+    responses: true
+    chat_completions: false
+  health_requirement:
+    route_health: healthy
+    route_health_reason: qwopus_q5_public_beta_image_text_smoke_passed
+    capability_smoke: image_text
+
+compatibility_bridge:
+  required: true
+  reason: >
+    Hermes v0.14 codex_responses uses streaming Responses, while the verified
+    Spark Qwopus public-beta route accepts non-streaming Responses for image
+    input and does not expose public chat_completions. The shared worker presents
+    a chat_completions-shaped endpoint to Hermes and forwards to Spark
+    /v1/responses non-streaming.
+  kubernetes_scope: shared_specialization_namespace
+  service_name: finite-specialization-worker
+  service_namespace: fc-specializations
+  service_port: 18998
+  bridge_base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
+  secret_inputs:
+    FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN: external_secret_only
+
+hermes_fragment:
+  auxiliary:
+    vision:
+      provider: custom
+      model: qwopus3-6-35b-a3b-v1-q5-k-m-gguf-fast
+      base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
+      api_key: external_worker_secret_only
+      api_mode: chat_completions
+      timeout: 120
+      download_timeout: 30
+
+verification:
+  checkpoint: docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md
+  expected_public_frontdoor_noauth_status: 401
+  expected_hermes_tool_result:
+    success: true
+    contains:
+      - AUSTIN-FINITE
+      - Austin
+      - Chat relay is connected
+
+rollback:
+  scope: target_agent_only
+  action: >
+    Remove or replace auxiliary.vision in the target Hermes config and restart
+    only the target agent workload. The shared worker is host-level
+    infrastructure and should remain installed while any specialization uses it.

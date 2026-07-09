@@ -514,6 +514,7 @@ Candidate order:
 - [x] `finite-brain`
 - [x] `finite-search`
 - [x] `finite-skills`
+- [x] `finite-specialization`
 - [ ] `reporting`
 - [ ] legacy `finitecomputer`
 
@@ -543,6 +544,25 @@ and `finite-skills`:
       applicable.
 - [x] Add root `just` modules for repos with useful local command surfaces.
 - [x] Preserve and run the old local validation loops.
+
+Completed for `finite-specialization`:
+
+- [x] Verify the source checkout is clean and matches `origin/main` at
+      `54a87aedc2f43dfb794a9ca9b654e42f45c97ecd`.
+- [x] Run the source scaffold check without modifying the source checkout.
+- [x] Keep the import intact under a top-level `finite-specialization/` folder.
+- [x] Confirm that the source has no Cargo workspace, Nix flake, or `just`
+      command surface to merge during the initial import.
+- [x] Keep the deployed `finite-specialization-worker` boundary separate. Its
+      implementation remains in legacy `finitecomputer` while that fleet stays
+      outside this monorepo; the scaffold import must not imply that the worker
+      has moved.
+- [x] Copy the tracked source files without `.git/` or machine-local files.
+- [x] Add the imported snapshot to `scripts/import-sync.toml` only after its
+      tree is present in the monorepo.
+- [x] Run `finite-specialization/scripts/check.sh` from the copied tree.
+- [x] Add the imported folder to root README and docs navigation.
+- [x] Record the completed import and validation in the migration log.
 
 ## First Milestone Definition
 

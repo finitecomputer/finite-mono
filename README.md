@@ -12,6 +12,7 @@ and infrastructure definition in one tree.
 | `finite-identity/`, `finite-nostr/`, `finite-auth/` | shared identity/protocol crates |
 | `finite-search/` | SearXNG/Firecrawl search stack + Tinfoil bundle |
 | `finite-skills/` | shared agent skills tree |
+| `finite-specialization/` | Hermes capability vocabulary and safe specialization config examples |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
 | `docs/` | doctrine, plan, migration log, architecture |

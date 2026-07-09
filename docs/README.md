@@ -49,6 +49,7 @@ Docs copied with each source repo remain inside their owning folders for now:
 - [`finite-brain/docs`](../finite-brain/docs)
 - [`finite-search/docs`](../finite-search/docs)
 - [`finite-skills/skills`](../finite-skills/skills)
+- [`finite-specialization/docs`](../finite-specialization/docs)
 
 Some imported repos also have root-level source repo docs:
 
@@ -61,6 +62,7 @@ Some imported repos also have root-level source repo docs:
 - [`finite-brain/development.md`](../finite-brain/development.md)
 - [`finite-search/README.md`](../finite-search/README.md)
 - [`finite-skills/README.md`](../finite-skills/README.md)
+- [`finite-specialization/README.md`](../finite-specialization/README.md)
 
 Treat repo-local docs as owner-scoped background until the Phase 13 stale-docs
 audit promotes, rewrites, or deletes them.

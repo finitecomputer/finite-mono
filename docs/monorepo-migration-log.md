@@ -721,3 +721,52 @@ follow-ups: `finite-fable/notes/lat1-cutover-complete-2026-07-09.md`.
 Open follow-ups: offsite borg backups (redundancy gap — single-disk root),
 disk mirror, brain+oauth2-proxy migration, runner (phala/enclavia), firecrawl
 API. Docs across `infra/` were reconciled to this topology the same day.
+
+## Later Repo Import: `finite-specialization`
+
+Date: 2026-07-09
+
+Source:
+
+| Repo | Source path | Commit SHA | Working tree | Remote state |
+| --- | --- | --- | --- | --- |
+| `finite-specialization` | `/Users/plebdev/Desktop/Projects/finite/finite-specialization` | `54a87aedc2f43dfb794a9ca9b654e42f45c97ecd` | Clean | Matches `origin/main` |
+
+Validation:
+
+- Compared the local source commit with GitHub `refs/heads/main`; both resolve
+  to the recorded SHA.
+- Ran the source `scripts/check.sh`; result: passed with
+  `finite-specialization scaffold looks ok`.
+- Ran `finite-specialization/scripts/check.sh` from the copied monorepo tree;
+  result: passed with `finite-specialization scaffold looks ok`.
+- `cargo fmt --all -- --check`: passed through `scripts/with-dev-env`.
+- `just check`: passed for the root Cargo workspace with the lockfile enforced.
+- `just test`: passed for the full root Cargo workspace with the lockfile
+  enforced.
+- `git diff --check`: passed.
+
+Import:
+
+- Imported the 11 tracked files intact under a top-level
+  `finite-specialization/` folder using `git archive` at the recorded source
+  SHA. Source history, `.git/`, and machine-local files were not copied.
+- Removed one redundant trailing blank line from the copied `.gitignore` so
+  the root `git diff --check` gate passes. This is the only deliberate
+  mono-side content change from the recorded source snapshot.
+- Added the imported snapshot to `scripts/import-sync.toml` so future stray
+  source commits can use the existing three-way sync process.
+- Added the component to the root README and docs navigation.
+- The source is currently a docs-and-example-config scaffold. It has no
+  `Cargo.toml`, `Cargo.lock`, `flake.nix`, or `justfile`, so the initial import
+  required no root Cargo, Nix, lockfile, or `just` changes.
+- Preserved `finite-specialization/scripts/check.sh` as the component's initial
+  validation loop.
+- The deployed `finite-specialization-worker` is not in the scaffold repo. Its
+  Rust implementation remains under legacy `finitecomputer`, which the
+  monorepo doctrine deliberately keeps outside while the legacy fleet is
+  active. Importing the scaffold does not migrate that worker or its deploy
+  ownership.
+
+The worker's final code and deployment boundary remains a later legacy-fleet
+migration decision rather than an implicit part of this scaffold import.

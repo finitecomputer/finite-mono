@@ -1,0 +1,129 @@
+# Example Hermes capability config for a text-only main agent.
+#
+# This is not meant to be applied as-is. Confirm provider aliases, model IDs,
+# installed extras, Spark route health, and whether each capability should use
+# direct provider keys or a gateway in the target Hermes install.
+#
+# Provider aliases such as spark-public-beta are placeholders for named
+# OpenAI-compatible providers in Hermes. Do not materialize them until the Spark
+# front door shows a healthy route and the capability-specific smoke passes.
+
+model:
+  provider: zai
+  default: glm-5.2
+
+fallback_providers:
+  - provider: spark-public-beta
+    model: spark-text-fallback-alias
+  - provider: openrouter
+    model: google/gemini-3-flash-preview
+
+stt:
+  provider: local
+  local:
+    model: base
+
+# Move STT to Spark only after there is a verified transcription route. Current
+# Spark audio-speech examples are TTS, not speech-to-text.
+
+voice:
+  record_key: "ctrl+b"
+  max_recording_seconds: 120
+  auto_tts: false
+  beep_enabled: true
+  silence_threshold: 200
+  silence_duration: 3.0
+
+tts:
+  provider: openai
+  speed: 1.0
+  openai:
+    base_url: https://inference.finite.computer/v1
+    model: spark-audio-speech-alias
+    voice: default
+    speed: 1.0
+
+# Keep a non-Spark TTS provider configured in the materialized profile when
+# Spark audio speech is not admitted or is too slow for the target UX.
+
+auxiliary:
+  vision:
+    provider: spark-operator-frontdoor
+    model: spark-image-text-alias
+    timeout: 120
+    # First verified concrete fragment:
+    # config/working/vision-input.spark-qwopus.hermes-fragment.yaml
+
+  web_extract:
+    provider: spark-public-beta
+    model: spark-long-context-or-summarizer-alias
+    timeout: 360
+
+  compression:
+    provider: spark-public-beta
+    model: spark-compression-alias
+
+  approval:
+    provider: spark-public-beta
+    model: spark-fast-approval-alias
+
+  title_generation:
+    provider: spark-public-beta
+    model: spark-fast-title-alias
+
+  skills_hub:
+    provider: spark-public-beta
+    model: spark-fast-skills-alias
+
+  mcp:
+    provider: spark-public-beta
+    model: spark-fast-mcp-helper-alias
+
+web:
+  search_backend: searxng
+  extract_backend: firecrawl
+  use_gateway: false
+
+browser:
+  cloud_provider: browser-use
+  use_gateway: false
+  inactivity_timeout: 120
+  command_timeout: 30
+  record_sessions: false
+  auto_local_for_private_urls: true
+
+image_gen:
+  model: spark-image-generation-alias
+  use_gateway: false
+
+# If Hermes image_gen cannot target the Spark image endpoint directly, keep this
+# as a dedicated adapter/plugin capability instead of folding it into MoA.
+
+terminal:
+  backend: docker
+  cwd: "."
+  timeout: 180
+  docker_image: nikolaik/python-nodejs:python3.11-nodejs20
+
+code_execution:
+  mode: project
+  timeout: 300
+  max_tool_calls: 50
+
+approvals:
+  mode: smart
+
+delegation:
+  provider: spark-public-beta
+  model: spark-delegation-alias
+  max_concurrent_children: 3
+  max_spawn_depth: 1
+  orchestrator_enabled: true
+
+mcp_servers:
+  filesystem:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "/home/user/projects"

@@ -1,0 +1,214 @@
+# Draft Finite specialization inventory.
+#
+# This file is the repo's domain sketch. The shape can later become generated
+# Hermes config, dashboard data, or a small router service contract.
+version: 0
+status: sketch
+owner: finite
+
+principles:
+  - finite_agents_route_by_capability
+  - dedicated_hermes_config_before_moa
+  - spark_preferred_for_model_backed_capabilities
+  - verify_spark_route_before_materializing_alias
+  - moa_is_for_private_text_advice
+  - hermes_runtime_owns_tools_memory_and_final_output
+  - secrets_live_outside_this_repo
+
+spark_backing:
+  strategy: prefer_when_route_is_healthy
+  endpoint_refs:
+    - id: spark-public-beta
+      base_url: https://inference.finite.computer/v1
+      scope: public_beta
+      use_for:
+        - chat_models
+        - responses_capable_text_routes
+        - image_text_routes_when_admitted
+        - audio_speech_routes_when_admitted
+      verification_required:
+        - front_door_model_available_metrics
+        - route_health_healthy
+        - capability_specific_smoke
+      notes: Public route names drift. Do not hard-code aliases from memory.
+
+    - id: spark-operator-frontdoor
+      base_url: operator_frontdoor_base_url_placeholder
+      scope: operator_or_office_lan
+      use_for:
+        - experimental_vision_routes
+        - candidate_tts_routes
+        - candidate_image_routes
+        - cognitive_reference_models
+      verification_required:
+        - current_route_manifest
+        - route_evidence_not_stale
+        - capability_specific_smoke
+
+  not_spark_backed:
+    - browser_state_and_clicks
+    - terminal_execution
+    - mcp_service_calls
+    - web_search_transport
+    - file_editing
+    - cron_delivery
+
+agent_profiles:
+  - id: glm52-text-agent
+    status: example
+    main_model:
+      provider: zai
+      model: glm-5.2
+      multimodal: false
+    notes: Text-only main agent profile. Confirm the provider alias and exact
+      model ID against the live Hermes install before materializing.
+
+capabilities:
+  - id: speech-to-text
+    priority: config_first
+    hermes_surface: stt
+    request_kinds:
+      - voice_message
+      - microphone_audio
+      - meeting_audio
+    example_provider: local
+    output_contract: transcript_text
+    use_moa: false
+    spark_backing: candidate_when_spark_stt_route_exists
+    notes: Audio is transformed into text before the main model sees it.
+
+  - id: text-to-speech
+    priority: config_first
+    hermes_surface: tts
+    request_kinds:
+      - spoken_reply
+      - audio_delivery
+    example_provider: edge
+    input_contract: assistant_text
+    output_contract: audio_file_or_platform_voice_message
+    use_moa: false
+    spark_backing: preferred_when_audio_speech_route_is_healthy
+    spark_endpoint_ref: spark-public-beta
+    notes: Text is transformed into audio after the main model writes. Prefer a
+      Spark audio speech route when it is admitted and smoke-tested; otherwise
+      fall back to Edge, OpenAI, or another configured Hermes TTS provider.
+
+  - id: voice-mode
+    priority: config_first
+    hermes_surface: voice
+    request_kinds:
+      - push_to_talk
+      - live_cli_voice
+    use_moa: false
+    notes: Controls microphone recording, silence detection, and auto-TTS
+      behavior. It is runtime interaction config, not a model panel.
+
+  - id: vision-input
+    priority: config_first
+    hermes_surface: auxiliary.vision
+    request_kinds:
+      - image
+      - screenshot
+      - chart
+      - diagram
+      - visual_ui_inspection
+    example_provider: spark-public-beta
+    example_model: spark-image-text-alias
+    output_contract: image_description_injected_as_text
+    use_moa: false
+    spark_backing: preferred_when_image_text_route_is_healthy
+    spark_endpoint_ref: spark-public-beta
+    notes: For a text-only main model, Hermes should route raw pixels through a
+      vision-capable auxiliary model, then inject text context. Prefer Spark
+      image-text routes after current image smoke evidence exists.
+    working_instantiations:
+      - id: vision-input.spark-qwopus
+        status: verified_first_working_specialization
+        verified_at: "2026-07-07"
+        agent_profile: glm52-text-agent
+        hermes_fragment: config/working/vision-input.spark-qwopus.hermes-fragment.yaml
+        checkpoint: docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md
+        model: qwopus3-6-35b-a3b-v1-q5-k-m-gguf-fast
+        bridge_required: true
+        bridge_reason: spark_route_is_responses_shaped_while_hermes_auxiliary_uses_chat_completions
+
+  - id: web-search
+    priority: config_first
+    hermes_surface: web
+    request_kinds:
+      - web_search
+      - page_extract
+      - research
+    auxiliary_surfaces:
+      - auxiliary.web_extract
+    use_moa: false
+    spark_backing: model_side_only
+    notes: Search/extract transport is a tool and service capability. Spark can
+      back the summarizer or reasoning model after retrieval, but should not
+      replace the search service itself.
+
+  - id: browser-automation
+    priority: config_first
+    hermes_surface: browser
+    request_kinds:
+      - click
+      - form_fill
+      - browser_state
+      - browser_screenshot
+    use_moa: false
+    spark_backing: no
+    notes: Browser work needs tools and stateful interaction. Spark can analyze
+      screenshots or page text after capture, but should not own the browser.
+
+  - id: image-generation
+    priority: config_first
+    hermes_surface: image_gen
+    request_kinds:
+      - text_to_image
+      - image_edit
+    use_moa: false
+    spark_backing: preferred_when_image_route_is_healthy
+    spark_endpoint_ref: spark-public-beta
+    notes: Prefer a Spark image route only after route health, latency, and
+      image smoke evidence are current. Keep a non-Spark provider fallback.
+
+  - id: code-review-advice
+    priority: moa_optional
+    hermes_surface: moa
+    request_kinds:
+      - code_review
+      - architecture_review
+      - test_strategy
+    hermes_moa_preset: finite-code-review
+    use_moa: true
+    spark_backing: preferred_for_reference_models
+    spark_endpoint_ref: spark-public-beta
+    notes: This is a cognitive specialist. Reference models provide private
+      text critique; the acting model still writes and calls tools.
+
+  - id: verification-advice
+    priority: moa_optional
+    hermes_surface: moa
+    request_kinds:
+      - final_answer_check
+      - risk_review
+      - factual_skeptic
+    hermes_moa_preset: finite-verifier
+    use_moa: true
+    spark_backing: preferred_for_reference_models
+    spark_endpoint_ref: spark-public-beta
+    notes: Use after the concrete capability path has produced text worth
+      checking.
+
+open_questions:
+  - Which provider alias and exact model ID identify GLM 5.2 in the target
+    Hermes install?
+  - Which provider should own vision for text-only main models?
+  - Which STT/TTS providers are default for Finite-hosted versus self-managed
+    machines?
+  - Which Spark front-door aliases are healthy enough to back each model-backed
+    capability right now?
+  - Should Finite materialize these examples into Hermes config directly, or
+    expose a dashboard capability menu that writes the config?
+  - Which cognitive specialist presets are worth keeping after STT, TTS, and
+    vision are configured?

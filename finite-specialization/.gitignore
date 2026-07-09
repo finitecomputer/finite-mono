@@ -1,0 +1,20 @@
+.DS_Store
+
+# Local/editor noise
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python/script scratch
+__pycache__/
+*.pyc
+
+# Never commit live Hermes or provider secrets.
+.env
+.env.*
+auth.json
+config.yaml
+*.log
+traces/
+backups/

@@ -1,0 +1,54 @@
+# Example Hermes Mixture of Agents fragment for cognitive specialization.
+#
+# This is not the first layer for STT, TTS, vision I/O, browser automation,
+# search, MCP, terminal work, or media generation. Use dedicated Hermes config
+# surfaces for those. MoA is for private text advice from specialist models.
+# Prefer Spark-backed reference models when the front-door route is healthy.
+
+moa:
+  default_preset: finite-code-review
+  active_preset: ""
+  save_traces: true
+  presets:
+    finite-code-review:
+      enabled: false
+      reference_models:
+        - provider: spark-public-beta
+          model: spark-code-reasoner
+        - provider: spark-public-beta
+          model: spark-verifier
+      aggregator:
+        provider: zai
+        model: glm-5.2
+      reference_temperature: 0.3
+      aggregator_temperature: 0.2
+      reference_max_tokens: 800
+      max_tokens: 4096
+
+    finite-verifier:
+      enabled: false
+      reference_models:
+        - provider: spark-public-beta
+          model: spark-verifier
+      aggregator:
+        provider: zai
+        model: glm-5.2
+      reference_temperature: 0.2
+      aggregator_temperature: 0.2
+      reference_max_tokens: 600
+      max_tokens: 4096
+
+    finite-architecture-review:
+      enabled: false
+      reference_models:
+        - provider: spark-public-beta
+          model: spark-code-reasoner
+        - provider: spark-public-beta
+          model: spark-verifier
+      aggregator:
+        provider: zai
+        model: glm-5.2
+      reference_temperature: 0.3
+      aggregator_temperature: 0.2
+      reference_max_tokens: 1000
+      max_tokens: 4096
