@@ -663,3 +663,29 @@ Manual follow-ups this log deliberately leaves open: re-register a lat-2
 GitHub Actions runner against finite-mono; set `RELEASE_MIRROR_TOKEN`; first
 mono-cut releases proven in the field before archiving source repos; the
 clawland→lat1 finitechat-server cutover; smoke-host backups + bind fix.
+
+## Hard Cut, CI Green, lat1 NixOS Config, Runner
+
+Date: 2026-07-08 (later the same day, still on `migration-integration`)
+
+- **Hard-cut release model** (Paul's decision — no live users): mirror jobs
+  removed; per-component rolling alias releases (`finitechat-latest`,
+  `fsite-latest`, `fbrain-latest`) refreshed by the release workflows;
+  install blocks/READMEs/compat matrix point only at finite-mono. Legacy
+  repos get archived once their first mono-built release verifies.
+- **CI is green** (all five jobs, including the devfinity full-stack smoke).
+  Getting there surfaced real debt the drift carried: devfinity had never
+  been clippy'd; finitechat's upstream CI had been red since the MLS-welcome
+  hard cut (smoke script filtered on a renamed test — passing vacuously;
+  unformatted python; RUF015), and a REAL product bug: the agent health
+  server trusted a stale pre-cut cached `paired` flag (now downgraded to
+  consumed_pending_admission before any probe). Also: devfinity postgres
+  pinned its unix socket into the run dir (CI runners can't write
+  /run/postgresql); clippy pinned to 1.93.
+- **infra/nixos**: flake packages for all server binaries + CLIs and
+  `nixosConfigurations.finite-lat-1` — the single-server target from
+  finite-fable/single-server-plan.md. Deploy = pinning the flake rev.
+  Cutover remains supervised (plan Phase 2).
+- **finite-lat-2 runner** `finite-lat-2-mono` registered against finite-mono
+  and online (labels self-hosted,Linux,X64,finite-lat-2,docker,nix); repo
+  requires approval for outside collaborators (public-repo mitigation).
