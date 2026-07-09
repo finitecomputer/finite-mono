@@ -49,7 +49,10 @@ jobs:
               echo "context=finitecomputer-v2" >> "$GITHUB_OUTPUT"
               ;;
             private-limiter)
-              echo "name=finite-private-limiter" >> "$GITHUB_OUTPUT"
+              # mono-owned package; the legacy finite-private-limiter package is
+              # write-locked to the archived finitecomputer repo and stays frozen
+              # serving the currently-deployed pinned digest.
+              echo "name=private-limiter" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               ;;

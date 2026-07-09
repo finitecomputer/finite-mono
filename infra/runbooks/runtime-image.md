@@ -1,6 +1,7 @@
 # Building and promoting the agent runtime image
 
-`ghcr.io/finitecomputer/finite-agent-runtime` — the image the lat1
+`ghcr.io/finitecomputer/agent-runtime` (mono-owned; the legacy
+`finite-agent-runtime` package is frozen with the deployed pins) — the image the lat1
 finite-saas-runner launches into Phala hosted-agent CVMs. Image definitions
 map: `infra/images/README.md`. Rung-ladder discipline: see
 [README.md](README.md) — no Phala/Tinfoil promotion without a Docker proof.
@@ -26,7 +27,7 @@ map: `infra/images/README.md`. Rung-ladder discipline: see
    `finitecomputer-v2/scripts/build_runtime_image.py` (staging finitechat,
    finite-sites, finite-brain from this tree), pushes `:$VERSION` +
    `:sha-<sha>`, uploads `runtime-image-report.json`, and prints the pinned
-   `ghcr.io/finitecomputer/finite-agent-runtime:<version>@sha256:...` in
+   `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
    the summary. Copy that pinned ref — it is the only thing you promote.
 
 ### 2. Prove (rung-ladder, before any promote)
@@ -39,7 +40,7 @@ image is gated on the smoke report by
 `finitechat/scripts/hermes-publish-proven-image.py` — the workflow will not
 publish an unproven image.
 
-Note: that workflow builds and proves `finite-chat-hermes-runtime` (the
+Note: that workflow builds and proves `hermes-runtime` (the
 hermes agent image), not `finite-agent-runtime` itself. TODO: the runtime
 image currently has no equivalent automated smoke of its own before Phala
 promote — until it does, at minimum launch one canary CVM from the new

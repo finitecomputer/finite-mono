@@ -27,7 +27,7 @@ notes = "v0.1.2 (2026-07-08) is the first public fbrain release, cut from mono; 
 
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.
-image = "ghcr.io/finitecomputer/finite-agent-runtime"
+image = "ghcr.io/finitecomputer/finite-agent-runtime"  # frozen legacy package; future builds publish to ghcr.io/finitecomputer/agent-runtime
 deployed = ["2026-07-04.1", "2026-07-06.1"]
 notes = "Runner launches whatever tag its env pins. Old CVMs keep their image until relaunched."
 

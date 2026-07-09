@@ -111,7 +111,7 @@ jobs:
       - name: Set runtime image ref
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          image_ref="ghcr.io/${owner}/finite-chat-hermes-runtime:${GITHUB_SHA}"
+          image_ref="ghcr.io/${owner}/hermes-runtime:${GITHUB_SHA}"  # mono-owned; legacy finite-chat-hermes-runtime package frozen
           echo "RUNTIME_IMAGE_REF=$image_ref" >> "$GITHUB_ENV"
           echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
 

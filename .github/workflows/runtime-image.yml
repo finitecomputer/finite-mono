@@ -52,7 +52,10 @@ jobs:
         id: build
         working-directory: finitecomputer-v2
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/finite-agent-runtime
+          # mono-owned package (legacy finite-agent-runtime is write-locked to
+          # finitecomputer-v2 and stays frozen; live CVMs keep pulling their
+          # pinned digests from it).
+          IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runtime
           VERSION: ${{ inputs.version }}
           HERMES_AGENT_VERSION: ${{ inputs.hermes_agent_version }}
         run: |
