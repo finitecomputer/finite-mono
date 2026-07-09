@@ -23,6 +23,8 @@ is to be measurable.
 2. Run the `Service Images` workflow (image=`private-limiter`) → CI pushes
    `ghcr.io/finitecomputer/private-limiter:<version>@<digest>` (mono-owned
    package; the legacy finite-private-limiter package stays frozen).
+   First mono-built digest, ready for the next roll (2026-07-09, main):
+   `ghcr.io/finitecomputer/private-limiter:2026-07-09.1@sha256:3973eec572936cec61d5daec1b0032b52a705ccde750c2a3d849f5b2a8d96baf`
 3. Update the digest pin in `confidential-kimi-k2-6`'s config; its measured
    release workflow produces the new enclave release.
 4. Relaunch via the Finite Private ops runbook. **Known debt:** the relaunch
