@@ -1002,11 +1002,9 @@ wait "$postgres_pid"
                         String::from("bash"),
                         self.postgres_script_path().display().to_string(),
                     ],
-                    ManagedProcess::Core => vec![
-                        String::from("cargo"),
-                        String::from("finite-saas-core"),
-                        String::from("serve"),
-                    ],
+                    ManagedProcess::Core => {
+                        vec![String::from("finite-saas-core"), String::from("serve")]
+                    }
                     ManagedProcess::FiniteChat => vec![
                         String::from("finitechat-server"),
                         self.finitechat_dir().display().to_string(),
@@ -1624,6 +1622,23 @@ mod tests {
             &process,
             &["cargo".to_string(), "finitesitesd".to_string()],
         ));
+    }
+
+    #[test]
+    fn core_process_spec_matches_started_binary() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        let spec = stack
+            .managed_process_specs()
+            .into_iter()
+            .find(|spec| spec.process == ManagedProcess::Core)
+            .unwrap();
+        let process = ProcessInfo {
+            pid: 1,
+            ppid: 0,
+            command: "target/debug/finite-saas-core serve".to_string(),
+        };
+
+        assert!(process_matches(&process, &spec.expected_fragments));
     }
 
     #[test]
