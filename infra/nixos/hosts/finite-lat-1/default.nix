@@ -25,33 +25,27 @@
 
   networking.hostName = "finite-lat-1";
 
-  # Static public addressing, from the 2026-07-08 capture (eno1 carries
-  # 64.34.82.77/31 + 2605:6440:5002:18e::2/64; eno2 is up but unaddressed).
+  # Static public addressing via systemd-networkd, matched by the WAN NIC's
+  # MAC (90:5a:08:2e:63:1b, derived from the capture's eno1 link-local
+  # fe80::925a:8ff:fe2e:631b). Matching by MAC instead of interface name
+  # makes this immune to the NIC enumerating under a different predictable
+  # name on the NixOS kernel — the suspected cause of the first single-disk
+  # boot being up-but-unreachable (2026-07-09). eno2 (…:631a) stays down.
   networking.useDHCP = false;
-  networking.interfaces.eno1 = {
-    ipv4.addresses = [
-      {
-        address = "64.34.82.77";
-        prefixLength = 31;
-      }
+  networking.useNetworkd = true;
+  systemd.network.enable = true;
+  systemd.network.networks."10-wan" = {
+    matchConfig.MACAddress = "90:5a:08:2e:63:1b";
+    address = [
+      "64.34.82.77/31"
+      "2605:6440:5002:18e::2/64"
     ];
-    ipv6.addresses = [
-      {
-        address = "2605:6440:5002:18e::2";
-        prefixLength = 64;
-      }
+    routes = [
+      { Gateway = "64.34.82.76"; }
+      { Gateway = "2605:6440:5002:18e::1"; }
     ];
+    linkConfig.RequiredForOnline = "routable";
   };
-  # Gateways VERIFIED against the live box 2026-07-09 (`ip route` / `ip -6 route`).
-  networking.defaultGateway = {
-    address = "64.34.82.76";
-    interface = "eno1";
-  };
-  networking.defaultGateway6 = {
-    address = "2605:6440:5002:18e::1";
-    interface = "eno1";
-  };
-  # Matches the live resolver set (resolvectl on the Ubuntu install).
   networking.nameservers = [
     "1.1.1.1"
     "8.8.8.8"
