@@ -209,10 +209,11 @@ impl Stack {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(180);
-        let outcome = match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
-            Ok(()) => self.run_stack_command(command),
-            Err(error) => Err(error),
-        };
+        let outcome =
+            match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
+                Ok(()) => self.run_stack_command(command),
+                Err(error) => Err(error),
+            };
 
         if let Err(error) = guard.shutdown() {
             eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
