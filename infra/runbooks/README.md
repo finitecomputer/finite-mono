@@ -9,16 +9,26 @@ secrets policy).
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
 
+> **Topology changed 2026-07-09**: the lat1 consolidation cutover
+> ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)) moved Core, dashboard,
+> Postgres, chat, and sites all onto finite-lat-1 (now NixOS); lat2 is the CI
+> runner box. The deploy-core / deploy-sites / deploy-finitechat-server
+> runbooks below still describe the PRE-cutover topology (k3s on lat1, sites on
+> lat2, chat on clawland) — TODO: fold them into the NixOS/`nixos-rebuild`
+> model. The reinstall runbook and the NixOS config (`infra/nixos/`) are the
+> current source of truth for lat1.
+
 ## Index
 
 | Runbook | Covers |
 |---|---|
+| [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Rebuilding / recovering lat1** (NixOS) — the cutover procedure + the mdadm / NIC-by-MAC / ACME gotchas |
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
-| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard to lat1 k3s |
-| [deploy-sites.md](deploy-sites.md) | finitesitesd / fsite to lat2 |
 | [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 Postgres — highest-priority runbook in this tree |
-| [deploy-finitechat-server.md](deploy-finitechat-server.md) | The live chat server (clawland today; lat1 cutover later) |
-| [deploy-brain.md](deploy-brain.md) | finite-brain on smoke (legacy nix flow + the fbrain release bridge) |
+| [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server + the single-writer doctrine (now on lat1) |
+| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard (PRE-cutover k3s flow — see banner) |
+| [deploy-sites.md](deploy-sites.md) | finitesitesd / fsite (PRE-cutover lat2 flow — see banner) |
+| [deploy-brain.md](deploy-brain.md) | finite-brain on smoke (still there; deferred from the cutover) |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image |
 | [break-glass.md](break-glass.md) | Getting on each box, logs, restarts |
 
