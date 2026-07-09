@@ -212,6 +212,16 @@ def invite() -> dict[str, Any]:
         if invite_payload is None:
             invite_payload = mint_invite(room_id=None)
             write_cached_invite(invite_payload)
+        if invite_payload.get("paired") and invite_payload.get("invite_state") != "paired":
+            # Legacy cache shape from before the MLS-welcome hard cut: a bare
+            # `paired` flag proves the single-use invite was spent, not that
+            # the joiner activated its Welcome. Only `mark_invite_paired`
+            # (which also stamps invite_state) may claim pairing; downgrade
+            # the cache before any room-state probe can echo the stale flag.
+            invite_payload.pop("paired", None)
+            invite_payload["invite_state"] = "consumed_pending_admission"
+            write_cached_invite(invite_payload)
+            return consumed_pending_admission_payload(identity_payload, invite_payload)
         if invite_room_is_paired(invite_payload):
             invite_payload = mark_invite_paired(invite_payload)
             return paired_payload(identity_payload, invite_payload)
