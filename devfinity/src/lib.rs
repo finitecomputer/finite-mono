@@ -203,7 +203,13 @@ impl Stack {
         self.ensure_process_compose_available()?;
         self.prepare_for_start()?;
         let mut guard = self.start_process_compose_headless()?;
-        let outcome = match self.wait_for_services_ready(Duration::from_secs(180), &mut guard) {
+        // Cold-cache CI needs a bigger window: the stack's cargo processes may
+        // still be compiling when a warm-cache 180s would already have expired.
+        let ready_timeout = std::env::var("DEVFINITY_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(180);
+        let outcome = match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
             Ok(()) => self.run_stack_command(command),
             Err(error) => Err(error),
         };
