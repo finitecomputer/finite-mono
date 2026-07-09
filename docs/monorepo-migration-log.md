@@ -689,3 +689,35 @@ Date: 2026-07-08 (later the same day, still on `migration-integration`)
 - **finite-lat-2 runner** `finite-lat-2-mono` registered against finite-mono
   and online (labels self-hosted,Linux,X64,finite-lat-2,docker,nix); repo
   requires approval for outside collaborators (public-repo mitigation).
+
+## lat1 Consolidation Cutover — COMPLETE
+
+Date: 2026-07-09
+
+finite-lat-1 (64.34.82.77) was reinstalled as NixOS from finite-mono
+(`infra/nixos/`, host `finite-lat-1`) and now runs the entire coupled
+cluster: finite-saas-core, dashboard, native Postgres 16 (finite_core, 87
+Finite Private keys restored + verified), the SaaS runner (dormant), the
+finitechat server (:8788, migrated from clawland under the single-writer
+doctrine), finitesitesd (:8787, migrated from lat2), finite-search, and one
+Caddy edge for finite.computer + chat.finite.computer + *.finite.chat
+(Cloudflare origin cert). Verified green over real public DNS; Finite Private
+validated end-to-end through the Tinfoil limiter.
+
+Topology now:
+- **lat1** = the single NixOS app server (deploy = `nixos-rebuild --flake
+  ...#finite-lat-1`). k3s/Traefik/on-host-podman-builds are gone.
+- **lat2** = the CI runner box (sites/search/tunnel disabled; hosts the
+  `finite-lat-2-mono` Actions runner).
+- **clawland** = legacy fleet; its finitechat-server is disabled (migrated).
+- **smoke** = finite-brain only (deferred from the cutover).
+
+Config facts learned the hard way (all in the flake now): single-disk, no
+mdadm (RAID1 superblocks were unassemblable on the pinned nixpkgs kernel);
+disks by `/dev/disk/by-id`; WAN bound by MAC (NIC is `enp1s0f1`, not `eno1`).
+Procedure + gotchas: `infra/runbooks/lat1-nixos-reinstall.md`. Outcome +
+follow-ups: `finite-fable/notes/lat1-cutover-complete-2026-07-09.md`.
+
+Open follow-ups: offsite borg backups (redundancy gap — single-disk root),
+disk mirror, brain+oauth2-proxy migration, runner (phala/enclavia), firecrawl
+API. Docs across `infra/` were reconciled to this topology the same day.

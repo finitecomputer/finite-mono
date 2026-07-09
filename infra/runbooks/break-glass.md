@@ -8,51 +8,61 @@ For incidents. Host facts (services, ports, secrets locations) live in
 > matches reality; an undocumented hotfix is drift, and drift is how the
 > pre-mono mess happened. Note the change in your PR even if it is embarrassing.
 
-## lat1 — finite-lat-1 (64.34.82.77)
+## lat1 — finite-lat-1 (64.34.82.77) — THE app server, NixOS
 
-- **Get on:** `ssh finite-lat-1` (user `ubuntu`). kubectl works for any
-  local user (kubeconfig is world-readable by design — lat1 README).
-- **Logs:**
-  - `journalctl -u caddy` — edge for finite.computer
-  - `journalctl -u k3s` — cluster
-  - `journalctl -u finite-saas-runner` — agent-creation runner (fires every
-    20s via the timer; each run is a fresh oneshot)
-  - `kubectl -n finite-system logs deploy/finite-saas-core` (also
-    `deploy/finite-dashboard`, `sts/finite-core-postgres`, and
-    `kubectl -n finite-system get jobs` for the backup CronJob)
+Since the 2026-07-09 cutover lat1 runs EVERYTHING (Core, dashboard, native
+Postgres, chat, sites, search) as NixOS. No k3s, no kubectl. Config is
+`infra/nixos/`; deploy/rebuild is [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
+
+- **Get on:** `ssh root@64.34.82.77` — **key-only, NO console password.** If
+  the box won't boot and ssh is dead, recover via Latitude **Rescue Mode +
+  IPMI console** per [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)
+  ("If it won't boot"). Diagnose from the IPMI console first (it shows the
+  real screen even with no network).
+- **Logs** (all native systemd/journald — no kubectl):
+  - `journalctl -u caddy` — the single edge (finite.computer,
+    chat.finite.computer, *.finite.chat)
+  - `journalctl -u finite-saas-core` — Core (127.0.0.1:4200)
+  - `journalctl -u podman-finite-saas-dashboard` — dashboard container
+    (127.0.0.1:3000)
+  - `journalctl -u postgresql` — native Postgres 16 (`finite_core`)
+  - `journalctl -u finitechat-server` — chat (127.0.0.1:8788)
+  - `journalctl -u finite-saas-sites` — finitesitesd (127.0.0.1:8787)
+  - `journalctl -u finite-postgres-backup` — the 6-hourly dump timer
+  - `journalctl -u finite-saas-runner` — agent-creation runner (currently
+    DORMANT; the `phala` CLI isn't packaged yet — Phala-Cloud-API/"enclavia"
+    runner is being explored)
+  - search: `journalctl -u podman-searxng` (up); firecrawl API (:3002) is
+    currently DOWN — follow-up.
 - **Restart:**
-  - `sudo systemctl restart caddy` (config test first:
-    `caddy validate --config /etc/caddy/Caddyfile`)
-  - `kubectl -n finite-system rollout restart deploy/finite-saas-core`
-    (same for dashboard)
-  - `sudo systemctl restart k3s` — last resort; takes the whole control
-    plane with it
-  - Runner: usually nothing to restart — the timer re-invokes it. To pause:
-    set `FC_RUNNER_DRAIN=true` in `/etc/finite-computer/runner.env`; to
-    stop the loop entirely: `sudo systemctl stop finite-saas-runner.timer`.
-- **Trap:** the Caddyfile and runner env hardcode core's ClusterIP
-  `10.43.237.180` — if core mysteriously 502s after Service changes, that
-  IP changed (lat1 README, "How finite.computer routes").
+  - `sudo systemctl restart caddy`
+  - `sudo systemctl restart finite-saas-core` / `finite-saas-sites` /
+    `finitechat-server` / `postgresql` / `podman-finite-saas-dashboard`
+  - Runner (dormant): the timer re-invokes it when packaged; to pause once
+    live, `FC_RUNNER_DRAIN=true` in `/etc/finite/runner.env` or
+    `sudo systemctl stop finite-saas-runner.timer`.
+- **Do NOT edit units on the box.** lat1 is declarative — a hotfix survives
+  only until the next `nixos-rebuild switch` and then reverts. Fix forward in
+  `infra/nixos/` and re-deploy; land any emergency change back within a day
+  (rule above). To roll config back fast: `nixos-rebuild switch --rollback`.
 
-## lat2 — finite-lat-2 (64.34.80.19)
+## lat2 — finite-lat-2 (64.34.80.19) — the CI runner box (Ubuntu+nix)
+
+Post-cutover lat2 is just the CI runner. Its finite-saas-sites, finite-search,
+and finite-core-tunnel units are **DISABLED** (those services moved to lat1).
+It hosts the `finite-lat-2-mono` GitHub Actions runner.
 
 - **Get on:** `ssh finite-lat-2` (user `ubuntu`).
 - **Logs:**
-  - `journalctl -u finite-saas-sites` — finitesitesd (`*.finite.chat`)
-  - `journalctl -u caddy`
-  - `journalctl -u finite-core-tunnel` — SSH tunnel to lat1 core
-  - `journalctl -u 'actions.runner.*'` — the three GitHub Actions runners
-  - search: `docker compose logs` in the two projects under
-    `/home/ubuntu/finite-search/`
+  - `journalctl -u 'actions.runner.*'` — the `finite-lat-2-mono` Actions
+    runner (drives the runtime-image / service-images build lanes)
+  - `journalctl -u caddy` — legacy edge, if still present
 - **Restart:**
-  - `sudo systemctl restart finite-saas-sites` — TODO: effect on running
-    Kata microVMs unverified (see [deploy-sites.md](deploy-sites.md)
-    cautions)
-  - `sudo systemctl reload caddy` — prefer reload; TLS is a Cloudflare
-    Origin CA cert, do not switch to ACME while firefighting
-  - `sudo systemctl restart finite-core-tunnel`
-  - runners: `sudo ./svc.sh stop|start` in the runner dir under
+  - runner: `sudo ./svc.sh stop|start` in the runner dir under
     `/srv/github-runner/`, or systemctl on the `actions.runner.*` unit
+- **Note:** do NOT re-enable the migrated units here (sites/search/tunnel) —
+  they are authoritative on lat1 now; a second sites writer especially is a
+  split-brain risk.
 - **Trap:** `/tmp` is a 94G tmpfs — never park a backup or artifact there
   (`infra/hosts/lat2/backups.md`).
 
@@ -80,20 +90,17 @@ For incidents. Host facts (services, ports, secrets locations) live in
   before anything risky. Disk was 82% full at capture. `/_admin` bypasses
   oauth at the edge (smoke README, risks).
 
-## clawland — clawland-ovh (15.204.108.57)
+## clawland — clawland-ovh (15.204.108.57) — legacy fleet box
 
 - **Get on:** `ssh ovh-rescue` (= `root@15.204.108.57`).
-- **Legacy fleet box** — mono's scope here is ONLY the finitechat server
-  (`infra/hosts/clawland/README.md`); coordinate anything else with the
-  legacy `finitecomputer` repo (workspace `ovh-fc-1`). Also NixOS: same
-  fix-forward caveat as smoke.
-- **Logs:**
-  - `journalctl -u finitechat-server` — the live chat.finite.computer server
-  - `journalctl -u fc-offsite-backup` (+ `systemctl list-timers` to confirm
-    the borg timer is live)
-  - edge is the fleet's socat → k3s Traefik, same pattern as smoke
-- **Restart:** `systemctl restart finitechat-server`, then confirm
-  `curl -fsS https://chat.finite.computer/health` reports the expected
-  `source_commit` ([deploy-finitechat-server.md](deploy-finitechat-server.md)).
-- **Trap:** it is also the nix build host for smoke deploys — an outage here
-  blocks smoke's deploy path too.
+- **Legacy fleet box** (finite.vip fleet) — coordinate anything here with the
+  legacy `finitecomputer` repo (workspace `ovh-fc-1`). NixOS: same fix-forward
+  caveat as smoke.
+- **`finitechat-server` here is DISABLED** (migrated to lat1 at the
+  2026-07-09 cutover, per the single-writer doctrine —
+  [deploy-finitechat-server.md](deploy-finitechat-server.md)). Do NOT
+  re-enable it: chat is single-writer, and lat1 is the live writer.
+  `chat.finite.computer` now resolves to lat1.
+- **Logs:** `journalctl -u fc-offsite-backup` (legacy borg, still relevant to
+  the fleet); edge is the fleet's socat → k3s Traefik, same pattern as smoke.
+- Otherwise unchanged legacy — nothing mono actively runs here now.

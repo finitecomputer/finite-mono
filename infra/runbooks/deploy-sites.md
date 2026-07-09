@@ -1,86 +1,74 @@
-# Deploying finite-sites (finitesitesd + fsite) to lat2
+# Deploying finite-sites (finitesitesd) to lat1
 
-Host map: `infra/hosts/lat2/README.md`. Deploy detail (current and target):
-`infra/hosts/lat2/deploy.md`. Serves `*.finite.chat` via
-`finite-saas-sites.service` (finitesitesd on 127.0.0.1:8787, Kata/cloud-
-hypervisor microVMs for tier-2 apps) behind Caddy.
+Since the 2026-07-09 cutover, finitesitesd runs on finite-lat-1
+(64.34.82.77), NOT lat2. Config: `infra/nixos/modules/finitesitesd.nix`
+(host `finite-lat-1`). It serves `*.finite.chat` / `*.docs.finite.chat` /
+`api.finite.chat` as systemd unit `finite-saas-sites.service`
+(finitesitesd on 127.0.0.1:8787), fronted by the one host Caddy with the
+Cloudflare Origin CA cert. Data `/var/lib/finite-sites` (16 published sites,
+npubs intact, restored from lat2 at cutover). Topology:
+`infra/nixos/README.md`; box rebuild: [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
 
-## Current flow — DEPRECATED
+> **KATA GAP (flagged follow-up):** this module ships `--app-runner none` —
+> sites run WITHOUT microVM isolation, so tier-2 tenant apps do not run until
+> Kata (or microvm.nix) is ported. lat2 previously ran `--app-runner kata`.
+> Tracked as the KATA ISOLATION TODO in `modules/finitesitesd.nix`.
 
-rsync source to the box, `cargo build --release` on the box, `sudo install`
-to `/usr/local/bin`. Summarized in `infra/hosts/lat2/deploy.md`, full detail
-in `finite-sites/docs/deploy-finite-lat-2.md` §3/§5a. No commit provenance —
-do not extend.
+> History: sites previously deployed to lat2 by rsync-source + `cargo build
+> --release` on the box + `sudo install`. That box no longer serves sites.
+> Do not resurrect the build-on-box flow.
 
-## Target flow — binaries from an `fsite/v*` release
+## Deploy flow — nixos-rebuild pinned to a mono rev
 
-> `fsite/v*` releases publish `finitesitesd-linux-x86_64.tar.gz` (+ sha256)
-> alongside the `fsite` CLI assets specifically for this flow (added
-> 2026-07-08, same day this gap was found — the asset first exists on the
-> first mono-cut `fsite/v*` release; earlier legacy releases do not have it).
+`fsite/v*` releases still ship the `fsite` CLI + `finitesitesd` linux binary
+([release-cli.md](release-cli.md)), but on lat1 the *daemon* is deployed by
+nixos-rebuild (the flake builds `finitesitesd` from the pinned mono rev), not
+by copying a release tarball onto the box.
 
 ### PRECONDITIONS
 
-- An `fsite/vX.Y.Z` release exists with linux-x86_64 assets for both
-  binaries (see gap above) and `compat/matrix.toml` `[field.fsite-cli]` was
-  updated at release time ([release-cli.md](release-cli.md)).
-- ssh access: `ssh finite-lat-2`.
-- A fresh durable backup of `/var/lib/finite-sites` exists — see
-  `infra/hosts/lat2/backups.md` (as of capture the newest durable backup was
-  2026-06-17; take one first).
+- The finitesitesd source change is merged to `main` (you deploy a committed
+  rev).
+- ssh access to lat1 (`ssh root@64.34.82.77`, key-only) or a nix driver host
+  that reaches it as root.
+- A fresh Postgres/state safety net exists — for sites, `/var/lib/finite-sites`
+  (`registry.db` is WAL-mode SQLite) is covered by the lat1 backup timer
+  (`modules/backups.nix`); FLAG: offsite borg is not yet enabled
+  ([postgres-backup-restore.md](postgres-backup-restore.md)).
 
 ### STEPS
 
-1. Download the tagged linux assets and verify their `.sha256`s locally.
-2. Copy **binaries only** (never source) to the box, then:
+1. Deploy:
 
    ```sh
-   # on lat2 — keep the .prev rollback copies exactly as today
-   ts=$(date -u +%Y%m%dT%H%M%SZ)
-   sudo cp /usr/local/bin/finitesitesd /usr/local/bin/finitesitesd.prev-$ts
-   sudo cp /usr/local/bin/fsite        /usr/local/bin/fsite.prev-$ts
-   sudo install -m 0755 ./finitesitesd ./fsite /usr/local/bin/
-   sudo systemctl restart finite-saas-sites
+   nixos-rebuild switch --target-host root@finite-lat-1 \
+     --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
    ```
 
-3. Config changes (units, drop-ins, polkit, sudoers, Caddyfile) deploy from
-   `infra/hosts/lat2/systemd/` and `infra/hosts/lat2/caddy/Caddyfile` via
-   `sudo install` + `systemctl daemon-reload` / `systemctl reload caddy` —
-   never from the sites source checkout.
-
-### Cautions
-
-- **Caddy:** prefer `systemctl reload caddy` over restart. TLS is a
-  Cloudflare Origin CA cert pair at `/etc/finite-saas/certs/` (no ACME, no
-  API token on the box) — do not "fix" cert errors by switching to ACME; the
-  zone is Cloudflare-proxied Full (strict).
-- **Kata:** tier-2 apps run as Kata microVMs driven via `sudo nerdctl` +
-  containerd, launched by finitesitesd. TODO: verify during the first
-  target-flow deploy what restarting `finite-saas-sites` does to running
-  Kata app microVMs (orphaned vs. restarted) and record it here.
-- `registry.db` is WAL-mode SQLite under `/var/lib/finite-sites` — for
-  anything destructive, take the stop-the-world backup first
-  (`infra/hosts/lat2/backups.md`).
+2. Config-only changes (listen flags, `--app-runner`, sites.env references,
+   Caddy vhosts) all live in `infra/nixos/modules/` — never edit units on the
+   box. Cert is the Cloudflare Origin CA pair at
+   `/etc/finite-saas/certs/finite-chat-origin.{pem,key}` (no ACME; the zone is
+   Cloudflare-proxied Full-strict — do not "fix" cert errors by switching to
+   ACME).
 
 ### VERIFY
 
-1. `finitesitesd --version` reports the released version (0.2.16 was live at
-   capture).
-2. `curl -fsS https://api.finite.chat/api/v1/healthz`
-3. Load a published site (`https://<something>.finite.chat`) and a docs
-   vhost.
+1. `ssh root@finite-lat-1 'systemctl status finite-saas-sites'` — active.
+2. `curl -fsS https://api.finite.chat/api/v1/healthz`.
+3. Load a published site (`https://<something>.finite.chat`) and a
+   `*.docs.finite.chat` vhost. (sitesd serves by Host header; there is no
+   root `/healthz` on the wildcard vhosts — a 404 at `/` is normal.)
 4. TODO: once finitesitesd exposes a `source_commit` health payload
-   (finitechat-style contract gate — the stated bar in
-   `infra/hosts/lat2/deploy.md`), gate on it here.
+   (finitechat-style contract gate), gate on it here.
 
 ### ROLLBACK
 
 ```sh
-# on lat2 — .prev copies are the rollback path (pattern in use since
-# finitesitesd.prev-20260619T155747Z)
-sudo install -m 0755 /usr/local/bin/finitesitesd.prev-<stamp> /usr/local/bin/finitesitesd
-sudo install -m 0755 /usr/local/bin/fsite.prev-<stamp>        /usr/local/bin/fsite
-sudo systemctl restart finite-saas-sites
+ssh root@finite-lat-1 nixos-rebuild switch --rollback
 ```
 
-Then re-run VERIFY, and record the rollback (and why) against the release.
+reverts to the previous generation (finitesitesd binary + config together);
+or re-run `nixos-rebuild switch --flake ...#finite-lat-1` pinned to the
+previous known-good mono rev. Then re-run VERIFY and reconcile git within a
+day (break-glass rule).

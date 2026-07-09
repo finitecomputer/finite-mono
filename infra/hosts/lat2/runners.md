@@ -1,5 +1,10 @@
 # GitHub Actions runners on finite-lat-2
 
+> Post-2026-07-09 cutover, **running CI is lat2's live role** — sites, search,
+> and the core tunnel moved to lat1. The mono runner `finite-lat-2-mono` is
+> registered and online (see the DONE note below); the 3 legacy-repo runners
+> stay until their repos are archived.
+
 Captured 2026-07-08. **Three** self-hosted runners (the old inventory said
 one), all version **2.335.1**, all `User=ubuntu`, each a systemd service
 (`ExecStart=<dir>/runsvc.sh`, `KillMode=process`, enabled at boot) under

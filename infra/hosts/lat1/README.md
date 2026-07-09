@@ -1,8 +1,24 @@
 # finite-lat-1 (lat1)
 
-Authoritative map of host `finite-lat-1` — 64.34.82.77, Latitude.sh.
-Everything here is traceable to the read-only capture of 2026-07-08 or to the
-files in this directory. Secrets: **names only** (this repo is public).
+> **SUPERSEDED 2026-07-09 — lat1 is now NixOS.** Its live config is
+> **`infra/nixos/`** (host `finite-lat-1`); reinstall/recovery procedure is
+> `infra/runbooks/lat1-nixos-reinstall.md`. The k8s manifests, systemd units,
+> and Caddyfile in **this** directory are **PRE-CUTOVER historical reference**:
+> the single-node k3s control plane they describe was **wiped** in the 2026-07-09
+> consolidation cutover. lat1 now runs everything natively — finite-saas-core,
+> dashboard (podman), **native** Postgres 16, finitechat-server (:8788),
+> finitesitesd (:8787), finite-search, and **one** Caddy edge — with **no k3s,
+> no Traefik, and no on-host podman builds**. Nothing below is current; it is
+> kept as provenance for how the box ran before the cutover. Deploy is now
+> `nixos-rebuild --flake ...#finite-lat-1`, not `kubectl apply`.
+
+---
+
+**Historical (pre-cutover) map** of host `finite-lat-1` — 64.34.82.77,
+Latitude.sh. Everything here is traceable to the read-only capture of
+2026-07-08 or to the files in this directory. Secrets: **names only** (this repo
+is public). **This describes the wiped k3s host, not the current NixOS box —
+see `infra/nixos/`.**
 
 ## Hardware / OS
 

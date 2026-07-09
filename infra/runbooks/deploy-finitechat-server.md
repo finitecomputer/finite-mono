@@ -1,20 +1,24 @@
 # Deploying the finitechat server (chat.finite.computer)
 
-## Where it runs today
+## Where it runs
 
-**clawland-ovh (15.204.108.57), not lat1.** `chat.finite.computer` DNS points
-at clawland; the server is systemd unit `finitechat-server.service` binding
-`10.42.0.1:8787` with SQLite at `/var/lib/finite-chat/data/server.sqlite3`,
-fronted by the legacy fleet's Traefik/oauth stack, **borg-backed**
-(`fc-offsite-backup.service` + timer). Full map:
-`infra/hosts/clawland/finitechat-server.md` and
-`infra/hosts/clawland/README.md`.
+**finite-lat-1 (64.34.82.77), NixOS.** Since the 2026-07-09 cutover
+`chat.finite.computer` DNS points at lat1; the server is systemd unit
+`finitechat-server.service` binding **`127.0.0.1:8788`** (moved off 8787,
+which finitesitesd owns on this consolidated box — the public URL is
+unchanged), DynamicUser with SQLite at the real path
+`/var/lib/private/finite-chat/data/server.sqlite3`, fronted by the one host
+Caddy (`chat.finite.computer` → 127.0.0.1:8788, Let's Encrypt cert via ACME
+HTTP-01). Config: `infra/nixos/modules/finitechat-server.nix`; topology:
+`infra/nixos/README.md`; box rebuild:
+[lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
 
-Server deploys to clawland are performed **from the legacy `finitecomputer`
-repo** ("box1") — mono owns the server source and the release gate, not the
-clawland deploy mechanics. TODO: the exact legacy-side deploy command for
-clawland is not captured in mono; record it here (or supersede it) at the
-next production server deploy.
+The migration from clawland is **DONE**: `finitechat-server` on clawland is
+`systemctl disable`d (single-writer doctrine below), and the SQLite was
+carried to lat1 per that discipline. Deploys are now nixos-rebuild pinned to
+a mono rev (`nixos-rebuild switch --target-host root@finite-lat-1
+--flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1`) — the
+flake builds `finitechat-server` from the pinned rev.
 
 ## The contract gate (applies to EVERY server deploy)
 
@@ -31,8 +35,15 @@ matching the expected finite-chat commit, and `source_dirty: false`.
 
 ### STEPS
 
-1. Hand off to the deploy lane per the gate doc (branch + full SHA, whether
-   companion services like `push-drain` are needed, rollback notes).
+1. Deploy the release rev to lat1:
+
+   ```sh
+   nixos-rebuild switch --target-host root@finite-lat-1 \
+     --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
+   ```
+
+   (This is a routine in-place server update, not a host move — no data
+   migration. A host MOVE follows the single-writer doctrine below.)
 2. After the deploy, run the gate from a mono checkout at the release
    commit:
 
@@ -58,10 +69,12 @@ matching the expected finite-chat commit, and `source_dirty: false`.
 
 ### ROLLBACK
 
-Redeploy the previous known-good commit through the same lane and re-run the
-gate against it. Data rollback (SQLite) comes from clawland's borg backups —
-TODO: the borg restore procedure for `/var/lib/finite-chat/data/` has not
-been drilled from mono's side; drill and document it (same discipline as
+`ssh root@finite-lat-1 nixos-rebuild switch --rollback` (or re-deploy the
+previous known-good mono rev), then re-run the gate against it. Data rollback
+(SQLite) comes from the lat1 backup set — FLAG: offsite borg is not yet
+enabled on lat1 (the current redundancy gap; single-disk root), so a durable
+copy of `/var/lib/private/finite-chat/data/` is the top follow-up. TODO:
+drill the restore once borg lands (same discipline as
 [postgres-backup-restore.md](postgres-backup-restore.md)).
 
 ## Single-writer doctrine (Paul, 2026-07-09 — applies to every chat move, forever)
@@ -86,37 +99,17 @@ unrecoverable. Concretely, any migration follows this exact order:
    re-enabling the old one, and carry the database back (any writes the new
    server accepted must move with it or be consciously discarded).
 
-## Future lat1 cutover — SEPARATELY SCHEDULED, NOT ROUTINE
+## Host MOVES — SEPARATELY SCHEDULED, NOT ROUTINE
 
-Moving the server to lat1 is a deliberate cutover with a data migration
-following the single-writer doctrine above: quiesced SQLite copy of
-`/var/lib/finite-chat/data/server.sqlite3` plus a DNS flip of
-`chat.finite.computer` from 15.204.108.57 to 64.34.82.77 (TTL already
-lowered to 300). Chat has no users as of 2026-07-09, so the outage window
-is free — the discipline is rehearsal for when it will not be. It is
-explicitly NOT part of routine deploys
-(`infra/hosts/clawland/finitechat-server.md`, "Migration story").
+The clawland → lat1 move is DONE. Any FUTURE host move (e.g. lat1 → a
+successor box, or splitting chat back onto dedicated hardware) is a
+deliberate cutover, NOT a routine deploy, and follows the single-writer
+doctrine above exactly: disable the old writer FIRST, WAL-checkpoint, carry
+the quiesced SQLite, start + verify the new writer via direct IP, and only
+then flip `chat.finite.computer` DNS (keep the TTL low ahead of the move).
+Chat had no users at the 2026-07-09 move, so the outage window was free —
+treat that as rehearsal, not license to skip the discipline when it is not.
 
-The deploy script for that future home is
-`infra/hosts/lat1/scripts/deploy-finitechat-server.sh` — **do not run it
-as-is**. Its header documents known host mismatches (it was written for a
-NixOS/Traefik host; lat1 is Ubuntu with `--disable=traefik` and host-Caddy
-edge): `nix shell` build, Traefik IngressRoute CRDs, dangling NixOS nologin
-shell. TODO: reconcile the script (cargo or CI-built binary; Caddy vhost
-instead of IngressRoutes) before scheduling the cutover, and write the
-cutover checklist as its own runbook at that time.
-
-## Small follow-up: clean the rolled-back Jul 7 leftovers on lat1
-
-The 2026-07-07 lat1 deploy attempt ran ~2 minutes and was rolled back
-(lat1 README appendix item 7). Still on lat1:
-
-1. `finite-chat` user (UID 986, dangling NixOS nologin shell) + group.
-2. `/var/lib/finite-chat/` — release binary, src clone at the pinned SHA,
-   and a small SQLite DB with a **197KB WAL that was never checkpointed**.
-
-Cleanup steps: if that 2-minute window's data could matter, checkpoint
-before archiving (`sqlite3 <db> 'PRAGMA wal_checkpoint(TRUNCATE);'`), tar
-`/var/lib/finite-chat` aside, then remove the directory and
-`userdel finite-chat` / `groupdel finite-chat`. Do it before the real
-cutover so the migration starts from a clean slate.
+The `lat1-nixos-reinstall.md` "Data restore → Chat" note is the compact
+checklist for standing chat up on a freshly built lat1; a full host-to-host
+move should get its own dated runbook at the time it is scheduled.

@@ -1,6 +1,15 @@
 # finite-lat-2 — 64.34.80.19 (Latitude.sh)
 
-Dedicated sites + search + CI-runner box. Captured read-only 2026-07-08.
+> **ROLE CHANGE 2026-07-09 — lat2 is now the CI RUNNER BOX.** The
+> consolidation cutover **migrated finitesitesd (sites), finite-search, and the
+> finite-core-tunnel to lat1**; those services are **DISABLED** here. lat2's
+> live role is the **GitHub Actions runners** — `finite-lat-2-mono` (against
+> finite-mono) plus the 3 legacy-repo runners until those repos are archived
+> (`runners.md`). The Services / Ports / Secrets tables below are the
+> **pre-cutover** capture; the sites/search/tunnel rows are historical.
+
+Formerly the dedicated sites + search + CI-runner box; now the CI runner box.
+Captured read-only 2026-07-08 (before the sites/search/tunnel migration).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
   7.0.0-15-generic, x86-64.
@@ -14,12 +23,12 @@ Dedicated sites + search + CI-runner box. Captured read-only 2026-07-08.
 
 | Service | What | Config in this tree |
 |---|---|---|
-| `finite-saas-sites.service` | finitesitesd **v0.2.16** (`/usr/local/bin/finitesitesd`, fsite v0.2.16 alongside). Registry, publishing API, Git smart HTTP, and site serving for `*.finite.chat` on 127.0.0.1:8787. `--app-runner kata`: tier-2 apps run as **Kata Containers 3.31.0 microVMs on cloud-hypervisor** (`[hypervisor.clh]`, `/etc/kata-containers/configuration.toml`), driven via `sudo nerdctl` (2.3.1) + containerd. Data: `/var/lib/finite-sites`. | `systemd/finite-saas-sites.service` + `systemd/finite-saas-sites-kata.conf` drop-in, `systemd/finite-app@.service` (template for the non-Kata systemd runner; no instances running), `systemd/50-finite-sites.rules` (polkit), `systemd/finite-sites-nerdctl-sudoers` |
-| `caddy.service` | Caddy **2.6.2** (distro unit at `/usr/lib/systemd/system/caddy.service`). Three vhosts — `api.finite.chat`, `*.finite.chat`, `*.docs.finite.chat` — all reverse_proxy → 127.0.0.1:8787. TLS via **Cloudflare Origin CA cert** (no ACME, no API token on box); Cloudflare proxies the zone in Full (strict). | `caddy/Caddyfile` |
-| finite-search | Two Docker Compose projects under `/home/ubuntu/finite-search/`: SearXNG on 127.0.0.1:8080, Firecrawl (upstream checkout + Finite override) on 127.0.0.1:3002. Loopback-only. | `search.md` (compose sources live in `finite-search/compose/`) |
-| `finite-core-tunnel.service` | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
+| `finite-saas-sites.service` **(DISABLED — migrated to lat1)** | finitesitesd **v0.2.16** (`/usr/local/bin/finitesitesd`, fsite v0.2.16 alongside). Registry, publishing API, Git smart HTTP, and site serving for `*.finite.chat` on 127.0.0.1:8787. `--app-runner kata`: tier-2 apps run as **Kata Containers 3.31.0 microVMs on cloud-hypervisor** (`[hypervisor.clh]`, `/etc/kata-containers/configuration.toml`), driven via `sudo nerdctl` (2.3.1) + containerd. Data: `/var/lib/finite-sites`. | `systemd/finite-saas-sites.service` + `systemd/finite-saas-sites-kata.conf` drop-in, `systemd/finite-app@.service` (template for the non-Kata systemd runner; no instances running), `systemd/50-finite-sites.rules` (polkit), `systemd/finite-sites-nerdctl-sudoers` |
+| `caddy.service` **(DISABLED — `*.finite.chat` edge migrated to lat1)** | Caddy **2.6.2** (distro unit at `/usr/lib/systemd/system/caddy.service`). Three vhosts — `api.finite.chat`, `*.finite.chat`, `*.docs.finite.chat` — all reverse_proxy → 127.0.0.1:8787. TLS via **Cloudflare Origin CA cert** (no ACME, no API token on box); Cloudflare proxies the zone in Full (strict). | `caddy/Caddyfile` |
+| finite-search **(DISABLED — migrated to lat1)** | Two Docker Compose projects under `/home/ubuntu/finite-search/`: SearXNG on 127.0.0.1:8080, Firecrawl (upstream checkout + Finite override) on 127.0.0.1:3002. Loopback-only. | `search.md` (compose sources live in `finite-search/compose/`) |
+| `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
-| GitHub Actions runners ×3 | **Three** runners (inventory said one), all v2.335.1, `User=ubuntu`, under `/srv/github-runner/`. Registered to finitechat, finitecomputer, and finitecomputer-v2 — all must be re-registered against finite-mono at cutover. | `runners.md` |
+| GitHub Actions runners **(lat2's LIVE role)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2) — kept until those repos are archived, then removed. | `runners.md` |
 
 ## Ports
 

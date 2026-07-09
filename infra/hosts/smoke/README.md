@@ -16,6 +16,14 @@ eventually own. See [`deploy.md`](deploy.md).
 
 All facts below captured read-only from the host on 2026-07-08.
 
+> **Cutover status 2026-07-09 — finite-brain was DEFERRED from the lat1
+> consolidation.** Brain still runs here, unchanged; it migrates to lat1 later,
+> together with the oauth2-proxy / auth-integration follow-up. DNS note:
+> `brain.finite.computer` now has a record pointing at **lat1**, but **brain is
+> not there yet** — `brain.smoke.finite.computer` (→ this box) is the working
+> URL. lat1's `infra/nixos/` already carries the brain + oauth2-proxy modules
+> and port map (3015 / 4180) for when the migration happens.
+
 ## finite-brain (the service mono cares about)
 
 finite-brain is **not** hand-run, and it listens on **3015 — not the 3025 some

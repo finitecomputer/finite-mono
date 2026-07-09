@@ -1,5 +1,13 @@
 # Deploying finite-brain (smoke)
 
+> **DEFERRED from the 2026-07-09 lat1 cutover.** finite-brain was intentionally
+> NOT migrated; it still runs on ovh-vps-smoke, deployed from the legacy
+> `finitecomputer` repo. Its move to lat1 (a `modules/finite-brain.nix` +
+> oauth2-proxy already stubbed in `infra/nixos/`) is bundled with the
+> auth-integration follow-up and will happen then. Until then everything below
+> — smoke host, legacy `just host-deploy` flow — is CURRENT. See
+> [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) "Post-install follow-ups".
+
 finite-brain runs on ovh-vps-smoke (15.204.56.61) as the NixOS-generated
 unit `finite-brain-app.service`, listening on :3015, SQLite at
 `/var/lib/private/finitebrain/finite-brain.sqlite3`. Host map:

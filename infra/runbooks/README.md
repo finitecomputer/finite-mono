@@ -9,14 +9,15 @@ secrets policy).
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
 
-> **Topology changed 2026-07-09**: the lat1 consolidation cutover
-> ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)) moved Core, dashboard,
-> Postgres, chat, and sites all onto finite-lat-1 (now NixOS); lat2 is the CI
-> runner box. The deploy-core / deploy-sites / deploy-finitechat-server
-> runbooks below still describe the PRE-cutover topology (k3s on lat1, sites on
-> lat2, chat on clawland) — TODO: fold them into the NixOS/`nixos-rebuild`
-> model. The reinstall runbook and the NixOS config (`infra/nixos/`) are the
-> current source of truth for lat1.
+> **Topology as of the 2026-07-09 lat1 consolidation cutover**
+> ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): Core, dashboard,
+> native Postgres, chat, and sites all run on finite-lat-1 (now NixOS, one
+> Caddy edge, no k3s); lat2 is the CI runner box; smoke still runs finite-brain
+> (deferred); clawland is legacy (chat disabled there). **The topology runbooks
+> below (deploy-core / deploy-sites / deploy-finitechat-server /
+> postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
+> The reinstall runbook and the NixOS config (`infra/nixos/`) are the source
+> of truth for lat1.
 
 ## Index
 
@@ -24,13 +25,13 @@ not been exercised yet are marked `TODO:` with what must be learned.
 |---|---|
 | [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Rebuilding / recovering lat1** (NixOS) — the cutover procedure + the mdadm / NIC-by-MAC / ACME gotchas |
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
-| [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 Postgres — highest-priority runbook in this tree |
-| [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server + the single-writer doctrine (now on lat1) |
-| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard (PRE-cutover k3s flow — see banner) |
-| [deploy-sites.md](deploy-sites.md) | finitesitesd / fsite (PRE-cutover lat2 flow — see banner) |
-| [deploy-brain.md](deploy-brain.md) | finite-brain on smoke (still there; deferred from the cutover) |
-| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image |
-| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts |
+| [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 native Postgres — highest-priority runbook in this tree |
+| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
+| [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
+| [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
+| [deploy-brain.md](deploy-brain.md) | finite-brain on smoke (deferred from the cutover; auth-integration follow-up) |
+| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image (runner on lat1, currently dormant) |
+| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke brain, clawland legacy) |
 
 ## Release checklist discipline
 

@@ -1,81 +1,87 @@
 # Deploying finite-saas-core (and dashboard) to lat1
 
-Host map, manifests, and drift notes: `infra/hosts/lat1/README.md` and
-`infra/hosts/lat1/k8s/`. Namespace `finite-system`, single-node k3s.
+Since the 2026-07-09 consolidation cutover, Core and the dashboard are NixOS
+services on finite-lat-1 (64.34.82.77). Config lives in `infra/nixos/`
+(host `finite-lat-1`, modules `modules/finite-saas-core.nix` +
+`modules/dashboard.nix`); topology and secrets checklist:
+`infra/nixos/README.md`. Rebuild/recovery of the box itself:
+[lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
 
-## Current flow — DEPRECATED
+- **Core** = systemd unit `finite-saas-core.service`, binds 127.0.0.1:4200,
+  DynamicUser, `EnvironmentFile=/etc/finite/core.env`. Talks to native
+  Postgres at 127.0.0.1:5432 via `FC_CORE_DATABASE_URL`.
+- **Dashboard** = podman container `finite-saas-dashboard` (host-net, binds
+  127.0.0.1:3000), image **digest-pinned** in `modules/dashboard.nix`
+  (`ghcr.io/finitecomputer/finite-saas-dashboard@sha256:...`),
+  `EnvironmentFile=/etc/finite/dashboard.env`, `FC_CORE_BASE_URL=
+  http://127.0.0.1:4200`.
+- **Edge** = the single host Caddy: `finite.computer/internal/finite-private/*`
+  → core:4200, everything else → dashboard:3000.
 
-On-box podman build + containerd import + imperative `kubectl set image`.
-Recorded in full in `infra/hosts/lat1/deploy.md` ("Current flow"); keep only
-for emergencies, do not extend. Everything below is the target flow.
+> History: this box previously ran Core/dashboard/Postgres as a single-node
+> k3s cluster with on-host podman builds and `kubectl set image`. That cluster
+> is GONE (wiped at the cutover). Do not resurrect the kubectl flow.
 
-## Target flow — CI image by digest
+## Deploy flow — nixos-rebuild pinned to a mono rev
+
+Deploying a release IS pinning the flake: the mono rev you build is the rev
+the host runs (binaries + config together). The dashboard is the exception —
+it deploys as a digest-pinned GHCR container, so bumping it is an edit to
+`modules/dashboard.nix`.
 
 ### PRECONDITIONS
 
-- The change is on `main` (the workflow builds from the dispatched ref's
-  checkout SHA).
-- ssh access to lat1 (`ssh finite-lat-1`; kubeconfig on the box is
-  world-readable — any local user is cluster-admin).
-- TODO: verify before the first GHCR deploy that lat1's k3s can pull
-  `ghcr.io/finitecomputer/finite-saas-core` / `finite-saas-dashboard`
-  (package visibility public, or an imagePullSecret exists). Today's live
-  images are `localhost/*` — GHCR pull has never been exercised on this box.
+- The change (Core source and/or the dashboard digest bump) is merged to
+  `main` — you deploy a committed rev, not a working tree.
+- ssh access to lat1 (`ssh root@64.34.82.77`, key-only) or a driver host with
+  nix that can reach it as root.
+- For a dashboard bump: the new image is CI-built and pushed to GHCR, and you
+  have its `name@sha256:...` digest (from the Service Images workflow summary).
 
 ### STEPS
 
-1. Dispatch **Service Images** (`.github/workflows/service-images.yml`):
-   `image=core` (or `dashboard`), `version=<date-based, e.g. 2026-07-08.1>`.
-2. Copy the pinned ref from the workflow summary:
-   `ghcr.io/finitecomputer/finite-saas-core:<version>@sha256:...`
-   (the summary also records the source commit).
-3. Edit `infra/hosts/lat1/k8s/core.yaml` (or `dashboard.yaml`): set the
-   container `image:` to the full pinned `name:tag@digest`. Commit — the
-   committed digest is the deploy record and the rollback target.
-   (This replaces the `:dev` placeholder tags noted in the lat1 README
-   appendix item 1.)
-4. On lat1:
+1. **Core (and any config/module change):**
 
    ```sh
-   kubectl apply -k infra/hosts/lat1/k8s/
-   # or, minimal-blast-radius equivalent:
-   kubectl -n finite-system set image deployment/finite-saas-core \
-     core=ghcr.io/finitecomputer/finite-saas-core:<version>@sha256:...
+   nixos-rebuild switch --target-host root@finite-lat-1 \
+     --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
    ```
+
+   The rev that tagged the Core binary is the rev the host runs.
+
+2. **Dashboard image bump:** edit `image = "...@sha256:..."` in
+   `infra/nixos/modules/dashboard.nix`, commit to `main` — the committed
+   digest is the deploy record and the rollback target — then run the same
+   `nixos-rebuild switch` against the new rev. podman pulls the pinned digest.
+
+3. Config-only validation without a linux builder (see `infra/nixos/README.md`):
+   `nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath`.
 
 ### VERIFY
 
-1. `kubectl -n finite-system rollout status deployment/finite-saas-core`
-   (readiness probe is `GET /healthz` on :4200 — the rollout only completes
-   healthy).
-2. Core `/healthz` directly (from the lat1 host, which can reach the service
-   CIDR):
+1. Core health directly on the box:
 
    ```sh
-   curl -fsS http://10.43.237.180:4200/healthz
+   ssh root@finite-lat-1 'curl -fsS http://127.0.0.1:4200/healthz'
    ```
 
-   Note: `10.43.237.180` is the hardcoded ClusterIP also baked into the host
-   Caddyfile — see lat1 README "How finite.computer routes". If this curl
-   fails after a Service recreation, Caddy's `/internal/finite-private/*`
-   route is broken too.
-3. Through Caddy: `curl -fsS https://finite.computer/` — this exercises the
-   edge → dashboard NodePort path (per the Caddyfile, only
-   `/internal/finite-private/*` reaches core through Caddy; everything else,
-   including `/healthz`, hits the dashboard).
-4. For the dashboard: `kubectl -n finite-system rollout status
-   deployment/finite-dashboard` + load the site.
-5. TODO: core does not yet expose a `source_commit`-reporting health payload
-   (the finitechat-style contract gate); until it does, confirm the running
-   image digest matches the commit:
-   `kubectl -n finite-system get deploy finite-saas-core -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+2. Through the edge: `curl -fsS https://finite.computer/` (dashboard) and
+   `curl -fsS https://finite.computer/internal/finite-private/` → 401
+   (core alive + gated — the limiter path).
+3. Units are up: `ssh root@finite-lat-1 'systemctl status finite-saas-core
+   finite-saas-dashboard'` (`podman-finite-saas-dashboard.service` for the
+   container unit name if querying journald).
+4. TODO: Core still exposes no `source_commit` health payload; until it does,
+   confirm the deployed rev by the NixOS generation
+   (`nixos-rebuild list-generations` on the host) rather than a runtime probe.
 
 ### ROLLBACK
 
-1. Preferred: re-apply the previous committed digest (git revert the
-   manifest bump, `kubectl apply -k infra/hosts/lat1/k8s/`).
-2. Fast path: `kubectl -n finite-system rollout undo deployment/finite-saas-core`
-   (revision history exists — live revisions were core 38 / dashboard 67 at
-   capture). Then reconcile the manifest in git to match what is running,
-   within a day (break-glass rule).
+1. Fast path: `ssh root@finite-lat-1 nixos-rebuild switch --rollback` — boots
+   the previous generation (both Core binary and dashboard digest revert
+   together). Then reconcile git to match what is running within a day
+   (break-glass rule).
+2. Deliberate path: re-run `nixos-rebuild switch --flake ...#finite-lat-1`
+   pinned to the previous known-good mono rev (and, for a dashboard-only
+   regression, revert the digest in `modules/dashboard.nix`).
 3. Re-run VERIFY.

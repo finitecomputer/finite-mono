@@ -2,25 +2,31 @@
 
 The NixOS definition of the single app server (finite-lat-1, 64.34.82.77).
 The root flake's `nixosConfigurations.finite-lat-1` composes the modules here;
-`packages.nix` builds every server binary from this workspace. **Executing
-the cutover follows `finite-fable/single-server-plan.md` Phase 2 —
-scheduled, supervised, backups restore-verified FIRST.** This tree is the
-migration artifact; review it like code, because it is.
+`packages.nix` builds every server binary from this workspace.
+
+**LIVE since 2026-07-09.** The cutover is done — lat1 was reinstalled as
+NixOS and now runs the whole coupled cluster (Core, dashboard, native
+Postgres, chat, sites, search, one Caddy edge). This tree IS lat1's current
+config; `nixos-rebuild switch --flake ...#finite-lat-1` is the deploy.
+Rebuild/recover procedure + the hard-won gotchas (single-disk/no-mdadm, disks
+by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`. Deferred:
+finite-brain + oauth2-proxy (still on smoke), a disk mirror (2 spare NVMes),
+offsite borg backups.
 
 ## Deploy story
 
-### One-time bootstrap (Phase 2 step 8 — wipes the box)
+### Rebuild from bare metal (wipes the box)
+
+Full procedure — install, rescue-mode recovery, secrets, data restore, DNS
+ordering — is in `infra/runbooks/lat1-nixos-reinstall.md`. In short:
 
 ```sh
-# From a machine with nix (or the lat2 runner). Verify disko device names
-# against the rescue env FIRST (hosts/finite-lat-1/disko.nix TODO), and put
-# operator ssh keys in hosts/finite-lat-1/default.nix.
+nix build .#nixosConfigurations.finite-lat-1.config.system.build.toplevel  # gate: build before you wipe
 nix run github:nix-community/nixos-anywhere -- \
-  --flake .#finite-lat-1 root@64.34.82.77
+  --flake .#finite-lat-1 --target-host root@64.34.82.77 --phases kexec,disko,install
 ```
 
-Then complete the secrets checklist below and restore data (Postgres dump,
-sites tar, chat sqlite, brain sqlite — plan Phase 2 steps 7/9).
+Then the secrets checklist below + the data restore in the runbook.
 
 ### Every deploy after that
 
@@ -48,7 +54,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_FINITE_PRIVATE_USAGE_API_TOKEN` | k8s Secret `finite-computer-secrets` on old lat1. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover** |
 | `/etc/finite/runner.env` | the 22 `FC_RUNNER_*`/`FC_CORE_*`/`PHALA_CLOUD_API_KEY` names in `infra/hosts/lat1/systemd/runner.env.example` | old lat1 `/etc/finite-computer/runner.env`; **edit**: `FC_CORE_URL=http://127.0.0.1:4200`, `FC_RUNNER_WORK_ROOT=/var/lib/finite-saas-runner`, `FC_RUNNER_PHALA_BIN` → wherever the phala CLI lands (see module TODO) |
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` (+ optional `FC_RELAY_ADMIN_TOKEN`, `FC_RELAY_HOST_ENDPOINTS_JSON`) | k8s Secret `finite-computer-secrets` on old lat1 |
-| `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | lat2 `/etc/finite-saas/sites.env` |
+| `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env` |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/oauth2-proxy.env` | `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET` | Google OAuth client from smoke's `fc-auth` k8s Secret; generate a fresh cookie secret |
 | `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
@@ -65,12 +71,12 @@ per the smoke capture).
 |---|---|---|---|
 | 22 | public | sshd (root key-only) | lat1 |
 | 80/443 | public | Caddy — ALL vhosts | lat1 + lat2 + clawland + smoke edges |
-| 3000 | 127.0.0.1 | dashboard (podman, host-net) | lat1 k3s NodePort 30080 |
+| 3000 | 127.0.0.1 | dashboard (podman, host-net) | was lat1 k3s NodePort 30080 |
 | 3002 | 127.0.0.1 | firecrawl api (podman) | lat2 |
 | 3015 | 127.0.0.1 | finite-brain | smoke (bound 0.0.0.0 there — fixed) |
 | 4180 | 127.0.0.1 | oauth2-proxy | smoke (in-cluster) |
-| 4200 | 127.0.0.1 | finite-saas-core | lat1 k3s ClusterIP |
-| 5432 | 127.0.0.1 | postgres 16 (`finite_core`) | lat1 k3s StatefulSet |
+| 4200 | 127.0.0.1 | finite-saas-core (nix-built binary) | was lat1 k3s ClusterIP |
+| 5432 | 127.0.0.1 | postgres 16 native (`finite_core`) | was lat1 k3s StatefulSet |
 | 8080 | 127.0.0.1 | searxng (podman) | lat2 |
 | 8787 | 127.0.0.1 | finitesitesd | lat2 |
 | **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
@@ -79,19 +85,25 @@ per the smoke capture).
 
 Caddy vhost → backend: `finite.computer` → 4200 (`/internal/finite-private/*`)
 else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
-`*.docs.finite.chat` → 8787 (Cloudflare Origin CA); `brain.smoke.finite.computer`
-→ oauth2-proxy(4180)-gated 3015 (only `/health` is open — `/_admin` is now
-gated too, unlike smoke).
+`*.docs.finite.chat` → 8787 (Cloudflare Origin CA). The brain vhost +
+oauth2-proxy are DEFERRED (brain stays on smoke) — ports 3015/4180 above are
+reserved for when brain migrates.
 
-## Known gaps (grep for TODO)
+## Open follow-ups (post-cutover; grep for TODO)
 
-- **KATA ISOLATION TODO** (`modules/finitesitesd.nix`): sites run
-  `--app-runner none` — tier-2 apps don't run until Kata (or microvm.nix) is
-  ported. Explicit, tracked, must not block cutover.
-- Dashboard image digest (`modules/dashboard.nix`) — pin after first CI build.
-- `phala` CLI not nix-packaged (`modules/finite-saas-runner.nix`).
-- disko device names + IPv4/IPv6 gateway + resolvers + root ssh keys
-  (`hosts/finite-lat-1/`).
-- Borg offsite target (`modules/backups.nix`).
-- Dead-man's-switch ping (`modules/monitoring.nix`).
-- finite-search images digest-pins (`modules/finite-search.nix`).
+Resolved during the 2026-07-09 cutover: disko device layout (single-disk,
+by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
+
+- **Offsite borg backups** (`modules/backups.nix`) — target undecided; this
+  is the current redundancy gap while root is single-disk. Highest priority.
+- **Disk mirror** — root + /data are single NVMe; two spare NVMes are free
+  for a ZFS/mdadm mirror (the mdadm RAID1 bug is why we went single-disk).
+- **Runner** — `phala` CLI not packaged (`modules/finite-saas-runner.nix`);
+  a Phala-Cloud-API / enclavia runner is being explored. Runner is dormant.
+- **finite-brain + oauth2-proxy** — deferred; still on smoke.
+- **KATA ISOLATION** (`modules/finitesitesd.nix`): sites run
+  `--app-runner none` — tier-2 `app` sites lack microVM isolation until Kata
+  (or microvm.nix) is ported.
+- **firecrawl API** (:3002) down — searxng works; crawl/scrape degraded.
+- Dead-man's-switch ping (`modules/monitoring.nix`); finite-search image
+  digest pins (`modules/finite-search.nix`).
