@@ -85,6 +85,8 @@
 
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  # Single-disk layout (see disko.nix) — no software RAID, so no swraid /
+  # mdadm-in-initrd. Plain ext4 on NVMe boots without any assembly step.
   boot.initrd.availableKernelModules = [
     "nvme"
     "xhci_pci"
@@ -93,29 +95,6 @@
     "sd_mod"
     "ext4"
   ];
-  # Force-load the RAID1 personality in the initrd. raid1.ko ships in the
-  # initrd via swraid.enable, but on the 6.12 kernel the on-demand load
-  # wasn't firing during incremental assembly, so the kernel rejected the
-  # members with EINVAL ("failed to add member: Invalid argument",
-  # "assembled from 0 drives") and /dev/md/md0 never appeared → stage-1
-  # could not mount root (observed twice, 2026-07-09). Loading it explicitly
-  # guarantees the personality is ready before mdadm assembles the arrays.
-  boot.initrd.kernelModules = [ "raid1" ];
-  boot.swraid.enable = true;
-  # The initrd runs `mdadm --assemble --scan` against THIS conf. Without
-  # explicit ARRAY lines it assembled nothing, so /dev/md/md0 never appeared
-  # and stage-1 failed to mount root (observed 2026-07-09 first boot). Match
-  # by the metadata array name, which disko reproduces on every run
-  # (homehost is unset in the installer, so mdadm stores "any:md0"/"any:md1")
-  # — stable across re-partitioning, unlike the per-format UUID.
-  boot.swraid.mdadmConf = ''
-    DEVICE partitions
-    HOMEHOST <ignore>
-    AUTO +all
-    ARRAY /dev/md0 metadata=1.2 name=any:md0
-    ARRAY /dev/md1 metadata=1.2 name=any:md1
-    MAILADDR root
-  '';
 
   # Container-shaped services (dashboard, finite-search) run under podman.
   virtualisation.podman.enable = true;
