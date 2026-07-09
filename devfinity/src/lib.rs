@@ -415,9 +415,10 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   initdb -D "$PGDATA" --username=postgres --auth=trust --no-locale --encoding=UTF8
 fi
 
-# Keep the unix socket inside the run dir: the nixpkgs default
-# (/run/postgresql) is not writable on CI runners.
-postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" -c unix_socket_directories="$PGDATA" &
+# TCP only: the nixpkgs default socket dir (/run/postgresql) is not writable
+# on CI runners, and run-dir paths exceed the 103-byte unix socket limit on
+# macOS. Everything in this stack connects via 127.0.0.1.
+postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" -c unix_socket_directories='' &
 postgres_pid=$!
 
 shutdown() {{
