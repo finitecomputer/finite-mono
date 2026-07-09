@@ -1536,7 +1536,7 @@ fn initialize_hermes_inbox_cursors_from_events<'a>(
         if event.sender.account_id == own_account
             && first_counterparty_seq_by_room
                 .get(event.room_id.as_str())
-                .map_or(true, |seq| event.seq < *seq)
+                .is_none_or(|seq| event.seq < *seq)
         {
             changed |= advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
         }
@@ -3125,7 +3125,7 @@ mod tests {
     fn inbox_initialization_does_not_consume_first_counterparty_message() {
         let home = tempfile::tempdir().unwrap();
         let mut inbox = HermesInboxState::default();
-        let events = vec![
+        let events = [
             StoredAppEvent {
                 room_id: "room-a".to_owned(),
                 seq: 1,

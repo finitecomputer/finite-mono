@@ -254,10 +254,10 @@ impl Stack {
 
         let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
         for path in [&self.process_compose_socket, &process_compose_pid_file] {
-            if path.exists() {
-                if let Err(error) = fs::remove_file(path) {
-                    eprintln!("failed to remove {}: {error}", path.display());
-                }
+            if path.exists()
+                && let Err(error) = fs::remove_file(path)
+            {
+                eprintln!("failed to remove {}: {error}", path.display());
             }
         }
 
@@ -684,6 +684,7 @@ wait "$postgres_pid"
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_http_probe(
         &self,
         yaml: &mut String,
@@ -763,13 +764,13 @@ wait "$postgres_pid"
 
     fn ensure_postgres_not_running(&self) -> Result<()> {
         let pid_file = self.pid_file(ManagedProcess::Postgres);
-        if let Some(pid) = read_pid_file(&pid_file)? {
-            if process_alive(pid) {
-                bail!(
-                    "devfinity postgres pid {pid} from {} is still running; run `devfinity cleanup` before starting a new stack",
-                    pid_file.display()
-                );
-            }
+        if let Some(pid) = read_pid_file(&pid_file)?
+            && process_alive(pid)
+        {
+            bail!(
+                "devfinity postgres pid {pid} from {} is still running; run `devfinity cleanup` before starting a new stack",
+                pid_file.display()
+            );
         }
 
         if connect_tcp("127.0.0.1", self.ports.postgres).is_ok() {
@@ -1192,10 +1193,10 @@ impl ProcessComposeGuard<'_> {
 
 impl Drop for ProcessComposeGuard<'_> {
     fn drop(&mut self) {
-        if !self.shutdown_complete {
-            if let Err(error) = self.shutdown() {
-                eprintln!("failed to shut down devfinity process-compose: {error:#}");
-            }
+        if !self.shutdown_complete
+            && let Err(error) = self.shutdown()
+        {
+            eprintln!("failed to shut down devfinity process-compose: {error:#}");
         }
     }
 }
@@ -1360,10 +1361,10 @@ fn process_alive(pid: u32) -> bool {
 }
 
 fn remove_file_best_effort(path: &Path) {
-    if path.exists() {
-        if let Err(error) = fs::remove_file(path) {
-            eprintln!("failed to remove {}: {error}", path.display());
-        }
+    if path.exists()
+        && let Err(error) = fs::remove_file(path)
+    {
+        eprintln!("failed to remove {}: {error}", path.display());
     }
 }
 

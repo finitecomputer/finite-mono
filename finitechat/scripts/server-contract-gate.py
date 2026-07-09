@@ -97,7 +97,9 @@ def main() -> int:
             f"{health.get('server_contract_version')!r}, expected {expected_contract}"
         )
     if health.get("source_commit") != expected_source:
-        failures.append(f"source_commit is {health.get('source_commit')!r}, expected {expected_source!r}")
+        failures.append(
+            f"source_commit is {health.get('source_commit')!r}, expected {expected_source!r}"
+        )
     if health.get("source_dirty") is True and not args.allow_dirty:
         failures.append("source_dirty is true")
     if "source_dirty" not in health and not args.allow_dirty:

@@ -21,6 +21,15 @@ material, never in this repo.
 Note: `nix-daemon.service` runs on this box; the tinfoil runner's `nix` label
 is real capacity, not aspiration.
 
+> **DONE 2026-07-08**: a new runner `finite-lat-2-mono` (labels
+> `self-hosted,Linux,X64,finite-lat-2,docker,nix`) is registered against
+> finitecomputer/finite-mono at `/srv/github-runner/finite-mono` (systemd
+> `actions.runner.finitecomputer-finite-mono.finite-lat-2-mono.service`),
+> verified online. Repo setting "require approval for all outside
+> collaborators" is set (public repo + self-hosted runner mitigation). The
+> three legacy-repo runners stay until their repos are archived, then get
+> removed per the steps below.
+
 ## Cutover checklist — re-register against finitecomputer/finite-mono
 
 Runners are repo-scoped. For mono CI to build images on this box, each

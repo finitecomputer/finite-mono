@@ -237,7 +237,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 "room-agent-1",
                 "hello",
                 reply_to="msg-0",
-                metadata={"conversation_id": "topic-build", "thread_id": "chat-build-1", "priority": "low"},
+                metadata={
+                    "conversation_id": "topic-build",
+                    "thread_id": "chat-build-1",
+                    "priority": "low",
+                },
             )
         )
 
@@ -378,7 +382,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["action"], "set")
         self.assertEqual(calls[0][1]["conversation_id"], "topic-build")
         self.assertEqual(calls[0][1]["segment_id"], "chat-build-1")
-        self.assertEqual(calls[0][1]["expires_in_millis"], self.module.PROCESSING_ACTIVITY_TTL_MILLIS)
+        self.assertEqual(
+            calls[0][1]["expires_in_millis"], self.module.PROCESSING_ACTIVITY_TTL_MILLIS
+        )
         ack_calls = [call for call in calls if call[0] == "ack"]
         self.assertEqual(
             ack_calls[0][1],
@@ -464,7 +470,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         )
 
         self.assertTrue(result.success)
-        send_payload = [call[1] for call in calls if call[0] == "send"][0]
+        send_payload = next(call[1] for call in calls if call[0] == "send")
         self.assertEqual(send_payload["conversation_id"], "topic-build")
         self.assertEqual(send_payload["segment_id"], "chat-build-1")
 

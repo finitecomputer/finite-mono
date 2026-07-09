@@ -1413,7 +1413,7 @@ fn spawn_app_runtime_worker(
                     let _ = response.send(result);
                 }
                 AppRuntimeCommand::AgentBridgeApplySyncHint { event, response } => {
-                    let result = (|| state.agent_bridge_apply_sync_hint(event))();
+                    let result = state.agent_bridge_apply_sync_hint(event);
                     if result.as_ref().is_ok_and(|bridge| {
                         !bridge.joined_account_ids.is_empty() || !bridge.events.is_empty()
                     }) {
@@ -2057,8 +2057,8 @@ impl AppRuntimeState {
         for room_id in connected_room_ids {
             self.ensure_home_topic(&room_id)?;
         }
-        if self.app.selected_room_id.is_none() {
-            if let Some(room_id) = self
+        if self.app.selected_room_id.is_none()
+            && let Some(room_id) = self
                 .app
                 .rooms
                 .iter()
@@ -2067,15 +2067,14 @@ impl AppRuntimeState {
                 })
                 .map(|room| room.room_id.clone())
                 .next()
-            {
-                self.app.selected_room_id = Some(room_id.clone());
-                self.app.selected_topic_id = Some(HOME_TOPIC_ID.to_owned());
-                self.app.selected_chat_id = self.default_chat_id_for_topic(&room_id, HOME_TOPIC_ID);
-                self.loaded_message_counts
-                    .entry(room_id)
-                    .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
-                self.persist_app_state()?;
-            }
+        {
+            self.app.selected_room_id = Some(room_id.clone());
+            self.app.selected_topic_id = Some(HOME_TOPIC_ID.to_owned());
+            self.app.selected_chat_id = self.default_chat_id_for_topic(&room_id, HOME_TOPIC_ID);
+            self.loaded_message_counts
+                .entry(room_id)
+                .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
+            self.persist_app_state()?;
         }
         Ok(())
     }
@@ -2289,7 +2288,7 @@ impl AppRuntimeState {
         topic_id: &str,
         reason: Option<String>,
     ) -> Result<String, FiniteChatCoreError> {
-        if !self.room_is_connected(&room_id) {
+        if !self.room_is_connected(room_id) {
             return Err(FiniteChatCoreError::Client {
                 reason: format!("room '{room_id}' is not ready to start chats"),
             });
@@ -4687,6 +4686,7 @@ impl AppRuntimeState {
         Ok((HOME_TOPIC_ID.to_owned(), chat_id))
     }
 
+    #[allow(clippy::type_complexity)]
     fn scope_unscoped_chat_event_to_default(
         &mut self,
         room_id: &str,

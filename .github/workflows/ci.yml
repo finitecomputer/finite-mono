@@ -164,3 +164,10 @@ jobs:
         run: nix develop --command cargo build --locked -p devfinity -p finite-saas-core -p finitechat-server -p finitesitesd
       - name: devfinity smoke
         run: nix develop --command just dev smoke
+      - name: Dump devfinity logs on failure
+        if: failure()
+        run: |
+          for f in .local-state/devfinity/runs/default/logs/*; do
+            echo "===== $f ====="
+            tail -50 "$f" || true
+          done

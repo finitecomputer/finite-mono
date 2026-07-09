@@ -565,7 +565,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             chat_type=str(source_data.get("chat_type") or "dm"),
             user_id=_string_or_none(source_data.get("user_id")) or "finite-user",
             user_name=_string_or_none(source_data.get("user_name")) or "Finite user",
-            thread_id=segment_id or _string_or_none(source_data.get("thread_id")) or conversation_id,
+            thread_id=segment_id
+            or _string_or_none(source_data.get("thread_id"))
+            or conversation_id,
             chat_topic=_string_or_none(source_data.get("chat_topic")),
             user_id_alt=_string_or_none(source_data.get("user_id_alt")),
             chat_id_alt=_string_or_none(source_data.get("chat_id_alt")),
@@ -780,7 +782,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         if segment_id is None and thread_id is not None:
             routed_conversation_id = self._inbound_chat_topics.get((room_id, thread_id))
-            if routed_conversation_id is not None or (room_id, thread_id) in self._inbound_chat_topics:
+            if (
+                routed_conversation_id is not None
+                or (room_id, thread_id) in self._inbound_chat_topics
+            ):
                 segment_id = thread_id
                 if conversation_id is None:
                     conversation_id = routed_conversation_id
@@ -1090,9 +1095,7 @@ def _finitechat_service_stream_worker(
                     _put_stream_result(
                         loop,
                         queue,
-                        _FiniteChatResult(
-                            False, {}, "finitechat inbound stream ended", True, True
-                        ),
+                        _FiniteChatResult(False, {}, "finitechat inbound stream ended", True, True),
                     )
                     return
                 stripped = raw_line.decode("utf-8", errors="replace").strip()

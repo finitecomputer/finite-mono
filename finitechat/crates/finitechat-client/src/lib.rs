@@ -9157,7 +9157,7 @@ mod tests {
         alice.set_last_applied_seq(room_id, seq).unwrap();
 
         let mut store = SqliteClientStore::open(
-            &dir.path().join("client.sqlite3"),
+            dir.path().join("client.sqlite3"),
             SqliteClientStoreOptions::from_nostr_secret(&alice_secret, "alice-electron").unwrap(),
         )
         .unwrap();

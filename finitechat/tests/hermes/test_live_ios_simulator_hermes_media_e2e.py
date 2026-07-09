@@ -106,9 +106,7 @@ def simulator_app_finite_home(udid: str) -> Path:
     return Path(result.stdout.strip()) / ".finite"
 
 
-def read_ios_app_state(
-    support_root: Path, server_url: str, finite_home: Path
-) -> dict[str, Any]:
+def read_ios_app_state(support_root: Path, server_url: str, finite_home: Path) -> dict[str, Any]:
     env = os.environ.copy()
     env["FINITE_HOME"] = str(finite_home)
     result = subprocess.run(
@@ -323,9 +321,7 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
             smoke.fact("ios_finite_home_present", ios_finite_home.exists())
 
             started = time.monotonic()
-            poll = await adapter._finitechat_json(
-                "poll", {"timeout_millis": 30_000}, timeout=45
-            )
+            poll = await adapter._finitechat_json("poll", {"timeout_millis": 30_000}, timeout=45)
             self.assertTrue(poll.ok, poll.error)
             self.assertTrue(
                 poll.data.get("joined"),
