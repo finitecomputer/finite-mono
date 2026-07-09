@@ -92,7 +92,18 @@
     "usbhid"
   ];
   boot.swraid.enable = true;
+  # The initrd runs `mdadm --assemble --scan` against THIS conf. Without
+  # explicit ARRAY lines it assembled nothing, so /dev/md/md0 never appeared
+  # and stage-1 failed to mount root (observed 2026-07-09 first boot). Match
+  # by the metadata array name, which disko reproduces on every run
+  # (homehost is unset in the installer, so mdadm stores "any:md0"/"any:md1")
+  # — stable across re-partitioning, unlike the per-format UUID.
   boot.swraid.mdadmConf = ''
+    DEVICE partitions
+    HOMEHOST <ignore>
+    AUTO +all
+    ARRAY /dev/md0 metadata=1.2 name=any:md0
+    ARRAY /dev/md1 metadata=1.2 name=any:md1
     MAILADDR root
   '';
 
