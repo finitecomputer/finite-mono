@@ -354,8 +354,13 @@ impl Stack {
         self.write_managed_command(
             yaml,
             process,
+            // One build per package, matching each service's `cargo run -p`
+            // resolution: a combined `-p A -p B -p C` build unifies features
+            // across the packages (resolver 2), producing artifacts the
+            // per-package runs don't reuse — on a cold cache every service
+            // then recompiles its whole dep stack inside the readiness window.
             &[String::from(
-                "exec cargo build -p finite-saas-core -p finitechat-server -p finitesitesd",
+                "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitesitesd",
             )],
             &[],
         );

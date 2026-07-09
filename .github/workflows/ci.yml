@@ -160,8 +160,14 @@ jobs:
       - name: Prebuild stack binaries
         # devfinity's readiness window is shorter than a cold compile of the
         # whole stack on a hosted runner; build first so the preflight is a
-        # no-op and the 180s wait measures actual service startup.
-        run: nix develop --command cargo build --locked -p devfinity -p finite-saas-core -p finitechat-server -p finitesitesd
+        # no-op and the wait measures actual service startup. One build per
+        # package: combined -p builds unify features (resolver 2) and produce
+        # artifacts the per-package `cargo run` invocations don't reuse.
+        run: |
+          nix develop --command cargo build --locked -p devfinity
+          nix develop --command cargo build --locked -p finite-saas-core
+          nix develop --command cargo build --locked -p finitechat-server
+          nix develop --command cargo build --locked -p finitesitesd
       - name: devfinity smoke
         env:
           # Cold-cache runs (e.g. when the Actions cache service hiccups)
