@@ -4,27 +4,18 @@
 #   ESP: capture shows /dev/nvme2n1p1 mounted at /boot/efi -> we put the ESP
 #   on the first root-pair member and a spare (unmounted) ESP on the second.
 #
-# ############################################################################
-# ##                                                                        ##
-# ##  TODO: verify device names against the box before nixos-anywhere.      ##
-# ##                                                                        ##
-# ##  The capture (host-capture/lat1/os-and-host.txt) proves md0/md1 exist  ##
-# ##  and that the ESP lives on nvme2n1p1, but contains NO lsblk or         ##
-# ##  /proc/mdstat, so WHICH nvme devices back each array is a GUESS:       ##
-# ##    - nvme2n1 + nvme3n1 as the ~480G root pair (md0) — nvme2n1 is       ##
-# ##      plausible because it carries the ESP; nvme3n1 is a placeholder.   ##
-# ##    - nvme0n1 + nvme1n1 as the ~1.9T data pair (md1) — placeholders.    ##
-# ##  Boot the Latitude rescue env and run `lsblk -o NAME,SIZE,MODEL` and   ##
-# ##  `cat /proc/mdstat` FIRST, then fix the four `device =` lines below.   ##
-# ##                                                                        ##
-# ############################################################################
+# Device names VERIFIED against the live box 2026-07-09 (lsblk + /proc/mdstat):
+#   md0 = nvme2n1p2 + nvme0n1p2 (447.1G disks; ESP on nvme2n1p1)
+#   md1 = nvme3n1p1 + nvme1n1p1 (1.7T disks)
+# Still re-run `lsblk` from the rescue env before nixos-anywhere — device
+# enumeration can change across reboots/kernel versions.
 { ... }:
 {
   disko.devices = {
     disk = {
       root0 = {
         type = "disk";
-        device = "/dev/nvme2n1"; # TODO: verify (carries the ESP in the capture)
+        device = "/dev/nvme2n1"; # verified: carries the live ESP (nvme2n1p1)
         content = {
           type = "gpt";
           partitions = {
@@ -50,7 +41,7 @@
       };
       root1 = {
         type = "disk";
-        device = "/dev/nvme3n1"; # TODO: verify device name (placeholder)
+        device = "/dev/nvme0n1"; # verified: second md0 member (447.1G)
         content = {
           type = "gpt";
           partitions = {
@@ -72,7 +63,7 @@
       };
       data0 = {
         type = "disk";
-        device = "/dev/nvme0n1"; # TODO: verify device name (placeholder)
+        device = "/dev/nvme3n1"; # verified: first md1 member (1.7T)
         content = {
           type = "gpt";
           partitions = {
@@ -88,7 +79,7 @@
       };
       data1 = {
         type = "disk";
-        device = "/dev/nvme1n1"; # TODO: verify device name (placeholder)
+        device = "/dev/nvme1n1"; # verified: second md1 member (1.7T)
         content = {
           type = "gpt";
           partitions = {

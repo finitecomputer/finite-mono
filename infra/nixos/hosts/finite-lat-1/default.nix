@@ -38,16 +38,16 @@
       }
     ];
   };
-  # TODO: verify the IPv4 gateway before nixos-anywhere. 64.34.82.76 is the
-  # /31 peer (the usual Latitude.sh point-to-point shape) but the capture has
-  # no `ip route` output.
+  # Gateways VERIFIED against the live box 2026-07-09 (`ip route` / `ip -6 route`).
   networking.defaultGateway = {
     address = "64.34.82.76";
     interface = "eno1";
   };
-  # TODO: IPv6 default gateway is not in the capture (likely a link-local
-  # fe80:: next hop on eno1); set networking.defaultGateway6 once known.
-  # TODO: confirm Latitude.sh resolvers; public resolvers as a safe default.
+  networking.defaultGateway6 = {
+    address = "2605:6440:5002:18e::1";
+    interface = "eno1";
+  };
+  # Matches the live resolver set (resolvectl on the Ubuntu install).
   networking.nameservers = [
     "1.1.1.1"
     "8.8.8.8"
@@ -74,8 +74,9 @@
     };
   };
   users.users.root.openssh.authorizedKeys.keys = [
-    # TODO: add operator public keys before nixos-anywhere (Paul's key + the
-    # CI deploy key that runs nixos-rebuild --target-host).
+    # Paul (same key that already administers the fleet).
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHqbHvWlrXRkTc0403ubkqNE/Ge4YbPvKwWuRBoLPVAW paul@paul.lol"
+    # TODO: add a CI deploy key here if/when deploys move off Paul's machine.
   ];
 
   boot.loader.systemd-boot.enable = true;

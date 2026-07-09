@@ -71,5 +71,24 @@ in
         reverse_proxy 127.0.0.1:3015
       }
     '';
+    # Same app, nicer domain: requires an A record for
+    # brain.finite.computer -> 64.34.82.77 in the Namecheap finite.computer
+    # zone before Caddy can obtain its certificate.
+    virtualHosts."brain.finite.computer".extraConfig = ''
+      @health path /health
+      handle @health {
+        reverse_proxy 127.0.0.1:3015
+      }
+      handle /oauth2/* {
+        reverse_proxy 127.0.0.1:4180
+      }
+      handle {
+        forward_auth 127.0.0.1:4180 {
+          uri /oauth2/auth
+          copy_headers X-Auth-Request-User X-Auth-Request-Email
+        }
+        reverse_proxy 127.0.0.1:3015
+      }
+    '';
   };
 }
