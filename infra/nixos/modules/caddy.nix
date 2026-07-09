@@ -52,43 +52,12 @@ in
       ${sitesBackend}
     '';
 
-    # brain: oauth2-proxy (Google, finite.vip) gates everything except
-    # /health — see modules/oauth2-proxy.nix. Note this also closes smoke's
-    # unauthenticated /_admin route (flagged in infra/hosts/smoke/README.md).
-    virtualHosts."brain.smoke.finite.computer".extraConfig = ''
-      @health path /health
-      handle @health {
-        reverse_proxy 127.0.0.1:3015
-      }
-      handle /oauth2/* {
-        reverse_proxy 127.0.0.1:4180
-      }
-      handle {
-        forward_auth 127.0.0.1:4180 {
-          uri /oauth2/auth
-          copy_headers X-Auth-Request-User X-Auth-Request-Email
-        }
-        reverse_proxy 127.0.0.1:3015
-      }
-    '';
-    # Same app, nicer domain: requires an A record for
-    # brain.finite.computer -> 64.34.82.77 in the Namecheap finite.computer
-    # zone before Caddy can obtain its certificate.
-    virtualHosts."brain.finite.computer".extraConfig = ''
-      @health path /health
-      handle @health {
-        reverse_proxy 127.0.0.1:3015
-      }
-      handle /oauth2/* {
-        reverse_proxy 127.0.0.1:4180
-      }
-      handle {
-        forward_auth 127.0.0.1:4180 {
-          uri /oauth2/auth
-          copy_headers X-Auth-Request-User X-Auth-Request-Email
-        }
-        reverse_proxy 127.0.0.1:3015
-      }
-    '';
+    # brain vhosts DEFERRED with the brain + oauth2-proxy modules to the
+    # auth-integration follow-up (Paul, 2026-07-09). Brain stays on smoke;
+    # brain.smoke.finite.computer keeps serving there. Do NOT add a
+    # brain.smoke or brain.finite vhost here until finite-brain.nix +
+    # oauth2-proxy.nix are re-imported — a vhost with no backend would fail
+    # ACME and 502. The forward_auth/oauth2 config is preserved in git
+    # history and in those modules' comments for the follow-up.
   };
 }

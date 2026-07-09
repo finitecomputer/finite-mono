@@ -8,13 +8,17 @@
     ../../modules/finite-saas-core.nix
     ../../modules/finite-saas-runner.nix
     ../../modules/finitechat-server.nix
-    ../../modules/finite-brain.nix
     ../../modules/finitesitesd.nix
     ../../modules/dashboard.nix
     ../../modules/finite-search.nix
     ../../modules/caddy.nix
-    ../../modules/oauth2-proxy.nix
     ../../modules/postgres.nix
+    # DEFERRED to the brain/auth-integration follow-up (Paul, 2026-07-09):
+    # brain is fully independent (own box/data/DNS) and is tangled with
+    # oauth2-proxy, which is slated for replacement by WorkOS/Core-integrated
+    # auth. Brain stays on smoke, zero downtime, through this cutover.
+    # ../../modules/finite-brain.nix
+    # ../../modules/oauth2-proxy.nix
     ../../modules/backups.nix
     ../../modules/monitoring.nix
   ];
