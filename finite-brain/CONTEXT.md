@@ -122,6 +122,94 @@ available. It exposes the same conceptual abilities the Product Client needs:
 identify the acting npub, sign FiniteBrain events, and perform NIP-44
 encryption and decryption for Folder Key Grant handling.
 
+### Email Invite Bootstrap
+
+A temporary email-address invitation state where email proof authorizes the
+claim, an out-of-band invite secret unlocks NIP-59-shaped gift-wrapped
+bootstrap material, and accepted access becomes durable only after it is bound
+to a User npub.
+
+### Invite Secret
+
+The high-entropy client-only secret carried outside the server-visible invite
+code, typically in the URL fragment. For Email Invite Bootstraps, this is the
+secret material needed to use the Invite Unwrap Key. It unlocks bootstrap
+material only after the recipient proves the invited email. It must never be
+sent through server-visible channels such as query parameters, request bodies,
+server logs, server-side mailer payloads, email bodies, email tracking links,
+analytics redirects, or stored database fields.
+
+### Invite Unwrap Key
+
+A temporary Nostr/secp256k1 keypair generated for an Email Invite Bootstrap.
+The public key receives the NIP-59-shaped gift-wrapped bootstrap payload; the
+private key is carried client-side as an Invite Secret and must not be stored
+server-side. This key is a bearer unwrap capability, not a User identity,
+member identity, or permission principal.
+
+### Invite Unwrap Proof
+
+A Nostr event signed by the Invite Unwrap Key during Email Invite Bootstrap
+Claim. It proves possession of the client-only Invite Secret without sending
+the secret to the server, and binds the claim to the invite code, Vault,
+invited email, claimant npub, bootstrap payload hash, and email proof
+timestamp.
+
+### Invite Instructions
+
+Agent-readable guidance for a Vault Invitation, analogous to Sites `llms.txt`
+but split by proof level for Brain's encrypted access model.
+
+### Public Invite Instructions
+
+Unauthenticated Invite Instructions that disclose only generic claim workflow
+guidance. They exclude invited email, Vault identity, Folder identity, access
+scope, claim state, Folder Keys, and bootstrap plaintext.
+
+### Post-Proof Invite Instructions
+
+Invite Instructions returned only after the invited email is proven through the
+Identity Authority. They may disclose the scoped workflow details needed to
+claim, open, and sync the Vault, including human-readable Vault and Folder
+names, but never Folder Keys or bootstrap plaintext.
+
+### Email-Targeted Vault Invitation
+
+A Vault Invitation addressed to an email instead of a known User npub. In v1,
+external email-shaped targets use an Email Invite Bootstrap even if they have
+prior email-only proof; only concrete npub/hex targets or active Finite VIP
+NIP-05 bindings use the normal npub-bound path. Email targets belong to
+invitation flows; direct permission mutations remain for known User npubs. Any
+invited email must prove control through the Identity Authority; Finite VIP
+emails also receive the Finite-owned NIP-05 binding.
+
+### Email Invite Bootstrap Claim
+
+The acceptance act that binds an Email Invite Bootstrap to the recipient's User
+npub after email proof, using the bootstrap material to create durable
+npub-addressed access without requiring the inviting admin to come back online.
+Claim is all-or-nothing: Brain must verify email proof, consume the pending
+bootstrap, bind the recipient npub, create membership/access metadata, and
+insert every required durable Folder Key Grant in one atomic operation.
+
+### Email Invite Bootstrap Authorization
+
+An admin-signed authorization for a future email recipient whose User npub is
+not known yet. It fixes the invited email, Vault, authorized Folder scope,
+Folder key versions, Invite Unwrap Key, bootstrap payload hash, expiry, and
+single-use claim bounds that a later Email Invite Bootstrap Claim must match.
+For email-targeted Vault Invitations, the authorized Folder scope includes
+current all-members Folders because the accepted recipient becomes a Vault
+Member.
+
+### Claim-Authorized Folder Key Grant
+
+A durable Folder Key Grant created by an invited recipient after a valid Email
+Invite Bootstrap Claim. The inviting admin authorized the access, while the
+recipient's User npub finalized the encrypted grant. The grant is valid only
+within the pending invitation's authorized email, Vault, Folder, key-version,
+expiry, and single-use claim bounds.
+
 ### Blocked Sync State
 
 A local condition where automatic sync cannot safely complete without

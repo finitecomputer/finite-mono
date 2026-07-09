@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use finitechat_core::{
-    AppAction, AppOutboxDebugRow, AppRoomState, AppState, FiniteChatRuntime,
+    AppAction, AppOutboxDebugRow, AppProfileSummary, AppRoomState, AppState, FiniteChatRuntime,
     OpenOptions as CoreOpenOptions, OutboundLocalSendState, OutboundServerDeliveryState,
     npub_from_account_id,
 };
@@ -263,7 +263,7 @@ fn ios_product_harness_with_ios_development_team_env(
     )?;
     let room_id = local_after_online.selected_room_id.clone().ok_or_else(|| {
         CliError::operational(
-            "after online create/send phase: expected selected local room for peer invite"
+            "after online create/send phase: expected selected local room for peer Welcome"
                 .to_owned(),
         )
     })?;
@@ -1420,34 +1420,44 @@ fn establish_peer_membership(
     room_id: &str,
     label: &str,
 ) -> Result<(), CliError> {
-    let owner = open_product_runtime(owner_store_path, server_url, owner_device, label)?;
-    let owner_state = owner
-        .dispatch_and_wait(AppAction::CreateInvite {
-            room_id: room_id.to_owned(),
-        })
-        .map_err(|error| {
-            CliError::operational(format!("{label}: failed to create peer invite: {error}"))
-        })?;
-    let invite = owner_state.active_invite.ok_or_else(|| {
-        CliError::operational(format!("{label}: create invite returned no active invite"))
-    })?;
-
     let peer = open_product_runtime(peer_store_path, server_url, peer_device, label)?;
-    peer.dispatch_and_wait(AppAction::ScanTarget {
-        value: invite.invite_url,
-    })
-    .map_err(|error| {
-        CliError::operational(format!("{label}: peer failed to scan invite: {error}"))
-    })?;
-    owner
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(|error| {
-            CliError::operational(format!("{label}: owner failed to admit peer: {error}"))
-        })?;
     let peer_state = peer
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(|error| {
-            CliError::operational(format!("{label}: peer failed to finalize room: {error}"))
+            CliError::operational(format!(
+                "{label}: peer failed to publish key packages: {error}"
+            ))
+        })?;
+    let peer_account_id = peer_state.identity.account_id;
+    let peer_npub = npub_from_account_id(peer_account_id.clone()).map_err(|error| {
+        CliError::operational(format!("{label}: failed to encode peer npub: {error}"))
+    })?;
+    let peer_profile = AppProfileSummary {
+        account_id: peer_account_id,
+        npub: peer_npub,
+        display_name: peer_device.to_owned(),
+        about: None,
+        picture: None,
+        stale: false,
+        is_agent: false,
+    };
+
+    let owner = open_product_runtime(owner_store_path, server_url, owner_device, label)?;
+    owner
+        .dispatch_and_wait(AppAction::AddRoomMembers {
+            room_id: room_id.to_owned(),
+            profiles: vec![peer_profile],
+        })
+        .map_err(|error| {
+            CliError::operational(format!(
+                "{label}: owner failed to add peer by Welcome: {error}"
+            ))
+        })?;
+
+    let peer_state = peer
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .map_err(|error| {
+            CliError::operational(format!("{label}: peer failed to claim Welcome: {error}"))
         })?;
     let Some(room) = peer_state.rooms.iter().find(|room| room.room_id == room_id) else {
         return Err(CliError::operational(format!(

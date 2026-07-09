@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -67,7 +68,6 @@ def launch_ios_app(
     support_root: Path,
     server_url: str,
     invite_url: str,
-    pin: str,
     image_path: Path,
 ) -> None:
     run_cmd([str(FINITECHAT_RMP_BIN), "run", "ios", "--udid", udid], timeout=600)
@@ -89,8 +89,6 @@ def launch_ios_app(
             IOS_DEVICE_ID,
             "--finitechat-auto-join",
             invite_url,
-            "--finitechat-pin",
-            pin,
             "--finitechat-auto-send-attachment-file",
             str(image_path),
             "--finitechat-auto-send-attachment-caption",
@@ -100,8 +98,18 @@ def launch_ios_app(
     )
 
 
-def read_ios_app_state(support_root: Path, server_url: str) -> dict[str, Any]:
-    return run_json(
+def simulator_app_finite_home(udid: str) -> Path:
+    result = run_cmd(
+        ["xcrun", "simctl", "get_app_container", udid, BUNDLE_ID, "data"],
+        timeout=30,
+    )
+    return Path(result.stdout.strip()) / ".finite"
+
+
+def read_ios_app_state(support_root: Path, server_url: str, finite_home: Path) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["FINITE_HOME"] = str(finite_home)
+    result = subprocess.run(
         [
             str(FINITECHAT_BIN),
             "app",
@@ -113,8 +121,17 @@ def read_ios_app_state(support_root: Path, server_url: str) -> dict[str, Any]:
             IOS_DEVICE_ID,
             "state",
         ],
+        capture_output=True,
+        text=True,
         timeout=30,
+        env=env,
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            "command failed:\n"
+            f"  args=finitechat app state\n  stdout={result.stdout}\n  stderr={result.stderr}"
+        )
+    return json.loads(result.stdout)
 
 
 def ios_state_has_agent_replies(state: dict[str, Any]) -> bool:
@@ -155,8 +172,9 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
         smoke.fact("ios_device_id", IOS_DEVICE_ID)
         smoke.fact("simulator_udid", udid)
 
-        with tempfile.TemporaryDirectory(prefix="finite-ios-hermes-media-") as tmp_value:
-            tmp = Path(tmp_value)
+        tmp = Path(tempfile.mkdtemp(prefix="finite-ios-hermes-media-"))
+        keep_tmp = True
+        try:
             support_root = tmp / "ios-support"
             support_root.mkdir()
             ios_image = tmp / "ios-image.png"
@@ -186,6 +204,7 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                         tmp, support_root, server_url, agent_image, ios_image, udid, smoke
                     )
                     smoke.finish()
+                    keep_tmp = False
                 finally:
                     subprocess.run(
                         ["xcrun", "simctl", "terminate", udid, BUNDLE_ID],
@@ -197,6 +216,26 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                         server.wait(timeout=5)
                     if server.poll() is None:
                         server.kill()
+        finally:
+            if keep_tmp:
+                smoke.fact("failed_tmp", str(tmp))
+                smoke.path.parent.mkdir(parents=True, exist_ok=True)
+                smoke.path.write_text(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "name": smoke.name,
+                            "elapsed_ms": int((time.monotonic() - smoke.started) * 1000),
+                            "facts": smoke.facts,
+                            "steps": smoke.steps,
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                shutil.rmtree(tmp, ignore_errors=True)
 
     async def _run_ios_round_trip(
         self,
@@ -263,23 +302,33 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
         smoke.fact("adapter_inbound_stream", bool(getattr(adapter, "inbound_stream", False)))
         smoke.fact("adapter_service_url_present", bool(getattr(adapter, "service_url", "")))
         try:
-            pin_info = await asyncio.to_thread(
-                run_json,
-                [str(FINITECHAT_BIN), "hermes", "--home", str(agent_home), "pin"],
-            )
-            smoke.fact("invite_url_present", bool(pin_info.get("url")))
-            smoke.fact("pin_present", bool(pin_info.get("pin")))
+            invite_result = await adapter._finitechat_json("invite", {}, timeout=60)
+            self.assertTrue(invite_result.ok, invite_result.error)
+            invite = invite_result.data
+            smoke.fact("invite_url_present", bool(invite.get("url")))
+            smoke.fact("invite_id", invite.get("invite_id"))
             started = time.monotonic()
             await asyncio.to_thread(
                 launch_ios_app,
                 udid=udid,
                 support_root=support_root,
                 server_url=server_url,
-                invite_url=pin_info["url"],
-                pin=pin_info["pin"],
+                invite_url=invite["url"],
                 image_path=ios_image,
             )
             smoke.step("ios_app_launch", started)
+            ios_finite_home = await asyncio.to_thread(simulator_app_finite_home, udid)
+            smoke.fact("ios_finite_home_present", ios_finite_home.exists())
+
+            started = time.monotonic()
+            poll = await adapter._finitechat_json("poll", {"timeout_millis": 30_000}, timeout=45)
+            self.assertTrue(poll.ok, poll.error)
+            self.assertTrue(
+                poll.data.get("joined"),
+                f"Hermes bridge poll did not admit the iOS join request: {poll.data!r}",
+            )
+            smoke.step("agent_poll_admits_join", started)
+            smoke.fact("agent_poll_joined", poll.data.get("joined"))
 
             started = time.monotonic()
             received = await asyncio.wait_for(agent_received, timeout=90)
@@ -297,7 +346,9 @@ class LiveIosSimulatorHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
             last_state: dict[str, Any] | None = None
             started = time.monotonic()
             while time.monotonic() < deadline:
-                last_state = await asyncio.to_thread(read_ios_app_state, support_root, server_url)
+                last_state = await asyncio.to_thread(
+                    read_ios_app_state, support_root, server_url, ios_finite_home
+                )
                 if ios_state_has_agent_replies(last_state):
                     summary = ios_agent_reply_summary(last_state)
                     smoke.step("ios_receive_agent_replies", started)

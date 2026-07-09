@@ -1,25 +1,27 @@
 //! The `finitechat hermes` subcommand family: the JSON bridge
 //! the Hermes platform plugin shells to (ADR 0002), plus agent onboarding
-//! (ADR 0006: init → invite URL/QR → chat).
+//! (`init` publishes the agent identity and KeyPackages; rooms admit members
+//! through MLS add/welcome).
 //!
 //! The agent's account key is the shared Finite identity at
 //! `$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/`),
 //! minted by whichever Finite tool runs first and never copied into the
 //! agent home. The agent's durable home lives under `--home` /
-//! `$FINITECHAT_HOME`: `config.json`, `invites.json` (0600, each line is a
-//! full invite URL — the URL carries the invite token), and the encrypted
-//! client store `client.sqlite3`.
+//! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
+//! `client.sqlite3`, and sidecar state files.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::{Path as AxumPath, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -31,34 +33,30 @@ use finitechat_blob::{
     prepare_blossom_download_http_request, sha256_hex,
 };
 use finitechat_client::{
-    FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, HttpRuntimeDeliveryError,
-    ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
+    FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, ReqwestHttpRuntimeTransport,
     SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppRoomState, AppSentMessage, FiniteChatCoreError,
+    AppAction, AppBridgeActivityInput, AppRoomState, AppSentMessage, AppState, FiniteChatCoreError,
     FiniteChatRuntime, OpenOptions,
 };
 use finitechat_hermes::{
     HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
     HermesMessageStatusV1, HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_POLL_TIMEOUT_MILLIS,
 };
-use finitechat_http::{
-    HttpInviteSessionState, HttpInviteSessionSummary, NostrProfileRecord, SyncWaitInvite,
-    SyncWaitRequest, SyncWaitRoom,
-};
+use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
     AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
-    EphemeralActivityActionV1, InviteCodeV1, npub_encode,
+    EphemeralActivityActionV1, npub_encode,
 };
+use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::CliError;
 
 const CONFIG_FILE: &str = "config.json";
-const INVITES_FILE: &str = "invites.json";
 const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
 const HERMES_RUNNING_FILE: &str = "hermes-running.json";
 const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
@@ -81,11 +79,10 @@ const DEFAULT_DEVICE_ID: &str = "agent";
 const DEFAULT_AGENT_PROFILE_NAME: &str = "Finite Agent";
 const DEFAULT_AGENT_PROFILE_ABOUT: &str = "A Finite Computer agent you can chat with.";
 const DEFAULT_AGENT_PROFILE_PICTURE: &str = "https://avatars.githubusercontent.com/u/274919006?v=4";
-const DEFAULT_MAX_JOINS: u32 = 8;
-const DEFAULT_INVITE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
+const HERMES_SERVICE_HEARTBEAT_MILLIS: u64 = 250;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentConfig {
@@ -115,9 +112,7 @@ pub(crate) fn run<W: Write>(args: Vec<String>, output: &mut W) -> Result<(), Cli
         "install" => cmd_install(&home_dir, rest, json_mode, output),
         "serve" => cmd_serve(&home_dir, rest, json_mode, output),
         "home-channel" => cmd_home_channel(&home_dir, rest, output),
-        "invite" => cmd_invite(&home_dir, rest, json_mode, output),
-        "invite-status" => cmd_invite_status(rest, json_mode, output),
-        "join" => cmd_join(&home_dir, rest, output),
+        "room-status" => cmd_room_status(&home_dir, rest, json_mode, output),
         "poll" => with_backup_activity(&home_dir, "poll", || {
             cmd_poll(&home_dir, read_request(request_json)?, output)
         }),
@@ -315,13 +310,15 @@ struct HermesServiceStarted {
     pid: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct HermesServiceState {
     agent_home: PathBuf,
     account_id: String,
     device_id: String,
     server_url: String,
-    bridge_lock: Arc<tokio::sync::Mutex<()>>,
+    runtime: Arc<FiniteChatRuntime>,
+    inbox_lock: Arc<Mutex<()>>,
+    running_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -399,12 +396,15 @@ async fn prepare_hermes_service(
         .local_addr()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
+    let runtime = open_agent_runtime(home)?;
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
         device_id: home.config.device_id.clone(),
         server_url: home.config.server_url.clone(),
-        bridge_lock: Arc::new(tokio::sync::Mutex::new(())),
+        runtime,
+        inbox_lock: Arc::new(Mutex::new(())),
+        running_lock: Arc::new(Mutex::new(())),
     };
     let started = HermesServiceStarted {
         service: "finitechat-hermes",
@@ -468,22 +468,20 @@ async fn hermes_service_healthz(
 async fn hermes_service_readyz(
     State(state): State<HermesServiceState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let home_dir = state.agent_home.clone();
-    let _guard = state.bridge_lock.lock().await;
     let result = tokio::task::spawn_blocking(move || {
-        let home = load_home(&home_dir)?;
-        let (_store, device, _delivery) = open_agent(&home)?;
-        let device_ref = device.device_ref();
+        let app = state.runtime.state().map_err(map_core_hermes_error)?;
         Ok(json!({
             "status": "ready",
             "service": "finitechat-hermes",
             "version": env!("CARGO_PKG_VERSION"),
-            "agent_home": home.dir.display().to_string(),
-            "account_id": device_ref.account_id.clone(),
-            "device_id": device_ref.device_id.clone(),
-            "server_url": home.config.server_url,
+            "agent_home": state.agent_home.display().to_string(),
+            "account_id": state.account_id,
+            "device_id": state.device_id,
+            "server_url": state.server_url,
             "store": "ok",
-            "store_file": home.dir.join(STORE_FILE).display().to_string(),
+            "store_file": state.agent_home.join(STORE_FILE).display().to_string(),
+            "rooms": app.rooms.len(),
+            "messages": app.messages.len(),
         }))
     })
     .await
@@ -496,13 +494,10 @@ async fn hermes_service_action(
     AxumPath(action): AxumPath<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let home_dir = state.agent_home.clone();
-    let _guard = state.bridge_lock.lock().await;
-    let result = tokio::task::spawn_blocking(move || {
-        handle_hermes_bridge_action(&home_dir, &action, payload)
-    })
-    .await
-    .map_err(|error| service_internal_error(error.to_string()))?;
+    let result =
+        tokio::task::spawn_blocking(move || handle_hermes_service_action(&state, &action, payload))
+            .await
+            .map_err(|error| service_internal_error(error.to_string()))?;
     result.map(Json).map_err(service_cli_error)
 }
 
@@ -510,105 +505,319 @@ async fn hermes_service_inbound(
     State(state): State<HermesServiceState>,
     Query(query): Query<HermesInboundQuery>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    let home_dir = state.agent_home.clone();
-    let _guard = state.bridge_lock.lock().await;
-    let result =
-        tokio::task::spawn_blocking(move || handle_hermes_inbound_stream(&home_dir, query))
-            .await
-            .map_err(|error| service_internal_error(error.to_string()))?;
-    result
-        .map(|body| {
-            (
-                [
-                    (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-                body,
-            )
-                .into_response()
-        })
-        .map_err(service_cli_error)
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(32);
+    std::thread::spawn(move || {
+        if let Err(error) = run_hermes_inbound_stream(state, query, tx.clone()) {
+            let record = json!({
+                "type": "error",
+                "error": error.to_string(),
+            });
+            if let Ok(line) = serde_json::to_string(&record) {
+                let _ = tx.blocking_send(Ok(Bytes::from(format!("{line}\n"))));
+            }
+        }
+    });
+
+    let body_stream = stream::unfold(
+        (
+            rx,
+            tokio::time::interval(Duration::from_millis(HERMES_SERVICE_HEARTBEAT_MILLIS)),
+        ),
+        |(mut rx, mut heartbeat)| async move {
+            tokio::select! {
+                item = rx.recv() => item.map(|bytes| (bytes, (rx, heartbeat))),
+                _ = heartbeat.tick() => Some((Ok(Bytes::from_static(b"\n")), (rx, heartbeat))),
+            }
+        },
+    );
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(body_stream),
+    )
+        .into_response())
 }
 
-fn handle_hermes_bridge_action(
-    home_dir: &Path,
+fn handle_hermes_service_action(
+    state: &HermesServiceState,
     action: &str,
     payload: Value,
 ) -> Result<Value, CliError> {
-    with_backup_activity(home_dir, action, || {
-        handle_hermes_bridge_action_inner(home_dir, action, payload)
-    })
-}
-
-fn handle_hermes_bridge_action_inner(
-    home_dir: &Path,
-    action: &str,
-    payload: Value,
-) -> Result<Value, CliError> {
-    let mut output = Vec::new();
     match action {
-        "invite" => cmd_invite(home_dir, Vec::new(), true, &mut output)?,
-        "poll" => cmd_poll(home_dir, payload, &mut output)?,
-        "ack" => cmd_ack(home_dir, payload, &mut output)?,
-        "send" => cmd_send(home_dir, payload, &mut output)?,
-        "edit" => cmd_edit(home_dir, payload, &mut output)?,
-        "recover" => cmd_recover(home_dir, payload, &mut output)?,
-        "activity" => cmd_activity(home_dir, payload, &mut output)?,
-        "home-channel-show" => write_home_channel_show(home_dir, &mut output)?,
+        "poll" => handle_hermes_service_poll(state, payload),
+        "ack" => {
+            let _guard = lock_service_mutex(&state.inbox_lock)?;
+            output_json_value(|output| cmd_ack(&state.agent_home, payload, output))
+        }
+        "send" => {
+            let request: HermesSendRequestV1 =
+                serde_json::from_value(payload).map_err(CliError::Json)?;
+            let _guard = lock_service_mutex(&state.running_lock)?;
+            let sent = send_hermes_request_with_runtime(&state.runtime, &request)?;
+            update_running_after_send(&state.agent_home, &request, &sent.message_id)?;
+            Ok(sent_message_value(&sent))
+        }
+        "edit" => {
+            let request: HermesEditRequestV1 =
+                serde_json::from_value(payload).map_err(CliError::Json)?;
+            let _guard = lock_service_mutex(&state.running_lock)?;
+            let sent = edit_hermes_request_with_runtime(&state.runtime, &request)?;
+            update_running_after_edit(&state.agent_home, &request)?;
+            Ok(sent_message_value(&sent))
+        }
+        "recover" => handle_hermes_service_recover(state),
+        "activity" => handle_hermes_service_activity(state, payload),
+        "home-channel-show" => {
+            output_json_value(|output| write_home_channel_show(&state.agent_home, output))
+        }
         "home-channel-set" => {
             let request: HermesHomeChannelSetRequest =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
-            set_home_channel(
-                home_dir,
-                request.room_id,
-                request.conversation_id,
-                &mut output,
-            )?;
+            output_json_value(|output| {
+                set_home_channel(
+                    &state.agent_home,
+                    request.room_id,
+                    request.conversation_id,
+                    output,
+                )
+            })
         }
         "home-channel-clear" => {
-            clear_home_channel(home_dir)?;
-            crate::write_pretty_json(
-                &mut output,
-                &json!({ "cleared": true, "home_channel": null }),
-            )?;
+            clear_home_channel(&state.agent_home)?;
+            Ok(json!({ "cleared": true, "home_channel": null }))
         }
-        _ => {
-            return Err(CliError::Usage(format!(
-                "unknown Hermes service action {action:?}"
-            )));
-        }
+        _ => Err(CliError::Usage(format!(
+            "unknown Hermes service action {action:?}"
+        ))),
     }
+}
+
+fn output_json_value(
+    f: impl FnOnce(&mut Vec<u8>) -> Result<(), CliError>,
+) -> Result<Value, CliError> {
+    let mut output = Vec::new();
+    f(&mut output)?;
     serde_json::from_slice(&output).map_err(CliError::Json)
 }
 
-fn handle_hermes_inbound_stream(
-    home_dir: &Path,
-    query: HermesInboundQuery,
-) -> Result<String, CliError> {
-    with_backup_activity(home_dir, "inbound", || {
-        handle_hermes_inbound_stream_inner(home_dir, query)
-    })
+fn handle_hermes_service_poll(
+    state: &HermesServiceState,
+    payload: Value,
+) -> Result<Value, CliError> {
+    let request: PollRequest = serde_json::from_value(payload).map_err(CliError::Json)?;
+    let timeout = normalized_hermes_poll_timeout(&request);
+    let started = Instant::now();
+    let home = load_home(&state.agent_home)?;
+
+    loop {
+        let payload = collect_hermes_service_inbound_payload(state, &home, &request, None)?;
+        if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
+            return Ok(payload);
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed()).as_millis() as u64;
+        let bridge = wait_for_hermes_bridge_update_or_poll(state, remaining)?;
+        let payload = collect_hermes_service_inbound_payload(state, &home, &request, Some(bridge))?;
+        if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
+            return Ok(payload);
+        }
+    }
 }
 
-fn handle_hermes_inbound_stream_inner(
-    home_dir: &Path,
+fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, CliError> {
+    let _guard = lock_service_mutex(&state.running_lock)?;
+    let running = load_hermes_running(&state.agent_home)?;
+    let mut recovered = 0usize;
+    for message in &running.messages {
+        let recovery = HermesEditRequestV1 {
+            room_id: message.room_id.clone(),
+            conversation_id: message.conversation_id.clone(),
+            segment_id: message.segment_id.clone(),
+            message_id: message.message_id.clone(),
+            text: "Hermes gateway restarted before this turn completed.".to_owned(),
+            status: HermesMessageStatusV1::Complete,
+            finalize: true,
+            metadata: BTreeMap::new(),
+        };
+        edit_hermes_request_with_runtime(&state.runtime, &recovery)?;
+        recovered += 1;
+    }
+    if recovered > 0 {
+        save_hermes_running(&state.agent_home, &HermesRunningState::default())?;
+    }
+    Ok(json!({ "recovered": recovered }))
+}
+
+fn handle_hermes_service_activity(
+    state: &HermesServiceState,
+    payload: Value,
+) -> Result<Value, CliError> {
+    let request: HermesActivityRequestV1 =
+        serde_json::from_value(payload).map_err(CliError::Json)?;
+    let activity_payload = if matches!(request.action, EphemeralActivityActionV1::Set) {
+        serde_json::to_vec(&request.payload).map_err(CliError::Serialize)?
+    } else {
+        Vec::new()
+    };
+    let accepted = state
+        .runtime
+        .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
+            room_id: request.room_id,
+            conversation_id: request.conversation_id,
+            activity_kind: request.activity_kind,
+            activity_id: request.activity_id,
+            action: request.action,
+            payload: activity_payload,
+            expires_in_millis: request.expires_in_millis,
+        })
+        .map_err(map_core_hermes_error)?;
+    Ok(json!({ "accepted": true, "result": accepted }))
+}
+
+fn run_hermes_inbound_stream(
+    state: HermesServiceState,
     query: HermesInboundQuery,
-) -> Result<String, CliError> {
-    let mut request = serde_json::Map::new();
-    if let Some(room_id) = query.room_id {
-        request.insert("room_id".to_owned(), Value::String(room_id));
+    tx: tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+) -> Result<(), CliError> {
+    let home = load_home(&state.agent_home)?;
+    let request = PollRequest {
+        room_id: query.room_id,
+        limit: query.limit,
+        timeout_millis: query.timeout_millis,
+    };
+    let timeout_millis = normalized_hermes_poll_timeout(&request).as_millis() as u64;
+
+    loop {
+        let payload = collect_hermes_service_inbound_payload(&state, &home, &request, None)?;
+        if !send_hermes_inbound_payload(&tx, &payload)? {
+            return Ok(());
+        }
+        if hermes_inbound_payload_has_records(&payload) {
+            continue;
+        }
+
+        let bridge = wait_for_hermes_bridge_update_or_poll(&state, timeout_millis)?;
+        let payload =
+            collect_hermes_service_inbound_payload(&state, &home, &request, Some(bridge))?;
+        if !send_hermes_inbound_payload(&tx, &payload)? {
+            return Ok(());
+        }
     }
-    if let Some(limit) = query.limit {
-        request.insert("limit".to_owned(), json!(limit));
+}
+
+fn wait_for_hermes_bridge_update_or_poll(
+    state: &HermesServiceState,
+    timeout_millis: u64,
+) -> Result<finitechat_core::AppBridgeSync, CliError> {
+    match state.runtime.agent_bridge_wait_for_update(timeout_millis) {
+        Ok(bridge) => Ok(bridge),
+        Err(_) => {
+            let fallback_sleep_ms = timeout_millis.min(POLL_SLEEP_MS);
+            if fallback_sleep_ms > 0 {
+                std::thread::sleep(Duration::from_millis(fallback_sleep_ms));
+            }
+            state
+                .runtime
+                .agent_bridge_poll_once()
+                .map_err(map_core_hermes_error)
+        }
     }
-    if let Some(timeout_millis) = query.timeout_millis {
-        request.insert("timeout_millis".to_owned(), json!(timeout_millis));
+}
+
+fn collect_hermes_service_inbound_payload(
+    state: &HermesServiceState,
+    home: &AgentHome,
+    request: &PollRequest,
+    bridge: Option<finitechat_core::AppBridgeSync>,
+) -> Result<Value, CliError> {
+    let limit = normalized_hermes_poll_limit(request);
+    let _guard = lock_service_mutex(&state.inbox_lock)?;
+    let mut inbox = load_hermes_inbox(&state.agent_home)?;
+    initialize_hermes_inbox_cursors(&state.agent_home, home, &mut inbox)?;
+    let mut joined = Vec::<String>::new();
+
+    if let Some(bridge) = bridge {
+        joined = bridge.joined_account_ids;
+        for applied in &bridge.events {
+            if let Some(room_filter) = &request.room_id
+                && room_filter != &applied.room_id
+            {
+                continue;
+            }
+            if applied.sender_account_id == state.account_id {
+                continue;
+            }
+            let context = HermesPollEventContext {
+                home_dir: &state.agent_home,
+                room_id: &applied.room_id,
+                seq: applied.seq,
+                message_id: &applied.message_id,
+                sender_account_id: &applied.sender_account_id,
+                sender_device_id: &applied.sender_device_id,
+                conversation_id: None,
+                segment_id: None,
+            };
+            if let Some(event) =
+                hermes_poll_event_from_application_plaintext(context, &applied.plaintext)?
+            {
+                enqueue_hermes_inbox_event(&state.agent_home, &mut inbox, event)?;
+            }
+        }
     }
 
-    let mut output = Vec::new();
-    cmd_poll(home_dir, Value::Object(request), &mut output)?;
-    let payload: Value = serde_json::from_slice(&output).map_err(CliError::Json)?;
-    hermes_inbound_ndjson(&payload)
+    recover_stored_hermes_events(
+        &state.agent_home,
+        home,
+        &state.account_id,
+        request.room_id.as_deref(),
+        &mut inbox,
+    )?;
+    let events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
+    Ok(json!({ "events": events, "joined": joined }))
+}
+
+fn send_hermes_inbound_payload(
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+    payload: &Value,
+) -> Result<bool, CliError> {
+    let body = hermes_inbound_ndjson(payload)?;
+    if body.is_empty() {
+        return Ok(true);
+    }
+    Ok(tx.blocking_send(Ok(Bytes::from(body))).is_ok())
+}
+
+fn hermes_inbound_payload_has_records(payload: &Value) -> bool {
+    payload
+        .get("joined")
+        .and_then(Value::as_array)
+        .is_some_and(|joined| !joined.is_empty())
+        || payload
+            .get("events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| !events.is_empty())
+}
+
+fn normalized_hermes_poll_limit(request: &PollRequest) -> usize {
+    request.limit.unwrap_or(10).clamp(1, 32) as usize
+}
+
+fn normalized_hermes_poll_timeout(request: &PollRequest) -> Duration {
+    Duration::from_millis(
+        request
+            .timeout_millis
+            .unwrap_or(0)
+            .min(MAX_HERMES_POLL_TIMEOUT_MILLIS),
+    )
+}
+
+fn lock_service_mutex(mutex: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, CliError> {
+    mutex
+        .lock()
+        .map_err(|_| CliError::Hermes("Hermes service state lock poisoned".to_owned()))
 }
 
 struct BackupActivityGuard {
@@ -924,7 +1133,6 @@ fn cmd_init<W: Write>(
         home_dir.join(CONFIG_FILE),
         &serde_json::to_string_pretty(&config).map_err(CliError::Serialize)?,
     )?;
-    write_private(home_dir.join(INVITES_FILE), "[]")?;
 
     let npub = npub_encode(&config.account_id)
         .map_err(|error| CliError::Hermes(format!("npub encoding failed: {error}")))?;
@@ -1017,265 +1225,100 @@ fn normalize_agent_profile_picture(value: String) -> Result<String, CliError> {
     Ok(trimmed)
 }
 
-fn cmd_invite<W: Write>(
+#[derive(Debug, Serialize)]
+struct HermesRoomStatusSummary {
+    room_id: String,
+    state: String,
+    status: String,
+    connected: bool,
+    paired: bool,
+    member_count: u32,
+    other_member_count: u32,
+}
+
+fn cmd_room_status<W: Write>(
     home_dir: &Path,
     mut args: Vec<String>,
     json_mode: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let room_id = crate::take_option(&mut args, "--room-id")?;
-    let room_name = crate::take_option(&mut args, "--room-name")?;
-    let max_joins = crate::take_option(&mut args, "--max-joins")?
-        .map(|value| crate::parse_u64("--max-joins", &value))
-        .transpose()?
-        .unwrap_or(DEFAULT_MAX_JOINS as u64) as u32;
-    let ttl_ms = crate::take_option(&mut args, "--ttl-ms")?
-        .map(|value| crate::parse_u64("--ttl-ms", &value))
-        .transpose()?
-        .unwrap_or(DEFAULT_INVITE_TTL_MS);
+    let room_id = crate::required_option(&mut args, "--room-id")?;
     crate::reject_extra_args(&args)?;
 
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    let room_id = match room_id {
-        Some(room_id) => {
-            runtime
-                .dispatch_and_wait(AppAction::StartRuntime)
-                .map_err(map_core_hermes_error)?;
-            room_id
-        }
-        None => {
-            let state = runtime
-                .dispatch_and_wait(AppAction::CreateRoom {
-                    display_name: room_name.clone().unwrap_or_default(),
-                })
-                .map_err(map_core_hermes_error)?;
-            state
-                .selected_room_id
-                .ok_or_else(|| CliError::Hermes("created room was not selected".to_owned()))?
-        }
-    };
-    let state = runtime
-        .create_invite_with_options_and_wait(room_id.clone(), room_name, max_joins, ttl_ms)
+    runtime
+        .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
-    let invite = state
-        .active_invite
-        .ok_or_else(|| CliError::Hermes(format!("could not create invite for room {room_id}")))?;
-    let url = invite.invite_url;
-    append_invite(home_dir, &url)?;
-
-    let code = InviteCodeV1::parse(&url).map_err(|error| CliError::Hermes(error.to_string()))?;
-    let npub = npub_encode(&code.inviter_account_id)
-        .map_err(|error| CliError::Hermes(format!("npub encoding failed: {error}")))?;
-    let qr = render_qr(&url)?;
-
-    if json_mode {
-        crate::write_pretty_json(
-            output,
-            &json!({
-                "url": url,
-                "qr": qr,
-                "invite_id": code.invite_id,
-                "room_id": room_id,
-                "npub": npub,
-            }),
-        )
-    } else {
-        writeln!(output, "{qr}").map_err(CliError::Output)?;
-        writeln!(output, "Scan or open in Finite Chat:\n  {url}").map_err(CliError::Output)?;
-        writeln!(output, "Agent identity: {npub}").map_err(CliError::Output)?;
-        Ok(())
-    }
-}
-
-/// The invite lifecycle words the hosted health shim keys off:
-/// `consumed` (someone was admitted, never re-serve/re-mint automatically),
-/// `expired` (nobody joined in time, re-minting is safe), and `joinable`.
-#[derive(Debug, Serialize)]
-struct HermesInviteStatusSummary {
-    invite_id: String,
-    room_id: String,
-    server_url: String,
-    /// Mirrors the server invite-session state (`open`/`closed`/`expired`),
-    /// or `not_found` when the invite's server has no such session.
-    state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_joins: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    accepted_joins: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_at_ms: Option<u64>,
-    consumed: bool,
-    expired: bool,
-    joinable: bool,
-}
-
-/// Inviter-side read of an invite session's admission state. Read-only:
-/// unlike `poll`, this never accepts joins, so the hosted status endpoint
-/// can call it on every probe without mutating room state.
-fn cmd_invite_status<W: Write>(
-    mut args: Vec<String>,
-    json_mode: bool,
-    output: &mut W,
-) -> Result<(), CliError> {
-    let url = crate::required_option(&mut args, "--url")?;
-    crate::reject_extra_args(&args)?;
-
-    let code = InviteCodeV1::parse(&url).map_err(|error| CliError::Hermes(error.to_string()))?;
-    let mut delivery =
-        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(code.server_url.clone()));
-    let session = match delivery.list_invite_join_requests(&code.invite_id) {
-        Ok(response) => Some(response.session),
-        // A missing session is a real lifecycle state (fresh server store or
-        // pre-persistence invite), not a transport failure: the invite is
-        // unjoinable, but nothing proves it was consumed.
-        Err(HttpRuntimeDeliveryError::Transport(ReqwestHttpRuntimeTransportError::Server {
-            status,
-            ..
-        })) if status == reqwest::StatusCode::NOT_FOUND => None,
-        Err(error) => {
-            return Err(CliError::Hermes(format!(
-                "invite status query failed: {error}"
-            )));
-        }
-    };
-    let summary = invite_status_summary(&code, session.as_ref(), now_ms())?;
+    let state = runtime
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: room_id.clone(),
+        })
+        .map_err(map_core_hermes_error)?;
+    let summary = hermes_room_status_summary(&state, &room_id);
 
     if json_mode {
         crate::write_pretty_json(output, &summary)
     } else {
         writeln!(
             output,
-            "Invite {} for room {} on {}: {} (consumed: {}, expired: {}, joinable: {})",
-            summary.invite_id,
+            "Room {}: {} (connected: {}, paired: {}, members: {})",
             summary.room_id,
-            summary.server_url,
-            summary.state,
-            summary.consumed,
-            summary.expired,
-            summary.joinable,
+            summary.status,
+            summary.connected,
+            summary.paired,
+            summary.member_count,
         )
         .map_err(CliError::Output)
     }
 }
 
-fn invite_status_summary(
-    code: &InviteCodeV1,
-    session: Option<&HttpInviteSessionSummary>,
-    now_ms: u64,
-) -> Result<HermesInviteStatusSummary, CliError> {
-    let Some(session) = session else {
-        return Ok(HermesInviteStatusSummary {
-            invite_id: code.invite_id.clone(),
-            room_id: code.room_id.clone(),
-            server_url: code.server_url.clone(),
-            state: "not_found",
-            max_joins: None,
-            accepted_joins: None,
-            expires_at_ms: None,
-            consumed: false,
-            expired: false,
-            joinable: false,
-        });
-    };
-    if session.room_id != code.room_id {
-        return Err(CliError::Hermes(format!(
-            "invite session {} belongs to room {}, but the invite URL claims room {}",
-            session.invite_id, session.room_id, code.room_id
-        )));
+fn hermes_room_status_summary(state: &AppState, room_id: &str) -> HermesRoomStatusSummary {
+    let room = state.rooms.iter().find(|room| room.room_id == room_id);
+    let connected = room
+        .map(|room| room.state == AppRoomState::Connected)
+        .unwrap_or(false);
+    let details = state
+        .room_details
+        .as_ref()
+        .filter(|details| details.room_id == room_id);
+    let member_count = details.map(|details| details.members.len()).unwrap_or(0) as u32;
+    let other_member_count = details
+        .map(|details| {
+            details
+                .members
+                .iter()
+                .filter(|member| !member.current_device)
+                .count() as u32
+        })
+        .unwrap_or(0);
+    let has_counterparty_messages = state
+        .messages
+        .iter()
+        .any(|message| message.room_id == room_id && !message.is_mine);
+
+    HermesRoomStatusSummary {
+        room_id: room_id.to_owned(),
+        state: room
+            .map(|room| app_room_state_label(&room.state).to_owned())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        status: room
+            .map(|room| room.status.clone())
+            .unwrap_or_else(|| "not_found".to_owned()),
+        connected,
+        paired: connected && (other_member_count > 0 || has_counterparty_messages),
+        member_count,
+        other_member_count,
     }
-    let state = match session.state {
-        HttpInviteSessionState::Open => "open",
-        HttpInviteSessionState::Closed => "closed",
-        HttpInviteSessionState::Expired => "expired",
-    };
-    // Consumed means an admission happened; the session closing on the last
-    // accepted join and the accepted counter are the same fact.
-    let consumed = session.state == HttpInviteSessionState::Closed
-        || session.accepted_joins >= session.max_joins;
-    let expired =
-        session.state == HttpInviteSessionState::Expired || now_ms >= session.expires_at_ms;
-    let joinable = session.state == HttpInviteSessionState::Open && !consumed && !expired;
-    Ok(HermesInviteStatusSummary {
-        invite_id: session.invite_id.clone(),
-        room_id: session.room_id.clone(),
-        server_url: code.server_url.clone(),
-        state,
-        max_joins: Some(session.max_joins),
-        accepted_joins: Some(session.accepted_joins),
-        expires_at_ms: Some(session.expires_at_ms),
-        consumed,
-        expired,
-        joinable,
-    })
 }
 
-/// User-side join: scan/paste the invite URL and land in the chat (ADR 0006).
-/// Submits the proof-bound join request, waits for the
-/// inviter's verdict, activates the Welcome from the room's server,
-/// verifies the inviter credential, and pins the room to its server.
-fn cmd_join<W: Write>(
-    home_dir: &Path,
-    mut args: Vec<String>,
-    output: &mut W,
-) -> Result<(), CliError> {
-    let url = crate::required_option(&mut args, "--url")?;
-    let timeout_ms = crate::take_option(&mut args, "--timeout-ms")?
-        .map(|value| crate::parse_u64("--timeout-ms", &value))
-        .transpose()?
-        .unwrap_or(60_000);
-    crate::reject_extra_args(&args)?;
-
-    let code = InviteCodeV1::parse(&url).map_err(|error| CliError::Hermes(error.to_string()))?;
-    let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::ScanTarget { value: url.clone() })
-        .map_err(map_core_hermes_error)?;
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        let state = runtime
-            .dispatch_and_wait(AppAction::StartRuntime)
-            .map_err(map_core_hermes_error)?;
-        if let Some(room) = state.rooms.iter().find(|room| room.room_id == code.room_id) {
-            match room.state {
-                AppRoomState::Connected => break,
-                AppRoomState::UnavailableOnDevice => {
-                    crate::write_pretty_json(
-                        output,
-                        &json!({ "state": "rejected", "room_id": code.room_id }),
-                    )?;
-                    return Err(CliError::Hermes("join was rejected".to_owned()));
-                }
-                AppRoomState::WaitingForApproval | AppRoomState::Joining => {}
-            }
-        }
-        if Instant::now() >= deadline {
-            crate::write_pretty_json(
-                output,
-                &json!({ "state": "pending", "room_id": code.room_id }),
-            )?;
-            return Err(CliError::Hermes(
-                "join timed out awaiting the agent".to_owned(),
-            ));
-        }
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as u64;
-        if runtime.wait_for_update(remaining.min(5_000)).is_err() {
-            std::thread::sleep(Duration::from_millis(POLL_SLEEP_MS));
-        }
+fn app_room_state_label(state: &AppRoomState) -> &'static str {
+    match state {
+        AppRoomState::Connected => "connected",
+        AppRoomState::WaitingForApproval => "waiting_for_approval",
+        AppRoomState::Joining => "joining",
+        AppRoomState::UnavailableOnDevice => "unavailable_on_device",
     }
-    crate::write_pretty_json(
-        output,
-        &json!({
-            "state": "joined",
-            "room_id": code.room_id,
-            "server_url": code.server_url,
-            "inviter_account_id": code.inviter_account_id,
-        }),
-    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1317,19 +1360,16 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     );
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    let invite_urls = load_invite_urls(home_dir)?;
-    let invites = load_invites(home_dir)?;
     let started = Instant::now();
     let own_account = home.config.account_id.clone();
     let mut inbox = load_hermes_inbox(home_dir)?;
     initialize_hermes_inbox_cursors(home_dir, &home, &mut inbox)?;
     let mut events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
     let mut joined: Vec<String> = Vec::new();
-    let invite_counts: BTreeMap<String, (u32, u32)> = BTreeMap::new();
 
     while events.is_empty() {
         let bridge = runtime
-            .agent_bridge_poll_once(invite_urls.clone())
+            .agent_bridge_poll_once()
             .map_err(map_core_hermes_error)?;
         joined.extend(bridge.joined_account_ids);
         joined.sort();
@@ -1351,6 +1391,8 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
                 message_id: &applied.message_id,
                 sender_account_id: &applied.sender_account_id,
                 sender_device_id: &applied.sender_device_id,
+                conversation_id: None,
+                segment_id: None,
             };
             if let Some(event) =
                 hermes_poll_event_from_application_plaintext(context, &applied.plaintext)?
@@ -1372,14 +1414,7 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         }
         let remaining = timeout.saturating_sub(started.elapsed()).as_millis() as u64;
         let (_store, device, mut delivery) = open_agent(&home)?;
-        wait_for_hermes_sync_hint(
-            &home,
-            &mut delivery,
-            &device,
-            &invites,
-            &invite_counts,
-            remaining,
-        );
+        wait_for_hermes_sync_hint(&home, &mut delivery, &device, remaining);
     }
 
     crate::write_pretty_json(output, &json!({ "events": events, "joined": joined }))
@@ -1452,6 +1487,22 @@ fn initialize_hermes_inbox_cursors(
     home: &AgentHome,
     inbox: &mut HermesInboxState,
 ) -> Result<(), CliError> {
+    let recent_events = load_recent_agent_app_events(home)?;
+    initialize_hermes_inbox_cursors_from_events(
+        home_dir,
+        inbox,
+        &home.config.account_id,
+        recent_events.iter(),
+    )
+}
+
+fn initialize_hermes_inbox_cursors_from_events<'a>(
+    home_dir: &Path,
+    inbox: &mut HermesInboxState,
+    own_account: &str,
+    recent_events: impl IntoIterator<Item = &'a StoredAppEvent>,
+) -> Result<(), CliError> {
+    let recent_events = recent_events.into_iter().collect::<Vec<_>>();
     if !inbox.cursors.is_empty() {
         return Ok(());
     }
@@ -1471,8 +1522,24 @@ fn initialize_hermes_inbox_cursors(
         return Ok(());
     }
 
-    for event in load_recent_agent_app_events(home)? {
-        changed |= advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
+    let mut first_counterparty_seq_by_room = BTreeMap::<&str, u64>::new();
+    for event in &recent_events {
+        if event.sender.account_id != own_account {
+            first_counterparty_seq_by_room
+                .entry(event.room_id.as_str())
+                .and_modify(|seq| *seq = (*seq).min(event.seq))
+                .or_insert(event.seq);
+        }
+    }
+
+    for event in recent_events {
+        if event.sender.account_id == own_account
+            && first_counterparty_seq_by_room
+                .get(event.room_id.as_str())
+                .is_none_or(|seq| event.seq < *seq)
+        {
+            changed |= advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
+        }
     }
     if changed {
         save_hermes_inbox(home_dir, inbox)?;
@@ -1507,6 +1574,8 @@ fn recover_stored_hermes_events(
             message_id: &stored.message_id,
             sender_account_id: &stored.sender.account_id,
             sender_device_id: &stored.sender.device_id,
+            conversation_id: None,
+            segment_id: None,
         };
         match hermes_poll_event_from_application_plaintext(context, &stored.plaintext)? {
             Some(event) => enqueue_hermes_inbox_event(home_dir, inbox, event)?,
@@ -1566,8 +1635,6 @@ fn wait_for_hermes_sync_hint(
     home: &AgentHome,
     delivery: &mut AgentDelivery,
     device: &FiniteChatDevice,
-    invites: &[InviteCodeV1],
-    invite_counts: &BTreeMap<String, (u32, u32)>,
     wait_ms: u64,
 ) {
     if wait_ms == 0 {
@@ -1580,22 +1647,7 @@ fn wait_for_hermes_sync_hint(
             .into_iter()
             .map(|cursor| (cursor.room_id, cursor.after_seq, cursor.server_url)),
     );
-    let invite_waits: Vec<SyncWaitInvite> = invites
-        .iter()
-        .map(|code| {
-            let (seen_requests, seen_resolved) = invite_counts
-                .get(&code.invite_id)
-                .copied()
-                .unwrap_or((u32::MAX, u32::MAX));
-            SyncWaitInvite {
-                invite_id: code.invite_id.clone(),
-                seen_requests,
-                seen_resolved,
-            }
-        })
-        .collect();
-    let wait_target_count =
-        usize::from(!home_rooms.is_empty() || !invite_waits.is_empty()) + remote_rooms.len();
+    let wait_target_count = usize::from(!home_rooms.is_empty()) + remote_rooms.len();
     if wait_target_count == 0 {
         std::thread::sleep(Duration::from_millis(wait_ms.min(POLL_SLEEP_MS)));
         return;
@@ -1607,11 +1659,10 @@ fn wait_for_hermes_sync_hint(
     };
     let started = Instant::now();
 
-    if !home_rooms.is_empty() || !invite_waits.is_empty() {
+    if !home_rooms.is_empty() {
         let target_wait_ms = bounded_remaining_wait_ms(wait_ms, per_target_wait_ms, started);
         let wait = SyncWaitRequest {
             rooms: home_rooms,
-            invites: invite_waits,
             wait_ms: target_wait_ms,
         };
         sync_wait_or_sleep(delivery, &wait, target_wait_ms);
@@ -1625,7 +1676,6 @@ fn wait_for_hermes_sync_hint(
             HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url));
         let wait = SyncWaitRequest {
             rooms,
-            invites: Vec::new(),
             wait_ms: target_wait_ms,
         };
         sync_wait_or_sleep(&mut room_delivery, &wait, target_wait_ms);
@@ -1672,6 +1722,8 @@ struct HermesPollEventContext<'a> {
     message_id: &'a str,
     sender_account_id: &'a str,
     sender_device_id: &'a str,
+    conversation_id: Option<&'a str>,
+    segment_id: Option<&'a str>,
 }
 
 fn hermes_poll_event_from_application_plaintext(
@@ -1684,6 +1736,11 @@ fn hermes_poll_event_from_application_plaintext(
         }
         return match event.kind {
             DurableAppEventKind::ChatMessage => {
+                let context = HermesPollEventContext {
+                    conversation_id: event.conversation_id.as_deref(),
+                    segment_id: event.segment_id.as_deref(),
+                    ..context
+                };
                 hermes_poll_event_from_chat_payload(context, &event.payload, true)
             }
             DurableAppEventKind::ConversationCreate
@@ -1721,6 +1778,16 @@ fn hermes_poll_event_from_chat_payload(
             context.sender_account_id.to_owned(),
             context.sender_device_id.to_owned(),
         );
+        if event.conversation_id.is_none() {
+            event.conversation_id = context.conversation_id.map(ToOwned::to_owned);
+            event.source.thread_id = event.conversation_id.clone();
+        }
+        if event.segment_id.is_none() {
+            event.segment_id = context.segment_id.map(ToOwned::to_owned);
+        }
+        if event.segment_id.is_some() {
+            event.source.thread_id = event.segment_id.clone();
+        }
         materialize_poll_event_attachments(context.home_dir, &mut event)?;
         return Ok(Some(event));
     }
@@ -1735,7 +1802,7 @@ fn hermes_poll_event_from_chat_payload(
     if text.trim().is_empty() {
         return Ok(None);
     }
-    HermesPollEventV1::finite_chat_text(
+    let mut event = HermesPollEventV1::finite_chat_text(
         context.room_id.to_owned(),
         context.seq,
         context.message_id.to_owned(),
@@ -1743,8 +1810,14 @@ fn hermes_poll_event_from_chat_payload(
         context.sender_device_id.to_owned(),
         text.to_owned(),
     )
-    .map(Some)
-    .map_err(|error| CliError::Hermes(error.to_string()))
+    .map_err(|error| CliError::Hermes(error.to_string()))?;
+    event.conversation_id = context.conversation_id.map(ToOwned::to_owned);
+    event.segment_id = context.segment_id.map(ToOwned::to_owned);
+    event.source.thread_id = event.segment_id.clone().or(event.conversation_id.clone());
+    event
+        .validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    Ok(Some(event))
 }
 
 fn materialize_poll_event_attachments(
@@ -1845,11 +1918,13 @@ fn payload_is_typed_json(payload: &[u8]) -> bool {
 fn encode_application_event(
     kind: DurableAppEventKind,
     conversation_id: Option<String>,
+    segment_id: Option<String>,
     payload: &[u8],
 ) -> Result<Vec<u8>, CliError> {
     let event = DecryptedApplicationEventV1 {
         kind,
         conversation_id,
+        segment_id,
         payload: payload.to_vec(),
     };
     event
@@ -1860,40 +1935,24 @@ fn encode_application_event(
 
 fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
     let request: HermesSendRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
-    let hermes_payload = HermesMessagePayloadV1::from_send(&request)
-        .encode()
-        .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let app_payload = encode_application_event(
-        DurableAppEventKind::ChatMessage,
-        request.conversation_id.clone(),
-        &hermes_payload,
-    )?;
-    let sent = append_payload_to_room(
-        home_dir,
-        &request.room_id,
-        app_payload,
-        request.text.clone(),
-    )?;
+    let home = load_home(home_dir)?;
+    let runtime = open_agent_runtime(&home)?;
+    runtime
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .map_err(map_core_hermes_error)?;
+    let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
     write_sent_message(output, &sent)
 }
 
 fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
     let request: HermesEditRequestV1 = serde_json::from_value(request).map_err(CliError::Json)?;
-    let hermes_payload = HermesMessagePayloadV1::from_edit(&request)
-        .encode()
-        .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let app_payload = encode_application_event(
-        DurableAppEventKind::ChatMessage,
-        request.conversation_id.clone(),
-        &hermes_payload,
-    )?;
-    let sent = append_payload_to_room(
-        home_dir,
-        &request.room_id,
-        app_payload,
-        request.text.clone(),
-    )?;
+    let home = load_home(home_dir)?;
+    let runtime = open_agent_runtime(&home)?;
+    runtime
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .map_err(map_core_hermes_error)?;
+    let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
     write_sent_message(output, &sent)
 }
@@ -1905,6 +1964,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         let recovery = HermesEditRequestV1 {
             room_id: message.room_id.clone(),
             conversation_id: message.conversation_id.clone(),
+            segment_id: message.segment_id.clone(),
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
             status: HermesMessageStatusV1::Complete,
@@ -1917,10 +1977,16 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         let app_payload = encode_application_event(
             DurableAppEventKind::ChatMessage,
             recovery.conversation_id.clone(),
+            recovery.segment_id.clone(),
             &hermes_payload,
         )?;
-        append_payload_to_room(
-            home_dir,
+        let home = load_home(home_dir)?;
+        let runtime = open_agent_runtime(&home)?;
+        runtime
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .map_err(map_core_hermes_error)?;
+        append_payload_to_room_with_runtime(
+            &runtime,
             &recovery.room_id,
             app_payload,
             recovery.text.clone(),
@@ -1933,27 +1999,65 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
 }
 
-fn append_payload_to_room(
-    home_dir: &Path,
+fn send_hermes_request_with_runtime(
+    runtime: &FiniteChatRuntime,
+    request: &HermesSendRequestV1,
+) -> Result<AppSentMessage, CliError> {
+    let hermes_payload = HermesMessagePayloadV1::from_send(request)
+        .encode()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let app_payload = encode_application_event(
+        DurableAppEventKind::ChatMessage,
+        request.conversation_id.clone(),
+        request.segment_id.clone(),
+        &hermes_payload,
+    )?;
+    append_payload_to_room_with_runtime(
+        runtime,
+        &request.room_id,
+        app_payload,
+        request.text.clone(),
+    )
+}
+
+fn edit_hermes_request_with_runtime(
+    runtime: &FiniteChatRuntime,
+    request: &HermesEditRequestV1,
+) -> Result<AppSentMessage, CliError> {
+    let hermes_payload = HermesMessagePayloadV1::from_edit(request)
+        .encode()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let app_payload = encode_application_event(
+        DurableAppEventKind::ChatMessage,
+        request.conversation_id.clone(),
+        request.segment_id.clone(),
+        &hermes_payload,
+    )?;
+    append_payload_to_room_with_runtime(
+        runtime,
+        &request.room_id,
+        app_payload,
+        request.text.clone(),
+    )
+}
+
+fn append_payload_to_room_with_runtime(
+    runtime: &FiniteChatRuntime,
     room_id: &str,
     payload: Vec<u8>,
     preview: String,
 ) -> Result<AppSentMessage, CliError> {
-    let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
     runtime
         .send_encoded_chat_message_and_wait(room_id.to_owned(), payload, preview)
         .map_err(map_core_hermes_error)
 }
 
 fn write_sent_message<W: Write>(output: &mut W, sent: &AppSentMessage) -> Result<(), CliError> {
-    crate::write_pretty_json(
-        output,
-        &json!({ "message_id": &sent.message_id, "seq": sent.seq }),
-    )
+    crate::write_pretty_json(output, &sent_message_value(sent))
+}
+
+fn sent_message_value(sent: &AppSentMessage) -> Value {
+    json!({ "message_id": &sent.message_id, "seq": sent.seq })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1966,6 +2070,8 @@ struct HermesRunningState {
 struct HermesRunningMessage {
     room_id: String,
     conversation_id: Option<String>,
+    #[serde(default)]
+    segment_id: Option<String>,
     message_id: String,
 }
 
@@ -1999,6 +2105,7 @@ fn update_running_after_send(
         HermesRunningMessage {
             room_id: request.room_id.clone(),
             conversation_id: request.conversation_id.clone(),
+            segment_id: request.segment_id.clone(),
             message_id: message_id.to_owned(),
         },
     )
@@ -2016,6 +2123,7 @@ fn update_running_after_edit(
         HermesRunningMessage {
             room_id: request.room_id.clone(),
             conversation_id: request.conversation_id.clone(),
+            segment_id: request.segment_id.clone(),
             message_id: request.message_id.clone(),
         },
     )
@@ -2463,30 +2571,6 @@ fn device_config(
     }
 }
 
-fn load_invites(dir: &Path) -> Result<Vec<InviteCodeV1>, CliError> {
-    let urls = load_invite_urls(dir)?;
-    let mut codes = Vec::with_capacity(urls.len());
-    for url in urls {
-        codes.push(InviteCodeV1::parse(&url).map_err(|error| CliError::Hermes(error.to_string()))?);
-    }
-    Ok(codes)
-}
-
-fn load_invite_urls(dir: &Path) -> Result<Vec<String>, CliError> {
-    let raw = fs::read_to_string(dir.join(INVITES_FILE)).unwrap_or_else(|_| "[]".to_owned());
-    serde_json::from_str(&raw).map_err(CliError::Json)
-}
-
-fn append_invite(dir: &Path, url: &str) -> Result<(), CliError> {
-    let raw = fs::read_to_string(dir.join(INVITES_FILE)).unwrap_or_else(|_| "[]".to_owned());
-    let mut urls: Vec<String> = serde_json::from_str(&raw).map_err(CliError::Json)?;
-    urls.push(url.to_owned());
-    write_private(
-        dir.join(INVITES_FILE),
-        &serde_json::to_string_pretty(&urls).map_err(CliError::Serialize)?,
-    )
-}
-
 fn write_private(path: PathBuf, contents: &str) -> Result<(), CliError> {
     fs::write(&path, contents).map_err(|error| CliError::Hermes(error.to_string()))?;
     #[cfg(unix)]
@@ -2524,15 +2608,6 @@ fn read_request(request_json: Option<String>) -> Result<Value, CliError> {
     }
 }
 
-fn render_qr(url: &str) -> Result<String, CliError> {
-    let code = qrcode::QrCode::new(url.as_bytes())
-        .map_err(|error| CliError::Hermes(format!("QR encoding failed: {error}")))?;
-    Ok(code
-        .render::<qrcode::render::unicode::Dense1x2>()
-        .quiet_zone(true)
-        .build())
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2553,7 +2628,7 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
 }
 
 pub(crate) fn hermes_usage() -> String {
-    "hermes commands:\n  finitechat hermes [--agent-home DIR] init --server URL [--device-id ID] [--agent-name NAME] [--agent-about TEXT] [--agent-picture-url URL] [--skip-agent-profile]\n  finitechat hermes [--agent-home DIR] install [--plugins-dir DIR | --plugin-dir DIR] [--plugin-name NAME] [--finitechat-bin PATH] [--service-url URL] [--force] [--json]\n  finitechat hermes [--agent-home DIR] serve [--addr HOST:PORT] [--ready-file PATH] [--json]\n  finitechat hermes [--agent-home DIR] home-channel show|clear\n  finitechat hermes [--agent-home DIR] home-channel set --room-id ID [--conversation-id ID]\n  finitechat hermes [--agent-home DIR] invite [--room-id ID] [--room-name NAME] [--max-joins N] [--ttl-ms N] [--json]\n  finitechat hermes invite-status --url INVITE_URL [--json]\n  finitechat hermes [--agent-home DIR] join --url INVITE_URL [--timeout-ms N]\n  finitechat hermes [--agent-home DIR] poll --json   (stdin: {room_id?, limit?, timeout_millis?})\n  finitechat hermes [--agent-home DIR] ack --json    (stdin: HermesAckRequestV1)\n  finitechat hermes [--agent-home DIR] send --json   (stdin: HermesSendRequestV1)\n  finitechat hermes [--agent-home DIR] edit --json   (stdin: HermesEditRequestV1)\n  finitechat hermes [--agent-home DIR] recover --json\n  finitechat hermes [--agent-home DIR] activity --json (stdin: HermesActivityRequestV1)\n  (--home is accepted as a compatibility alias; FINITE_AGENT_HOME, FINITECHAT_HOME, or ~/.finite/agent may replace --agent-home; the account key is the shared Finite identity under $FINITE_HOME/identity or ~/.finite/identity — see finitechat auth; --request-json JSON may replace stdin)".to_owned()
+    "hermes commands:\n  finitechat hermes [--agent-home DIR] init --server URL [--device-id ID] [--agent-name NAME] [--agent-about TEXT] [--agent-picture-url URL] [--skip-agent-profile]\n  finitechat hermes [--agent-home DIR] install [--plugins-dir DIR | --plugin-dir DIR] [--plugin-name NAME] [--finitechat-bin PATH] [--service-url URL] [--force] [--json]\n  finitechat hermes [--agent-home DIR] serve [--addr HOST:PORT] [--ready-file PATH] [--json]\n  finitechat hermes [--agent-home DIR] home-channel show|clear\n  finitechat hermes [--agent-home DIR] home-channel set --room-id ID [--conversation-id ID]\n  finitechat hermes [--agent-home DIR] room-status --room-id ID [--json]\n  finitechat hermes [--agent-home DIR] poll --json   (stdin: {room_id?, limit?, timeout_millis?})\n  finitechat hermes [--agent-home DIR] ack --json    (stdin: HermesAckRequestV1)\n  finitechat hermes [--agent-home DIR] send --json   (stdin: HermesSendRequestV1)\n  finitechat hermes [--agent-home DIR] edit --json   (stdin: HermesEditRequestV1)\n  finitechat hermes [--agent-home DIR] recover --json\n  finitechat hermes [--agent-home DIR] activity --json (stdin: HermesActivityRequestV1)\n  (--home is accepted as a compatibility alias; FINITE_AGENT_HOME, FINITECHAT_HOME, or ~/.finite/agent may replace --agent-home; the account key is the shared Finite identity under $FINITE_HOME/identity or ~/.finite/identity — see finitechat auth; --request-json JSON may replace stdin)".to_owned()
 }
 
 #[cfg(test)]
@@ -2570,6 +2645,97 @@ mod tests {
             r#"{"server_url":"http://127.0.0.1:1","device_id":"agent","account_id":"00"}"#,
         )
         .unwrap();
+    }
+
+    fn app_state_with_room_members(member_current_device_flags: Vec<bool>) -> AppState {
+        serde_json::from_value(json!({
+            "rev": 1,
+            "identity": {
+                "account_id": "agent-account",
+                "device_id": "agent-device",
+                "account_secret_hex": "00"
+            },
+            "rooms": [{
+                "room_id": "room-main",
+                "display_name": "Main",
+                "picture": null,
+                "state": "Connected",
+                "status": "connected",
+                "user_status_text": "Connected",
+                "last_message_preview": "",
+                "unread_count": 0,
+                "can_load_older": false,
+                "is_agent_chat": false
+            }],
+            "selected_room_id": "room-main",
+            "topics": [],
+            "selected_topic_id": null,
+            "active_profile_id": null,
+            "status": "ready",
+            "toast": null,
+            "messages": [],
+            "media_gallery": null,
+            "room_details": {
+                "room_id": "room-main",
+                "display_name": "Main",
+                "picture": null,
+                "state": "Connected",
+                "status": "connected",
+                "user_status_text": "Connected",
+                "media_item_count": 0,
+                "members": member_current_device_flags
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, current_device)| {
+                        json!({
+                            "account_id": format!("account-{index}"),
+                            "device_id": format!("device-{index}"),
+                            "npub": format!("npub-{index}"),
+                            "display_name": format!("Member {index}"),
+                            "picture": null,
+                            "current_device": current_device
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "devices": []
+            },
+            "profiles": [],
+            "devices": [],
+            "typing_members": [],
+            "flow": {
+                "notice_text": null,
+                "notice_busy": false,
+                "scan_in_flight": false,
+                "scan_result": "None",
+                "image_upload_url": null
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn room_status_summary_pairs_connected_room_with_other_member() {
+        let state = app_state_with_room_members(vec![true, false]);
+
+        let summary = hermes_room_status_summary(&state, "room-main");
+
+        assert!(summary.connected);
+        assert!(summary.paired);
+        assert_eq!(summary.member_count, 2);
+        assert_eq!(summary.other_member_count, 1);
+        assert_eq!(summary.state, "connected");
+    }
+
+    #[test]
+    fn room_status_summary_does_not_pair_without_other_member() {
+        let state = app_state_with_room_members(vec![true]);
+
+        let summary = hermes_room_status_summary(&state, "room-main");
+
+        assert!(summary.connected);
+        assert!(!summary.paired);
+        assert_eq!(summary.member_count, 1);
+        assert_eq!(summary.other_member_count, 0);
     }
 
     #[test]
@@ -2800,6 +2966,7 @@ mod tests {
         let wrapped_poll = DecryptedApplicationEventV1 {
             kind: DurableAppEventKind::ChatMessage,
             conversation_id: None,
+            segment_id: None,
             payload: br#"{"type":"finitechat.chat.poll.v1","question":"Lunch?","options":[]}"#
                 .to_vec(),
         };
@@ -2812,6 +2979,8 @@ mod tests {
                 message_id: "message-1",
                 sender_account_id: "alice",
                 sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
             },
             &plaintext,
         )
@@ -2824,6 +2993,7 @@ mod tests {
         let wrapped_text = DecryptedApplicationEventV1 {
             kind: DurableAppEventKind::ChatMessage,
             conversation_id: None,
+            segment_id: None,
             payload: b"plain hello".to_vec(),
         };
         let plaintext = serde_json::to_vec(&wrapped_text).unwrap();
@@ -2835,6 +3005,8 @@ mod tests {
                 message_id: "message-2",
                 sender_account_id: "alice",
                 sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
             },
             &plaintext,
         )
@@ -2842,6 +3014,51 @@ mod tests {
         .expect("typed plain-text chat is still bridge-visible");
         assert_eq!(event.text, "plain hello");
         assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+    }
+
+    #[test]
+    fn wrapped_chat_event_conversation_id_reaches_poll_event() {
+        let home = tempfile::tempdir().unwrap();
+        let hermes_payload = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: None,
+            segment_id: None,
+            text: "topic hello".to_owned(),
+            kind: finitechat_hermes::HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .unwrap();
+        let wrapped = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: Some("topic-main".to_owned()),
+            segment_id: None,
+            payload: hermes_payload,
+        };
+        let plaintext = serde_json::to_vec(&wrapped).unwrap();
+        let event = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                room_id: "room-main",
+                seq: 3,
+                message_id: "message-3",
+                sender_account_id: "alice",
+                sender_device_id: "electron",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &plaintext,
+        )
+        .unwrap()
+        .expect("topic chat is bridge-visible");
+        assert_eq!(event.text, "topic hello");
+        assert_eq!(event.conversation_id.as_deref(), Some("topic-main"));
+        assert_eq!(event.source.thread_id.as_deref(), Some("topic-main"));
     }
 
     #[test]
@@ -2904,98 +3121,63 @@ mod tests {
         assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 11);
     }
 
-    fn invite_status_code() -> InviteCodeV1 {
-        InviteCodeV1 {
-            server_url: "http://127.0.0.1:1".to_owned(),
-            room_id: "room-invite".to_owned(),
-            invite_id: "invite-1".to_owned(),
-            invite_token: vec![7; 32],
-            inviter_account_id: "aa".repeat(32),
-            display_name: None,
-        }
-    }
-
-    fn invite_status_session(
-        state: HttpInviteSessionState,
-        accepted_joins: u32,
-        expires_at_ms: u64,
-    ) -> HttpInviteSessionSummary {
-        HttpInviteSessionSummary {
-            invite_id: "invite-1".to_owned(),
-            room_id: "room-invite".to_owned(),
-            inviter: finitechat_proto::DeviceRef {
-                account_id: "aa".repeat(32),
-                device_id: "agent".to_owned(),
+    #[test]
+    fn inbox_initialization_does_not_consume_first_counterparty_message() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        let events = [
+            StoredAppEvent {
+                room_id: "room-a".to_owned(),
+                seq: 1,
+                message_id: "agent-setup".to_owned(),
+                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
+                plaintext: b"agent setup".to_vec(),
+                timestamp_unix_seconds: 1,
             },
-            max_joins: 1,
-            accepted_joins,
-            expires_at_ms,
-            state,
-        }
-    }
+            StoredAppEvent {
+                room_id: "room-a".to_owned(),
+                seq: 2,
+                message_id: "user-first".to_owned(),
+                sender: finitechat_proto::DeviceRef::new("user-account", "electron"),
+                plaintext: b"hello agent".to_vec(),
+                timestamp_unix_seconds: 2,
+            },
+            StoredAppEvent {
+                room_id: "room-a".to_owned(),
+                seq: 3,
+                message_id: "agent-after".to_owned(),
+                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
+                plaintext: b"agent after".to_vec(),
+                timestamp_unix_seconds: 3,
+            },
+        ];
 
-    #[test]
-    fn invite_status_open_session_before_expiry_is_joinable() {
-        let session = invite_status_session(HttpInviteSessionState::Open, 0, 10_000);
-        let summary = invite_status_summary(&invite_status_code(), Some(&session), 9_999).unwrap();
-        assert_eq!(summary.state, "open");
-        assert!(!summary.consumed);
-        assert!(!summary.expired);
-        assert!(summary.joinable);
-        assert_eq!(summary.max_joins, Some(1));
-        assert_eq!(summary.accepted_joins, Some(0));
-        assert_eq!(summary.expires_at_ms, Some(10_000));
-    }
+        initialize_hermes_inbox_cursors_from_events(
+            home.path(),
+            &mut inbox,
+            "agent-account",
+            events.iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            hermes_inbox_cursor(&inbox, "room-a"),
+            1,
+            "first run must not advance past unseen counterparty messages"
+        );
 
-    #[test]
-    fn invite_status_closed_session_is_consumed_and_not_joinable() {
-        let session = invite_status_session(HttpInviteSessionState::Closed, 1, 10_000);
-        let summary = invite_status_summary(&invite_status_code(), Some(&session), 0).unwrap();
-        assert_eq!(summary.state, "closed");
-        assert!(summary.consumed);
-        assert!(!summary.expired);
-        assert!(!summary.joinable);
-    }
-
-    #[test]
-    fn invite_status_open_session_past_expiry_is_expired_not_consumed() {
-        let session = invite_status_session(HttpInviteSessionState::Open, 0, 10_000);
-        let summary = invite_status_summary(&invite_status_code(), Some(&session), 10_000).unwrap();
-        assert_eq!(summary.state, "open");
-        assert!(!summary.consumed);
-        assert!(summary.expired);
-        assert!(!summary.joinable);
-    }
-
-    #[test]
-    fn invite_status_expired_session_state_is_expired() {
-        let session = invite_status_session(HttpInviteSessionState::Expired, 0, u64::MAX);
-        let summary = invite_status_summary(&invite_status_code(), Some(&session), 0).unwrap();
-        assert_eq!(summary.state, "expired");
-        assert!(summary.expired);
-        assert!(!summary.consumed);
-        assert!(!summary.joinable);
-    }
-
-    #[test]
-    fn invite_status_missing_session_is_not_found_and_not_consumed() {
-        let summary = invite_status_summary(&invite_status_code(), None, 0).unwrap();
-        assert_eq!(summary.state, "not_found");
-        assert!(!summary.consumed);
-        assert!(!summary.expired);
-        assert!(!summary.joinable);
-        assert_eq!(summary.max_joins, None);
-        assert_eq!(summary.accepted_joins, None);
-        assert_eq!(summary.expires_at_ms, None);
-    }
-
-    #[test]
-    fn invite_status_rejects_session_for_a_different_room() {
-        let mut session = invite_status_session(HttpInviteSessionState::Open, 0, 10_000);
-        session.room_id = "room-other".to_owned();
-        let error = invite_status_summary(&invite_status_code(), Some(&session), 0)
-            .expect_err("room mismatch fails closed");
-        assert!(error.to_string().contains("belongs to room"));
+        let user_event = HermesPollEventV1::finite_chat_text(
+            "room-a",
+            2,
+            "user-first",
+            "user-account",
+            "electron",
+            "hello agent",
+        )
+        .unwrap();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, user_event).unwrap();
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "user-first");
     }
 
     #[test]

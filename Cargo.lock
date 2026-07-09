@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "finite-brain-server",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "finite-brain-core",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "base64",
@@ -1018,10 +1018,11 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "finite-brain-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -1055,15 +1056,22 @@ dependencies = [
 name = "finite-identity"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64",
  "bech32",
  "dirs",
  "fs4",
+ "rusqlite",
  "secp256k1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "time",
+ "tokio",
+ "tower",
+ "ureq",
 ]
 
 [[package]]
@@ -1190,6 +1198,7 @@ dependencies = [
  "finitechat-proto 0.1.0",
  "finitechat-server",
  "finitechat-transport",
+ "futures-util",
  "qrcode",
  "reqwest",
  "serde",
@@ -1250,6 +1259,21 @@ dependencies = [
  "time",
  "tokio",
  "uniffi",
+]
+
+[[package]]
+name = "finitechat-daemon"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "finitechat-core",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower-http",
 ]
 
 [[package]]

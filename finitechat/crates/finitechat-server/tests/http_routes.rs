@@ -2,7 +2,10 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, Response, StatusCode};
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
-use finitechat_http::{ClaimKeyPackageRequest, HealthResponse, PublishKeyPackageResponse};
+use finitechat_http::{
+    ClaimKeyPackageRequest, FINITECHAT_SERVER_CONTRACT_VERSION, HealthResponse,
+    PublishKeyPackageResponse,
+};
 use finitechat_server::{HttpServerState, http_router};
 use finitechat_transport::MemberId;
 use finitechat_transport::engine::KeyPackage;
@@ -28,6 +31,10 @@ async fn health_reports_ok() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: HealthResponse = read_json(response).await;
     assert_eq!(body.status, "ok");
+    assert_eq!(
+        body.server_contract_version,
+        Some(FINITECHAT_SERVER_CONTRACT_VERSION)
+    );
     assert_eq!(body.server_version.as_deref(), Some("0.1.0"));
     assert_non_empty(body.source_commit.as_deref());
     assert_non_empty(body.source_branch.as_deref());

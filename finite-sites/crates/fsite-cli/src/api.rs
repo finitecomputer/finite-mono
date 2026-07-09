@@ -19,6 +19,7 @@ pub struct Client {
 }
 
 const DEFAULT_API_URL: &str = "https://api.finite.chat";
+const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
 
 fn base_url_from_env_value(value: Option<String>) -> String {
     value
@@ -31,6 +32,139 @@ fn now_unix() -> u64 {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     assert!(now > 0);
     now as u64
+}
+
+pub struct IdentityAuthorityClient {
+    base_url: String,
+    client: finite_identity::client::IdentityClient,
+}
+
+impl IdentityAuthorityClient {
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var(IDENTITY_AUTHORITY_ENV)
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())?;
+        Some(Self {
+            client: finite_identity::client::IdentityClient::new(&base_url),
+            base_url,
+        })
+    }
+
+    pub fn request_email_challenge(&self, email: &str) -> Result<EmailLoginResponse, CliError> {
+        let body = self
+            .client
+            .email_challenge_body(email)
+            .map_err(|error| CliError::Key(error.to_string()))?;
+        let url = format!("{}/api/v1/email-challenges", self.base_url);
+        let response = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(body);
+        identity_response_json(response, "POST", "/api/v1/email-challenges")
+    }
+
+    pub fn redeem_email_only(
+        &self,
+        key: &KeyFile,
+        email: &str,
+        token: &str,
+    ) -> Result<EmailRedeemResponse, CliError> {
+        let key = identity_key(key)?;
+        let request = self
+            .client
+            .email_only_redeem(&key, email, token, now_unix())
+            .map_err(|error| CliError::Key(error.to_string()))?;
+        let response: serde_json::Value = self.send_signed_json(request)?;
+        let email = response
+            .get("email")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Api("identity authority response missing email".into()))?;
+        let pubkey = response
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Api("identity authority response missing pubkey".into()))?;
+        Ok(EmailRedeemResponse {
+            email: email.to_owned(),
+            pubkey: pubkey.to_owned(),
+            linked_to_native_principal: false,
+        })
+    }
+
+    pub fn redeem_vip_email(
+        &self,
+        key: &KeyFile,
+        email: &str,
+        token: &str,
+    ) -> Result<EmailRedeemResponse, CliError> {
+        let key = identity_key(key)?;
+        let request = self
+            .client
+            .vip_email_binding_redeem(&key, email, token, now_unix())
+            .map_err(|error| CliError::Key(error.to_string()))?;
+        let response: serde_json::Value = self.send_signed_json(request)?;
+        let email = response
+            .get("email")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Api("identity authority response missing email".into()))?;
+        let pubkey = response
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Api("identity authority response missing pubkey".into()))?;
+        Ok(EmailRedeemResponse {
+            email: email.to_owned(),
+            pubkey: pubkey.to_owned(),
+            linked_to_native_principal: true,
+        })
+    }
+
+    fn send_signed_json<T: serde::de::DeserializeOwned>(
+        &self,
+        signed: finite_identity::client::SignedJsonRequest,
+    ) -> Result<T, CliError> {
+        let url = format!("{}{}", self.base_url, signed.path);
+        let response = ureq::request(&signed.method, &url)
+            .set("Content-Type", "application/json")
+            .set("Authorization", &signed.authorization)
+            .send_bytes(&signed.body);
+        identity_response_json(response, &signed.method, &signed.path)
+    }
+}
+
+fn identity_key(key: &KeyFile) -> Result<finite_identity::client::LocalIdentityKey, CliError> {
+    finite_identity::client::LocalIdentityKey::from_secret(key.secret)
+        .map_err(|error| CliError::Key(error.to_string()))
+}
+
+fn identity_response_json<T: serde::de::DeserializeOwned>(
+    response: Result<ureq::Response, ureq::Error>,
+    method: &str,
+    path: &str,
+) -> Result<T, CliError> {
+    match response {
+        Ok(response) => response.into_json::<T>().map_err(|error| {
+            CliError::Api(format!("invalid identity authority response: {error}"))
+        }),
+        Err(ureq::Error::Status(status, response)) => {
+            let message = response
+                .into_json::<serde_json::Value>()
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "no error details".to_string());
+            Err(CliError::ApiStatus {
+                method: method.to_string(),
+                path: path.to_string(),
+                status,
+                message,
+            })
+        }
+        Err(error) => Err(CliError::Http(format!(
+            "{method} {path} failed against Identity Authority: {error}"
+        ))),
+    }
 }
 
 impl Client {

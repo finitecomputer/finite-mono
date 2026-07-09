@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# import-sync — safely re-import a source repo into its finite-mono directory.
+#
+# Performs a true three-way merge:
+#   base   = source tree at last_import_sha (from scripts/import-sync.toml)
+#   ours   = the current mono copy (preserves deliberate mono-side edits:
+#            deleted sub-workspace Cargo.toml/Cargo.lock, path-dep retargets)
+#   theirs = source tree at origin/main (or --source-path HEAD)
+#
+# Clean merge: the result is written back into the mono directory, the manifest
+# SHA is advanced, and a migration-log entry is appended. Review with git diff,
+# then commit yourself.
+#
+# Conflicts: the temp merge repo is left in place with conflict markers; resolve
+# and `git commit` there, then re-run with --finish to write the result back.
+#
+# After any sync that adds/removes crates, update the root Cargo.toml members
+# list and run `just check`.
+#
+# Usage:
+#   scripts/import-sync <name> [--source-path /path/to/local/checkout] [--dry-run]
+#   scripts/import-sync <name> --finish
+set -euo pipefail
+
+MONO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST="$MONO_ROOT/scripts/import-sync.toml"
+LOG="$MONO_ROOT/docs/monorepo-migration-log.md"
+WORK_ROOT="${IMPORT_SYNC_WORK:-$MONO_ROOT/.import-sync}"
+
+NAME="${1:-}"; shift || true
+[ -n "$NAME" ] || { grep '^\[' "$MANIFEST" | tr -d '[]' | sed 's/^/  /'; echo "usage: scripts/import-sync <name> [--source-path PATH] [--dry-run] | <name> --finish" >&2; exit 2; }
+
+SOURCE_PATH=""; DRY_RUN=0; FINISH=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source-path) SOURCE_PATH="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --finish) FINISH=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+read -r MONO_DIR SOURCE_URL BASE_SHA < <(python3 - "$MANIFEST" "$NAME" <<'EOF'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as f:
+    m = tomllib.load(f)
+e = m.get(sys.argv[2]) or sys.exit(f"no manifest entry for {sys.argv[2]!r}")
+print(e['mono_dir'], e['source_url'], e['last_import_sha'])
+EOF
+)
+
+TMP="$WORK_ROOT/$NAME"
+EXCLUDES=(--exclude '.git' --exclude 'node_modules/' --exclude '.next/' --exclude 'target/'
+          --exclude '.local-state/' --exclude '.finitechat/' --exclude '.state/'
+          --exclude '.direnv/' --exclude '__pycache__/' --exclude '.DS_Store')
+
+write_back() {
+  local src_sha="$1"
+  rsync -a --delete "${EXCLUDES[@]}" "$TMP/" "$MONO_ROOT/$MONO_DIR/"
+  python3 - "$MANIFEST" "$NAME" "$src_sha" <<'EOF'
+import sys, re
+path, name, sha = sys.argv[1:4]
+text = open(path).read()
+pat = re.compile(r'(\[' + re.escape(name) + r'\][^\[]*last_import_sha = ")[0-9a-f]+(")')
+open(path, 'w').write(pat.sub(lambda m: m.group(1) + sha + m.group(2), text))
+EOF
+  {
+    echo ""
+    echo "## import-sync: \`$NAME\` ($(date -u +%Y-%m-%d))"
+    echo ""
+    echo "- Source: $SOURCE_URL"
+    echo "- Base (previous import): \`$BASE_SHA\`"
+    echo "- Synced to: \`$src_sha\`"
+    echo "- Method: three-way merge via scripts/import-sync (mono-side edits preserved)."
+  } >> "$LOG"
+  echo "Wrote merged tree into $MONO_DIR/, advanced manifest to $src_sha, appended log entry."
+  echo "Review: git status && git diff; then update root Cargo.toml members if crates changed, run 'just check', and commit."
+  rm -rf "$TMP"
+}
+
+if [ "$FINISH" = 1 ]; then
+  cd "$TMP" || { echo "no in-progress merge at $TMP" >&2; exit 1; }
+  git diff --quiet && git diff --cached --quiet || { echo "merge repo has uncommitted changes; commit the resolution first" >&2; exit 1; }
+  write_back "$(cat "$TMP/.source-sha")"
+  exit 0
+fi
+
+rm -rf "$TMP"; mkdir -p "$TMP"; cd "$TMP"
+export GIT_AUTHOR_NAME=import-sync GIT_AUTHOR_EMAIL=import-sync@finite \
+       GIT_COMMITTER_NAME=import-sync GIT_COMMITTER_EMAIL=import-sync@finite
+git init -q -b base . && git config commit.gpgsign false
+
+if [ -n "$SOURCE_PATH" ]; then
+  SRC_GIT=(git -C "$SOURCE_PATH")
+  SRC_SHA=$("${SRC_GIT[@]}" rev-parse HEAD)
+else
+  CACHE="$WORK_ROOT/.cache/$NAME.git"
+  if [ -d "$CACHE" ]; then git -C "$CACHE" fetch -q origin; else git clone -q --bare "$SOURCE_URL" "$CACHE"; fi
+  SRC_GIT=(git -C "$CACHE")
+  SRC_SHA=$("${SRC_GIT[@]}" rev-parse origin/main 2>/dev/null || "${SRC_GIT[@]}" rev-parse main)
+fi
+echo "$SRC_SHA" > "$TMP/.source-sha"
+
+if [ "$SRC_SHA" = "$BASE_SHA" ]; then echo "$NAME: source unchanged since last import ($BASE_SHA); nothing to do."; rm -rf "$TMP"; exit 0; fi
+
+materialize() { git ls-files -z | xargs -0 rm -f 2>/dev/null || true; find . -type d -empty -not -path './.git*' -delete 2>/dev/null || true; }
+
+"${SRC_GIT[@]}" archive "$BASE_SHA" | tar -x -C "$TMP"
+git add -A && git commit -q -m base --allow-empty
+git checkout -qb monoside
+materialize
+git -C "$MONO_ROOT" archive "HEAD:$MONO_DIR" | tar -x -C "$TMP"
+git add -A && git commit -q -m mono --allow-empty
+git checkout -q base && git checkout -qb sourceside
+materialize
+"${SRC_GIT[@]}" archive "$SRC_SHA" | tar -x -C "$TMP"
+git add -A && git commit -q -m source --allow-empty
+git checkout -q monoside
+
+echo "--- mono-side edits preserved (vs base):"; git diff --stat base monoside | tail -3
+echo "--- source drift being imported:";       git diff --stat base sourceside | tail -3
+
+if git merge -q sourceside -m "import-sync $NAME $BASE_SHA..$SRC_SHA" 2>/dev/null; then
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "DRY RUN: merge is clean. Result left at $TMP (not written back)."
+  else
+    write_back "$SRC_SHA"
+  fi
+else
+  echo ""
+  echo "CONFLICTS — resolve in $TMP, 'git commit' there, then:"
+  echo "  scripts/import-sync $NAME --finish"
+  git status --porcelain | grep -E '^(UU|AA|DU|UD|AU|DA)' || true
+  exit 1
+fi

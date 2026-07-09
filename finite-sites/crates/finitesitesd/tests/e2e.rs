@@ -7,9 +7,11 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use finitesites_blob::BlobStore;
@@ -80,17 +82,28 @@ impl TestServer {
     }
 
     async fn start_without_publish_grant(git_auto_reconcile: bool) -> TestServer {
-        Self::start_inner(None, git_auto_reconcile).await
+        Self::start_inner(None, git_auto_reconcile, None).await
+    }
+
+    async fn start_with_identity_authority(
+        allowed_pubkey: &str,
+        identity_authority_url: String,
+    ) -> TestServer {
+        Self::start_inner(Some(allowed_pubkey), true, Some(identity_authority_url)).await
     }
 
     async fn start_with_git_auto_reconcile(
         allowed_pubkey: &str,
         git_auto_reconcile: bool,
     ) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), git_auto_reconcile).await
+        Self::start_inner(Some(allowed_pubkey), git_auto_reconcile, None).await
     }
 
-    async fn start_inner(allowed_pubkey: Option<&str>, git_auto_reconcile: bool) -> TestServer {
+    async fn start_inner(
+        allowed_pubkey: Option<&str>,
+        git_auto_reconcile: bool,
+        identity_authority_url: Option<String>,
+    ) -> TestServer {
         let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
         if let Some(allowed_pubkey) = allowed_pubkey {
@@ -122,6 +135,7 @@ impl TestServer {
             document_base_domain: document_base_domain(),
             api_url: format!("http://127.0.0.1:{}", addr.port()),
             git_base_url: format!("http://git.{BASE_DOMAIN}:{}", addr.port()),
+            identity_authority_url,
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
             site_url_scheme: "http".to_string(),
@@ -228,6 +242,61 @@ fn hook_helper_path() -> PathBuf {
 
 fn json_body<T: serde::de::DeserializeOwned>(response: ureq::Response) -> T {
     response.into_json().unwrap()
+}
+
+fn identity_authority_stub(satisfied: bool) -> (String, mpsc::Receiver<serde_json::Value>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 512];
+        let body_start = loop {
+            let read = stream.read(&mut chunk).unwrap();
+            assert_ne!(read, 0, "identity authority client closed before headers");
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(end) = buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+            {
+                break end;
+            }
+        };
+        let headers = String::from_utf8_lossy(&buffer[..body_start]).into_owned();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+            })
+            .unwrap_or(0);
+        while buffer.len() < body_start + content_length {
+            let read = stream.read(&mut chunk).unwrap();
+            assert_ne!(read, 0, "identity authority client closed before body");
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let request_line = headers.lines().next().unwrap_or_default();
+        assert_eq!(
+            request_line,
+            "POST /api/v1/principal-resolution/satisfies-grant HTTP/1.1"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
+        sender.send(body).unwrap();
+
+        let response_body = serde_json::json!({ "satisfied": satisfied }).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (url, receiver)
 }
 
 fn outbox_link(outbox: &Path) -> String {
@@ -1553,6 +1622,67 @@ async fn project_init_and_git_auth_flow() {
         assert_eq!(credential.project_slug, "finitechat-native");
         assert_eq!(credential.username, credential.credential_id);
         assert_eq!(credential.password.len(), 64);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let stranger_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let (identity_authority_url, identity_authority_requests) = identity_authority_stub(true);
+    let server =
+        TestServer::start_with_identity_authority(&user_pubkey, identity_authority_url).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        assert!(created.created);
+
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: "skyler@example.com".into(),
+            role: "editor".into(),
+        })
+        .unwrap();
+        let grant: ProjectGrantResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/grant",
+                    Some(&grant_body),
+                )
+                .unwrap(),
+        );
+        assert!(grant.collaborator.created);
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest {
+            email: Some("skyler@example.com".into()),
+        })
+        .unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(credential.project_slug, "finitechat-native");
+        assert_eq!(credential.username, credential.credential_id);
+        assert_eq!(credential.password.len(), 64);
+
+        let identity_request = identity_authority_requests
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(identity_request["grant"], "skyler@example.com");
+        assert_eq!(identity_request["actor_pubkey"], stranger_pubkey);
     });
     task.await.unwrap();
 }

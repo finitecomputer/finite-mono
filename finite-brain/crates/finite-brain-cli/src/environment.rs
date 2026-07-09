@@ -7,6 +7,9 @@ pub struct CliEnvironment {
     pub cwd: PathBuf,
     pub config_dir: PathBuf,
     pub now: Option<String>,
+    /// Optional finite-identity Authority URL for email proof and native
+    /// finite.vip binding flows.
+    pub identity_authority_url: Option<String>,
     /// Explicit Finite home for the shared identity, used by tests and
     /// embedders. `None` resolves per the Finite Identity Contract v1:
     /// `$FINITE_HOME/identity/` when `FINITE_HOME` is set, otherwise
@@ -26,10 +29,15 @@ impl CliEnvironment {
             })
             .unwrap_or_else(|| cwd.join(".fbrain"));
         let now = env::var("FBRAIN_NOW").ok();
+        let identity_authority_url = env::var("FINITE_IDENTITY_AUTHORITY")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
         Self {
             cwd,
             config_dir,
             now,
+            identity_authority_url,
             finite_home: None,
         }
     }

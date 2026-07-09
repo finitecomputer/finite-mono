@@ -2,20 +2,18 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use finitechat_client::{
-    AppliedLogEntry, ClientError, ClientStoreError, CreateRoomInviteParams, FiniteChatDevice,
-    FiniteChatDeviceConfig, HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport,
-    LinkFanoutRoomStatus, ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError,
-    RuntimeDelivery, RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError,
-    SqliteClientStore, SqliteClientStoreOptions, accept_pending_invite_joins, create_room_invite,
-    finalize_invited_room, run_link_fanout_tick, run_room_server_sync_tick, run_runtime_sync_tick,
-    submit_invite_join_request,
+    AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
+    HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
+    ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
+    RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
+    SqliteClientStoreOptions, run_link_fanout_tick, run_runtime_sync_tick,
 };
 use finitechat_delivery::MAX_HTTP_SYNC_PAGE_ENTRIES;
-use finitechat_http::{HttpInviteJoinState, SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
+use finitechat_http::{SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::LogEntryKind;
 use finitechat_proto::{
-    AppendEventRequest, CreateRoomRequest, DurableAppEventKind, EventAccepted, InviteCodeV1,
+    AppendEventRequest, CreateRoomRequest, DurableAppEventKind, EventAccepted,
     ListAccountRoomsRequest, RoomProtocol, RoomSyncProjection, WelcomeRecord, envelope,
     lease_token_for,
 };
@@ -300,7 +298,6 @@ fn reqwest_http_runtime_delivery_reads_sync_stream_hints_over_live_server() {
                 room_id: room_id.to_owned(),
                 after_seq: 0,
             }],
-            invites: Vec::new(),
             heartbeat_ms: Some(60_000),
         })
         .unwrap();
@@ -811,9 +808,9 @@ fn runtime_later_device_history_starts_at_add_commit_over_finitechat_http() {
         })
         .unwrap();
     let prior_plaintext =
-        br#"{"type":"finitecomputer.command.v1","body":{"text":"before http invite"}}"#;
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"before http add"}}"#;
     let prior = bob
-        .create_application_request(room_id, prior_plaintext, "history_http_before_invite")
+        .create_application_request(room_id, prior_plaintext, "history_http_before_add")
         .unwrap();
     let prior = delivery
         .append_event(&prior, DurableAppEventKind::ChatMessage.delivery_policy())
@@ -850,9 +847,9 @@ fn runtime_later_device_history_starts_at_add_commit_over_finitechat_http() {
     assert_eq!(bob.group_epoch(room_id).unwrap(), 1);
 
     let post_plaintext =
-        br#"{"type":"finitecomputer.command.v1","body":{"text":"after http invite"}}"#;
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"after http add"}}"#;
     let post = bob
-        .create_application_request(room_id, post_plaintext, "history_http_after_invite")
+        .create_application_request(room_id, post_plaintext, "history_http_after_add")
         .unwrap();
     let post = delivery
         .append_event(&post, DurableAppEventKind::ChatMessage.delivery_policy())
@@ -1097,22 +1094,22 @@ fn http_runtime_delivery_filters_membership_and_rejects_pending_sends() {
         })
         .unwrap();
 
-    let before_invite = bob
-        .create_application_request(room_id, b"before invite", "bob_before_http_filter")
+    let before_add = bob
+        .create_application_request(room_id, b"before add", "bob_before_http_filter")
         .unwrap();
-    let before_invite = delivery
+    let before_add = delivery
         .append_event(
-            &before_invite,
+            &before_add,
             DurableAppEventKind::ChatMessage.delivery_policy(),
         )
         .unwrap();
-    assert_eq!(before_invite.seq, 1);
+    assert_eq!(before_add.seq, 1);
 
     let alice_hidden = delivery
         .sync_events(room_id, alice.device_ref(), 0)
         .unwrap();
     assert!(alice_hidden.entries.is_empty());
-    assert_eq!(alice_hidden.next_after_seq, before_invite.seq);
+    assert_eq!(alice_hidden.next_after_seq, before_add.seq);
 
     delivery
         .upload_key_package(
@@ -2590,6 +2587,7 @@ enum InProcessHttpTransportError {
     Router(String),
     InjectedSubmitBeforeAccept,
     InjectedSubmitAfterAccept,
+    InjectedKeyPackageInventory,
 }
 
 impl std::fmt::Display for InProcessHttpTransportError {
@@ -2602,6 +2600,9 @@ impl std::fmt::Display for InProcessHttpTransportError {
             Self::Router(error) => write!(formatter, "router error: {error}"),
             Self::InjectedSubmitBeforeAccept => write!(formatter, "injected submit before accept"),
             Self::InjectedSubmitAfterAccept => write!(formatter, "injected submit after accept"),
+            Self::InjectedKeyPackageInventory => {
+                write!(formatter, "injected KeyPackage inventory failure")
+            }
         }
     }
 }
@@ -2647,6 +2648,7 @@ struct InProcessHttpTransport {
     runtime: tokio::runtime::Runtime,
     fail_next_submit_before_accept: bool,
     fail_next_submit_after_accept: bool,
+    fail_key_package_inventory: bool,
 }
 
 impl InProcessHttpTransport {
@@ -2656,6 +2658,7 @@ impl InProcessHttpTransport {
             runtime: tokio::runtime::Runtime::new().unwrap(),
             fail_next_submit_before_accept: false,
             fail_next_submit_after_accept: false,
+            fail_key_package_inventory: false,
         }
     }
 }
@@ -2671,6 +2674,14 @@ impl HttpRuntimeTransport for InProcessHttpTransport {
         if uri == "/commits" && self.fail_next_submit_before_accept {
             self.fail_next_submit_before_accept = false;
             return Err(InProcessHttpTransportError::InjectedSubmitBeforeAccept);
+        }
+        if self.fail_key_package_inventory
+            && matches!(
+                uri,
+                "/key-packages" | "/key-packages/claim" | "/key-packages/claims"
+            )
+        {
+            return Err(InProcessHttpTransportError::InjectedKeyPackageInventory);
         }
         let result = self.runtime.block_on(async {
             let request = Request::builder()
@@ -2739,337 +2750,4 @@ fn assert_application_acceptance(accepted: &EventAccepted, sent_plaintexts: &[Se
         .map(|message| message.seq + 1)
         .unwrap_or(2);
     assert_eq!(accepted.seq, expected_seq);
-}
-
-#[test]
-fn invite_flow_admits_via_url_and_join_proof_and_pins_room_server_over_http() {
-    let dir = tempfile::tempdir().unwrap();
-    let server_db = dir.path().join("finitechat-http.sqlite3");
-    let now_ms = NOW * 1000;
-    let room_server_url = "http://rooms.finite.test:8787";
-
-    let agent_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "agent_hermes");
-    let mut agent_store = sqlite_client_store(dir.path().join("agent.sqlite3"), &agent_config);
-    let mut agent = FiniteChatDevice::new(agent_config.clone()).unwrap();
-    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_phone");
-    let mut bob_store = sqlite_client_store(dir.path().join("bob.sqlite3"), &bob_config);
-    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
-    let mut mallory = test_device(CHARLIE_ACCOUNT_SECRET_BYTES, "mallory_laptop");
-    let mut mallory_store = sqlite_client_store(
-        dir.path().join("mallory.sqlite3"),
-        &test_config(CHARLIE_ACCOUNT_SECRET_BYTES, "mallory_laptop"),
-    );
-    let options = RuntimeSyncOptions {
-        key_package_target_available: 0,
-        max_sync_pages_per_room: 4,
-    };
-    agent_store.save_device_state(&agent).unwrap();
-    bob_store.save_device_state(&bob).unwrap();
-
-    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
-
-    // The agent creates its room and an invite, printed as a URL + QR.
-    agent.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
-    agent_store.save_device_state(&agent).unwrap();
-    delivery
-        .bootstrap_account_room(&CreateRoomRequest {
-            room_id: ROOM_ID.to_owned(),
-            mls_group_id: MLS_GROUP_ID.to_owned(),
-            creator: agent.device_ref().clone(),
-            protocol: RoomProtocol::default(),
-        })
-        .unwrap();
-    let code = create_room_invite(
-        &agent,
-        &mut delivery,
-        CreateRoomInviteParams {
-            room_id: ROOM_ID,
-            server_url: room_server_url,
-            display_name: Some("Hermes Agent".to_owned()),
-            max_joins: 4,
-            ttl_ms: 24 * 60 * 60 * 1000,
-            now_ms,
-        },
-    )
-    .unwrap();
-
-    // What travels is only the URL string; the app re-parses it.
-    let url = code.encode().unwrap();
-    let scanned = InviteCodeV1::parse(&url).unwrap();
-    assert_eq!(scanned, code);
-    assert_eq!(scanned.inviter_account_id, agent.device_ref().account_id);
-
-    // Bob submits the proof derived from the invite URL.
-    let bob_join = submit_invite_join_request(
-        &mut bob_store,
-        &mut bob,
-        &mut delivery,
-        &scanned,
-        Some("Bob".to_owned()),
-        now_ms,
-    )
-    .unwrap();
-
-    // Mallory has the invite id but not the real invite token, so her proof fails.
-    let mut tampered = scanned.clone();
-    tampered.invite_token[0] ^= 0xff;
-    let mallory_join = submit_invite_join_request(
-        &mut mallory_store,
-        &mut mallory,
-        &mut delivery,
-        &tampered,
-        Some("Definitely Bob".to_owned()),
-        now_ms,
-    )
-    .unwrap();
-
-    // The agent verifies proofs before anyone enters the MLS group.
-    let report =
-        accept_pending_invite_joins(&mut agent_store, &mut agent, &mut delivery, &code, now_ms)
-            .unwrap();
-    assert_eq!(report.accepted, vec![bob.device_ref().clone()]);
-    assert_eq!(report.rejected, vec![mallory.device_ref().clone()]);
-    assert!(!report.deferred_pending_commit);
-
-    // Joiner-visible verdicts.
-    let bob_status = delivery
-        .invite_join_status(&code.invite_id, &bob_join.request_id)
-        .unwrap();
-    assert_eq!(bob_status.state, HttpInviteJoinState::Accepted);
-    assert_eq!(bob_status.room_id, ROOM_ID);
-    let mallory_status = delivery
-        .invite_join_status(&code.invite_id, &mallory_join.request_id)
-        .unwrap();
-    assert_eq!(mallory_status.state, HttpInviteJoinState::Rejected);
-
-    // The agent merges its own add commit from the log (pending-commit rule).
-    run_runtime_sync_tick(&mut agent_store, &mut agent, &mut delivery, &options).unwrap();
-    assert_eq!(agent.group_epoch(ROOM_ID).unwrap(), 1);
-
-    // Bob claims and activates the Welcome from the room's server, then
-    // verifies the agent is really in the room and pins the server address.
-    let bob_report =
-        run_runtime_sync_tick(&mut bob_store, &mut bob, &mut delivery, &options).unwrap();
-    assert_eq!(bob_report.claimed_welcomes, 1);
-    assert_eq!(bob.group_epoch(ROOM_ID).unwrap(), 1);
-    finalize_invited_room(&mut bob_store, &mut bob, &scanned).unwrap();
-    assert_eq!(bob.room_server_url(ROOM_ID), Some(room_server_url));
-
-    // Verification rejects an account that is not in the room.
-    let mut fake = scanned.clone();
-    fake.inviter_account_id = mallory.device_ref().account_id.clone();
-    assert!(matches!(
-        bob.verify_room_member_account(ROOM_ID, &fake.inviter_account_id),
-        Err(ClientError::AccountNotInRoom { .. })
-    ));
-
-    // The room is now pinned to its room server: the home tick skips it and
-    // the room-server tick owns it.
-    let message = agent
-        .create_application_request(ROOM_ID, b"hello from your agent", "app_invite_hello")
-        .unwrap();
-    agent_store.save_device_state(&agent).unwrap();
-    delivery
-        .append_event(&message, DurableAppEventKind::ChatMessage.delivery_policy())
-        .unwrap();
-    let home_report =
-        run_runtime_sync_tick(&mut bob_store, &mut bob, &mut delivery, &options).unwrap();
-    assert!(home_report.applied_entries.is_empty());
-    let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
-    let room_report = run_room_server_sync_tick(
-        &mut bob_store,
-        &mut bob,
-        &mut delivery,
-        &options,
-        room_server_url,
-    )
-    .unwrap();
-    assert_eq!(room_report.applied_entries.len(), 1);
-    assert_eq!(
-        room_report.applied_entries[0].entry,
-        AppliedLogEntry::Application {
-            plaintext: b"hello from your agent".to_vec(),
-            sender: agent.device_ref().clone(),
-        }
-    );
-
-    let bob_receipt = bob
-        .create_application_request(ROOM_ID, b"read receipt from phone", "phone_receipt_1")
-        .unwrap();
-    bob_store.save_device_state(&bob).unwrap();
-    delivery
-        .append_event(
-            &bob_receipt,
-            DurableAppEventKind::ChatReceipt.delivery_policy(),
-        )
-        .unwrap();
-    let bob_media = bob
-        .create_application_request(ROOM_ID, b"media from phone", "phone_media_1")
-        .unwrap();
-    bob_store.save_device_state(&bob).unwrap();
-    delivery
-        .append_event(
-            &bob_media,
-            DurableAppEventKind::ChatMessage.delivery_policy(),
-        )
-        .unwrap();
-    let mut agent = agent_store.load_device(agent_config.clone()).unwrap();
-    let agent_report =
-        run_runtime_sync_tick(&mut agent_store, &mut agent, &mut delivery, &options).unwrap();
-    assert_eq!(agent_report.applied_entries.len(), 2);
-
-    // Hermes bridge sends are separate CLI invocations: each send opens the
-    // encrypted store, creates one MLS application message, saves, and exits.
-    // The sender ratchet must survive that round trip or the next send reuses
-    // an MLS generation and recipients reject it with SecretReuseError.
-    let mut agent = agent_store.load_device(agent_config.clone()).unwrap();
-    let second_message = agent
-        .create_application_request(
-            ROOM_ID,
-            b"second hello from your agent",
-            "app_invite_hello_2",
-        )
-        .unwrap();
-    agent_store.save_device_state(&agent).unwrap();
-    delivery
-        .append_event(
-            &second_message,
-            DurableAppEventKind::ChatMessage.delivery_policy(),
-        )
-        .unwrap();
-    let mut agent = agent_store.load_device(agent_config.clone()).unwrap();
-    let third_message = agent
-        .create_application_request(
-            ROOM_ID,
-            b"third hello from your agent",
-            "app_invite_hello_3",
-        )
-        .unwrap();
-    agent_store.save_device_state(&agent).unwrap();
-    delivery
-        .append_event(
-            &third_message,
-            DurableAppEventKind::ChatMessage.delivery_policy(),
-        )
-        .unwrap();
-    let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
-    let room_report = run_room_server_sync_tick(
-        &mut bob_store,
-        &mut bob,
-        &mut delivery,
-        &options,
-        room_server_url,
-    )
-    .unwrap();
-    assert_eq!(room_report.applied_entries.len(), 2);
-    assert_eq!(
-        room_report.applied_entries[0].entry,
-        AppliedLogEntry::Application {
-            plaintext: b"second hello from your agent".to_vec(),
-            sender: agent.device_ref().clone(),
-        }
-    );
-    assert_eq!(
-        room_report.applied_entries[1].entry,
-        AppliedLogEntry::Application {
-            plaintext: b"third hello from your agent".to_vec(),
-            sender: agent.device_ref().clone(),
-        }
-    );
-
-    // The server pin survives the encrypted store round trip.
-    let bob = bob_store.load_device(bob_config).unwrap();
-    assert_eq!(bob.room_server_url(ROOM_ID), Some(room_server_url));
-    // Mallory never entered the group.
-    assert_eq!(
-        agent
-            .verified_member_count(ROOM_ID, mallory.device_ref())
-            .unwrap(),
-        0
-    );
-}
-
-#[test]
-fn invite_accept_defers_while_a_pending_commit_is_unmerged() {
-    let dir = tempfile::tempdir().unwrap();
-    let server_db = dir.path().join("finitechat-http.sqlite3");
-    let now_ms = NOW * 1000;
-
-    let agent_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "agent_hermes_defer");
-    let mut agent_store = sqlite_client_store(dir.path().join("agent.sqlite3"), &agent_config);
-    let mut agent = FiniteChatDevice::new(agent_config).unwrap();
-    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_phone_defer");
-    let mut bob_store = sqlite_client_store(dir.path().join("bob.sqlite3"), &bob_config);
-    let mut bob = FiniteChatDevice::new(bob_config).unwrap();
-    let mut dana = test_device(DANA_ACCOUNT_SECRET_BYTES, "dana_tablet");
-    let mut dana_store = sqlite_client_store(
-        dir.path().join("dana.sqlite3"),
-        &test_config(DANA_ACCOUNT_SECRET_BYTES, "dana_tablet"),
-    );
-    let options = RuntimeSyncOptions {
-        key_package_target_available: 0,
-        max_sync_pages_per_room: 4,
-    };
-    agent_store.save_device_state(&agent).unwrap();
-    bob_store.save_device_state(&bob).unwrap();
-
-    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
-    agent.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
-    agent_store.save_device_state(&agent).unwrap();
-    delivery
-        .bootstrap_account_room(&CreateRoomRequest {
-            room_id: ROOM_ID.to_owned(),
-            mls_group_id: MLS_GROUP_ID.to_owned(),
-            creator: agent.device_ref().clone(),
-            protocol: RoomProtocol::default(),
-        })
-        .unwrap();
-    let code = create_room_invite(
-        &agent,
-        &mut delivery,
-        CreateRoomInviteParams {
-            room_id: ROOM_ID,
-            server_url: "http://rooms.finite.test:8787",
-            display_name: None,
-            max_joins: 4,
-            ttl_ms: 60 * 60 * 1000,
-            now_ms,
-        },
-    )
-    .unwrap();
-
-    // First joiner is accepted; the add commit is pending until the agent
-    // observes it in the log.
-    submit_invite_join_request(&mut bob_store, &mut bob, &mut delivery, &code, None, now_ms)
-        .unwrap();
-    let first =
-        accept_pending_invite_joins(&mut agent_store, &mut agent, &mut delivery, &code, now_ms)
-            .unwrap();
-    assert_eq!(first.accepted.len(), 1);
-
-    // A second joiner arriving before the merge is deferred, not lost.
-    submit_invite_join_request(
-        &mut dana_store,
-        &mut dana,
-        &mut delivery,
-        &code,
-        None,
-        now_ms,
-    )
-    .unwrap();
-    let deferred =
-        accept_pending_invite_joins(&mut agent_store, &mut agent, &mut delivery, &code, now_ms)
-            .unwrap();
-    assert!(deferred.deferred_pending_commit);
-    assert!(deferred.accepted.is_empty());
-
-    // After a sync tick merges the pending commit, the deferred join lands.
-    run_runtime_sync_tick(&mut agent_store, &mut agent, &mut delivery, &options).unwrap();
-    let second =
-        accept_pending_invite_joins(&mut agent_store, &mut agent, &mut delivery, &code, now_ms)
-            .unwrap();
-    assert_eq!(second.accepted, vec![dana.device_ref().clone()]);
-    assert_eq!(agent.group_epoch(ROOM_ID).unwrap(), 1);
-    run_runtime_sync_tick(&mut agent_store, &mut agent, &mut delivery, &options).unwrap();
-    assert_eq!(agent.group_epoch(ROOM_ID).unwrap(), 2);
 }

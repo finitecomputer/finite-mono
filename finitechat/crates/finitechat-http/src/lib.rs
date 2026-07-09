@@ -9,11 +9,17 @@ use finitechat_transport::transport::TransportMessage;
 use finitechat_transport::{GroupId, MemberId, MessageId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+/// Exact HTTP delivery/admission contract spoken by this build.
+///
+/// Bump this when client, Hermes bridge, or server behavior changes in a way
+/// that must not silently interoperate with an older deployed server.
+pub const FINITECHAT_SERVER_CONTRACT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_contract_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,15 +122,13 @@ pub struct GroupSyncRequest {
 }
 
 /// Long-poll wake hint (ADR 0003 §5 wake contract over HTTP): returns when
-/// any watched room log advances past the supplied cursor or any watched
-/// invite session changes, or when `wait_ms` elapses. Purely advisory —
-/// hints never advance state; callers re-sync to observe actual entries.
+/// any watched room log advances past the supplied cursor or when `wait_ms`
+/// elapses. Purely advisory — hints never advance state; callers re-sync to
+/// observe actual entries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncWaitRequest {
     #[serde(default)]
     pub rooms: Vec<SyncWaitRoom>,
-    #[serde(default)]
-    pub invites: Vec<SyncWaitInvite>,
     pub wait_ms: u64,
 }
 
@@ -132,15 +136,6 @@ pub struct SyncWaitRequest {
 pub struct SyncWaitRoom {
     pub room_id: String,
     pub after_seq: HttpSequence,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SyncWaitInvite {
-    pub invite_id: String,
-    /// Wake when join_requests.len() exceeds this.
-    pub seen_requests: u32,
-    /// Wake when resolved (non-pending) requests exceed this.
-    pub seen_resolved: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,8 +151,6 @@ pub struct SyncWaitResponse {
 pub struct SyncStreamRequest {
     #[serde(default)]
     pub rooms: Vec<SyncWaitRoom>,
-    #[serde(default)]
-    pub invites: Vec<SyncWaitInvite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ms: Option<u64>,
 }
@@ -172,12 +165,6 @@ pub enum SyncHintEvent {
     ActivityChanged {
         room_id: String,
         received_at_ms: u64,
-    },
-    InviteChanged {
-        invite_id: String,
-        requests: u32,
-        resolved: u32,
-        state: HttpInviteSessionState,
     },
     Heartbeat,
 }
@@ -290,19 +277,19 @@ pub struct GetNostrProfilesResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GetInviteAvailabilityRequest {
+pub struct GetKeyPackageAvailabilityRequest {
     pub account_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InviteAvailabilityEntry {
+pub struct KeyPackageAvailabilityEntry {
     pub account_id: String,
     pub available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GetInviteAvailabilityResponse {
-    pub accounts: Vec<InviteAvailabilityEntry>,
+pub struct GetKeyPackageAvailabilityResponse {
+    pub accounts: Vec<KeyPackageAvailabilityEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,172 +414,6 @@ pub enum HttpLinkSessionState {
     Claimed,
     Delivered,
     Expired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateInviteSessionRequest {
-    pub invite_id: String,
-    pub room_id: String,
-    pub inviter: DeviceRef,
-    pub max_joins: u32,
-    pub expires_at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubmitInviteJoinRequest {
-    pub invite_id: String,
-    pub request_id: String,
-    pub joiner: DeviceRef,
-    pub key_package: Vec<u8>,
-    pub join_proof: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    pub submitted_at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListInviteJoinRequestsRequest {
-    pub invite_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListInviteJoinRequestsResponse {
-    pub session: HttpInviteSessionSummary,
-    pub requests: Vec<HttpInviteJoinRequestRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RespondInviteJoinRequest {
-    pub invite_id: String,
-    pub request_id: String,
-    pub accept: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InviteJoinStatusRequest {
-    pub invite_id: String,
-    pub request_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InviteJoinStatusResponse {
-    pub room_id: String,
-    pub state: HttpInviteJoinState,
-    /// Total resolved (non-pending) join requests in the session; the
-    /// joiner's wake predicate for /sync/wait.
-    #[serde(default)]
-    pub resolved_requests: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpireInviteSessionRequest {
-    pub invite_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpireInviteSessionResponse {
-    pub expired: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpInviteSessionSummary {
-    pub invite_id: String,
-    pub room_id: String,
-    pub inviter: DeviceRef,
-    pub max_joins: u32,
-    pub accepted_joins: u32,
-    pub expires_at_ms: u64,
-    pub state: HttpInviteSessionState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpInviteSessionRecord {
-    pub invite_id: String,
-    pub room_id: String,
-    pub inviter: DeviceRef,
-    pub max_joins: u32,
-    pub accepted_joins: u32,
-    pub expires_at_ms: u64,
-    pub state: HttpInviteSessionState,
-    #[serde(default)]
-    pub join_requests: BTreeMap<String, HttpInviteJoinRequestRecord>,
-}
-
-impl HttpInviteSessionRecord {
-    pub fn summary(&self) -> HttpInviteSessionSummary {
-        HttpInviteSessionSummary {
-            invite_id: self.invite_id.clone(),
-            room_id: self.room_id.clone(),
-            inviter: self.inviter.clone(),
-            max_joins: self.max_joins,
-            accepted_joins: self.accepted_joins,
-            expires_at_ms: self.expires_at_ms,
-            state: self.state.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpInviteSessionState {
-    Open,
-    Closed,
-    Expired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct HttpInviteJoinRequestRecord {
-    pub request_id: String,
-    pub joiner: DeviceRef,
-    pub key_package: Vec<u8>,
-    pub join_proof: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    pub submitted_at_ms: u64,
-    pub state: HttpInviteJoinState,
-}
-
-impl<'de> Deserialize<'de> for HttpInviteJoinRequestRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            request_id: String,
-            joiner: DeviceRef,
-            key_package: Vec<u8>,
-            #[serde(default)]
-            join_proof: Option<String>,
-            #[serde(default)]
-            pin_proof: Option<String>,
-            #[serde(default)]
-            display_name: Option<String>,
-            submitted_at_ms: u64,
-            state: HttpInviteJoinState,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let join_proof = wire
-            .join_proof
-            .or(wire.pin_proof)
-            .ok_or_else(|| serde::de::Error::missing_field("join_proof"))?;
-        Ok(Self {
-            request_id: wire.request_id,
-            joiner: wire.joiner,
-            key_package: wire.key_package,
-            join_proof,
-            display_name: wire.display_name,
-            submitted_at_ms: wire.submitted_at_ms,
-            state: wire.state,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpInviteJoinState {
-    Pending,
-    Accepted,
-    Rejected,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -745,57 +566,4 @@ pub struct PublishKeyPackageResponse {
 pub struct ErrorResponse {
     pub kind: String,
     pub error: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invite_join_record_reads_legacy_pin_proof_as_join_proof() {
-        let record: HttpInviteJoinRequestRecord = serde_json::from_value(serde_json::json!({
-            "request_id": "request-1",
-            "joiner": {
-                "account_id": "acct",
-                "device_id": "device"
-            },
-            "key_package": [1, 2, 3],
-            "pin_proof": "legacy-proof",
-            "display_name": "Paul",
-            "submitted_at_ms": 42,
-            "state": "Pending"
-        }))
-        .expect("legacy stored invite join record should decode");
-
-        assert_eq!(record.join_proof, "legacy-proof");
-        assert_eq!(record.request_id, "request-1");
-        assert_eq!(record.joiner, DeviceRef::new("acct", "device"));
-        assert_eq!(record.key_package, vec![1, 2, 3]);
-        assert_eq!(record.display_name.as_deref(), Some("Paul"));
-        assert_eq!(record.submitted_at_ms, 42);
-        assert_eq!(record.state, HttpInviteJoinState::Pending);
-    }
-
-    #[test]
-    fn invite_join_record_serializes_only_join_proof() {
-        let record = HttpInviteJoinRequestRecord {
-            request_id: "request-1".to_owned(),
-            joiner: DeviceRef::new("acct", "device"),
-            key_package: vec![1, 2, 3],
-            join_proof: "new-proof".to_owned(),
-            display_name: None,
-            submitted_at_ms: 42,
-            state: HttpInviteJoinState::Pending,
-        };
-
-        let value = serde_json::to_value(record).expect("record should serialize");
-        assert_eq!(
-            value.get("join_proof").and_then(serde_json::Value::as_str),
-            Some("new-proof")
-        );
-        assert!(
-            value.get("pin_proof").is_none(),
-            "new records must not write legacy pin_proof"
-        );
-    }
 }

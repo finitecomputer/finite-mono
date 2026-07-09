@@ -19,11 +19,19 @@ Decision:
 - `fsite auth redeem EMAIL TOKEN --link-native` lets an email invite token be
   linked to the local native Principal directly, without requesting a second
   token.
+- When `FINITE_IDENTITY_AUTHORITY` is configured, email challenge and redeem
+  requests go to finite-identity. Finite VIP email redemption binds the email
+  to the local shared User Key there; external email redemption remains
+  email-only.
 - A verified Email Link maps one email address to one Native Principal. Future
   Project Grants to that email resolve to the linked native Principal.
 - Linking migrates existing active Project Collaborator grants from the
   External Principal to the Native Principal and revokes old email-scoped Git
   Credentials. Replay is a no-op.
+- With Identity Authority enabled, Sites asks finite-identity whether the
+  actor pubkey satisfies an email grant before minting a scoped Git Credential
+  for that email. Sites-local email keys remain available only as a fallback
+  for deployments without the Authority.
 - Operator grants remain useful for manual override and revocation, but they
   are no longer the default onboarding path.
 

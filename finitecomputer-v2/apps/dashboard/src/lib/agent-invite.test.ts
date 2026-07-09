@@ -91,6 +91,28 @@ test("parseAgentInviteResponse maps a consumed invite to the paired state", () =
   });
 });
 
+test("parseAgentInviteResponse does not treat consumed-pending-admission as paired", () => {
+  assert.deepEqual(
+    parseAgentInviteResponse({
+      ready: true,
+      paired: false,
+      room_id: "room-1",
+      invite_state: "consumed_pending_admission",
+    }),
+    { state: "pending" }
+  );
+
+  assert.deepEqual(
+    parseAgentInviteResponse({
+      ready: false,
+      paired: false,
+      room_id: "room-1",
+      invite_state: "consumed_pending_admission",
+    }),
+    { state: "pending" }
+  );
+});
+
 test("parseAgentInviteResponse lets paired take precedence over a lingering URL", () => {
   assert.deepEqual(
     parseAgentInviteResponse({

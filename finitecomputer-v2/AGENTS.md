@@ -55,8 +55,10 @@ with a delete condition.
 
 - Prefer copying proven code over rewriting from scratch, but delete legacy
   compatibility as soon as the v2 path has replacement tests.
-- Keep service repos separate. Do not vendor `finite-sites`, `finitechat`, or
-  `finite-skills` here.
+- Components stay separate trees inside finite-mono. Do not copy
+  `finite-sites`, `finitechat`, or `finite-skills` code into this directory —
+  depend on their sibling workspace crates/paths (see
+  `../docs/monorepo-doctrine.md`).
 - Add docs before adding new compatibility bridges.
 - Keep secrets out of the repo. Use `.env.example` files with comments.
 - For dashboard code, read `apps/dashboard/AGENTS.md` before editing.

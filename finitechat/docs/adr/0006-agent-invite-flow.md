@@ -1,7 +1,9 @@
 # ADR 0006: Agent Invite Flow — URL, QR, and Challenge PIN
 
-Status: accepted 2026-06-12 (design); implementation tracked in
-`docs/agent-invite-plan.md`
+Status: superseded 2026-07-08 by
+[ADR 0010: Welcome-First Room Admission](0010-welcome-first-room-admission.md).
+This document is retained as historical context for the abandoned invite-session
+design; it is not the current protocol contract.
 
 ## Context
 

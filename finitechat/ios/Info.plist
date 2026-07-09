@@ -18,10 +18,21 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>computer.finite.finitechat.target</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>finite</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Finite Chat uses the camera to scan invite and profile QR codes you choose to open.</string>
+	<string>Finite Chat uses the camera to scan profile QR codes you choose to open.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Finite Chat uses the microphone to record voice messages you choose to send.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

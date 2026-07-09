@@ -1,0 +1,53 @@
+# Import-sync manifest: source-of-record for every repo imported into finite-mono.
+# `last_import_sha` is the source commit whose tree is fully reflected in the mono
+# directory (modulo the deliberate mono-side edits listed in
+# docs/monorepo-migration-log.md: sub-workspace Cargo.toml/Cargo.lock removed,
+# path-dep retargets, etc.). scripts/import-sync updates this file after each sync.
+#
+# Once a source repo is archived (post-cutover), its entry stays here as the
+# permanent provenance record.
+
+[finitecomputer-v2]
+mono_dir = "finitecomputer-v2"
+source_url = "https://github.com/finitecomputer/finitecomputer-v2"
+last_import_sha = "0150dd9503812d540c82cca9c808854bb5d6b334"
+
+[finitechat]
+mono_dir = "finitechat"
+source_url = "https://github.com/finitecomputer/finitechat"
+last_import_sha = "6bde2cca16339e41ce927b969202a63bf81e1a8f"
+
+[finite-sites]
+mono_dir = "finite-sites"
+source_url = "https://github.com/finitecomputer/finite-sites"
+last_import_sha = "a6d03e9b1089965d9953b59b4074dc156e645703"
+
+[finite-brain]
+mono_dir = "finite-brain"
+source_url = "https://github.com/finitecomputer/finite-brain"
+last_import_sha = "7c661772c0159fd07ad37f9bb20e2db068de65e1"
+
+[finite-identity]
+mono_dir = "finite-identity"
+source_url = "https://github.com/finitecomputer/finite-identity"
+last_import_sha = "0750e8c5c8cadaf9b7638ef93c6dc1522c6fe5fb"
+
+[finite-nostr]
+mono_dir = "finite-nostr"
+source_url = "https://github.com/finitecomputer/finite-nostr"
+last_import_sha = "fefd22b3f3c39481225a28000bba0b2b9354d1ce"
+
+[finite-auth]
+mono_dir = "finite-auth"
+source_url = "https://github.com/finitecomputer/finite-auth"
+last_import_sha = "13347c93650b55be819d37ec77fbc3b50664a432"
+
+[finite-search]
+mono_dir = "finite-search"
+source_url = "https://github.com/finitecomputer/finite-search"
+last_import_sha = "02d7628922e418405c059753ceaf3449e40a24e7"
+
+[finite-skills]
+mono_dir = "finite-skills"
+source_url = "https://github.com/finitecomputer/finite-skills"
+last_import_sha = "80ada39d477d645eaaacb624e89e0010d3e4aedc"

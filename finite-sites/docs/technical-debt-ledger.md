@@ -103,8 +103,9 @@ snapshot suspend deferred (stop/start already gets idle RAM to ~0).
 - **Risk**: a finitesitesd compromise reaches root via `sudo nerdctl`
   (true regardless of ProtectSystem once that sudo path exists). The
   daemon still runs as the unprivileged finite-sites user.
-- **Proof**: `deploy/finite-lat-2/finite-saas-sites-kata.conf`,
-  `finite-sites-nerdctl-sudoers`.
+- **Proof**: `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf`,
+  `finite-sites-nerdctl-sudoers` (mono root; moved from
+  `deploy/finite-lat-2/`).
 - **Delete condition**: drive containerd via its gRPC API from the daemon
   (no nerdctl, no sudo) with a privilege-separated networking helper, if
   the daemon's own attack surface ever warrants it.

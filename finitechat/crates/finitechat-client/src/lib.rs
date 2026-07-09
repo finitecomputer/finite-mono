@@ -4,18 +4,14 @@ use finitechat_delivery::{
 use finitechat_http::{
     AckWelcomeRequest, AckWelcomeResponse, BootstrapAccountRoomRequest,
     BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimWelcomesRequest, CreateInviteSessionRequest, FiniteAccountRoomCommitProjection,
-    GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse, GetNostrProfilesRequest,
-    GetNostrProfilesResponse, GroupSyncRequest, HttpClaimedWelcome, HttpInviteJoinRequestRecord,
-    HttpInviteJoinState, HttpInviteSessionRecord, HttpKeyPackageInventory, InviteJoinStatusRequest,
-    InviteJoinStatusResponse, KeyPackageInventoryRequest, ListAccountRoomDirectoryRequest,
-    ListAccountRoomDirectoryResponse, ListInviteJoinRequestsRequest,
-    ListInviteJoinRequestsResponse, NostrProfileRecord, PublishKeyPackageResponse, PushPlatform,
-    PutNostrProfileRequest, PutNostrProfileResponse, RegisterPushTokenRequest,
-    RegisterPushTokenResponse, RemovePushTokenRequest, RemovePushTokenResponse,
-    RespondInviteJoinRequest, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SubmitInviteJoinRequest, SyncHintEvent, SyncStreamRequest,
-    SyncWaitRequest, SyncWaitResponse,
+    ClaimWelcomesRequest, FiniteAccountRoomCommitProjection, GetEphemeralActivitiesRequest,
+    GetEphemeralActivitiesResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
+    GroupSyncRequest, HttpClaimedWelcome, HttpKeyPackageInventory, KeyPackageInventoryRequest,
+    ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
+    PublishKeyPackageResponse, PushPlatform, PutNostrProfileRequest, PutNostrProfileResponse,
+    RegisterPushTokenRequest, RegisterPushTokenResponse, RemovePushTokenRequest,
+    RemovePushTokenResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
+    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
 };
 use finitechat_mls::{
     ExpectedDeviceCredential, FiniteDeviceCredentialV1, MlsCredentialError, NOSTR_PUBLIC_KEY_BYTES,
@@ -26,13 +22,10 @@ use finitechat_proto::{
     AccountRoomRecord, AppendApplicationEventRequest, AppendEventRequest,
     ApplicationDeliveryPolicy, ClaimKeyPackageResult, CommitAccepted, CreateRoomRequest,
     EngineError, EventAccepted, KeyPackageInventory, ListAccountRoomsPage, ListAccountRoomsRequest,
-    SubmitCommitRequest, SyncEventsPage, UploadKeyPackageRequest, WelcomeRecord, envelope,
-    lease_token_for,
+    SubmitCommitRequest, SyncEventsPage, UploadKeyPackageRequest, WelcomeRecord,
+    delivery_member_id_for_device, envelope, lease_token_for,
 };
-use finitechat_proto::{
-    AppendEphemeralActivityRequest, EphemeralActivityAccepted, InviteCodeV1, MAX_INVITE_TTL_MILLIS,
-    invite_join_proof, verify_invite_join_proof,
-};
+use finitechat_proto::{AppendEphemeralActivityRequest, EphemeralActivityAccepted};
 use finitechat_proto::{
     DeviceRef, KeyPackageId, LogEntryKind, MAX_ACCOUNT_ID_BYTES,
     MAX_ACCOUNT_ROOM_DISCOVERY_RESULTS, MAX_DEVICE_ID_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES,
@@ -92,6 +85,7 @@ const MAX_PENDING_KEY_PACKAGE_UPLOADS: u32 = MAX_KEY_PACKAGES_PER_DEVICE;
 const MAX_LINK_FANOUTS: u32 = 16;
 const MAX_LINK_FANOUT_ROOMS: u32 = MAX_ACCOUNT_ROOM_DISCOVERY_RESULTS;
 const MAX_RUNTIME_SYNC_PAGES_PER_ROOM: u32 = 64;
+const PENDING_COMMIT_SYNC_OVERLAP: u64 = 8192;
 const MAX_RUNTIME_LINK_FANOUT_DISCOVERY_PAGES_PER_TICK: u32 = MAX_LINK_FANOUT_ROOMS;
 const MAX_RUNTIME_LINK_FANOUT_COMMITS_PER_TICK: u32 = MAX_LINK_FANOUT_ROOMS;
 const MAX_OPENMLS_STORAGE_RECORDS: u32 = 8192;
@@ -112,7 +106,6 @@ const MAX_APP_OUTBOX_METADATA_CIPHERTEXT_BYTES: u32 =
 const MAX_APP_ROOM_DISPLAY_NAME_BYTES: u32 = 256;
 const MAX_APP_ROOM_PICTURE_BYTES: u32 = 2 * 1024;
 const MAX_APP_ROOM_STATUS_BYTES: u32 = 512;
-const MAX_APP_ROOM_INVITE_URL_BYTES: u32 = 4096;
 const MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES: u32 = 8192;
 const MAX_APP_ROOM_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
@@ -160,7 +153,6 @@ const _: () = {
     assert!(MAX_APP_EVENT_CIPHERTEXT_BYTES > MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_APP_ROOM_METADATA_CIPHERTEXT_BYTES > MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES);
     assert!(MAX_APP_PROFILE_METADATA_CIPHERTEXT_BYTES > MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES);
-    assert!(MAX_APP_ROOM_INVITE_URL_BYTES >= MAX_ROOM_SERVER_URL_BYTES);
     assert!(MAX_STORED_APP_MESSAGES > 0);
     assert!(MAX_STORED_APP_PROFILES > 0);
 };
@@ -206,8 +198,9 @@ pub struct PersistedRoomState {
     pub mls_group_id: MlsGroupId,
     pub last_applied_seq: u64,
     /// Which server hosts this room's ordered log. `None` means the
-    /// device's home server (ADR 0005); invited rooms record the address
-    /// from their invite code so the sync ticks can group rooms by server.
+    /// device's home server (ADR 0005). Rooms activated from a Welcome
+    /// record the room server that stored the Welcome so sync ticks can
+    /// group rooms by server.
     pub server_url: Option<String>,
 }
 
@@ -484,8 +477,6 @@ pub struct StoredAppRoom {
     pub state: StoredAppRoomState,
     pub status: String,
     pub local_read_seq: u64,
-    pub pending_invite_url: Option<String>,
-    pub owned_invite_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,8 +499,6 @@ impl StoredAppRoom {
         validate_bytes_non_empty("app_room.display_name", self.display_name.len())?;
         validate_optional_app_room_picture("app_room.picture", self.picture.as_deref())?;
         validate_string_bytes("app_room.status", &self.status, MAX_APP_ROOM_STATUS_BYTES)?;
-        validate_optional_app_room_url("app_room.pending_invite_url", &self.pending_invite_url)?;
-        validate_optional_app_room_url("app_room.owned_invite_url", &self.owned_invite_url)?;
         Ok(())
     }
 }
@@ -522,15 +511,13 @@ struct StoredAppRoomMetadataV1 {
     state: StoredAppRoomState,
     status: String,
     local_read_seq: u64,
-    #[serde(default)]
-    pending_invite_url: Option<String>,
-    #[serde(default)]
-    owned_invite_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredAppState {
     pub selected_room_id: Option<RoomId>,
+    pub selected_topic_id: Option<String>,
+    pub selected_chat_id: Option<String>,
     pub revoked_devices: BTreeSet<DeviceRef>,
 }
 
@@ -538,6 +525,14 @@ impl StoredAppState {
     fn validate_limits(&self) -> Result<(), ClientError> {
         if let Some(room_id) = &self.selected_room_id {
             validate_room_id(room_id)?;
+        }
+        if let Some(topic_id) = &self.selected_topic_id {
+            validate_bytes_non_empty("app_state.selected_topic_id", topic_id.len())?;
+            validate_string_bytes("app_state.selected_topic_id", topic_id, MAX_OBJECT_ID_BYTES)?;
+        }
+        if let Some(chat_id) = &self.selected_chat_id {
+            validate_bytes_non_empty("app_state.selected_chat_id", chat_id.len())?;
+            validate_string_bytes("app_state.selected_chat_id", chat_id, MAX_OBJECT_ID_BYTES)?;
         }
         validate_item_count(
             "app_state.revoked_devices",
@@ -555,6 +550,10 @@ impl StoredAppState {
 struct StoredAppStateMetadataV1 {
     #[serde(deserialize_with = "deserialize_required_option")]
     selected_room_id: Option<RoomId>,
+    #[serde(default)]
+    selected_topic_id: Option<String>,
+    #[serde(default)]
+    selected_chat_id: Option<String>,
     revoked_devices: BTreeSet<DeviceRef>,
 }
 
@@ -1066,7 +1065,8 @@ impl FiniteChatDevice {
             .hash_ref(self.provider.crypto())
             .map_err(|_| ClientError::HashKeyPackageRef)?;
         let key_package_hash = message_id_for_bytes(&payload);
-        let key_package_id = key_package_id.unwrap_or_else(|| format!("kp_{key_package_hash}"));
+        let key_package_id = key_package_id
+            .unwrap_or_else(|| format!("kp_t{:020}_{key_package_hash}", self.now_unix_seconds));
 
         let request = UploadKeyPackageRequest {
             key_package_id,
@@ -1208,10 +1208,10 @@ impl FiniteChatDevice {
         let idempotency_key = idempotency_key.into();
         validate_idempotency_key(&idempotency_key)?;
         if claimed_key_packages.is_empty() {
-            return Err(ClientError::EmptyInviteBatch);
+            return Err(ClientError::EmptyWelcomeBatch);
         }
         if claimed_key_packages.len() != welcome_ids.len() {
-            return Err(ClientError::InviteWelcomeCountMismatch {
+            return Err(ClientError::WelcomeBatchCountMismatch {
                 key_packages: claimed_key_packages.len(),
                 welcome_ids: welcome_ids.len(),
             });
@@ -1246,12 +1246,12 @@ impl FiniteChatDevice {
                 MAX_OBJECT_ID_BYTES,
             )?;
             if !seen_devices.insert(claimed_key_package.owner.clone()) {
-                return Err(ClientError::DuplicateInviteDevice(
+                return Err(ClientError::DuplicateWelcomeBatchDevice(
                     claimed_key_package.owner.clone(),
                 ));
             }
             if !seen_key_packages.insert(claimed_key_package.key_package_id.clone()) {
-                return Err(ClientError::DuplicateInviteKeyPackage(
+                return Err(ClientError::DuplicateWelcomeBatchKeyPackage(
                     claimed_key_package.key_package_id.clone(),
                 ));
             }
@@ -1259,7 +1259,9 @@ impl FiniteChatDevice {
         for welcome_id in welcome_ids {
             validate_string_bytes("welcome_id", welcome_id, MAX_OBJECT_ID_BYTES)?;
             if !seen_welcomes.insert(welcome_id.clone()) {
-                return Err(ClientError::DuplicateInviteWelcome(welcome_id.clone()));
+                return Err(ClientError::DuplicateWelcomeBatchWelcome(
+                    welcome_id.clone(),
+                ));
             }
         }
 
@@ -1663,8 +1665,8 @@ impl FiniteChatDevice {
     }
 
     /// Record which server hosts a room's ordered log. `None` means the
-    /// home server. Joined-via-invite rooms record the address from their
-    /// invite code.
+    /// home server. Rooms activated from a Welcome record the room server
+    /// that stored the Welcome.
     pub fn set_room_server_url(
         &mut self,
         room_id: &str,
@@ -2402,20 +2404,13 @@ impl FiniteChatDevice {
             .map_err(|_| ClientError::Randomness)
     }
 
-    /// Fresh high-entropy invite token (ADR 0006): lives only in the
-    /// invite URL/QR, never alone on the server.
-    pub fn generate_invite_token(&self) -> Result<Vec<u8>, ClientError> {
-        Ok(self.random_bytes::<16>()?.to_vec())
-    }
-
     pub fn generate_object_id(&self, prefix: &str) -> Result<String, ClientError> {
         let bytes = self.random_bytes::<8>()?;
         Ok(format!("{prefix}-{}", hex_lower(&bytes)))
     }
 
     /// Verify that some member of the room carries a valid credential for
-    /// the given account. Joiners run this against the inviter account from
-    /// the invite code after activating the Welcome: a hostile rendezvous
+    /// the given account after activating a Welcome: a hostile rendezvous
     /// server that admits the device to a different group fails here.
     pub fn verify_room_member_account(
         &self,
@@ -3391,8 +3386,6 @@ impl SqliteClientStore {
                 state: metadata.state,
                 status: metadata.status,
                 local_read_seq: metadata.local_read_seq,
-                pending_invite_url: metadata.pending_invite_url,
-                owned_invite_url: metadata.owned_invite_url,
             };
             room.validate_limits()?;
             rooms.push(room);
@@ -3430,6 +3423,8 @@ impl SqliteClientStore {
             decrypt_app_state_metadata(&self.options.encryption_key, owner, &nonce, &ciphertext)?;
         let state = StoredAppState {
             selected_room_id: metadata.selected_room_id,
+            selected_topic_id: metadata.selected_topic_id,
+            selected_chat_id: metadata.selected_chat_id,
             revoked_devices: metadata.revoked_devices,
         };
         state.validate_limits()?;
@@ -3794,7 +3789,18 @@ fn apply_log_entry_in_memory(
         }
         .into());
     }
-    if entry.seq <= device.last_applied_seq(room_id)? {
+    let last_applied_seq = device.last_applied_seq(room_id)?;
+    if entry.seq <= last_applied_seq {
+        let own_pending_commit = entry.kind == LogEntryKind::Commit
+            && entry.sender == *device.device_ref()
+            && device.has_pending_commit(room_id)?;
+        if own_pending_commit {
+            return match device.apply_log_entry(room_id, entry) {
+                Ok(applied) => Ok(Some(applied)),
+                Err(ClientError::UnexpectedCommitEpoch { .. }) => Ok(None),
+                Err(error) => Err(error.into()),
+            };
+        }
         return Ok(None);
     }
     // Own application messages cannot be decrypted by their sender (MLS);
@@ -3902,32 +3908,6 @@ pub trait RuntimeDelivery {
         requester: &DeviceRef,
         after_seq: u64,
     ) -> Result<SyncEventsPage, Self::Error>;
-
-    fn create_invite_session(
-        &mut self,
-        request: CreateInviteSessionRequest,
-    ) -> Result<HttpInviteSessionRecord, Self::Error>;
-
-    fn submit_invite_join(
-        &mut self,
-        request: SubmitInviteJoinRequest,
-    ) -> Result<HttpInviteJoinRequestRecord, Self::Error>;
-
-    fn list_invite_join_requests(
-        &mut self,
-        invite_id: &str,
-    ) -> Result<ListInviteJoinRequestsResponse, Self::Error>;
-
-    fn respond_invite_join(
-        &mut self,
-        request: RespondInviteJoinRequest,
-    ) -> Result<HttpInviteJoinRequestRecord, Self::Error>;
-
-    fn invite_join_status(
-        &mut self,
-        invite_id: &str,
-        request_id: &str,
-    ) -> Result<InviteJoinStatusResponse, Self::Error>;
 }
 
 pub trait HttpRuntimeTransport {
@@ -4177,7 +4157,7 @@ impl<T: HttpRuntimeTransport> HttpRuntimeDelivery<T> {
     }
 
     /// Long-poll wake hint (/sync/wait): purely advisory, never advances
-    /// state. Returns when a watched room/invite changes or wait_ms passes.
+    /// state. Returns when a watched room changes or wait_ms passes.
     pub fn sync_wait(
         &mut self,
         request: &SyncWaitRequest,
@@ -4492,53 +4472,6 @@ impl<T: HttpRuntimeTransport> RuntimeDelivery for HttpRuntimeDelivery<T> {
         Ok(())
     }
 
-    fn create_invite_session(
-        &mut self,
-        request: CreateInviteSessionRequest,
-    ) -> Result<HttpInviteSessionRecord, Self::Error> {
-        self.post_json("/invites", &request)
-    }
-
-    fn submit_invite_join(
-        &mut self,
-        request: SubmitInviteJoinRequest,
-    ) -> Result<HttpInviteJoinRequestRecord, Self::Error> {
-        self.post_json("/invites/join", &request)
-    }
-
-    fn list_invite_join_requests(
-        &mut self,
-        invite_id: &str,
-    ) -> Result<ListInviteJoinRequestsResponse, Self::Error> {
-        self.post_json(
-            "/invites/requests",
-            &ListInviteJoinRequestsRequest {
-                invite_id: invite_id.to_owned(),
-            },
-        )
-    }
-
-    fn respond_invite_join(
-        &mut self,
-        request: RespondInviteJoinRequest,
-    ) -> Result<HttpInviteJoinRequestRecord, Self::Error> {
-        self.post_json("/invites/respond", &request)
-    }
-
-    fn invite_join_status(
-        &mut self,
-        invite_id: &str,
-        request_id: &str,
-    ) -> Result<InviteJoinStatusResponse, Self::Error> {
-        self.post_json(
-            "/invites/status",
-            &InviteJoinStatusRequest {
-                invite_id: invite_id.to_owned(),
-                request_id: request_id.to_owned(),
-            },
-        )
-    }
-
     fn sync_events(
         &mut self,
         room_id: &str,
@@ -4703,9 +4636,7 @@ fn claimed_key_package_result_from_http<E>(
 fn http_member_id_for_device<E>(
     device: &DeviceRef,
 ) -> Result<HttpMemberId, HttpRuntimeDeliveryError<E>> {
-    serde_json::to_vec(device)
-        .map(HttpMemberId::new)
-        .map_err(|error| HttpRuntimeDeliveryError::Json(error.to_string()))
+    Ok(HttpMemberId::new(delivery_member_id_for_device(device)))
 }
 
 fn http_group_id_for_room(room_id: &str) -> HttpGroupId {
@@ -4779,8 +4710,7 @@ pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
 
 /// Sync the rooms hosted on one specific room server (ADR 0005). The
 /// caller provides a delivery bound to that server's address; welcomes are
-/// claimed there too, because an invited room's Welcome lives on the room's
-/// server (ADR 0006).
+/// claimed there too, because a room Welcome lives on the room's server.
 pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -4853,269 +4783,6 @@ fn pending_welcome_activation_failure_is_permanent(error: &ClientStoreError) -> 
                 | ClientError::GroupAlreadyExists(_)
         )
     )
-}
-
-/// Parameters for creating a room invite (ADR 0006). `server_url` is the
-/// public address of the server hosting the room — it goes into the invite
-/// code verbatim, because joining a room is discovering where it lives.
-#[derive(Debug, Clone)]
-pub struct CreateRoomInviteParams<'a> {
-    pub room_id: &'a str,
-    pub server_url: &'a str,
-    pub display_name: Option<String>,
-    pub max_joins: u32,
-    pub ttl_ms: u64,
-    pub now_ms: u64,
-}
-
-/// Create an invite session for a room this device administers and return
-/// the invite code. The code carries the only copy of the invite token;
-/// print it as a URL/QR. The URL carries the invite token used for join proof.
-pub fn create_room_invite<D: RuntimeDelivery>(
-    device: &FiniteChatDevice,
-    delivery: &mut D,
-    params: CreateRoomInviteParams<'_>,
-) -> Result<InviteCodeV1, RuntimeWorkerError<D::Error>> {
-    let code = InviteCodeV1 {
-        server_url: params.server_url.to_owned(),
-        room_id: params.room_id.to_owned(),
-        invite_id: device.generate_object_id("invite")?,
-        invite_token: device.generate_invite_token()?,
-        inviter_account_id: device.device_ref().account_id.clone(),
-        display_name: params.display_name,
-    };
-    code.encode()
-        .map_err(|error| ClientError::InviteCode(error.to_string()))?;
-    delivery
-        .create_invite_session(CreateInviteSessionRequest {
-            invite_id: code.invite_id.clone(),
-            room_id: code.room_id.clone(),
-            inviter: device.device_ref().clone(),
-            max_joins: params.max_joins,
-            expires_at_ms: params
-                .now_ms
-                .saturating_add(params.ttl_ms.min(MAX_INVITE_TTL_MILLIS)),
-        })
-        .map_err(RuntimeWorkerError::Delivery)?;
-    Ok(code)
-}
-
-#[derive(Debug, Default)]
-pub struct InviteAcceptReport {
-    pub accepted: Vec<DeviceRef>,
-    pub rejected: Vec<DeviceRef>,
-    /// True when pending joins exist but the room already has an unmerged
-    /// pending commit; run a sync tick (which merges own commits from the
-    /// log) and call again.
-    pub deferred_pending_commit: bool,
-    /// Session totals after this pass — the inviter's /sync/wait predicate.
-    pub total_requests: u32,
-    pub resolved_requests: u32,
-}
-
-/// Inviter-side processing of pending join requests (ADR 0006): verify each
-/// proof for the invite token, reject failures, and admit all verified joiners
-/// in a single Add commit with their Welcomes. Nothing enters the MLS group
-/// before its proof verifies.
-pub fn accept_pending_invite_joins<D: RuntimeDelivery>(
-    store: &mut SqliteClientStore,
-    device: &mut FiniteChatDevice,
-    delivery: &mut D,
-    code: &InviteCodeV1,
-    _now_ms: u64,
-) -> Result<InviteAcceptReport, RuntimeWorkerError<D::Error>> {
-    let mut report = InviteAcceptReport::default();
-    let listing = delivery
-        .list_invite_join_requests(&code.invite_id)
-        .map_err(RuntimeWorkerError::Delivery)?;
-    if listing.session.room_id != code.room_id {
-        return Err(ClientError::InviteRoomMismatch {
-            expected: code.room_id.clone(),
-            actual: listing.session.room_id,
-        }
-        .into());
-    }
-    report.total_requests = listing.requests.len() as u32;
-    report.resolved_requests = listing
-        .requests
-        .iter()
-        .filter(|request| request.state != HttpInviteJoinState::Pending)
-        .count() as u32;
-    let pending = listing
-        .requests
-        .into_iter()
-        .filter(|request| request.state == HttpInviteJoinState::Pending)
-        .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return Ok(report);
-    }
-    if device.has_pending_commit(&code.room_id)? {
-        report.deferred_pending_commit = true;
-        return Ok(report);
-    }
-
-    let mut verified = Vec::new();
-    for join in pending {
-        let proof_ok = verify_invite_join_proof(
-            &code.invite_token,
-            &join.joiner.account_id,
-            &join.joiner.device_id,
-            &join.key_package,
-            &join.join_proof,
-        );
-        let upload = proof_ok
-            .then(|| serde_json::from_slice::<UploadKeyPackageRequest>(&join.key_package).ok())
-            .flatten()
-            .filter(|upload| upload.owner == join.joiner);
-        match upload {
-            Some(upload) => verified.push((join, upload)),
-            None => {
-                delivery
-                    .respond_invite_join(RespondInviteJoinRequest {
-                        invite_id: code.invite_id.clone(),
-                        request_id: join.request_id.clone(),
-                        accept: false,
-                    })
-                    .map_err(RuntimeWorkerError::Delivery)?;
-                report.rejected.push(join.joiner);
-                report.resolved_requests += 1;
-            }
-        }
-    }
-    if verified.is_empty() {
-        return Ok(report);
-    }
-
-    // The joiner's KeyPackage rides inline in the join request. The proof is
-    // bound to that exact package, so admission must not accept an older
-    // available package for the same device.
-    let mut claimed_key_packages = Vec::with_capacity(verified.len());
-    let mut welcome_ids = Vec::with_capacity(verified.len());
-    for (join, upload) in &verified {
-        delivery
-            .upload_key_package(upload.clone())
-            .map_err(RuntimeWorkerError::Delivery)?;
-        let claimed = claim_invite_key_package_for_device(delivery, &join.joiner, upload)?;
-        claimed_key_packages.push(claimed);
-        welcome_ids.push(format!(
-            "invite-welcome-{}-{}",
-            code.invite_id, join.request_id
-        ));
-    }
-    let mut request_ids = verified
-        .iter()
-        .map(|(join, _)| join.request_id.as_str())
-        .collect::<Vec<_>>();
-    request_ids.sort_unstable();
-    let idempotency_key = format!("invite-add-{}-{}", code.invite_id, request_ids.join("+"));
-    let prepared = device.prepare_add_members_commit(
-        &code.room_id,
-        &claimed_key_packages,
-        &welcome_ids,
-        idempotency_key,
-    )?;
-    store.save_device_state(device)?;
-    delivery
-        .submit_commit(prepared.request)
-        .map_err(RuntimeWorkerError::Delivery)?;
-    for (join, _) in &verified {
-        delivery
-            .respond_invite_join(RespondInviteJoinRequest {
-                invite_id: code.invite_id.clone(),
-                request_id: join.request_id.clone(),
-                accept: true,
-            })
-            .map_err(RuntimeWorkerError::Delivery)?;
-        report.accepted.push(join.joiner.clone());
-        report.resolved_requests += 1;
-    }
-    Ok(report)
-}
-
-fn claim_invite_key_package_for_device<D: RuntimeDelivery>(
-    delivery: &mut D,
-    joiner: &DeviceRef,
-    expected: &UploadKeyPackageRequest,
-) -> Result<ClaimKeyPackageResult, RuntimeWorkerError<D::Error>> {
-    for _ in 0..=MAX_KEY_PACKAGES_PER_DEVICE {
-        let Some(claimed) = delivery
-            .claim_key_package_for_device(joiner)
-            .map_err(RuntimeWorkerError::Delivery)?
-        else {
-            break;
-        };
-        if claimed.key_package_id == expected.key_package_id
-            && claimed.key_package_ref == expected.key_package_ref
-            && claimed.key_package_hash == expected.key_package_hash
-            && claimed.key_package_payload == expected.key_package_payload
-        {
-            return Ok(claimed);
-        }
-    }
-    Err(ClientError::InviteKeyPackageUnavailable(joiner.device_id.clone()).into())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InviteJoinHandle {
-    pub request_id: String,
-    pub key_package_id: String,
-}
-
-/// Joiner-side join request (ADR 0006): build a fresh single-use KeyPackage,
-/// persist its private material, and submit it with a proof binding the invite
-/// token to this exact identity and key material. The raw invite token never
-/// leaves the device.
-pub fn submit_invite_join_request<D: RuntimeDelivery>(
-    store: &mut SqliteClientStore,
-    device: &mut FiniteChatDevice,
-    delivery: &mut D,
-    code: &InviteCodeV1,
-    display_name: Option<String>,
-    now_ms: u64,
-) -> Result<InviteJoinHandle, RuntimeWorkerError<D::Error>> {
-    let upload = device.upload_key_package_auto_id_request()?;
-    let key_package_bytes =
-        serde_json::to_vec(&upload).map_err(|_| ClientError::SerializeKeyPackage)?;
-    // Persist the KeyPackage private material before the bytes leave the
-    // device: the agent may commit the Add immediately.
-    store.save_device_state(device)?;
-    let request_id = device.generate_object_id("join")?;
-    let join_proof = invite_join_proof(
-        &code.invite_token,
-        &device.device_ref().account_id,
-        &device.device_ref().device_id,
-        &key_package_bytes,
-    );
-    delivery
-        .submit_invite_join(SubmitInviteJoinRequest {
-            invite_id: code.invite_id.clone(),
-            request_id: request_id.clone(),
-            joiner: device.device_ref().clone(),
-            key_package: key_package_bytes,
-            join_proof,
-            display_name,
-            submitted_at_ms: now_ms,
-        })
-        .map_err(RuntimeWorkerError::Delivery)?;
-    Ok(InviteJoinHandle {
-        request_id,
-        key_package_id: upload.key_package_id,
-    })
-}
-
-/// After the invited room's Welcome has been activated (by the room-server
-/// sync tick), verify the inviter is really in the room and pin the room to
-/// the server the invite named. Mandatory (ADR 0006): this is the joiner's
-/// defense against a hostile rendezvous server admitting it to a different
-/// group.
-pub fn finalize_invited_room(
-    store: &mut SqliteClientStore,
-    device: &mut FiniteChatDevice,
-    code: &InviteCodeV1,
-) -> Result<(), ClientStoreError> {
-    device.verify_room_member_account(&code.room_id, &code.inviter_account_id)?;
-    device.set_room_server_url(&code.room_id, Some(code.server_url.clone()))?;
-    store.save_device_state(device)
 }
 
 pub fn run_link_fanout_tick<D: RuntimeDelivery>(
@@ -5387,6 +5054,9 @@ fn sync_room_pages<D: RuntimeDelivery>(
     mut after_seq: u64,
     report: &mut RuntimeSyncReport,
 ) -> Result<(), RuntimeWorkerError<D::Error>> {
+    if device.has_pending_commit(&room_id)? {
+        after_seq = after_seq.saturating_sub(PENDING_COMMIT_SYNC_OVERLAP);
+    }
     let mut pages = 0u32;
     while pages < options.max_sync_pages_per_room {
         let page = delivery
@@ -5666,12 +5336,6 @@ pub enum ClientError {
         payload_epoch: u64,
         group_epoch: u64,
     },
-    #[error("invite code is invalid: {0}")]
-    InviteCode(String),
-    #[error("invite session room {actual} does not match invite code room {expected}")]
-    InviteRoomMismatch { expected: String, actual: String },
-    #[error("no KeyPackage available for invited device {0}")]
-    InviteKeyPackageUnavailable(String),
     #[error("room {room_id} has no verified member for account {account_id}")]
     AccountNotInRoom { room_id: String, account_id: String },
     #[error("failed to serialize OpenMLS KeyPackage")]
@@ -5756,19 +5420,19 @@ pub enum ClientError {
     MissingPendingCommit(RoomId),
     #[error("pending commit was not observed in the ordered server log: {0}")]
     PendingCommitNotObserved(String),
-    #[error("invite batch must contain at least one KeyPackage")]
-    EmptyInviteBatch,
-    #[error("invite batch has {key_packages} KeyPackages but {welcome_ids} Welcome ids")]
-    InviteWelcomeCountMismatch {
+    #[error("Welcome batch must contain at least one KeyPackage")]
+    EmptyWelcomeBatch,
+    #[error("Welcome batch has {key_packages} KeyPackages but {welcome_ids} Welcome ids")]
+    WelcomeBatchCountMismatch {
         key_packages: usize,
         welcome_ids: usize,
     },
-    #[error("invite batch contains duplicate device: {0:?}")]
-    DuplicateInviteDevice(DeviceRef),
-    #[error("invite batch contains duplicate KeyPackage: {0}")]
-    DuplicateInviteKeyPackage(KeyPackageId),
-    #[error("invite batch contains duplicate Welcome id: {0}")]
-    DuplicateInviteWelcome(WelcomeId),
+    #[error("Welcome batch contains duplicate device: {0:?}")]
+    DuplicateWelcomeBatchDevice(DeviceRef),
+    #[error("Welcome batch contains duplicate KeyPackage: {0}")]
+    DuplicateWelcomeBatchKeyPackage(KeyPackageId),
+    #[error("Welcome batch contains duplicate Welcome id: {0}")]
+    DuplicateWelcomeBatchWelcome(WelcomeId),
     #[error("pending Welcome already exists: {0}")]
     DuplicatePendingWelcome(WelcomeId),
     #[error("pending Welcome ack already exists: {0}")]
@@ -6618,18 +6282,6 @@ fn validate_app_event_limit(limit: u32) -> Result<(), ClientStoreError> {
     validate_app_message_limit(limit)
 }
 
-fn validate_optional_app_room_url(
-    field: &'static str,
-    value: &Option<String>,
-) -> Result<(), ClientError> {
-    let Some(value) = value.as_deref() else {
-        return Ok(());
-    };
-    validate_bytes_non_empty(field, value.len())?;
-    validate_string_bytes(field, value, MAX_APP_ROOM_INVITE_URL_BYTES)?;
-    Ok(())
-}
-
 fn validate_optional_app_room_picture(
     field: &'static str,
     value: Option<&str>,
@@ -7406,8 +7058,6 @@ fn encrypt_app_room_metadata(
         state: room.state,
         status: room.status.clone(),
         local_read_seq: room.local_read_seq,
-        pending_invite_url: room.pending_invite_url.clone(),
-        owned_invite_url: room.owned_invite_url.clone(),
     };
     let plaintext =
         serde_json::to_vec(&metadata).map_err(|_| ClientStoreError::EncodeAppRoomMetadata)?;
@@ -7457,6 +7107,8 @@ fn encrypt_app_state_metadata(
     state.validate_limits()?;
     let metadata = StoredAppStateMetadataV1 {
         selected_room_id: state.selected_room_id.clone(),
+        selected_topic_id: state.selected_topic_id.clone(),
+        selected_chat_id: state.selected_chat_id.clone(),
         revoked_devices: state.revoked_devices.clone(),
     };
     let plaintext =
@@ -7770,8 +7422,6 @@ fn decrypt_app_room_metadata(
         MAX_APP_ROOM_STATUS_BYTES,
     )
     .map_err(ClientError::from)?;
-    validate_optional_app_room_url("app_room.pending_invite_url", &metadata.pending_invite_url)?;
-    validate_optional_app_room_url("app_room.owned_invite_url", &metadata.owned_invite_url)?;
     Ok(metadata)
 }
 
@@ -7816,6 +7466,18 @@ fn decrypt_app_state_metadata(
         .map_err(|_| ClientStoreError::DecodeAppStateMetadata)?;
     if let Some(room_id) = &metadata.selected_room_id {
         validate_room_id(room_id).map_err(ClientError::from)?;
+    }
+    if let Some(topic_id) = &metadata.selected_topic_id {
+        validate_bytes_non_empty("app_state.selected_topic_id", topic_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_state.selected_topic_id", topic_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
+    }
+    if let Some(chat_id) = &metadata.selected_chat_id {
+        validate_bytes_non_empty("app_state.selected_chat_id", chat_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_state.selected_chat_id", chat_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
     }
     validate_item_count(
         "app_state.revoked_devices",
@@ -9344,6 +9006,192 @@ mod tests {
     }
 
     #[test]
+    fn sync_applies_own_pending_commit_even_when_cursor_already_advanced() {
+        let alice_secret = NostrSecretKey::from_bytes([1; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let mut alice = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: alice_secret,
+            device_id: "alice-electron".to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        })
+        .unwrap();
+        let room_id = "room-stale-pending-commit";
+        alice
+            .create_group_state(room_id, "mls-room-stale-pending-commit")
+            .unwrap();
+
+        let prepared = alice
+            .prepare_self_update_commit(room_id, "self-update-stale-pending")
+            .unwrap();
+        assert!(alice.has_pending_commit(room_id).unwrap());
+        let seq = 7;
+        alice.set_last_applied_seq(room_id, seq).unwrap();
+
+        let entry = RoomLogEntry {
+            room_id: room_id.to_owned(),
+            seq,
+            message_id: prepared.message_id.clone(),
+            sender: alice.device_ref().clone(),
+            kind: LogEntryKind::Commit,
+            epoch: prepared.request.expected_epoch,
+            envelope: prepared.request.envelope,
+            idempotency_key: prepared.request.idempotency_key,
+            timestamp_unix_seconds: NOW,
+        };
+        let applied = apply_log_entry_in_memory(&mut alice, room_id, &entry)
+            .expect("old own commit should still merge pending state")
+            .expect("own commit merge should be reported as applied");
+
+        assert!(matches!(applied, AppliedLogEntry::Commit { .. }));
+        assert!(
+            !alice.has_pending_commit(room_id).unwrap(),
+            "own commit at or behind the cursor must clear pending MLS state"
+        );
+    }
+
+    #[test]
+    fn runtime_sync_overlaps_when_pending_commit_cursor_already_advanced() {
+        struct PendingCommitDelivery {
+            entry: RoomLogEntry,
+            requested_after_seq: Option<u64>,
+        }
+
+        impl RuntimeDelivery for PendingCommitDelivery {
+            type Error = String;
+
+            fn key_package_inventory(
+                &mut self,
+                owner: &DeviceRef,
+            ) -> Result<KeyPackageInventory, Self::Error> {
+                Ok(KeyPackageInventory {
+                    owner: owner.clone(),
+                    available: 0,
+                    leased: 0,
+                })
+            }
+
+            fn upload_key_package(
+                &mut self,
+                _request: UploadKeyPackageRequest,
+            ) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn claim_key_package_for_device(
+                &mut self,
+                _owner: &DeviceRef,
+            ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+                unimplemented!("not used by runtime sync")
+            }
+
+            fn claim_key_package_for_account(
+                &mut self,
+                _account_id: &str,
+            ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+                unimplemented!("not used by runtime sync")
+            }
+
+            fn submit_commit(
+                &mut self,
+                _request: SubmitCommitRequest,
+            ) -> Result<CommitAccepted, Self::Error> {
+                unimplemented!("not used by runtime sync")
+            }
+
+            fn list_account_rooms(
+                &mut self,
+                _request: ListAccountRoomsRequest,
+            ) -> Result<ListAccountRoomsPage, Self::Error> {
+                unimplemented!("not used by runtime sync")
+            }
+
+            fn claim_welcomes(
+                &mut self,
+                _device: &DeviceRef,
+            ) -> Result<Vec<WelcomeRecord>, Self::Error> {
+                Ok(Vec::new())
+            }
+
+            fn ack_welcome(&mut self, _welcome_id: &str) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn sync_events(
+                &mut self,
+                room_id: &str,
+                _requester: &DeviceRef,
+                after_seq: u64,
+            ) -> Result<SyncEventsPage, Self::Error> {
+                self.requested_after_seq = Some(after_seq);
+                let entries = (room_id == self.entry.room_id && after_seq < self.entry.seq)
+                    .then(|| self.entry.clone())
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                Ok(SyncEventsPage {
+                    entries,
+                    next_after_seq: self.entry.seq,
+                    has_more: false,
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let alice_secret = NostrSecretKey::from_bytes([1; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let mut alice = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: alice_secret.clone(),
+            device_id: "alice-electron".to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        })
+        .unwrap();
+        let room_id = "room-pending-overlap";
+        alice
+            .create_group_state(room_id, "mls-pending-overlap")
+            .unwrap();
+        let prepared = alice
+            .prepare_self_update_commit(room_id, "self-update-overlap")
+            .unwrap();
+        let seq = 7;
+        alice.set_last_applied_seq(room_id, seq).unwrap();
+
+        let mut store = SqliteClientStore::open(
+            dir.path().join("client.sqlite3"),
+            SqliteClientStoreOptions::from_nostr_secret(&alice_secret, "alice-electron").unwrap(),
+        )
+        .unwrap();
+        store.save_device_state(&alice).unwrap();
+        let entry = RoomLogEntry {
+            room_id: room_id.to_owned(),
+            seq,
+            message_id: prepared.message_id.clone(),
+            sender: alice.device_ref().clone(),
+            kind: LogEntryKind::Commit,
+            epoch: prepared.request.expected_epoch,
+            envelope: prepared.request.envelope,
+            idempotency_key: prepared.request.idempotency_key,
+            timestamp_unix_seconds: NOW,
+        };
+        let mut delivery = PendingCommitDelivery {
+            entry,
+            requested_after_seq: None,
+        };
+        let options = RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 1,
+        };
+
+        run_runtime_sync_tick(&mut store, &mut alice, &mut delivery, &options).unwrap();
+
+        assert_eq!(delivery.requested_after_seq, Some(0));
+        assert!(
+            !alice.has_pending_commit(room_id).unwrap(),
+            "runtime sync must recover a pending own commit even when the cursor was advanced"
+        );
+    }
+
+    #[test]
     fn sqlite_client_store_persists_app_messages_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let secret = NostrSecretKey::from_bytes([7; NOSTR_SECRET_KEY_BYTES]).unwrap();
@@ -9993,7 +9841,6 @@ mod tests {
             state: StoredAppRoomState::WaitingForApproval,
             status: "waiting for room admission".to_owned(),
             local_read_seq: 42,
-            pending_invite_url: Some("finite://join?v=1&s=http%3A%2F%2Flocalhost&r=room-side&i=invite-1&t=token&a=npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqgcpfl3".to_owned()),
             ..app_room("room-side", "Side Room")
         };
         store
@@ -10050,6 +9897,8 @@ mod tests {
 
         let selected = StoredAppState {
             selected_room_id: Some("room-main".to_owned()),
+            selected_topic_id: Some("home".to_owned()),
+            selected_chat_id: Some("segment-main".to_owned()),
             revoked_devices: [DeviceRef {
                 account_id: owner.account_id.clone(),
                 device_id: "tablet".to_owned(),
@@ -10066,6 +9915,8 @@ mod tests {
 
         let cleared = StoredAppState {
             selected_room_id: None,
+            selected_topic_id: None,
+            selected_chat_id: None,
             revoked_devices: BTreeSet::new(),
         };
         reopened.save_app_state(&owner, &cleared).unwrap();
@@ -10094,6 +9945,8 @@ mod tests {
 
             let mut metadata = serde_json::to_value(StoredAppStateMetadataV1 {
                 selected_room_id: Some("room-main".to_owned()),
+                selected_topic_id: Some("home".to_owned()),
+                selected_chat_id: Some("segment-main".to_owned()),
                 revoked_devices: [DeviceRef {
                     account_id: owner.account_id.clone(),
                     device_id: "tablet".to_owned(),
@@ -10452,8 +10305,6 @@ mod tests {
             state: StoredAppRoomState::Connected,
             status: "connected".to_owned(),
             local_read_seq: 0,
-            pending_invite_url: None,
-            owned_invite_url: None,
         }
     }
 

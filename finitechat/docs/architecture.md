@@ -139,13 +139,12 @@ only as an internal conformance boundary.
 operates on metadata the caller *declares*; payloads stay ciphertext.
 
 **Membership lifecycle.** Typed bootstrap creates a room's membership
-projection (creator active, creator admin, protocol slots). Typed `/commits`
-carry a declared `MembershipDeltaV1` which the server validates
-structurally (epochs, duplicates, caps) and for **authority** (ADR 0003 §2:
-changing another account's membership requires admin; linking or removing
-your own devices never does). Accepted commits atomically: append the commit
-to the log, consume the claimed KeyPackages, release the derived Welcomes to
-recipient inboxes, and update the projections. The projection records
+projection (creator active, protocol slots). Typed `/commits` carry a declared
+`MembershipDeltaV1` which the server validates for relay invariants (epochs,
+active sender, duplicates, caps, and structural shape) but not for social room
+authority. Accepted commits atomically: append the commit to the log, consume
+the claimed KeyPackages, release the derived Welcomes to recipient inboxes,
+and update the projections. The projection records
 membership as **intervals** (`[start_seq, end_seq)` per device), which is
 what makes requester-filtered sync work: a new device's history starts at
 its add-commit; a removed or departed device can sync through its exit seq

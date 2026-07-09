@@ -606,6 +606,12 @@ def first_matching_mine_message_id(state: dict[str, Any]) -> str | None:
     return None
 
 
+def finite_identity_env(base: dict[str, str], finite_home: Path) -> dict[str, str]:
+    scoped = base.copy()
+    scoped["FINITE_HOME"] = str(finite_home)
+    return scoped
+
+
 def main() -> int:
     args = parse_args()
     enforce_product_server_url(args.server_url)
@@ -698,6 +704,8 @@ def main() -> int:
         agent_home = state_root / "agent-home"
         probe_home = state_root / "probe-home"
         hermes_home = state_root / "hermes-home"
+        agent_env = finite_identity_env(env, agent_home)
+        probe_env = finite_identity_env(env, probe_home)
         service_port = free_port()
         service_addr = f"127.0.0.1:{service_port}"
         service_url = f"http://{service_addr}"
@@ -724,7 +732,7 @@ def main() -> int:
                 "--agent-name",
                 args.room_name,
             ],
-            env=env,
+            env=agent_env,
             timeout=60,
         )
         report["agent"].update(
@@ -749,7 +757,7 @@ def main() -> int:
                 "probe",
                 "--skip-agent-profile",
             ],
-            env=env,
+            env=probe_env,
             timeout=60,
         )
         step("probe.init")
@@ -772,7 +780,7 @@ def main() -> int:
                 "--force",
                 "--json",
             ],
-            env=env,
+            env=agent_env,
             timeout=60,
         )
         report["runtime"]["plugin_install"] = install
@@ -791,7 +799,7 @@ def main() -> int:
                 "8",
                 "--json",
             ],
-            env=env,
+            env=agent_env,
             timeout=60,
         )
         report["invite"] = {
@@ -807,11 +815,12 @@ def main() -> int:
             service_url=service_url,
             service_addr=service_addr,
             finitechat_bin=finitechat_bin,
-            env=env,
+            env=agent_env,
         )
         step("hermes.config_written")
 
-        env.update(
+        runtime_env = agent_env.copy()
+        runtime_env.update(
             {
                 "HERMES_HOME": str(hermes_home),
                 "FINITECHAT_HOME": str(agent_home),
@@ -838,7 +847,7 @@ def main() -> int:
                 "--json",
             ],
             cwd=REPO_ROOT,
-            env=env,
+            env=runtime_env,
             stdout=sidecar_log.open("w", encoding="utf-8"),
             stderr=subprocess.STDOUT,
             text=True,
@@ -869,7 +878,7 @@ def main() -> int:
                 "--replace",
             ],
             cwd=REPO_ROOT,
-            env=env,
+            env=runtime_env,
             stdout=gateway_log.open("w", encoding="utf-8"),
             stderr=subprocess.STDOUT,
             text=True,
@@ -895,7 +904,7 @@ def main() -> int:
                 "--timeout-ms",
                 str(args.timeout_ms),
             ],
-            env=env,
+            env=probe_env,
             timeout=max(60, args.timeout_ms / 1000 + 30),
         )
         report["admission_probe"] = {
@@ -920,7 +929,7 @@ def main() -> int:
                 probe_home=probe_home,
                 server_url=args.server_url,
                 room_id=str(invite["room_id"]),
-                env=env,
+                env=probe_env,
             )
             step(
                 "model_smoke.reply", reply_message_id=report["model_smoke"].get("reply_message_id")

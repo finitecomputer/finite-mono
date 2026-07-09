@@ -29,8 +29,8 @@ use std::process::{Command, ExitCode, Stdio};
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest,
-    SharingRequest,
+    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectInitRequest,
+    ProjectRevokeRequest, SharingRequest,
 };
 use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
@@ -1302,8 +1302,10 @@ fn auth_link_email(args: &[String]) -> Result<(), CliError> {
     let identity = keys::load_or_generate_user_key()?;
     let display =
         npub::encode_npub(&identity.pubkey).map_err(|error| CliError::Key(error.to_string()))?;
-    let client = api::Client::from_env();
-    let response = client.request_email_login(&email)?;
+    let response = match api::IdentityAuthorityClient::from_env() {
+        Some(identity_authority) => identity_authority.request_email_challenge(&email)?,
+        None => api::Client::from_env().request_email_login(&email)?,
+    };
     keys::write_pending_email_link(&response.email, &identity.pubkey)?;
     if output_json {
         let value = serde_json::json!({
@@ -1333,9 +1335,9 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
         return print_help(auth_git_help());
     }
     let options = parse_auth_git_args(args)?;
-    let key = match &options.email {
-        Some(email) => keys::load_or_create_email_key(email)?,
-        None => keys::load_or_generate_user_key()?,
+    let key = match (&options.email, api::IdentityAuthorityClient::from_env()) {
+        (Some(_), Some(_)) | (None, _) => keys::load_or_generate_user_key()?,
+        (Some(email), None) => keys::load_or_create_email_key(email)?,
     };
     let client = api::Client::from_env();
     let response = client.auth_git(
@@ -1894,8 +1896,10 @@ fn auth_login(args: &[String]) -> Result<(), CliError> {
     let [email] = args else {
         return Err(CliError::Usage(auth_login_help().to_string()));
     };
-    let client = api::Client::from_env();
-    let response = client.request_email_login(email)?;
+    let response = match api::IdentityAuthorityClient::from_env() {
+        Some(identity_authority) => identity_authority.request_email_challenge(email)?,
+        None => api::Client::from_env().request_email_login(email)?,
+    };
     println!("sent email login for {}", response.email);
     println!("run the fsite auth redeem command from the email to verify this machine");
     Ok(())
@@ -1907,6 +1911,26 @@ fn auth_redeem(args: &[String]) -> Result<(), CliError> {
     }
     let (email, token, link_native, output_json) = parse_redeem_args(args)?;
     let pending_link_pubkey = keys::pending_email_link_pubkey(&email)?;
+    if let Some(identity_authority) = api::IdentityAuthorityClient::from_env() {
+        let key = keys::load_or_generate_user_key()?;
+        if let Some(pubkey) = &pending_link_pubkey
+            && key.pubkey != *pubkey
+        {
+            return Err(CliError::Key(
+                "pending email link belongs to a different local User Key; run `fsite auth link-email EMAIL` again from the machine that should own this email".to_string(),
+            ));
+        }
+        let response =
+            if (link_native || pending_link_pubkey.is_some()) && is_finite_vip_email(&email) {
+                identity_authority.redeem_vip_email(&key, &email, &token)?
+            } else {
+                identity_authority.redeem_email_only(&key, &email, &token)?
+            };
+        if pending_link_pubkey.is_some() {
+            keys::clear_pending_email_link(&email)?;
+        }
+        return print_email_redeem_response(&response, output_json);
+    }
     let key = if link_native {
         keys::load_or_generate_user_key()?
     } else {
@@ -1941,10 +1965,17 @@ fn auth_redeem(args: &[String]) -> Result<(), CliError> {
     if response.linked_to_native_principal {
         keys::clear_pending_email_link(&email)?;
     }
+    print_email_redeem_response(&response, output_json)
+}
+
+fn print_email_redeem_response(
+    response: &EmailRedeemResponse,
+    output_json: bool,
+) -> Result<(), CliError> {
     if output_json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&response).expect("response serializes")
+            serde_json::to_string_pretty(response).expect("response serializes")
         );
     } else {
         println!("verified {} for publishing", response.email);
@@ -1953,6 +1984,10 @@ fn auth_redeem(args: &[String]) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn is_finite_vip_email(email: &str) -> bool {
+    email.trim().to_ascii_lowercase().ends_with("@finite.vip")
 }
 
 fn parse_redeem_args(args: &[String]) -> Result<(String, String, bool, bool), CliError> {

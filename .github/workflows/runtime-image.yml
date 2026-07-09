@@ -1,0 +1,90 @@
+name: Agent Runtime Image
+
+# Monorepo adaptation of finitecomputer-v2's runtime-image workflow.
+# The old workflow cloned finitechat / finite-sites / finite-brain as sibling
+# checkouts at arbitrary refs; in finite-mono they ARE siblings in this tree,
+# all pinned by the single checkout SHA — so the multi-clone (and the whole
+# per-repo ref input surface) disappears.
+#
+# NOTE: runs on the self-hosted finite-lat-2 runner, which must be registered
+# against this repo (see infra/hosts/lat2/runners.md for the cutover checklist).
+
+run-name: Publish agent runtime ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version tag, for example 2026-07-08.1"
+        required: true
+        type: string
+      hermes_agent_version:
+        description: "hermes-agent package version"
+        required: true
+        default: "0.18.0"
+        type: string
+      runs_on_json:
+        description: "GitHub runner labels JSON"
+        required: true
+        default: '["self-hosted","finite-lat-2"]'
+        type: string
+
+concurrency:
+  group: agent-runtime-image-${{ inputs.version }}
+
+jobs:
+  publish:
+    runs-on: ${{ fromJSON(inputs.runs_on_json) }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push runtime image
+        id: build
+        working-directory: finitecomputer-v2
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/finite-agent-runtime
+          VERSION: ${{ inputs.version }}
+          HERMES_AGENT_VERSION: ${{ inputs.hermes_agent_version }}
+        run: |
+          scripts/build_runtime_image.py \
+            --image-ref "$IMAGE:$VERSION" \
+            --hermes-agent-version "$HERMES_AGENT_VERSION" \
+            --finitechat-repo ../finitechat \
+            --finite-sites-repo ../finite-sites \
+            --finite-brain-repo ../finite-brain \
+            --platform linux/amd64 \
+            --push \
+            --report runtime-image-report.json
+          DIGEST="$(docker image inspect "$IMAGE:$VERSION" --format '{{index .RepoDigests 0}}' | sed "s#^$IMAGE@##")"
+          if [ -z "$DIGEST" ]; then
+            echo "::error::docker did not report a pushed digest"
+            cat runtime-image-report.json
+            exit 1
+          fi
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "pinned=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-image-report
+          path: finitecomputer-v2/runtime-image-report.json
+
+      - name: Summarize
+        env:
+          PINNED: ${{ steps.build.outputs.pinned }}
+        run: |
+          echo "Pinned runtime image (source commit ${GITHUB_SHA}):" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"

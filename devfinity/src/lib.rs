@@ -203,10 +203,17 @@ impl Stack {
         self.ensure_process_compose_available()?;
         self.prepare_for_start()?;
         let mut guard = self.start_process_compose_headless()?;
-        let outcome = match self.wait_for_services_ready(Duration::from_secs(180), &mut guard) {
-            Ok(()) => self.run_stack_command(command),
-            Err(error) => Err(error),
-        };
+        // Cold-cache CI needs a bigger window: the stack's cargo processes may
+        // still be compiling when a warm-cache 180s would already have expired.
+        let ready_timeout = std::env::var("DEVFINITY_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(180);
+        let outcome =
+            match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
+                Ok(()) => self.run_stack_command(command),
+                Err(error) => Err(error),
+            };
 
         if let Err(error) = guard.shutdown() {
             eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
@@ -254,10 +261,10 @@ impl Stack {
 
         let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
         for path in [&self.process_compose_socket, &process_compose_pid_file] {
-            if path.exists() {
-                if let Err(error) = fs::remove_file(path) {
-                    eprintln!("failed to remove {}: {error}", path.display());
-                }
+            if path.exists()
+                && let Err(error) = fs::remove_file(path)
+            {
+                eprintln!("failed to remove {}: {error}", path.display());
             }
         }
 
@@ -347,8 +354,13 @@ impl Stack {
         self.write_managed_command(
             yaml,
             process,
+            // One build per package, matching each service's `cargo run -p`
+            // resolution: a combined `-p A -p B -p C` build unifies features
+            // across the packages (resolver 2), producing artifacts the
+            // per-package runs don't reuse — on a cold cache every service
+            // then recompiles its whole dep stack inside the readiness window.
             &[String::from(
-                "exec cargo build -p finite-saas-core -p finitechat-server -p finitesitesd",
+                "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitesitesd",
             )],
             &[],
         );
@@ -403,7 +415,10 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   initdb -D "$PGDATA" --username=postgres --auth=trust --no-locale --encoding=UTF8
 fi
 
-postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" &
+# TCP only: the nixpkgs default socket dir (/run/postgresql) is not writable
+# on CI runners, and run-dir paths exceed the 103-byte unix socket limit on
+# macOS. Everything in this stack connects via 127.0.0.1.
+postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" -c unix_socket_directories='' &
 postgres_pid=$!
 
 shutdown() {{
@@ -684,6 +699,7 @@ wait "$postgres_pid"
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_http_probe(
         &self,
         yaml: &mut String,
@@ -763,13 +779,13 @@ wait "$postgres_pid"
 
     fn ensure_postgres_not_running(&self) -> Result<()> {
         let pid_file = self.pid_file(ManagedProcess::Postgres);
-        if let Some(pid) = read_pid_file(&pid_file)? {
-            if process_alive(pid) {
-                bail!(
-                    "devfinity postgres pid {pid} from {} is still running; run `devfinity cleanup` before starting a new stack",
-                    pid_file.display()
-                );
-            }
+        if let Some(pid) = read_pid_file(&pid_file)?
+            && process_alive(pid)
+        {
+            bail!(
+                "devfinity postgres pid {pid} from {} is still running; run `devfinity cleanup` before starting a new stack",
+                pid_file.display()
+            );
         }
 
         if connect_tcp("127.0.0.1", self.ports.postgres).is_ok() {
@@ -1192,10 +1208,10 @@ impl ProcessComposeGuard<'_> {
 
 impl Drop for ProcessComposeGuard<'_> {
     fn drop(&mut self) {
-        if !self.shutdown_complete {
-            if let Err(error) = self.shutdown() {
-                eprintln!("failed to shut down devfinity process-compose: {error:#}");
-            }
+        if !self.shutdown_complete
+            && let Err(error) = self.shutdown()
+        {
+            eprintln!("failed to shut down devfinity process-compose: {error:#}");
         }
     }
 }
@@ -1360,10 +1376,10 @@ fn process_alive(pid: u32) -> bool {
 }
 
 fn remove_file_best_effort(path: &Path) {
-    if path.exists() {
-        if let Err(error) = fs::remove_file(path) {
-            eprintln!("failed to remove {}: {error}", path.display());
-        }
+    if path.exists()
+        && let Err(error) = fs::remove_file(path)
+    {
+        eprintln!("failed to remove {}: {error}", path.display());
     }
 }
 

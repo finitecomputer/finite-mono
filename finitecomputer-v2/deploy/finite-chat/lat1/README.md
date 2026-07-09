@@ -12,14 +12,18 @@ cp deploy/finite-chat/lat1/workspace.env.example \
   deploy/finite-chat/lat1/secrets/workspace.env
 ```
 
-Deploy a pinned Finite Chat commit from the `finitecomputer-v2` repo root:
+Deploy a pinned Finite Chat commit (the script lives in
+`infra/hosts/lat1/scripts/` and resolves this workspace relative to the
+finite-mono root):
 
 ```sh
-scripts/deploy_finitechat_server_lat1.sh \
-  deploy/finite-chat/lat1 \
+../infra/hosts/lat1/scripts/deploy-finitechat-server.sh \
+  finitecomputer-v2/deploy/finite-chat/lat1 \
   <finitechat-full-sha>
 ```
 
 The script builds `finitechat-server` on the host from
 `https://github.com/finitecomputer/finitechat.git`, installs a systemd service,
-and routes `chat.finite.computer` through the host k3s/Traefik edge.
+and creates k3s Service/IngressRoute objects. NOTE: lat1 has no Traefik and no
+Nix — see the script header and `infra/hosts/lat1/README.md`; the live chat
+server runs on clawland today.

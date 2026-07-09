@@ -188,6 +188,7 @@ pub(crate) async fn remove_folder_access_handler(
     )?;
     let event_json = event.as_json();
     let grant_created_at = server_timestamp(&state);
+    let updated_at = grant_created_at.clone();
     let grants = grant_requests_to_metadata(
         &request.grants,
         &folder_id,
@@ -237,6 +238,7 @@ pub(crate) async fn remove_folder_access_handler(
                 request.new_key_version,
                 &grants,
                 &reencrypted_records,
+                &updated_at,
             )
         },
     )

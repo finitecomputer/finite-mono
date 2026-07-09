@@ -26,8 +26,10 @@ and TRF while those users are unmigrated.
   extract this to its own repo/deploy boundary after the v2 Core grant contract
   and image release path are stable. Keep it owned and deployed from v2 for now.
 - `deploy/finite-computer`: copied deployment/runtime files for the v2 product
-  stack. These need renaming and pruning as the split hardens.
-- `scripts/deploy_finitechat_server_lat1.sh` and
+  stack (image Dockerfiles and runtime template; the k8s manifests and systemd
+  units moved to `../infra/hosts/lat1/`). These need renaming and pruning as
+  the split hardens.
+- `../infra/hosts/lat1/scripts/deploy-finitechat-server.sh` and
   `deploy/finite-chat/lat1`: hosted Finite Chat server deployment lane for the
   SaaS stack.
 
@@ -41,7 +43,9 @@ These stay separate repos:
 - `finite-skills`: Finite-managed agent skills.
 - `finite-brain`: future brain/knowledgebase sharing.
 
-v2 should deploy and integrate those services, not vendor their code.
+v2 deploys and integrates those services. Since the finite-mono cutover they
+are sibling directories in this repo — consume them through the root Cargo
+workspace and `infra/`, never by copying their code into `finitecomputer-v2/`.
 
 ## Hard-Cut Rules
 
@@ -124,5 +128,5 @@ FC_RUNNER_BACKEND=phala
 ```
 
 See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) and
-[deploy/finite-computer/systemd/runner.env.example](deploy/finite-computer/systemd/runner.env.example)
+[../infra/hosts/lat1/systemd/runner.env.example](../infra/hosts/lat1/systemd/runner.env.example)
 for the live runner env, Phala CLI prerequisite, and acceptance criteria.

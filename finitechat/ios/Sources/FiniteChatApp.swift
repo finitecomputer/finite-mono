@@ -58,6 +58,9 @@ struct FiniteChatApp: App {
                 .onAppear {
                     configurePushNotifications()
                 }
+                .onOpenURL { url in
+                    model.openTargetURL(url)
+                }
         }
     }
 

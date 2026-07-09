@@ -1,0 +1,25 @@
+# Captured from host finite-lat-2 on 2026-07-08 (previously unmanaged — this
+# exact unit existed only at /etc/systemd/system/finite-saas-runner.service;
+# the finitecomputer-v2 repo carried a near-identical lat1 variant pointing at
+# /opt/finite/finitecomputer-v2 instead, now under infra/hosts/lat1/).
+# DORMANT: the driving timer (finite-saas-runner.timer) is disabled and
+# not listed in list-timers. The binary comes from the build-on-box checkout
+# /opt/finite/finitecomputer (see host README appendix). Note the stale
+# After=k3s.service — there is no k3s on this box; copied from the lat1 unit.
+# EnvironmentFile /etc/finite-computer/runner.env holds 18 FC_* vars
+# (names in the host README secrets inventory; values on-host only).
+# Drop-in captured alongside: finite-saas-runner-10-core-tunnel.conf.
+
+[Unit]
+Description=Finite agent creation runner
+Wants=network-online.target
+After=network-online.target k3s.service
+
+[Service]
+Type=oneshot
+KillMode=process
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/etc/finite-computer/runner.env
+WorkingDirectory=/opt/finite/finitecomputer
+ExecStart=/opt/finite/finitecomputer/target/release/finite-saas-runner run-once

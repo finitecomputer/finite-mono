@@ -19,7 +19,7 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finitechat"
+repo="finitecomputer/finite-mono"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -31,7 +31,7 @@ case "$os:$arch" in
   *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
-base="https://github.com/$repo/releases/latest/download"
+base="https://github.com/$repo/releases/download/finitechat-latest"
 curl -fsSL "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz"
 curl -fsSL "$base/$asset.tar.gz.sha256" -o "$tmp/$asset.tar.gz.sha256"
 
@@ -364,9 +364,10 @@ cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer hea
 ```
 
 Expected production output includes `status: "ok"`, `server_version`,
-`source_commit`, and `source_dirty: false`. If `source_commit` is missing,
-the production server is an old build and the app release is blocked until
-`../finitecomputer-v2` deploys a compatible finite-chat commit. See
+`server_contract_version`, `source_commit`, and `source_dirty: false`. If
+`server_contract_version` or `source_commit` is missing, the production server
+is an old build and the app release is blocked until `../finitecomputer-v2`
+deploys a compatible finite-chat commit. See
 `docs/server-deployment-gate.md` for the required handoff and verification
 steps.
 

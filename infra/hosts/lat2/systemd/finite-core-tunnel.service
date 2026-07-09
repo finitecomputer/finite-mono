@@ -1,0 +1,22 @@
+# Captured from host finite-lat-2 on 2026-07-08 (previously unmanaged — this
+# unit existed only at /etc/systemd/system/finite-core-tunnel.service, in no
+# repo). Persistent SSH local-forward from lat2 to the finite-saas-core
+# ClusterIP on lat1 (10.43.237.180:4200 inside lat1's k3s), exposed on
+# lat2 loopback as 127.0.0.1:14200. Consumed by finite-saas-runner (dormant).
+# Key: /home/ubuntu/.ssh/finite-lat2-core-tunnel (on-host only, never here).
+
+[Unit]
+Description=Finite lat-2 Core API SSH tunnel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/bin/ssh -i /home/ubuntu/.ssh/finite-lat2-core-tunnel -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -N -L 127.0.0.1:14200:10.43.237.180:4200 ubuntu@64.34.82.77
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

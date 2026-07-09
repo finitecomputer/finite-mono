@@ -1,0 +1,14 @@
+# PROPOSED — NOT YET DEPLOYED (authored 2026-07-08, not installed on
+# finite-lat-2). Disabled by default; enabling is an explicit operator step:
+#   sudo systemctl enable --now finite-sites-backup.timer
+
+[Unit]
+Description=Daily finite-sites backup to /data
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+Unit=finite-sites-backup.service
+
+[Install]
+WantedBy=timers.target

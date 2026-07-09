@@ -145,11 +145,19 @@ impl BrainStore {
                     .cloned()
                     .unwrap_or_default();
                 if current_access.contains(user_id) {
-                    return Err(StoreError::BrokenInvariant {
-                        reason: "folder access is already granted".to_owned(),
-                    });
+                    if stored.grants.iter().any(|existing| {
+                        existing.folder_id == *folder_id
+                            && existing.key_version == folder.current_key_version
+                            && existing.recipient_npub == *user_id
+                    }) {
+                        return Err(StoreError::BrokenInvariant {
+                            reason: "folder key grant is already present".to_owned(),
+                        });
+                    }
+                    false
+                } else {
+                    true
                 }
-                true
             }
             FolderAccessMode::AllMembers => {
                 if stored.grants.iter().any(|existing| {
@@ -201,6 +209,7 @@ impl BrainStore {
     }
 
     /// Remove restricted Folder access by rotating the Folder Key and re-encrypting live objects.
+    #[allow(clippy::too_many_arguments)]
     pub fn rotate_folder_key_for_access_removal(
         &mut self,
         vault_id: &VaultId,
@@ -209,6 +218,7 @@ impl BrainStore {
         new_key_version: u32,
         grants: &[FolderKeyGrantMetadata],
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
+        updated_at: &str,
     ) -> Result<(), StoreError> {
         let stored = self.load_vault(vault_id)?;
         let folder = stored
@@ -264,6 +274,9 @@ impl BrainStore {
         tx.execute(
             "UPDATE folders SET current_key_version = ?3 WHERE vault_id = ?1 AND id = ?2",
             params![vault_id.as_str(), folder_id.as_str(), new_key_version],
+        )?;
+        invalidate_pending_email_bootstraps_for_rotated_folder(
+            &tx, vault_id, folder_id, updated_at,
         )?;
         for grant in grants {
             insert_grant(&tx, vault_id, grant)?;

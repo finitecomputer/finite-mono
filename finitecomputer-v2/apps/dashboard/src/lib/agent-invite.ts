@@ -40,14 +40,22 @@ export function parseAgentInviteResponse(payload: unknown): AgentInviteStatus {
   }
   const record = payload as Record<string, unknown>;
 
-  // A consumed invite means the user already paired: that beats any URL the
-  // payload might still carry — never re-show a QR for a paired agent.
+  // A confirmed pairing beats any URL the payload might still carry — never
+  // re-show a QR for a paired agent.
   if (record.paired === true) {
     return {
       state: "paired",
       roomId: optionalTrimmedString(record.room_id),
       agentNpub: optionalTrimmedString(record.agent_npub),
     };
+  }
+
+  // A single-use invite may be consumed before the MLS Welcome/admission is
+  // observable by the runtime. That is not paired yet, and there is no safe QR
+  // to re-render; keep the bounded waiting state instead of showing success or
+  // a broken invite error.
+  if (record.invite_state === "consumed_pending_admission") {
+    return { state: "pending" };
   }
 
   // The runtime lost its invite session entirely; waiting will never help,

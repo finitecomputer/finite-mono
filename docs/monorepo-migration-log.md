@@ -596,3 +596,96 @@ Changes:
 - Updated `devfinity status` and `devfinity cleanup` to report and clean only
   devfinity-managed processes, service probes, and control files.
 - Updated the local integration harness docs and phase 9 plan text.
+
+## Full Re-Sync Before Cutover
+
+Date: 2026-07-08
+
+All drifted source repos were re-synced into the monorepo on branch
+`migration-integration`, using a three-way merge per repo
+(base = recorded import SHA, ours = mono copy, theirs = source `origin/main`).
+Mono-side deliberate edits (deleted sub-workspace `Cargo.toml`/`Cargo.lock`,
+path-dep retargets to workspace-local `finite-identity`/`finite-nostr`) were
+preserved; all source drift was imported. The procedure is now scripted as
+`scripts/import-sync`, with per-repo provenance in `scripts/import-sync.toml`.
+
+Synced (one commit per repo on the branch):
+
+| Repo | Range | Notes |
+| --- | --- | --- |
+| `finitecomputer-v2` | `862e6bf..0150dd9` | merged clean |
+| `finite-identity` | `54a6936..0750e8c` | nip98 + authority work; supersedes the git-rev pins that `finite-sites`/`finite-brain` bumped in their source repos (both use the workspace path dep in mono) |
+| `finite-sites` | `768a0b8..a6d03e9` | source's only root-manifest change was the finite-identity rev bump (moot in mono) |
+| `finite-brain` | `8e1033c..7c66177` | carried source's workspace version bump as explicit `0.1.2` on all five crates; kept mono's workspace-dep retargets in `finite-brain-cli` |
+| `finitechat` | `f13c973..6bde2cc` | 13 commits (~18k insertions incl. Electron app, `finitechat-daemon`); new crate added to root workspace members |
+
+No drift (source `origin/main` == recorded import SHA):
+`finite-nostr`, `finite-search`, `finite-skills`, `finite-auth`.
+Note: earlier drift worries about these repos were an artifact of stale local
+checkouts — the "mono-only" nip05/searxng-proxy/skills changes were in fact
+pushed to the source repos by the import work.
+
+Validation: `cargo check --workspace` passes; root `Cargo.lock` regenerated
+(new crate `finitechat-daemon`, updated deps from finitechat drift).
+
+## Infra Root, Root CI, and Doctrine Flip
+
+Date: 2026-07-08 (branch `migration-integration`, same day as the full re-sync)
+
+- Added `infra/` as the single deploy root, authored from read-only SSH
+  captures of the production hosts taken this day. Key corrections vs prior
+  belief: no Traefik on lat1 (host Caddy edge); the live finitechat server
+  runs on clawland-ovh (15.204.108.57), not lat1; the real ovh-vps-smoke is
+  15.204.56.61; finite-brain is NixOS-managed by the legacy fleet flow.
+- Moved deploy assets into `infra/`: v2's k8s manifests + runner units +
+  finitechat-server deploy script (→ `infra/hosts/lat1/`), finite-sites'
+  lat-2 units/Caddyfile (→ `infra/hosts/lat2/`). All in-repo references
+  updated; capture-vs-repo divergences recorded in per-host README appendices.
+- Moved service image definitions to `infra/images/` (core, dashboard,
+  private-limiter), adapted for the mono build context. The limiter image
+  building from THIS repo closes the legacy-repo split-brain.
+- Added root `.github/workflows/`: ci.yml (fmt/clippy/test vs Postgres,
+  dashboard, Hermes bridge, nix checks, devfinity smoke), component-scoped
+  release workflows with legacy mirror jobs, service-images, runtime-image
+  (single-checkout adaptation), hermes-runtime-smoke. Superseded component
+  `.github/workflows` files deleted (they never executed in mono).
+- Doctrine flip: `docs/monorepo-doctrine.md` added; root AGENTS.md/README
+  rewritten; CONTRIBUTING.md and `compat/matrix.toml` added; the old
+  workspace-level "not a monorepo" orientation files updated outside this
+  repo.
+- Validation: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  --locked -D warnings`, `cargo test --workspace --locked` (276 tests),
+  dashboard `npm test` (101 tests) all green locally. Secrets scan (gitleaks
+  over full history + targeted greps): 6 findings, all benign fixtures or
+  placeholders — cleared for the public visibility flip.
+
+Manual follow-ups this log deliberately leaves open: re-register a lat-2
+GitHub Actions runner against finite-mono; set `RELEASE_MIRROR_TOKEN`; first
+mono-cut releases proven in the field before archiving source repos; the
+clawland→lat1 finitechat-server cutover; smoke-host backups + bind fix.
+
+## Hard Cut, CI Green, lat1 NixOS Config, Runner
+
+Date: 2026-07-08 (later the same day, still on `migration-integration`)
+
+- **Hard-cut release model** (Paul's decision — no live users): mirror jobs
+  removed; per-component rolling alias releases (`finitechat-latest`,
+  `fsite-latest`, `fbrain-latest`) refreshed by the release workflows;
+  install blocks/READMEs/compat matrix point only at finite-mono. Legacy
+  repos get archived once their first mono-built release verifies.
+- **CI is green** (all five jobs, including the devfinity full-stack smoke).
+  Getting there surfaced real debt the drift carried: devfinity had never
+  been clippy'd; finitechat's upstream CI had been red since the MLS-welcome
+  hard cut (smoke script filtered on a renamed test — passing vacuously;
+  unformatted python; RUF015), and a REAL product bug: the agent health
+  server trusted a stale pre-cut cached `paired` flag (now downgraded to
+  consumed_pending_admission before any probe). Also: devfinity postgres
+  pinned its unix socket into the run dir (CI runners can't write
+  /run/postgresql); clippy pinned to 1.93.
+- **infra/nixos**: flake packages for all server binaries + CLIs and
+  `nixosConfigurations.finite-lat-1` — the single-server target from
+  finite-fable/single-server-plan.md. Deploy = pinning the flake rev.
+  Cutover remains supervised (plan Phase 2).
+- **finite-lat-2 runner** `finite-lat-2-mono` registered against finite-mono
+  and online (labels self-hosted,Linux,X64,finite-lat-2,docker,nix); repo
+  requires approval for outside collaborators (public-repo mitigation).

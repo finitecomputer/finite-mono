@@ -255,3 +255,67 @@ designed next step, when it matters, is a resident bridge process
 (`hermes serve`, JSON-lines over stdio, same contract as today's
 subcommands) which would also let one long-poll loop run continuously
 instead of re-arming per poll call.
+
+### 2026-07-08 - Electron + hosted-runtime Hermes feels fast
+
+Validated product shape:
+
+- `chat.finite.computer` deployed from finitechat `28887848e058`.
+- Runtime image `ghcr.io/finitecomputer/finite-agent-runtime:2026-07-08.hermes-stream.1`
+  packages the same finitechat commit and Hermes agent `0.18.0`.
+- Local proof ran the image under Apple `container` with a clean durable
+  mount, the Electron app using the Rust desktop daemon, and the legacy-derived
+  chat UI talking to the deployed server.
+
+Why it feels fast:
+
+- **The room server wake path is already hot.** Message publish wakes
+  `/sync/wait`/stream waiters immediately. Hints still only mean "pull
+  needed"; durable sync remains the consistency model. This keeps latency near
+  one network RTT without letting a push callback mutate state directly.
+- **Hermes now rides a resident Rust sidecar.** The Python Hermes adapter is
+  thin and holds one local `/v1/hermes/inbound` NDJSON stream to
+  `finitechat hermes serve`. The Rust sidecar owns invite admission, sync,
+  cursoring, inbox persistence, ack, send/edit/activity, and AppState-aligned
+  room projection. The hot path no longer respawns a CLI process or reopens the
+  encrypted store for every inbound message.
+- **The sidecar stream stays resident while idle.** Commit `28887848e058`
+  fixed the bad idle behavior where the advisory wait stream could end and
+  make `/v1/hermes/inbound` EOF. The sidecar now falls back to a normal bridge
+  poll and keeps the NDJSON response alive. The regression in
+  `hermes_cli_inits_invites_admits_and_round_trips_messages` asserts an idle
+  inbound stream emits heartbeat lines instead of ending.
+- **Invite admission no longer waits on the wrong KeyPackage path.** Admission
+  uses the verified inline KeyPackage carried by the invite join request, and
+  the server validates the commit Add against that stored request. This removes
+  the earlier `no KeyPackage available for invited device` failure and avoids a
+  slow "waiting for Hermes" state that was actually protocol skew.
+- **Hermes inbox cursoring no longer eats the first user message.** The agent
+  inbox initializer only advances over the agent's own prior events before the
+  first counterparty event. A freshly admitted Electron or iOS message is
+  recovered into Hermes instead of being marked consumed.
+- **Electron is thin over AppState.** The renderer subscribes to the daemon's
+  projected AppState and dispatches Rust actions. It does not implement its own
+  protocol loop, delivery semantics, or Hermes polling. Launch-time
+  `finite://join` handling is durable: the main process retains the pending
+  invite URL until the renderer explicitly consumes it after resolving the
+  daemon URL.
+- **Bridge health is explicit.** Runtime `/healthz` and `/invite` include a
+  `bridge` object. If the Hermes stream is broken, the runtime reports a real
+  bridge error instead of leaving the UI stuck on a generic waiting state.
+
+What made earlier runs slow or stuck:
+
+- server/runtime/client version skew;
+- invite admission depending on global KeyPackage inventory;
+- Hermes inbox cursor initialization advancing past the first user message;
+- the inbound stream closing on idle advisory-wait EOF and reconnecting in a
+  tight loop;
+- Electron losing the initial invite URL before React subscribed to IPC.
+
+The current manual Electron test intentionally skipped a visible invite-code
+entry step because the app was launched with a full `finite://join` URL. That
+is the right deep-link path for this proof, but it is not the final onboarding
+UX by itself. A polished product flow should still present a clear invite
+entry/import path when the app is opened normally, and should explain whether
+the user is generating a fresh device key or importing an existing account key.

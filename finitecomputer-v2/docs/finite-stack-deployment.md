@@ -101,7 +101,7 @@ Runner env is configured from:
 ```
 
 Use
-`deploy/finite-computer/systemd/runner.env.example` as the template. The
+`../infra/hosts/lat1/systemd/runner.env.example` as the template. The
 production shape is:
 
 - `FC_RUNNER_BACKEND=phala`
@@ -213,11 +213,12 @@ This repo owns the hosted Finite Chat production deploy mechanics for the SaaS
 product. The `finitechat` repo owns source, protocol compatibility, local
 checks, and the release-blocking decision about which commit is safe to deploy.
 
-From this repo:
+The deploy script now lives in `infra/hosts/lat1/scripts/` (it resolves the
+workspace path relative to the finite-mono root):
 
 ```sh
-scripts/deploy_finitechat_server_lat1.sh \
-  deploy/finite-chat/lat1 \
+../infra/hosts/lat1/scripts/deploy-finitechat-server.sh \
+  finitecomputer-v2/deploy/finite-chat/lat1 \
   <finitechat-full-sha>
 ```
 

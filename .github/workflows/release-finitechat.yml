@@ -1,0 +1,102 @@
+name: Release finitechat
+
+# Component-scoped release: tag `finitechat/vX.Y.Z` on finite-mono.
+# Asset names are a product contract; do not rename.
+# Because this repo hosts releases for several components, the repo-wide
+# `releases/latest` URL is meaningless — installers use the rolling alias
+# release `finitechat-latest`, whose assets this workflow refreshes on every
+# versioned release:
+#   https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/<asset>
+# (Hard-cut decision 2026-07-08: no mirror releases to the archived legacy
+# repos; installers point only at finite-mono.)
+
+on:
+  push:
+    tags:
+      - "finitechat/v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-latest
+            asset_name: finitechat-linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - runs_on: macos-14
+            asset_name: finitechat-macos-aarch64
+            target: aarch64-apple-darwin
+          - runs_on: macos-14
+            asset_name: finitechat-macos-x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build finitechat
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package finitechat-cli --bin finitechat
+
+      - name: Package finitechat
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/finitechat" dist/finitechat
+          tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" finitechat
+          shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes --latest=false
+          fi
+
+      - name: Refresh finitechat-latest rolling alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          alias=finitechat-latest
+          notes="Rolling alias for the newest finitechat release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
+          if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
+            # best-effort: move the alias tag to this commit for provenance
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
+          else
+            gh release create "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "finitechat (latest)" --notes "$notes" --latest=false
+          fi

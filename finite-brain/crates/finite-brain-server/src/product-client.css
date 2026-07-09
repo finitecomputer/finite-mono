@@ -717,7 +717,7 @@ pre {
 
 .obsidian-shell {
   display: grid;
-  grid-template-columns: 44px minmax(268px, 318px) minmax(0, 1fr);
+  grid-template-columns: 44px minmax(284px, 340px) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   min-height: 100vh;
@@ -726,7 +726,7 @@ pre {
 }
 
 .obsidian-shell[data-workspace-view="graph"] {
-  grid-template-columns: 44px minmax(268px, 318px) minmax(0, 1fr);
+  grid-template-columns: 44px minmax(284px, 340px) minmax(0, 1fr);
 }
 
 .ribbon-button:active {
@@ -1138,7 +1138,7 @@ pre {
   display: block;
   overflow: auto;
   overflow-x: hidden;
-  --access-panel-inset: 12px;
+  --access-panel-inset: 10px;
   --access-surface-radius: 10px;
 }
 
@@ -1290,6 +1290,10 @@ pre {
 .access-folder-selector {
   position: relative;
   margin: 0 var(--access-panel-inset) 16px;
+}
+
+#accessAddPersonPanel .access-folder-selector {
+  margin: 0;
 }
 
 .access-folder-picker {
@@ -1471,6 +1475,28 @@ pre {
   margin-bottom: 14px;
 }
 
+.access-action-stack,
+.access-state-stack {
+  display: grid;
+  min-width: 0;
+}
+
+.access-action-stack {
+  gap: 8px;
+  margin: 0 var(--access-panel-inset) 14px;
+}
+
+.access-state-stack {
+  gap: 12px;
+  margin: 0 var(--access-panel-inset) 14px;
+}
+
+.access-action-stack > .access-advanced-section,
+.access-action-stack > .access-vault-admin,
+.access-state-stack > .vault-management-section {
+  margin: 0;
+}
+
 .access-header {
   margin-bottom: 14px;
   padding-bottom: 12px;
@@ -1637,6 +1663,78 @@ pre {
   letter-spacing: 0.5px;
 }
 
+.access-person-info-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #8f8f8f;
+  cursor: pointer;
+  transition-duration: 150ms;
+  transition-property: background-color, color, transform;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.access-person-info-button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.access-person-info-button:hover,
+.access-person-info-button[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.055);
+  color: #d6d2ff;
+}
+
+.access-person-info-button:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+.access-person-detail-panel {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  flex: 1 1 100%;
+  gap: 5px 10px;
+  margin: 3px 0 2px 24px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: var(--shadow-access-ring);
+}
+
+.access-person-detail-panel[hidden] {
+  display: none !important;
+}
+
+.access-person-detail-panel dt,
+.access-person-detail-panel dd {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.access-person-detail-panel dt {
+  color: #8f8f8f;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.access-person-detail-panel dd {
+  min-width: 0;
+  color: #cfcfcf;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .access-remove-person {
   min-width: 40px;
   min-height: 40px;
@@ -1667,13 +1765,25 @@ pre {
 /* Inline Add Person Form */
 .access-inline-form {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   margin-top: 12px;
-  padding: 10px;
+  padding: 12px;
   background: rgba(255, 255, 255, 0.02);
   border: 0;
   border-radius: var(--access-surface-radius);
   box-shadow: var(--shadow-access-ring);
+}
+
+#accessAddPersonPanel .access-inline-form {
+  margin-top: 0;
+}
+
+#accessAddPersonPanel .access-inline-form.is-locked {
+  background: rgba(255, 255, 255, 0.014);
+}
+
+#accessAddPersonPanel .access-inline-form.is-locked input {
+  color: #8f8f8f;
 }
 
 .access-inline-form .access-inline-field + .access-inline-field {
@@ -1684,7 +1794,7 @@ pre {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   margin: 0;
 }
@@ -1748,8 +1858,8 @@ pre {
 .access-field-hint {
   margin: 0;
   color: #a6a6a6;
-  font-size: 10px;
-  line-height: 1.3;
+  font-size: 11px;
+  line-height: 1.4;
   text-wrap: pretty;
 }
 
@@ -1887,7 +1997,7 @@ pre {
 
 .access-field {
   display: grid;
-  gap: 5px;
+  gap: 7px;
   color: #a6a6a6;
   font-size: 11px;
   font-weight: 700;
@@ -1922,6 +2032,16 @@ pre {
   width: 15px;
   height: 15px;
   margin: 0;
+}
+
+.access-checkbox-hint {
+  margin: -6px 0 0 23px;
+  color: #8f8f8f;
+}
+
+.access-share-form.is-locked .access-checkbox {
+  color: #8f8f8f;
+  opacity: 0.72;
 }
 
 .access-section {
@@ -2715,7 +2835,17 @@ pre {
 .internal-link,
 .external-link {
   color: #8fb6ff;
+  cursor: pointer;
   font-weight: 650;
+  text-decoration: none;
+}
+
+.internal-link:hover,
+.external-link:hover,
+.internal-link:focus-visible,
+.external-link:focus-visible {
+  color: #a9c7ff;
+  text-decoration: underline;
 }
 
 .note-content-empty {
@@ -3073,16 +3203,21 @@ pre {
   overflow: hidden;
 }
 
-.access-advanced-summary {
+.access-advanced-summary,
+.access-admin-summary {
   min-height: 44px;
   padding: 11px 12px 11px 14px;
   background: transparent;
   border: none;
   cursor: pointer;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "icon title chevron"
+    "icon meta chevron";
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 2px;
   color: #dadada;
   font-size: 12px;
   font-weight: 500;
@@ -3097,12 +3232,14 @@ pre {
   display: none;
 }
 
-.access-advanced-summary:hover {
+.access-advanced-summary:hover,
+.access-admin-summary:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
 .access-advanced-summary::after,
 .access-admin-summary::after {
+  grid-area: chevron;
   content: "";
   width: 7px;
   height: 7px;
@@ -3121,19 +3258,33 @@ pre {
   transform: rotate(45deg);
 }
 
-.access-advanced-summary span {
+.access-advanced-summary .icon,
+.access-admin-summary .icon {
+  grid-area: icon;
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  opacity: 0.7;
+}
+
+.access-advanced-summary span,
+.access-admin-summary span {
+  grid-area: title;
   min-width: 0;
+  color: #dadada;
   font-weight: 600;
   text-wrap: balance;
 }
 
-.access-advanced-summary small {
-  max-width: 145px;
+.access-advanced-summary small,
+.access-admin-summary small {
+  grid-area: meta;
+  max-width: none;
   color: #a6a6a6;
   font-size: 10px;
   font-weight: 400;
   line-height: 1.25;
-  text-align: right;
+  text-align: left;
   text-wrap: pretty;
 }
 
@@ -3141,6 +3292,11 @@ pre {
   padding: 12px;
   background: rgba(0, 0, 0, 0.12);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+#accessAddPersonPanel .access-advanced-content {
+  display: grid;
+  gap: 12px;
 }
 
 /* Subsections */
@@ -3426,6 +3582,43 @@ pre {
   white-space: nowrap;
 }
 
+#vaultInvitationListSection .access-who-has-list li,
+#sharedFolderSection .access-who-has-list li,
+#folderShareLinkList li {
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+#vaultInvitationListSection .access-person-info,
+#sharedFolderSection .access-person-info,
+#folderShareLinkList .access-person-info {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 5px 7px;
+  line-height: 1.25;
+}
+
+#vaultInvitationListSection .access-person-name,
+#sharedFolderSection .access-person-name,
+#folderShareLinkList .access-person-name {
+  flex: 1 1 100%;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+#vaultInvitationListSection .access-person-role,
+#sharedFolderSection .access-person-role,
+#folderShareLinkList .access-person-role {
+  flex-shrink: 1;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .vault-management-section .access-who-has-list {
   gap: 0;
 }
@@ -3447,20 +3640,81 @@ pre {
   padding: 8px 0 !important;
 }
 
-#vaultPeopleSection .vault-people-form {
-  padding: 0;
-  background: transparent;
-  box-shadow: none;
+.vault-access-action-grid {
+  display: grid;
+  gap: 10px;
 }
 
-#vaultPeopleSection .access-inline-field {
-  grid-template-columns: minmax(0, 1fr) minmax(108px, 116px);
+.vault-access-option {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.018);
+  box-shadow: var(--shadow-access-ring);
 }
 
-#vaultPeopleSection .access-add-button {
+.vault-access-option.primary {
+  background: rgba(124, 108, 255, 0.055);
+  box-shadow:
+    var(--shadow-access-ring),
+    inset 3px 0 0 rgba(124, 108, 255, 0.45);
+}
+
+.vault-access-option + .vault-access-option {
+  margin-top: 0;
+}
+
+.vault-access-option-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.vault-access-option-heading h4 {
+  margin: 0;
+}
+
+.vault-access-option-heading .pill {
+  flex-shrink: 0;
+}
+
+#vaultPeopleActionPanel .access-inline-field {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 7px;
+}
+
+#vaultPeopleActionPanel .access-add-button {
   width: 100%;
   padding-right: 10px;
   padding-left: 10px;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+#vaultPeopleActionPanel .access-button-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+#vaultPeopleActionPanel .access-button-row button {
+  width: 100%;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+#vaultPeopleSection .access-person-info {
+  align-items: flex-start;
+}
+
+#vaultPeopleSection .access-person-name {
+  line-height: 1.25;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 /* Link lifecycle status inside access lists */
@@ -3557,13 +3811,6 @@ pre {
   color: #c4e8c6;
 }
 
-/* Share link list inside the Folder share section */
-.access-share-list {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-}
-
 /* Vault Administration */
 .access-vault-admin {
   margin: 14px var(--access-panel-inset) 0;
@@ -3572,67 +3819,6 @@ pre {
   background: rgba(255, 255, 255, 0.015);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.052);
   overflow: hidden;
-}
-
-.access-admin-summary {
-  min-height: 44px;
-  padding: 11px 12px 11px 14px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  display: grid;
-  grid-template-areas:
-    "icon title chevron"
-    "icon meta chevron";
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: 8px;
-  row-gap: 2px;
-  color: #dadada;
-  font-size: 12px;
-  font-weight: 500;
-  list-style: none;
-  transition-property: background-color;
-  transition-duration: 150ms;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-.access-admin-summary:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.access-admin-summary .icon {
-  grid-area: icon;
-  align-self: center;
-  width: 14px;
-  height: 14px;
-  opacity: 0.7;
-}
-
-.access-admin-summary span {
-  grid-area: title;
-  min-width: 0;
-  color: #dadada;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  text-wrap: balance;
-}
-
-.access-admin-summary small {
-  grid-area: meta;
-  max-width: none;
-  color: #a6a6a6;
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.25;
-  text-align: left;
-  text-wrap: pretty;
-}
-
-.access-admin-summary::after {
-  grid-area: chevron;
 }
 
 .access-admin-content {
@@ -3657,6 +3843,23 @@ pre {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   text-wrap: balance;
+}
+
+.access-admin-section .access-field + .access-field,
+.access-admin-section .access-field + .access-button-row,
+.access-admin-section .access-button-row + .access-field {
+  margin-top: 10px;
+}
+
+#vaultInvitationPanel .access-button-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+#vaultInvitationPanel .access-button-row button {
+  width: 100%;
+  line-height: 1.25;
+  white-space: normal;
 }
 
 @media (max-width: 1180px) {

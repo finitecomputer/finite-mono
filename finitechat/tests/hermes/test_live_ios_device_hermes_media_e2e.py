@@ -337,12 +337,19 @@ class LiveIosDeviceHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
         smoke.fact("adapter_service_url_present", bool(getattr(adapter, "service_url", "")))
         pid: int | None = None
         try:
-            pin_info = await asyncio.to_thread(
+            invite = await asyncio.to_thread(
                 run_json,
-                [str(FINITECHAT_BIN), "hermes", "--home", str(agent_home), "pin"],
+                [
+                    str(FINITECHAT_BIN),
+                    "hermes",
+                    "--home",
+                    str(agent_home),
+                    "invite",
+                    "--json",
+                ],
             )
-            smoke.fact("invite_url_present", bool(pin_info.get("url")))
-            smoke.fact("pin_present", bool(pin_info.get("pin")))
+            smoke.fact("invite_url_present", bool(invite.get("url")))
+            smoke.fact("invite_id", invite.get("invite_id"))
             launch_args = [
                 "--finitechat-server",
                 server_url,
@@ -350,9 +357,7 @@ class LiveIosDeviceHermesMediaE2ETest(unittest.IsolatedAsyncioTestCase):
                 IOS_DEVICE_IDENTITY,
                 "--finitechat-persist-launch-config",
                 "--finitechat-auto-join",
-                pin_info["url"],
-                "--finitechat-pin",
-                pin_info["pin"],
+                invite["url"],
                 "--finitechat-auto-send-attachment-base64",
                 base64.b64encode(PNG_1X1).decode("ascii"),
             ]

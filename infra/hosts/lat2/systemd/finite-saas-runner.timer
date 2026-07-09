@@ -1,0 +1,16 @@
+# Captured from host finite-lat-2 on 2026-07-08 (previously unmanaged).
+# DORMANT: unit-file state "disabled" on the host and absent from
+# `systemctl list-timers` — the agent-creation runner is not polling on lat2.
+# When it was active it ran finite-saas-runner.service every 20s.
+
+[Unit]
+Description=Run Finite agent creation runner
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+AccuracySec=1s
+Unit=finite-saas-runner.service
+
+[Install]
+WantedBy=timers.target

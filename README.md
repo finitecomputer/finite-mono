@@ -1,48 +1,45 @@
 # Finite Mono
 
-`finite-mono` is the new Finite monorepo.
+The Finite company monorepo: every first-party product, service, protocol,
+and infrastructure definition in one tree.
 
-The first migration is intentionally conservative. Imported repos are copied
-into top-level folders with their internal structure mostly intact:
+| Component | What it is |
+|---|---|
+| `finitechat/` | finitechat CLI, server, iOS app, Electron app, Hermes agent bridge, agent runtime containers |
+| `finitecomputer-v2/` | finite.computer SaaS: Core control plane, dashboard, Phala runner, Finite Private limiter |
+| `finite-sites/` | fsite CLI + finitesitesd (`*.finite.chat` hosting) |
+| `finite-brain/` | fbrain CLI + FiniteBrain server |
+| `finite-identity/`, `finite-nostr/`, `finite-auth/` | shared identity/protocol crates |
+| `finite-search/` | SearXNG/Firecrawl search stack + Tinfoil bundle |
+| `finite-skills/` | shared agent skills tree |
+| `devfinity/` | local integration harness (Fedimint devimint-style) |
+| `infra/` | **the single deploy root**: per-host config, images, runbooks |
+| `docs/` | doctrine, plan, migration log, architecture |
 
-- `finitecomputer-v2`
-- `finitechat`
-- `finite-sites`
-- `finite-identity`
-- `finite-nostr`
-- `finite-auth`
-- `finite-brain`
-- `finite-search`
-- `finite-skills`
+Read [docs/monorepo-doctrine.md](docs/monorepo-doctrine.md) for the rules
+(single-repo model, component-scoped release tags, what deliberately stays
+outside). New here? Start with [CONTRIBUTING.md](CONTRIBUTING.md) — local
+stack in ~15 minutes.
 
-Do not reorganize dashboards, mobile code, deployment files, integrations, or
-service wiring during import. The goal is to make copied repos work in one
-checkout, then add shared workspace structure around them.
+## Everyday commands
 
-## Start Here
+- `just` — list all root commands and modules
+- `just check` / `just fmt` / `just test` — Rust workspace gates
+- `just dev up` — boot the full local stack (devfinity + process-compose TUI)
+- `just dev smoke` — headless stack + integration smoke + teardown (CI gate)
+- `just sites …`, `just search …`, `just skills …` — component modules
+
+## Releases
+
+Component-scoped tags on this repo: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
+`fbrain/vX.Y.Z` (see `.github/workflows/release-*.yml`). Container images
+(`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
+`finite-private-limiter`) build via workflow dispatch, digest-pinned to GHCR.
+Legacy per-repo release URLs keep working via mirror releases until retired.
+
+## More
 
 - [Docs index](docs/README.md)
-- [Monorepo plan](docs/monorepo-plan.md)
-- [Migration log](docs/monorepo-migration-log.md)
-- [Fedimint monorepo structure analysis](docs/fedimint-monorepo-structure-analysis.md)
-
-## Current Root Tools
-
-- `just`: show available root commands and repo modules.
-- `just check`: check imported Rust workspace crates.
-- `just fmt`: format Rust code across the root workspace.
-- `just test`: test imported Rust workspace crates.
-- `just sites build`: build the Finite Sites packages.
-- `just sites test`: test the Finite Sites packages.
-- `just sites lint`: run Finite Sites formatting and Clippy checks.
-- `just search check`: run Finite Search static checks.
-- `just skills check`: validate the shared Finite skills tree.
-- `just dev up`: start the initial local stack with `devfinity` and the
-  process-compose TUI.
-- `just dev up --headless`: start the same local stack without the TUI.
-- `just dev smoke`: start the headless stack, run the integration smoke test,
-  and tear it down.
-- `just dev rust-smoke`: start the headless stack, run the ignored Rust
-  integration smoke test, and tear it down.
-- `just dev status`: print devfinity process and service status.
-- `just dev cleanup`: best-effort cleanup for orphaned local stack processes.
+- [Migration log](docs/monorepo-migration-log.md) · [import-sync provenance](scripts/import-sync.toml)
+- [Deploy root](infra/README.md)
+- [Fedimint structure analysis](docs/fedimint-monorepo-structure-analysis.md)

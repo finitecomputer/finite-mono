@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-enum InviteAvailability: String, Codable, Equatable, Sendable {
+enum KeyPackageAvailability: String, Codable, Equatable, Sendable {
     case unknown
     case available
     case unavailable
@@ -26,7 +26,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
     let about: String?
     let pictureURL: String?
     let relayHint: String?
-    let inviteAvailability: InviteAvailability
+    let keyPackageAvailability: KeyPackageAvailability
     let isAgent: Bool
 
     private enum CodingKeys: String, CodingKey {
@@ -37,7 +37,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
         case about
         case pictureURL
         case relayHint
-        case inviteAvailability
+        case keyPackageAvailability
         case isAgent
     }
 
@@ -49,7 +49,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
         about: String?,
         pictureURL: String?,
         relayHint: String?,
-        inviteAvailability: InviteAvailability = .unknown,
+        keyPackageAvailability: KeyPackageAvailability = .unknown,
         isAgent: Bool = false
     ) {
         self.pubkey = pubkey
@@ -59,7 +59,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
         self.about = about
         self.pictureURL = pictureURL
         self.relayHint = relayHint
-        self.inviteAvailability = inviteAvailability
+        self.keyPackageAvailability = keyPackageAvailability
         self.isAgent = isAgent
     }
 
@@ -72,7 +72,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
         about = try container.decodeIfPresent(String.self, forKey: .about)
         pictureURL = try container.decodeIfPresent(String.self, forKey: .pictureURL)
         relayHint = try container.decodeIfPresent(String.self, forKey: .relayHint)
-        inviteAvailability = try container.decodeIfPresent(InviteAvailability.self, forKey: .inviteAvailability) ?? .unknown
+        keyPackageAvailability = try container.decodeIfPresent(KeyPackageAvailability.self, forKey: .keyPackageAvailability) ?? .unknown
         isAgent = try container.decodeIfPresent(Bool.self, forKey: .isAgent) ?? false
     }
 
@@ -85,7 +85,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
         try container.encodeIfPresent(about, forKey: .about)
         try container.encodeIfPresent(pictureURL, forKey: .pictureURL)
         try container.encodeIfPresent(relayHint, forKey: .relayHint)
-        try container.encode(inviteAvailability, forKey: .inviteAvailability)
+        try container.encode(keyPackageAvailability, forKey: .keyPackageAvailability)
         try container.encode(isAgent, forKey: .isAgent)
     }
 
@@ -142,12 +142,12 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
             about: about.nostrPreferredValue(over: metadata.about),
             pictureURL: pictureURL.nostrPreferredValue(over: metadata.pictureURL),
             relayHint: relayHint,
-            inviteAvailability: inviteAvailability,
+            keyPackageAvailability: keyPackageAvailability,
             isAgent: isAgent || metadata.isAgent
         )
     }
 
-    func withInviteAvailability(_ availability: InviteAvailability) -> NostrFollowProfile {
+    func withKeyPackageAvailability(_ availability: KeyPackageAvailability) -> NostrFollowProfile {
         NostrFollowProfile(
             pubkey: pubkey,
             npub: npub,
@@ -156,7 +156,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
             about: about,
             pictureURL: pictureURL,
             relayHint: relayHint,
-            inviteAvailability: availability,
+            keyPackageAvailability: availability,
             isAgent: isAgent
         )
     }
@@ -168,7 +168,7 @@ struct NostrFollowProfile: Codable, Identifiable, Equatable, Sendable {
             displayName: displayName,
             about: about,
             picture: pictureURL,
-            stale: inviteAvailability == .unknown,
+            stale: keyPackageAvailability == .unknown,
             isAgent: isAgent
         )
     }
@@ -245,7 +245,7 @@ actor NostrPeopleCache: Sendable {
             about: metadata.about,
             pictureURL: metadata.pictureURL,
             relayHint: nil,
-            inviteAvailability: .available,
+            keyPackageAvailability: .available,
             isAgent: metadata.isAgent
         )
     }
@@ -299,7 +299,7 @@ actor NostrPeopleCache: Sendable {
             return nil
         }
         return NostrFollowFetchResult(
-            profiles: envelope.profiles.map { $0.withInviteAvailability(.unknown) },
+            profiles: envelope.profiles.map { $0.withKeyPackageAvailability(.unknown) },
             relayCount: envelope.relayCount,
             followedPubkeyCount: envelope.followedPubkeyCount
         )
@@ -522,22 +522,22 @@ private extension Optional where Wrapped == String {
 final class NostrPeopleModel: ObservableObject {
     @Published private(set) var profiles: [NostrFollowProfile] = []
     @Published private(set) var isLoading = false
-    @Published private(set) var isCheckingInviteAvailability = false
+    @Published private(set) var isCheckingKeyPackageAvailability = false
     @Published private(set) var statusText: String?
 
     private let service: NostrRelayProfileService
-    private let inviteAvailabilityService: FiniteInviteAvailabilityService
+    private let keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService
     private let cache: NostrPeopleCache?
     private var lastLoadedAccountID: String?
     private var lastLoadedServerURL: String?
 
     init(
         service: NostrRelayProfileService = NostrRelayProfileService(),
-        inviteAvailabilityService: FiniteInviteAvailabilityService = FiniteInviteAvailabilityService(),
+        keyPackageAvailabilityService: FiniteKeyPackageAvailabilityService = FiniteKeyPackageAvailabilityService(),
         cache: NostrPeopleCache? = .shared
     ) {
         self.service = service
-        self.inviteAvailabilityService = inviteAvailabilityService
+        self.keyPackageAvailabilityService = keyPackageAvailabilityService
         self.cache = cache
     }
 
@@ -615,7 +615,7 @@ final class NostrPeopleModel: ObservableObject {
                 preserveNonEmptyOnEmptyResult: true
             )
 
-            await refreshInviteAvailability(serverURL: serverURL)
+            await refreshKeyPackageAvailability(serverURL: serverURL)
             await cache?.save(
                 NostrFollowFetchResult(
                     profiles: profiles,
@@ -662,7 +662,7 @@ final class NostrPeopleModel: ObservableObject {
                 serverURL: serverURL,
                 preserveNonEmptyOnEmptyResult: true
             )
-            await refreshInviteAvailability(serverURL: serverURL)
+            await refreshKeyPackageAvailability(serverURL: serverURL)
             await cache?.save(
                 NostrFollowFetchResult(
                     profiles: profiles,
@@ -726,50 +726,50 @@ final class NostrPeopleModel: ObservableObject {
     }
 
     @MainActor
-    func recheckInviteAvailability(
+    func recheckKeyPackageAvailability(
         for profile: NostrFollowProfile,
         serverURL: String
     ) async throws -> NostrFollowProfile {
-        let availability = try await inviteAvailabilityService.fetchAvailability(
+        let availability = try await keyPackageAvailabilityService.fetchAvailability(
             serverURL: serverURL,
             accountIDs: [profile.pubkey]
         )
-        let nextAvailability: InviteAvailability = availability[profile.pubkey] == true
+        let nextAvailability: KeyPackageAvailability = availability[profile.pubkey] == true
             ? .available
             : .unavailable
-        let updated = profile.withInviteAvailability(nextAvailability)
+        let updated = profile.withKeyPackageAvailability(nextAvailability)
         if let index = profiles.firstIndex(where: { $0.pubkey == profile.pubkey }) {
-            profiles[index] = profiles[index].withInviteAvailability(nextAvailability)
+            profiles[index] = profiles[index].withKeyPackageAvailability(nextAvailability)
             return profiles[index]
         }
         return updated
     }
 
     @MainActor
-    private func refreshInviteAvailability(serverURL: String) async {
+    private func refreshKeyPackageAvailability(serverURL: String) async {
         let accountIDs = profiles.map(\.pubkey)
         guard !accountIDs.isEmpty else { return }
-        isCheckingInviteAvailability = true
-        defer { isCheckingInviteAvailability = false }
+        isCheckingKeyPackageAvailability = true
+        defer { isCheckingKeyPackageAvailability = false }
         do {
-            let availability = try await inviteAvailabilityService.fetchAvailability(
+            let availability = try await keyPackageAvailabilityService.fetchAvailability(
                 serverURL: serverURL,
                 accountIDs: accountIDs
             )
             profiles = profiles.map { profile in
-                let nextAvailability: InviteAvailability = availability[profile.pubkey] == true
+                let nextAvailability: KeyPackageAvailability = availability[profile.pubkey] == true
                     ? .available
                     : .unavailable
-                return profile.withInviteAvailability(nextAvailability)
+                return profile.withKeyPackageAvailability(nextAvailability)
             }
         } catch {
             // Leave rows in the neutral unknown state. A failed availability
-            // check is not evidence that a person lacks invite material.
+            // check is not evidence that a person lacks KeyPackages.
         }
     }
 }
 
-final class FiniteInviteAvailabilityService: Sendable {
+final class FiniteKeyPackageAvailabilityService: Sendable {
     typealias AvailabilityLoader = @Sendable (
         _ serverURL: String,
         _ accountIDs: [String]
@@ -781,7 +781,7 @@ final class FiniteInviteAvailabilityService: Sendable {
     init(
         chunkSize: Int = 100,
         availabilityLoader: @escaping AvailabilityLoader = { serverURL, accountIDs in
-            try await FiniteInviteAvailabilityService.fetchAvailabilityFromServer(
+            try await FiniteKeyPackageAvailabilityService.fetchAvailabilityFromServer(
                 serverURL: serverURL,
                 accountIDs: accountIDs
             )
@@ -811,35 +811,35 @@ final class FiniteInviteAvailabilityService: Sendable {
     ) async throws -> [String: Bool] {
         let trimmedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let baseURL = URL(string: trimmedServerURL) else {
-            throw InviteAvailabilityError.invalidServerURL
+            throw KeyPackageAvailabilityError.invalidServerURL
         }
-        let url = baseURL.appendingPathComponent("key-packages/invite-availability")
+        let url = baseURL.appendingPathComponent("key-packages/availability")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONEncoder().encode(
-            InviteAvailabilityRequestBody(accountIDs: accountIDs)
+            KeyPackageAvailabilityRequestBody(accountIDs: accountIDs)
         )
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode)
         else {
-            throw InviteAvailabilityError.serverRejected
+            throw KeyPackageAvailabilityError.serverRejected
         }
-        let decoded = try JSONDecoder().decode(InviteAvailabilityResponseBody.self, from: data)
+        let decoded = try JSONDecoder().decode(KeyPackageAvailabilityResponseBody.self, from: data)
         return Dictionary(uniqueKeysWithValues: decoded.accounts.map { account in
             (account.accountID, account.available)
         })
     }
 }
 
-private enum InviteAvailabilityError: Error {
+private enum KeyPackageAvailabilityError: Error {
     case invalidServerURL
     case serverRejected
 }
 
-private struct InviteAvailabilityRequestBody: Encodable {
+private struct KeyPackageAvailabilityRequestBody: Encodable {
     let accountIDs: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -847,11 +847,11 @@ private struct InviteAvailabilityRequestBody: Encodable {
     }
 }
 
-private struct InviteAvailabilityResponseBody: Decodable {
-    let accounts: [InviteAvailabilityAccountBody]
+private struct KeyPackageAvailabilityResponseBody: Decodable {
+    let accounts: [KeyPackageAvailabilityAccountBody]
 }
 
-private struct InviteAvailabilityAccountBody: Decodable {
+private struct KeyPackageAvailabilityAccountBody: Decodable {
     let accountID: String
     let available: Bool
 
@@ -941,7 +941,7 @@ final class NostrRelayProfileService: Sendable {
             about: profile.about,
             pictureURL: profile.pictureURL,
             relayHint: nil,
-            inviteAvailability: .available,
+            keyPackageAvailability: .available,
             isAgent: profile.isAgent
         )
     }
@@ -1036,7 +1036,7 @@ final class NostrRelayProfileService: Sendable {
                 about: profile?.about ?? seed.about,
                 pictureURL: profile?.pictureURL ?? seed.pictureURL,
                 relayHint: seed.relayHint,
-                inviteAvailability: seed.inviteAvailability,
+                keyPackageAvailability: seed.keyPackageAvailability,
                 isAgent: (profile?.isAgent ?? false) || seed.isAgent
             )
         }

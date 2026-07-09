@@ -1,0 +1,26 @@
+# PROPOSED — NOT YET DEPLOYED (authored 2026-07-08, not installed on
+# finite-lat-2). Disabled by default: install both files, review, then
+# `sudo systemctl enable --now finite-sites-backup.timer` explicitly.
+#
+# Tars the tier-1 sites state (/var/lib/finite-sites: registry.db, blobs,
+# git repos, app data) plus /etc/finite-saas (sites.env, Origin CA cert pair)
+# to /data — the 1.8T /dev/md1 array that is currently empty. Retention:
+# keep the newest 14 tarballs.
+#
+# Caveats, on purpose kept out of the script to stay dead simple:
+# - registry.db is SQLite in WAL mode; a live tar can catch a mid-write
+#   state. The restore drill MUST run `sqlite3 registry.db 'PRAGMA
+#   integrity_check;'` (see infra/hosts/lat2/backups.md). The stop-the-world
+#   variant in finite-sites/docs/deploy-finite-lat-2.md §6 remains the gold
+#   path before destructive operations.
+# - The tarball CONTAINS SECRETS (RESEND_API_KEY, origin TLS key). It is
+#   root-owned 0600 under /data/backups; never copy it off-box unencrypted.
+# - /data is on the same chassis. This fixes the "newest backup is in tmpfs"
+#   gap, not the off-box gap.
+
+[Unit]
+Description=Tar /var/lib/finite-sites and /etc/finite-saas to /data/backups
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'stamp=$(date -u +%%Y%%m%%dT%%H%%M%%SZ); install -d -m 0700 /data/backups; tar -C / -czf /data/backups/finite-sites-$stamp.tar.gz.tmp var/lib/finite-sites etc/finite-saas && mv /data/backups/finite-sites-$stamp.tar.gz.tmp /data/backups/finite-sites-$stamp.tar.gz && chmod 0600 /data/backups/finite-sites-$stamp.tar.gz; ls -1t /data/backups/finite-sites-*.tar.gz | tail -n +15 | xargs -r rm --'

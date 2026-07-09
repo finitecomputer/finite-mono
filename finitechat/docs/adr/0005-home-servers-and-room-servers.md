@@ -9,7 +9,7 @@ The product vision: **each room can live on its own server.** A group stays
 "centralized" to a single ordering authority — which is exactly what keeps
 ADR 0001's guarantees — but the app as a whole depends on no single server,
 and any group can self-host the server for its room. This ships as an
-advanced setting first; eventually the invite code itself carries the room's
+advanced setting first; eventually the room link itself carries the room's
 address.
 
 Because the Finite Chat protocol is open source, we expect an ecosystem of
@@ -66,9 +66,9 @@ servers forward wake hints to it. The wake payload is frozen at
 `{room_id, seq}` — no content, no token — which is what makes relaying it
 through a stranger's server acceptable.
 
-**Invite codes become room addresses.** The eventual invite format is
-`(room server URL, room id, welcome claim credentials)`; joining a room is
-discovering where it lives.
+**Room links become room addresses.** The eventual shareable room-link format
+is `(room server URL, room id, Welcome claim credentials)`; joining a room is
+discovering where it lives and activating a Welcome.
 
 ## Principles that must stay true
 
@@ -82,7 +82,7 @@ discovering where it lives.
    the only copy of something the user cannot regenerate.**
    - Honest caveat: discovery. Peers who only know your old home cannot
      fetch fresh KeyPackages until they learn your new address. Contact and
-     invite flows must treat the home address as mutable data attached to an
+     room-link flows must treat the home address as mutable data attached to an
      identity, never as the identity.
 2. **Identity never becomes server-issued.** `AccountId` stays derived from
    the account key. No home server gains the power to mint, deny, or reuse
@@ -95,9 +95,8 @@ discovering where it lives.
    the only interop mechanism; no app-specific behavior enters the protocol.
 5. **The cross-room state list is closed.** Account-resident server state is
    exactly: KeyPackage inventory, push tokens, revocation fast-block, link
-   sessions, device liveness, account-room directory, and invite sessions
-   (added by ADR 0006; ephemeral with a TTL — the migration story is "print
-   a new invite"). New server state must be room-scoped, or be explicitly
+   sessions, device liveness, and account-room directory. New server state must
+   be room-scoped, or be explicitly
    added here as home-scoped *with a migration story*. This is a review-time
    rule starting now.
 6. **Revocation degrades gracefully, by design.** Server-side revocation is
@@ -113,12 +112,12 @@ move with the room; home-scoped routes are account-resident.
 | Scope | Routes |
 | --- | --- |
 | Room server | `/commits`, `/events`, `/activities`, `/sync/group`, `/sync/inbox` (server-local device inbox), `/welcomes/claim`, `/welcomes/ack`, `/application-effects/*`, `/rooms/admins`, `/rooms/leave`, `/rooms/report-invalid-commit` |
-| Home server | `/key-packages`, `/key-packages/invite-availability`, `/key-packages/claim`, `/key-packages/claims`, `/key-packages/inventory`, `/key-packages/leases/expire`, `/push-tokens`, `/push-tokens/remove`, `/devices/revoke`, `/devices/liveness`, `/devices/liveness/get`, `/link-sessions/*`, `/account-rooms`, `/account-rooms/bootstrap`, `/account-rooms/list` |
+| Home server | `/key-packages`, `/key-packages/availability`, `/key-packages/claim`, `/key-packages/claims`, `/key-packages/inventory`, `/key-packages/leases/expire`, `/push-tokens`, `/push-tokens/remove`, `/devices/revoke`, `/devices/liveness`, `/devices/liveness/get`, `/link-sessions/*`, `/account-rooms`, `/account-rooms/bootstrap`, `/account-rooms/list` |
 | Both | `/health` |
 
 Note `/welcomes/claim` is device-addressed but server-local: in a sharded
-world a device claims welcomes from the room server named in its invite.
-KeyPackage claims are the inverse: an inviter claims from the *invitee's
+world a device claims welcomes from the room server named in its room link.
+KeyPackage claims are the inverse: an adding member claims from the target's
 home server*, then publishes the commit + Welcome bundle to the room server.
 The KeyPackage routes are already room-free, which is what makes that a URL
 change rather than a protocol change.
@@ -135,10 +134,10 @@ shape-of-future-work rules.
    dispatching (a no-op grouping today). This is the one place where waiting
    makes the work strictly larger — every new client feature threads through
    the room record and the tick loops.
-2. **Reserve the invite-code format with the address field first.** No
-   invite codes exist in the wild yet. When the invite format is designed,
-   it is versioned and `(server URL, room id, claim credentials)` is the v1
-   shape, so room addressing never needs a flag day.
+2. **Reserve the room-link format with the address field first.** No stable
+   room links exist in the wild yet. When the shareable link format is
+   designed, it is versioned and `(server URL, room id, claim credentials)` is
+   the v1 shape, so room addressing never needs a flag day.
 3. **Build the pusher daemon relay-shaped.** When the deferred pusher
    (ADR 0003 §5) is built, its internal interface is "wake hint in, platform
    push out" at the home server — even while room server and home server are

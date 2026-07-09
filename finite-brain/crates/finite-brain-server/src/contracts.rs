@@ -363,9 +363,32 @@ pub struct RemoveFolderAccessRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateVaultInvitationRequest {
-    pub target_npub: String,
+    #[serde(default)]
+    pub target_npub: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub target_email: Option<String>,
+    #[serde(default)]
     pub initial_folder_access: Vec<String>,
     pub expires_at: String,
+    #[serde(default)]
+    pub invite_unwrap_npub: Option<String>,
+    #[serde(default)]
+    pub bootstrap_payload_hash: Option<String>,
+    #[serde(default)]
+    pub bootstrap_wrapped_event_json: Option<String>,
+    #[serde(default)]
+    pub bootstrap_authorization_event_json: Option<String>,
+}
+
+/// One Folder included in an Email Invite Bootstrap scope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailInviteBootstrapScopeResponse {
+    pub folder_id: String,
+    pub access: FolderAccessMode,
+    pub key_version: u32,
 }
 
 /// Vault Invitation response.
@@ -374,17 +397,48 @@ pub struct CreateVaultInvitationRequest {
 pub struct VaultInvitationResponse {
     pub id: String,
     pub vault_id: String,
-    pub user_id: String,
+    pub target_kind: String,
+    pub user_id: Option<String>,
+    pub invited_email: Option<String>,
+    pub invite_unwrap_npub: Option<String>,
+    pub bootstrap_payload_hash: Option<String>,
+    pub bootstrap_wrapped_event_json: Option<String>,
+    pub bootstrap_authorization_event_json: Option<String>,
+    pub bootstrap_scope: Vec<EmailInviteBootstrapScopeResponse>,
+    pub claimed_by_npub: Option<String>,
     pub identities: Vec<IdentityResponse>,
     pub status: String,
     pub invite_code: String,
     pub accept_path: String,
+    pub public_instructions_path: String,
+    pub public_instructions_url: Option<String>,
+    pub delivery_status: Option<String>,
     pub initial_folder_access: Vec<String>,
     pub expires_at: String,
     pub created_at: String,
     pub updated_at: String,
     pub accepted_at: Option<String>,
     pub duplicate_accept: bool,
+}
+
+/// Claim an Email Invite Bootstrap into npub-bound Vault access.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimEmailVaultInvitationRequest {
+    pub email: String,
+    pub email_proof_created_at: String,
+    #[serde(default)]
+    pub invite_unwrap_proof_event_json: Option<String>,
+    #[serde(default)]
+    pub grants: Vec<CreateVaultFolderKeyGrantRequest>,
+}
+
+/// Request authenticated, post-proof Invite Instructions for an Email Invite Bootstrap.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostProofInviteInstructionsRequest {
+    pub email: String,
+    pub email_proof_created_at: String,
 }
 
 /// Vault Invitation list response.

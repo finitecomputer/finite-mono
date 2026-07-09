@@ -1487,10 +1487,10 @@ implemented, in eight verified steps (one commit each):
    dev-dependency are deleted. The upstream contract remains proven at state
    level by the conformance suite; the process smoke now drives typed
    bootstrap + append-event end to end.
-5. Admin authority (ADR 0003 §2 as amended): creator-initialized admin set on
-   the membership projection; cross-account membership changes require admin;
-   `/rooms/admins` grant/revoke with a last-admin rule. Direct rooms
-   dissolved (ADR 0004 §4): `/direct-rooms`, stored account pairs,
+5. Relay authority boundary (ADR 0003 §2 as amended): the server keeps a
+   membership projection for routing/sync and validates commit structure, but
+   it does not enforce social admin authority over encrypted room evolution.
+   Direct rooms dissolved (ADR 0004 §4): `/direct-rooms`, stored account pairs,
    third-account rejection, and the extra device cap are deleted.
 6. Whole-account leave (ADR 0003 §3): `/rooms/leave` closes the account's
    intervals immediately; a departed marker lets the later MLS removal

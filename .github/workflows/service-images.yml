@@ -1,0 +1,93 @@
+name: Service Images
+
+# Builds the control-plane service images from this repo in CI and pushes them
+# digest-pinned to GHCR. This replaces the deprecated on-host `podman build`
+# flow on finite-lat-1 (see infra/hosts/lat1/deploy.md).
+
+run-name: Publish ${{ inputs.image }} ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Which image to build"
+        required: true
+        type: choice
+        options:
+          - core
+          - dashboard
+          - private-limiter
+      version:
+        description: "Image version tag, for example 2026-07-08.1"
+        required: true
+        type: string
+
+concurrency:
+  group: service-image-${{ inputs.image }}-${{ inputs.version }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image parameters
+        id: params
+        run: |
+          case "${{ inputs.image }}" in
+            core)
+              echo "name=finite-saas-core" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=infra/images/core.Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              ;;
+            dashboard)
+              echo "name=finite-saas-dashboard" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=infra/images/dashboard.Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=finitecomputer-v2" >> "$GITHUB_OUTPUT"
+              ;;
+            private-limiter)
+              echo "name=finite-private-limiter" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push
+        id: build
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ steps.params.outputs.name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          docker buildx create --use
+          docker buildx build \
+            --platform linux/amd64 \
+            --file "${{ steps.params.outputs.dockerfile }}" \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:sha-${GITHUB_SHA::12}" \
+            --metadata-file image-metadata.json \
+            --push \
+            "${{ steps.params.outputs.context }}"
+          DIGEST="$(jq -r '."containerimage.digest"' image-metadata.json)"
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::docker buildx did not return an image digest"
+            cat image-metadata.json
+            exit 1
+          fi
+          echo "pinned=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        env:
+          PINNED: ${{ steps.build.outputs.pinned }}
+        run: |
+          echo "Pinned image (source commit ${GITHUB_SHA}):" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"

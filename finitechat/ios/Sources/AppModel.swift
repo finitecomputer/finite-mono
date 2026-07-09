@@ -253,7 +253,7 @@ private struct PersistedRuntimeConfig: Codable, Equatable {
 typealias AppRuntimeFactory = (OpenOptions) throws -> any FiniteChatRuntimeProtocol
 
 extension AppRoomSummary {
-    var isWaitingForInviteApproval: Bool {
+    var isWaitingForWelcome: Bool {
         state == .waitingForApproval
             && status.localizedCaseInsensitiveContains("waiting for room admission")
     }
@@ -350,7 +350,6 @@ struct RuntimeDataStore {
 enum AppScanTargetResult {
     case empty
     case profile(AppProfileSummary)
-    case room(AppRoomSummary)
     case unavailable
 }
 
@@ -581,6 +580,53 @@ final class AppModel: ObservableObject, AppReconciler {
         return projection(for: roomId).messages
     }
 
+    func topics(for roomID: String) -> [AppTopicSummary] {
+        state?.topics.filter { $0.roomId == roomID && !$0.archived } ?? []
+    }
+
+    func selectedTopic(in roomID: String) -> AppTopicSummary? {
+        let roomTopics = topics(for: roomID)
+        if let selectedTopicID = state?.selectedTopicId,
+           let topic = roomTopics.first(where: { $0.topicId == selectedTopicID })
+        {
+            return topic
+        }
+        return roomTopics.first
+    }
+
+    func selectedChat(in topic: AppTopicSummary) -> AppChatSummary? {
+        if let selectedChatID = state?.selectedChatId,
+           let chat = topic.chats.first(where: { $0.chatId == selectedChatID })
+        {
+            return chat
+        }
+        if let activeChatID = topic.activeChatId,
+           let chat = topic.chats.first(where: { $0.chatId == activeChatID })
+        {
+            return chat
+        }
+        return topic.chats.first
+    }
+
+    func selectedChatRoute(for roomID: String) -> (topicID: String, chatID: String)? {
+        guard let topic = selectedTopic(in: roomID),
+              let chat = selectedChat(in: topic)
+        else {
+            return nil
+        }
+        return (topic.topicId, chat.chatId)
+    }
+
+    func compositionRoute(for roomID: String, replyTo message: ChatMessage? = nil) -> (topicID: String, chatID: String)? {
+        if let message,
+           let topicID = message.conversationId,
+           let chatID = message.chatId
+        {
+            return (topicID, chatID)
+        }
+        return selectedChatRoute(for: roomID)
+    }
+
     var roomListEmptyDescription: String {
         if developerErrorText != nil {
             return "Open Settings to check connection."
@@ -602,10 +648,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
     var actionNoticeText: String? {
         userNoticeText ?? developerErrorText
-    }
-
-    var inviteJoinSubmissionRoomID: String? {
-        state?.flow.inviteJoinSubmissionRoomId
     }
 
     var scanInFlight: Bool {
@@ -1023,6 +1065,18 @@ final class AppModel: ObservableObject, AppReconciler {
         }
     }
 
+    func openTopic(_ topic: AppTopicSummary) {
+        dispatchInBackground(.openTopic(roomId: topic.roomId, topicId: topic.topicId))
+    }
+
+    func openChat(_ chat: AppChatSummary, in topic: AppTopicSummary) {
+        dispatchInBackground(.openChat(
+            roomId: topic.roomId,
+            topicId: topic.topicId,
+            chatId: chat.chatId
+        ))
+    }
+
     func projection(for roomID: String) -> ChatRoomProjection {
         chatProjections[roomID] ?? .empty(roomID: roomID)
     }
@@ -1034,17 +1088,20 @@ final class AppModel: ObservableObject, AppReconciler {
         dispatchInBackground(.createRoom(displayName: name))
     }
 
-    func createInvite(
-        for room: AppRoomSummary,
-        onCreated: (@MainActor () -> Void)? = nil
-    ) -> Bool {
-        guard room.state == .connected else { return false }
-        return dispatchInBackground(.createInvite(roomId: room.roomId)) { [weak self] in
-            guard let self else { return }
-            if self.state?.activeInvite?.roomId == room.roomId {
-                onCreated?()
-            }
-        }
+    @discardableResult
+    func createTopic(roomID: String, title rawTitle: String) -> Bool {
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+        return dispatchInBackground(.createTopic(roomId: roomID, title: title))
+    }
+
+    @discardableResult
+    func startChat(in topic: AppTopicSummary) -> Bool {
+        dispatchInBackground(.startTopicChat(
+            roomId: topic.roomId,
+            topicId: topic.topicId,
+            reason: nil
+        ))
     }
 
     func startProfileChat(
@@ -1206,6 +1263,26 @@ final class AppModel: ObservableObject, AppReconciler {
         return true
     }
 
+    func openTargetURL(_ url: URL) {
+        let value = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
+        appendDiagnostic(
+            category: "transport",
+            event: "open_target_url.requested",
+            details: ["scheme": url.scheme ?? "none"]
+        )
+        launchAutomationTask?.cancel()
+        launchAutomationTask = Task { [weak self] in
+            guard let self else { return }
+            await MainActor.run {
+                self.scanDraft = value
+                _ = self.scanTarget { [weak self] result in
+                    guard let self, case .profile(let profile) = result else { return }
+                    _ = self.startProfileChat(for: profile)
+                }
+            }
+        }
+    }
+
     private func scanTargetResultFromUpdatedState() -> AppScanTargetResult {
         guard let scanResult = state?.flow.scanResult else { return .unavailable }
         switch scanResult {
@@ -1213,10 +1290,6 @@ final class AppModel: ObservableObject, AppReconciler {
             guard let profile = activeProfile else { return .unavailable }
             scanDraft = ""
             return .profile(profile)
-        case .room:
-            guard let room = selectedRoom else { return .unavailable }
-            scanDraft = ""
-            return .room(room)
         case .unavailable, .none:
             return .unavailable
         }
@@ -1405,17 +1478,39 @@ final class AppModel: ObservableObject, AppReconciler {
         guard roomAllowsComposition(roomID) else { return false }
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
+        let selectedRoute = compositionRoute(for: roomID, replyTo: message)
+        let optimisticConversationID = message?.conversationId ?? selectedRoute?.topicID
+        let optimisticChatID = message?.chatId ?? selectedRoute?.chatID
         let optimisticMessageID = installOptimisticMessage(
             roomID: roomID,
             text: text,
-            replyToMessageID: message?.messageId
+            replyToMessageID: message?.messageId,
+            conversationID: optimisticConversationID,
+            chatID: optimisticChatID
         )
         let action: AppAction
         if let message {
-            action = .sendReply(
+            if let selectedRoute {
+                action = .sendChatReply(
+                    roomId: roomID,
+                    topicId: selectedRoute.topicID,
+                    chatId: selectedRoute.chatID,
+                    text: text,
+                    replyToMessageId: message.messageId
+                )
+            } else {
+                action = .sendReply(
+                    roomId: roomID,
+                    text: text,
+                    replyToMessageId: message.messageId
+                )
+            }
+        } else if let selectedRoute {
+            action = .sendChatMessage(
                 roomId: roomID,
-                text: text,
-                replyToMessageId: message.messageId
+                topicId: selectedRoute.topicID,
+                chatId: selectedRoute.chatID,
+                text: text
             )
         } else {
             action = .sendMessage(roomId: roomID, text: text)
@@ -1453,6 +1548,7 @@ final class AppModel: ObservableObject, AppReconciler {
     ) -> Bool {
         guard roomAllowsComposition(roomID) else { return false }
         let caption = outboundText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedRoute = compositionRoute(for: roomID, replyTo: message)
         outboundText = ""
         Task { [weak self] in
             guard let self else { return }
@@ -1462,15 +1558,30 @@ final class AppModel: ObservableObject, AppReconciler {
                 }.value
                 let runtime = try currentRuntime()
                 let runtimeKey = openKey
-                let action = AppAction.sendAttachment(
-                    roomId: roomID,
-                    filename: attachment.filename,
-                    mimeType: attachment.mimeType,
-                    kind: attachment.kind,
-                    bytes: attachment.data,
-                    caption: caption,
-                    replyToMessageId: message?.messageId
-                )
+                let action: AppAction
+                if let selectedRoute {
+                    action = .sendChatAttachment(
+                        roomId: roomID,
+                        topicId: selectedRoute.topicID,
+                        chatId: selectedRoute.chatID,
+                        filename: attachment.filename,
+                        mimeType: attachment.mimeType,
+                        kind: attachment.kind,
+                        bytes: attachment.data,
+                        caption: caption,
+                        replyToMessageId: message?.messageId
+                    )
+                } else {
+                    action = .sendAttachment(
+                        roomId: roomID,
+                        filename: attachment.filename,
+                        mimeType: attachment.mimeType,
+                        kind: attachment.kind,
+                        bytes: attachment.data,
+                        caption: caption,
+                        replyToMessageId: message?.messageId
+                    )
+                }
                 enqueueRuntimeDispatch(
                     action,
                     runtime: runtime,
@@ -1507,17 +1618,30 @@ final class AppModel: ObservableObject, AppReconciler {
         guard !attachments.isEmpty else { return false }
         let caption = (captionOverride ?? outboundText)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedRoute = compositionRoute(for: roomID, replyTo: message)
         Task { [weak self] in
             guard let self else { return }
             do {
                 let runtime = try currentRuntime()
                 let runtimeKey = openKey
-                let action = AppAction.sendAttachments(
-                    roomId: roomID,
-                    attachments: attachments,
-                    caption: caption,
-                    replyToMessageId: message?.messageId
-                )
+                let action: AppAction
+                if let selectedRoute {
+                    action = .sendChatAttachments(
+                        roomId: roomID,
+                        topicId: selectedRoute.topicID,
+                        chatId: selectedRoute.chatID,
+                        attachments: attachments,
+                        caption: caption,
+                        replyToMessageId: message?.messageId
+                    )
+                } else {
+                    action = .sendAttachments(
+                        roomId: roomID,
+                        attachments: attachments,
+                        caption: caption,
+                        replyToMessageId: message?.messageId
+                    )
+                }
                 enqueueRuntimeDispatch(
                     action,
                     runtime: runtime,
@@ -1553,6 +1677,15 @@ final class AppModel: ObservableObject, AppReconciler {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard !trimmedQuestion.isEmpty, trimmedOptions.count >= 2 else { return false }
+        if let selectedRoute = selectedChatRoute(for: roomID) {
+            return dispatchInBackground(.sendChatPoll(
+                roomId: roomID,
+                topicId: selectedRoute.topicID,
+                chatId: selectedRoute.chatID,
+                question: trimmedQuestion,
+                options: trimmedOptions
+            ))
+        }
         return dispatchInBackground(.sendPoll(
             roomId: roomID,
             question: trimmedQuestion,
@@ -2025,7 +2158,9 @@ final class AppModel: ObservableObject, AppReconciler {
     private func installOptimisticMessage(
         roomID: String,
         text: String,
-        replyToMessageID: String?
+        replyToMessageID: String?,
+        conversationID: String? = nil,
+        chatID: String? = nil
     ) -> String? {
         guard let state else { return nil }
         optimisticMessageCounter &+= 1
@@ -2037,7 +2172,8 @@ final class AppModel: ObservableObject, AppReconciler {
             roomId: roomID,
             seq: Self.optimisticSequenceBase + sequenceOffset,
             messageId: messageID,
-            conversationId: nil,
+            conversationId: conversationID,
+            chatId: chatID,
             senderAccountId: state.identity.accountId,
             senderDeviceId: state.identity.deviceId,
             senderDisplayName: state.identity.deviceId,
@@ -2222,11 +2358,35 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "open_room",
                 details: ["room": roomId]
             )
+        case .openTopic(let roomId, let topicId):
+            return DiagnosticActionSummary(
+                category: "runtime",
+                name: "open_topic",
+                details: ["room": roomId, "topic": topicId]
+            )
+        case .openChat(let roomId, let topicId, let chatId):
+            return DiagnosticActionSummary(
+                category: "runtime",
+                name: "open_chat",
+                details: ["room": roomId, "topic": topicId, "chat": chatId]
+            )
         case .createRoom:
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "create_room",
                 details: [:]
+            )
+        case .createTopic(let roomId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "create_topic",
+                details: ["room": roomId]
+            )
+        case .startTopicChat(let roomId, let topicId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "start_topic_chat",
+                details: ["room": roomId, "topic": topicId]
             )
         case .saveProfile:
             return DiagnosticActionSummary(
@@ -2264,23 +2424,11 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "add_room_members",
                 details: ["room": roomId, "members": "\(profiles.count)"]
             )
-        case .createInvite(let roomId):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "create_invite",
-                details: ["room": roomId]
-            )
         case .scanTarget:
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "scan_target",
                 details: [:]
-            )
-        case .submitInviteJoin(let pendingRoomId):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "submit_invite_join",
-                details: ["room": pendingRoomId]
             )
         case .sendMessage(let roomId, _):
             return DiagnosticActionSummary(
@@ -2288,11 +2436,34 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "send_message",
                 details: ["room": roomId]
             )
+        case .sendTopicMessage(let roomId, let topicId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_topic_message",
+                details: ["room": roomId, "topic": topicId]
+            )
+        case .sendChatMessage(let roomId, let topicId, let chatId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_chat_message",
+                details: ["room": roomId, "topic": topicId, "chat": chatId]
+            )
         case .sendReply(let roomId, _, let replyToMessageId):
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "send_reply",
                 details: ["room": roomId, "reply_to": replyToMessageId]
+            )
+        case .sendChatReply(let roomId, let topicId, let chatId, _, let replyToMessageId):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_chat_reply",
+                details: [
+                    "room": roomId,
+                    "topic": topicId,
+                    "chat": chatId,
+                    "reply_to": replyToMessageId,
+                ]
             )
         case .sendAttachment(let roomId, _, _, _, _, let caption, let replyToMessageId):
             var details = [
@@ -2307,6 +2478,23 @@ final class AppModel: ObservableObject, AppReconciler {
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "send_attachment",
+                details: details
+            )
+        case .sendChatAttachment(let roomId, let topicId, let chatId, _, _, _, _, let caption, let replyToMessageId):
+            var details = [
+                "room": roomId,
+                "topic": topicId,
+                "chat": chatId,
+                "attachment_count": "1",
+                "has_caption": caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "false" : "true",
+            ]
+            if let replyToMessageId {
+                details["reply_to"] = replyToMessageId
+            }
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_chat_attachment",
                 details: details
             )
         case .sendAttachments(let roomId, let attachments, let caption, let replyToMessageId):
@@ -2324,11 +2512,39 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "send_attachments",
                 details: details
             )
+        case .sendChatAttachments(let roomId, let topicId, let chatId, let attachments, let caption, let replyToMessageId):
+            var details = [
+                "room": roomId,
+                "topic": topicId,
+                "chat": chatId,
+                "attachment_count": "\(attachments.count)",
+                "has_caption": caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "false" : "true",
+            ]
+            if let replyToMessageId {
+                details["reply_to"] = replyToMessageId
+            }
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_chat_attachments",
+                details: details
+            )
         case .sendPoll(let roomId, _, let options):
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "send_poll",
                 details: ["room": roomId, "option_count": "\(options.count)"]
+            )
+        case .sendChatPoll(let roomId, let topicId, let chatId, _, let options):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "send_chat_poll",
+                details: [
+                    "room": roomId,
+                    "topic": topicId,
+                    "chat": chatId,
+                    "option_count": "\(options.count)",
+                ]
             )
         case .votePoll(let roomId, let messageId, let optionId):
             return DiagnosticActionSummary(
@@ -2473,7 +2689,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private func runLaunchAutomationIfRequested() {
         guard !didRunLaunchAutomation else { return }
-        let inviteURL = Self.argumentValue("--finitechat-auto-join", in: args)
         let createRoomName = Self.argumentValue("--finitechat-auto-create-room", in: args)
         let profileChatNpub = Self.argumentValue("--finitechat-auto-start-profile-chat-npub", in: args)
         let outbound = Self.argumentValue("--finitechat-auto-send", in: args)
@@ -2501,8 +2716,7 @@ final class AppModel: ObservableObject, AppReconciler {
             "--finitechat-auto-send-attachment-caption",
             in: args
         )
-        guard inviteURL != nil
-            || createRoomName != nil
+        guard createRoomName != nil
             || profileChatNpub != nil
             || outbound != nil
             || attachmentText != nil
@@ -2523,9 +2737,6 @@ final class AppModel: ObservableObject, AppReconciler {
             {
                 self.roomDraft = createRoomName
                 self.createRoom()
-            }
-            if let inviteURL {
-                _ = await self.scanLaunchAutomationInvite(inviteURL)
             }
             if let profileChatNpub,
                !profileChatNpub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2560,22 +2771,6 @@ final class AppModel: ObservableObject, AppReconciler {
                     mimeType: attachmentMimeType,
                     caption: attachmentCaption ?? ""
                 )
-            }
-        }
-    }
-
-    private func scanLaunchAutomationInvite(_ inviteURL: String) async -> AppScanTargetResult {
-        await withCheckedContinuation { continuation in
-            var didResume = false
-            func finish(_ result: AppScanTargetResult) {
-                guard !didResume else { return }
-                didResume = true
-                continuation.resume(returning: result)
-            }
-
-            scanDraft = inviteURL
-            _ = scanTarget { result in
-                finish(result)
             }
         }
     }
@@ -2729,7 +2924,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private static func hasLaunchAutomation(args: [String]) -> Bool {
         [
-            "--finitechat-auto-join",
             "--finitechat-auto-create-room",
             "--finitechat-auto-start-profile-chat-npub",
             "--finitechat-auto-send",

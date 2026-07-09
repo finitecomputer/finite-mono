@@ -18,7 +18,7 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finite-sites"
+repo="finitecomputer/finite-mono"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -30,7 +30,7 @@ case "$os:$arch" in
   *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
-base="https://github.com/$repo/releases/latest/download"
+base="https://github.com/$repo/releases/download/fsite-latest"
 curl -fsSL "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz"
 curl -fsSL "$base/$asset.tar.gz.sha256" -o "$tmp/$asset.tar.gz.sha256"
 
@@ -74,6 +74,23 @@ copies the secret anywhere else.
 ```sh
 fsite auth status --output json
 ```
+
+### Email And Identity Authority
+
+When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
+`fsite auth login`, `fsite auth link-email`, and `fsite auth redeem` use that
+authority for email proof and Nostr key ownership instead of Sites-local email
+keys.
+
+For `@finite.vip` addresses, redeeming after `fsite auth link-email EMAIL` or
+redeeming with `--link-native` binds the email to the shared User Key in
+finite-identity. That is the path that lets finite-identity own the user's
+Nostr keypair and NIP-05 identity. For non-`@finite.vip` addresses, redeeming
+preserves the email-only collaborator flow: the email can satisfy an email
+grant, but it does not become a native Finite VIP identity.
+
+Sites keeps its legacy `/api/v1/email-auth/*` endpoints for self-hosted and
+transition deployments that do not configure `FINITE_IDENTITY_AUTHORITY`.
 
 ### Migrating an existing key
 

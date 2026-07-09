@@ -40,7 +40,7 @@ Current hosted smoke service:
 Repository and releases:
 
 - Source: `https://github.com/finitecomputer/finite-brain`
-- Release downloads: `https://github.com/finitecomputer/finite-brain/releases/latest`
+- Release downloads: `https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
 
 No production FiniteBrain URL is canonized in this repository yet. Do not
 invent one in docs, skills, tests, or agent instructions.
@@ -143,6 +143,11 @@ loopback addresses.
 - `FINITE_BRAIN_PUBLIC_BASE_URL`: browser-visible Product Client origin and
   legacy CLI fallback.
 - `FINITE_BRAIN_DB`: SQLite database path, default `finite-brain.sqlite3`.
+- `FINITE_IDENTITY_AUTHORITY`: finite-identity Authority base URL used by
+  email-targeted Vault Invitation claims to verify current email proof.
+- `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
+  `resend`, `postmark`, or `none`.
+- `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend` or `postmark`.
 - `FBRAIN_CONFIG_DIR`: local `fbrain` config directory for prototype signer
   state. Prefer global `--config-dir` in scripts and agent runtimes.
 

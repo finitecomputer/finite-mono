@@ -869,7 +869,7 @@ struct MyNostrProfileSheet: View {
     let profile: AppProfileSummary?
     let serverURL: String
     let showsSecretKey: Bool
-    private let availabilityService: FiniteInviteAvailabilityService
+    private let availabilityService: FiniteKeyPackageAvailabilityService
     private let onUploadImage: @MainActor (Data, String) async -> String?
     private let onSaveProfile: @MainActor (String, String, String?) async -> Bool
     @State private var showingSecret = false
@@ -891,7 +891,7 @@ struct MyNostrProfileSheet: View {
         profile: AppProfileSummary? = nil,
         serverURL: String = RuntimeConfig.defaultServerURL,
         showsSecretKey: Bool = true,
-        availabilityService: FiniteInviteAvailabilityService = FiniteInviteAvailabilityService(),
+        availabilityService: FiniteKeyPackageAvailabilityService = FiniteKeyPackageAvailabilityService(),
         onUploadImage: @escaping @MainActor (Data, String) async -> String? = { _, _ in nil },
         onSaveProfile: @escaping @MainActor (String, String, String?) async -> Bool = { _, _, _ in false }
     ) {
@@ -1289,7 +1289,7 @@ private struct NostrProfileRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Label(profile.inviteAvailability.userStatusText, systemImage: statusSystemImage)
+                Label(profile.keyPackageAvailability.userStatusText, systemImage: statusSystemImage)
                     .font(.caption2)
                     .foregroundStyle(statusTint)
                     .lineLimit(1)
@@ -1306,7 +1306,7 @@ private struct NostrProfileRow: View {
     }
 
     private var statusSystemImage: String {
-        switch profile.inviteAvailability {
+        switch profile.keyPackageAvailability {
         case .available:
             return "checkmark.circle.fill"
         case .unavailable:
@@ -1317,7 +1317,7 @@ private struct NostrProfileRow: View {
     }
 
     private var statusTint: Color {
-        switch profile.inviteAvailability {
+        switch profile.keyPackageAvailability {
         case .available:
             return .green
         case .unavailable:

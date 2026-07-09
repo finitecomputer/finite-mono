@@ -15,6 +15,7 @@ FINITECHAT_BIN = os.environ.get("FINITECHAT_BIN", "/usr/local/bin/finitechat")
 HOST = os.environ.get("FINITE_AGENT_HTTP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FINITE_AGENT_HTTP_PORT", "8080"))
 INVITE_FILE = AGENT_HOME / "current-invite.json"
+BRIDGE_STATUS_FILE = AGENT_HOME / "hermes-bridge-status.json"
 ROOM_NAME = os.environ.get(
     "FINITECHAT_HERMES_ROOM_NAME",
     os.environ.get("FINITE_AGENT_NAME", "Finite Agent"),
@@ -52,6 +53,24 @@ def identity() -> dict[str, Any]:
         "npub": value.get("npub"),
         "account_id": value.get("account_id"),
     }
+
+
+def bridge_status() -> dict[str, Any]:
+    try:
+        payload = json.loads(BRIDGE_STATUS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "starting", "ok": False}
+    except Exception as exc:
+        return {"status": "unavailable", "ok": False, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"status": "unavailable", "ok": False, "error": "bridge status is not an object"}
+    return payload
+
+
+def runtime_health() -> dict[str, Any]:
+    payload = identity()
+    payload["bridge"] = bridge_status()
+    return payload
 
 
 def finitechat_json(args: list[str]) -> dict[str, Any]:
@@ -97,11 +116,26 @@ def invite_status(url: str) -> dict[str, Any]:
     return finitechat_json(["hermes", "invite-status", "--url", url, "--json"])
 
 
+def room_status(room_id: str) -> dict[str, Any]:
+    return finitechat_json(
+        [
+            "hermes",
+            "--agent-home",
+            str(AGENT_HOME),
+            "room-status",
+            "--room-id",
+            room_id,
+            "--json",
+        ]
+    )
+
+
 def invite_base_payload(
     identity_payload: dict[str, Any], invite_payload: dict[str, Any]
 ) -> dict[str, Any]:
     return {
         "ready": True,
+        "bridge": bridge_status(),
         "agent_npub": identity_payload.get("npub"),
         "account_id": identity_payload.get("account_id"),
         "room_id": invite_payload.get("room_id"),
@@ -109,14 +143,26 @@ def invite_base_payload(
     }
 
 
+def consumed_pending_admission_payload(
+    identity_payload: dict[str, Any], invite_payload: dict[str, Any]
+) -> dict[str, Any]:
+    # A closed single-use invite only proves the rendezvous session can no
+    # longer admit another join request. It does not prove the joiner claimed
+    # and activated its Welcome or that the agent has observed a usable MLS
+    # member. Do not tell the dashboard the agent is paired until finitechat can
+    # prove room admission from member state.
+    payload = invite_base_payload(identity_payload, invite_payload)
+    payload["paired"] = False
+    payload["invite_state"] = "consumed_pending_admission"
+    return payload
+
+
 def paired_payload(
     identity_payload: dict[str, Any], invite_payload: dict[str, Any]
 ) -> dict[str, Any]:
-    # No url: the dashboard treats a missing url as not-serving-an-invite,
-    # and paired tells it why.
     payload = invite_base_payload(identity_payload, invite_payload)
     payload["paired"] = True
-    payload["invite_state"] = "consumed"
+    payload["invite_state"] = "paired"
     return payload
 
 
@@ -139,6 +185,24 @@ def open_payload(
     return payload
 
 
+def invite_room_is_paired(invite_payload: dict[str, Any]) -> bool:
+    room_id = invite_payload.get("room_id")
+    if not room_id:
+        return False
+    try:
+        status = room_status(str(room_id))
+    except Exception:
+        return bool(invite_payload.get("paired"))
+    return bool(status.get("paired"))
+
+
+def mark_invite_paired(invite_payload: dict[str, Any]) -> dict[str, Any]:
+    invite_payload["paired"] = True
+    invite_payload["invite_state"] = "paired"
+    write_cached_invite(invite_payload)
+    return invite_payload
+
+
 def invite() -> dict[str, Any]:
     identity_payload = identity()
     if not identity_payload.get("ready"):
@@ -148,6 +212,21 @@ def invite() -> dict[str, Any]:
         if invite_payload is None:
             invite_payload = mint_invite(room_id=None)
             write_cached_invite(invite_payload)
+        if invite_payload.get("paired") and invite_payload.get("invite_state") != "paired":
+            # Legacy cache shape from before the MLS-welcome hard cut: a bare
+            # `paired` flag proves the single-use invite was spent, not that
+            # the joiner activated its Welcome. Only `mark_invite_paired`
+            # (which also stamps invite_state) may claim pairing; downgrade
+            # the cache before any room-state probe can echo the stale flag.
+            invite_payload.pop("paired", None)
+            invite_payload["invite_state"] = "consumed_pending_admission"
+            write_cached_invite(invite_payload)
+            return consumed_pending_admission_payload(identity_payload, invite_payload)
+        if invite_room_is_paired(invite_payload):
+            invite_payload = mark_invite_paired(invite_payload)
+            return paired_payload(identity_payload, invite_payload)
+        if invite_payload.get("invite_state") == "consumed_pending_admission":
+            return consumed_pending_admission_payload(identity_payload, invite_payload)
         if invite_payload.get("paired"):
             return paired_payload(identity_payload, invite_payload)
         try:
@@ -160,11 +239,13 @@ def invite() -> dict[str, Any]:
                 identity_payload, invite_payload, invite_state="unknown", expires_at_ms=None
             )
         if status.get("consumed"):
-            # Someone paired. Persist that verdict so /invite never re-mints
-            # for this room, even if the server later forgets the session.
-            invite_payload["paired"] = True
+            # The single-use rendezvous is closed, so do not re-mint
+            # automatically. But invite consumption is not pairing: a stale or
+            # incompatible client can burn the session before it has usable MLS
+            # room state. Persist only that the invite is spent.
+            invite_payload["invite_state"] = "consumed_pending_admission"
             write_cached_invite(invite_payload)
-            return paired_payload(identity_payload, invite_payload)
+            return consumed_pending_admission_payload(identity_payload, invite_payload)
         if status.get("expired"):
             # Nobody paired in time: mint a fresh invite for the same room.
             invite_payload = mint_invite(room_id=invite_payload.get("room_id"))
@@ -198,8 +279,9 @@ def invite() -> dict[str, Any]:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
-            payload = identity()
-            self._write(200 if payload["ready"] else 503, payload)
+            payload = runtime_health()
+            bridge_ok = payload.get("bridge", {}).get("ok") is not False
+            self._write(200 if payload["ready"] and bridge_ok else 503, payload)
             return
         if self.path == "/invite":
             payload = invite()

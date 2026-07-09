@@ -36,7 +36,10 @@ needed to keep already issued private-inference keys valid.
 
 ## Non-Goals
 
-- Do not vendor Finite Sites code here.
-- Do not vendor Finite Chat code here.
+- Do not copy Finite Sites code into this component. (Since the finite-mono
+  cutover, `finite-sites/` is a sibling directory in the same repo — depend on
+  it through the root Cargo workspace, never by duplicating its code here.)
+- Same for Finite Chat: depend on the sibling `finitechat/` workspace crates,
+  do not duplicate them here.
 - Do not use dashboard chat as a substitute for Finite Chat.
 - Do not use `finitec repo` or `finitec publish` as migration shortcuts.

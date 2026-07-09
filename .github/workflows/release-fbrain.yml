@@ -1,0 +1,113 @@
+name: Release fbrain
+
+# Component-scoped release: tag `fbrain/vX.Y.Z` on finite-mono.
+# Installers use the rolling alias release `fbrain-latest` (repo-wide
+# `releases/latest` is meaningless in a multi-component repo):
+#   https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/<asset>
+# Hard-cut 2026-07-08: no mirror releases to the archived legacy repos.
+
+on:
+  push:
+    tags:
+      - "fbrain/v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-latest
+            asset_name: fbrain-linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - runs_on: macos-14
+            asset_name: fbrain-macos-aarch64
+            target: aarch64-apple-darwin
+          - runs_on: macos-14
+            asset_name: fbrain-macos-x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build fbrain
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-cli --bin fbrain
+
+      - name: Package fbrain
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/fbrain" dist/fbrain
+          tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" fbrain
+          shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
+
+      # The smoke-host bridge (infra/hosts/smoke/deploy.md) consumes the
+      # finite-brain server binary from this release so the legacy nix
+      # packaging can stop vendoring source tarballs.
+      - name: Build and package finite-brain server (linux only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-app --bin finite-brain
+          mkdir -p dist-server
+          cp "target/${{ matrix.target }}/release/finite-brain" dist-server/finite-brain
+          tar -C dist-server -czf "finite-brain-linux-x86_64.tar.gz" finite-brain
+          shasum -a 256 "finite-brain-linux-x86_64.tar.gz" > "finite-brain-linux-x86_64.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.tar.gz.sha256
+            finite-brain-linux-x86_64.tar.gz
+            finite-brain-linux-x86_64.tar.gz.sha256
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes --latest=false
+          fi
+
+      - name: Refresh fbrain-latest rolling alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          alias=fbrain-latest
+          notes="Rolling alias for the newest fbrain release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
+          if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
+          else
+            gh release create "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "fbrain (latest)" --notes "$notes" --latest=false
+          fi
