@@ -90,7 +90,17 @@
     "xhci_pci"
     "ahci"
     "usbhid"
+    "sd_mod"
+    "ext4"
   ];
+  # Force-load the RAID1 personality in the initrd. raid1.ko ships in the
+  # initrd via swraid.enable, but on the 6.12 kernel the on-demand load
+  # wasn't firing during incremental assembly, so the kernel rejected the
+  # members with EINVAL ("failed to add member: Invalid argument",
+  # "assembled from 0 drives") and /dev/md/md0 never appeared → stage-1
+  # could not mount root (observed twice, 2026-07-09). Loading it explicitly
+  # guarantees the personality is ready before mdadm assembles the arrays.
+  boot.initrd.kernelModules = [ "raid1" ];
   boot.swraid.enable = true;
   # The initrd runs `mdadm --assemble --scan` against THIS conf. Without
   # explicit ARRAY lines it assembled nothing, so /dev/md/md0 never appeared
