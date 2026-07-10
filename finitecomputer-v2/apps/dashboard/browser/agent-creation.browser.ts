@@ -308,13 +308,21 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       const agentNav = productNav.getByRole("link", { name: "Agent", exact: true });
       await agentNav.waitFor({ state: "visible" });
       // The fake Core changes out of band, unlike a product mutation that
-      // invalidates the dashboard's short SWR cache. Let the background read
-      // settle, then verify the hydrated navigation on a real page load.
-      if ((await agentNav.getAttribute("aria-current")) !== "page") {
-        await new Promise((resolve) => setTimeout(resolve, 150));
-        await page.reload();
-      }
-      await waitFor(async () => (await agentNav.getAttribute("aria-current")) === "page");
+      // invalidates the dashboard's short SWR cache. A stale server render
+      // starts the background refresh; reload until that refreshed projection
+      // is visible instead of racing one fixed sleep against CI load.
+      await waitFor(
+        async () => {
+          if ((await agentNav.getAttribute("aria-current")) === "page") {
+            return true;
+          }
+          await page.waitForTimeout(250);
+          await page.reload();
+          return (await agentNav.getAttribute("aria-current")) === "page";
+        },
+        15_000,
+        async () => `agent navigation did not hydrate from Core\n${await pageText(page)}`
+      );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
       await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
       await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
