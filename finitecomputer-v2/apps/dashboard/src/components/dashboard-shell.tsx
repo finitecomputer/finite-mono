@@ -12,6 +12,7 @@ import {
   LogOutIcon,
   MessageSquareIcon,
   PlugIcon,
+  ShieldCheckIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -173,6 +174,7 @@ function DashboardAppSection({
   activeMachine,
   machines,
   pathname,
+  isAdmin,
   saasMode,
   showMachineFleet,
   viewerEmail,
@@ -181,6 +183,7 @@ function DashboardAppSection({
   activeMachine: MachineNavItem | null;
   machines: MachineNavItem[];
   pathname: string;
+  isAdmin: boolean;
   saasMode: boolean;
   showMachineFleet: boolean;
   viewerEmail?: string | null;
@@ -241,6 +244,16 @@ function DashboardAppSection({
         </div>
 
         <div className="ocean-app-header__actions">
+          {isAdmin ? (
+            <Link
+              href="/dashboard/admin"
+              className="ocean-sign-out-button"
+              aria-label="Admin Ops"
+            >
+              <ShieldCheckIcon className="size-4" />
+              <span className="hidden md:inline">Admin Ops</span>
+            </Link>
+          ) : null}
           {viewerEmail ? (
             <span className="hidden max-w-56 truncate text-sm text-muted-foreground md:inline">
               {viewerEmail}
@@ -276,7 +289,7 @@ export function DashboardShell({
     () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
     [selectedMachineId, machines]
   );
-  const showMachineFleet = isAdmin || machines.length > 1;
+  const showMachineFleet = machines.length > 1;
   const isChatSurface = /^\/dashboard\/machines\/[^/]+\/chat\/?$/u.test(pathname);
 
   if (isChatSurface) {
@@ -289,6 +302,7 @@ export function DashboardShell({
         activeMachine={activeMachine}
         machines={machines}
         pathname={pathname}
+        isAdmin={isAdmin}
         saasMode={saasMode}
         showMachineFleet={showMachineFleet}
         viewerEmail={viewerEmail}

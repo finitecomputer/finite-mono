@@ -9,11 +9,7 @@ import { chromium, type Browser } from "playwright";
 
 const CORE_TOKEN = "browser-core-token";
 
-type CoreState = {
-  grantResets: string[];
-};
-
-test("dashboard Finite Private admin controls render status and reset grants", { timeout: 120_000 }, async () => {
+test("admins keep the SaaS dashboard and separate Finite Private controls", { timeout: 120_000 }, async () => {
   const core = await startFakeCore();
   const dashboardPort = await freePort();
   const dashboard = startDashboard(dashboardPort, core.url);
@@ -30,11 +26,15 @@ test("dashboard Finite Private admin controls render status and reset grants", {
     const page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+    await page
+      .getByRole("link", { name: "Agent", exact: true })
+      .waitFor({ state: "visible" });
+    assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
+
+    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByText("fp_grant_1", { exact: true }).waitFor({ state: "visible" });
     await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
-    await page.getByRole("button", { name: "Reset" }).click();
-    await waitFor(() => core.state.grantResets.includes("fp_grant_1"));
 
     await context.close();
   } finally {
@@ -70,12 +70,9 @@ function startDashboard(port: number, coreUrl: string) {
 }
 
 async function startFakeCore() {
-  const state: CoreState = {
-    grantResets: [],
-  };
   const server = http.createServer(async (request, response) => {
     try {
-      await handleCoreRequest(request, response, state);
+      await handleCoreRequest(request, response);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: String(error) }));
@@ -89,14 +86,12 @@ async function startFakeCore() {
   return {
     server,
     url: `http://127.0.0.1:${address.port}`,
-    state,
   };
 }
 
 async function handleCoreRequest(
   request: IncomingMessage,
-  response: ServerResponse,
-  state: CoreState
+  response: ServerResponse
 ) {
   if (request.headers.authorization !== `Bearer ${CORE_TOKEN}`) {
     writeJson(response, 401, { error: "missing service token" });
@@ -105,18 +100,6 @@ async function handleCoreRequest(
 
   if (request.method === "GET" && request.url === "/api/core/v1/finite-private/admin-state") {
     writeJson(response, 200, finitePrivateAdminState());
-    return;
-  }
-
-  const resetMatch = request.url?.match(/^\/api\/core\/v1\/finite-private\/grants\/([^/]+)\/reset$/u);
-  if (request.method === "POST" && resetMatch?.[1]) {
-    const grantId = decodeURIComponent(resetMatch[1]);
-    state.grantResets.push(grantId);
-    writeJson(response, 200, {
-      ...finitePrivateAdminState().grants[0],
-      current_window_used_units: 0,
-      updated_at: "2026-05-28T12:05:00Z",
-    });
     return;
   }
 

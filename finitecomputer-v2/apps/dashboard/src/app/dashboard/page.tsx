@@ -106,8 +106,8 @@ export default async function DashboardPage({
     getAccountAuthContext(),
   ]);
 
-  if (!viewer.isAdmin) {
-    const core = await loadCoreMe();
+  const core = await loadCoreMe();
+  if (core.configured || !viewer.isAdmin) {
     // The checkout-return sync poll must observe Core directly, not a cached
     // read, so the webhook-arrival flip is seen as soon as it lands.
     const billing = await loadCoreBillingOverview({

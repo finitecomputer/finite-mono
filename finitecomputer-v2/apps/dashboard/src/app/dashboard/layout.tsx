@@ -33,7 +33,7 @@ export default async function DashboardLayout({
     <DashboardShell
       isAdmin={viewer.isAdmin}
       machines={machines}
-      saasMode={core.configured && !viewer.isAdmin}
+      saasMode={core.configured}
       viewerEmail={viewer.email}
     >
       {children}
