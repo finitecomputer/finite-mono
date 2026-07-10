@@ -31,16 +31,16 @@ and mounts while the Rust core and server mature.
 
 ### Product Client
 
-The trusted browser experience a User actually uses to open a Vault, connect a
-NIP-07 signer, open Folder Key Grants, decrypt accessible Folder Objects,
+The trusted browser experience a Member Identity's controller uses to open a
+Vault, connect a NIP-07 signer, open Folder Key Grants, decrypt accessible Folder Objects,
 materialize Pages, edit content, sync changes, run local search/graph indexes,
 and perform OKF import/export. Unlike the Smoke UI, the Product Client owns the
-normal user workflow.
+normal member workflow.
 
 ### Product Client Spine
 
 The minimum trusted-client workflow that later client features build on:
-connect the User's NIP-07 signer, load Vault state, open current Folder Key
+connect the acting Member Identity's NIP-07 signer, load Vault state, open current Folder Key
 Grants, decrypt readable Pages, edit one Page, encrypt and write the Page back
 as a signed revision, and pull/apply sync records without losing unresolved
 local edits.
@@ -73,6 +73,13 @@ A trusted-client state in which Session Folder Keys and temporary plaintext
 state are unavailable and automatic grant reopening is blocked until the
 Member explicitly resumes the grant-opening flow. A Session Lock hides client
 content but does not claim to erase a separately created Vault Working Tree.
+The browser Product Client applies the same lock before page navigation or
+back/forward-cache suspension and whenever a signed event no longer matches the
+Member Identity connected for the current session.
+A newly delivered invitation fragment is handled as a one-shot pre-session
+capability: the client removes it from browser history immediately, holds it in
+memory outside the locked content session, and imports it only after explicit
+Resume. Explicit Lock, Vault switching, or a failed Resume discards it.
 
 ### Ephemeral Client Plaintext
 
@@ -141,7 +148,7 @@ agents, search, and graph flows reason over it.
 
 ### Graph View
 
-A Product Client view over the active User's decrypted accessible Pages. It
+A Product Client view over the acting Member Identity's decrypted accessible Pages. It
 renders Page nodes and Page relationships only after Folder Keys are open and
 visibility filtering has been applied.
 

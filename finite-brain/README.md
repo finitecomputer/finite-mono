@@ -190,3 +190,25 @@ This repository is the active Rust implementation target and includes the
 first-party Product Client prototype served at `/client`. The previous
 SilverBullet/TypeScript fork is legacy archive material, not part of the active
 workspace or compatibility surface.
+
+The Product Client starts with its content session locked. **Resume session**
+uses the connected Member Identity to reopen encrypted Folder Key Grants and
+rebuild readable Pages, drafts, search, graph, and access views in memory.
+**Lock session** clears that in-memory keyring, opened-grant metadata, decrypted
+projections, drafts, prepared writes, import plans, invite secrets, and rendered
+plaintext. Switching Vaults uses the same clearing boundary. It does not change
+or delete the external signer identity. Navigating away, entering the browser
+back/forward cache, or receiving a signature from a different signer identity
+also locks the session before protected work can continue.
+
+An invitation-link fragment is removed from browser history immediately and
+held only as a one-shot, in-memory pre-session capability. It enters invitation
+controls after explicit **Resume session**; explicit Lock, Vault switching, or a
+failed Resume discards it.
+
+The first-party browser client does not write raw Folder Keys or decrypted
+FiniteBrain content to Web Storage, IndexedDB, Cache Storage, cookies, or
+browser history. Encrypted server sync remains allowed. Unprompted plaintext
+egress is denied, while an explicit export or send remains a controller action;
+FiniteBrain cannot control a third-party client after an authorized Member
+Identity decrypts content.

@@ -5,19 +5,53 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 function element() {
+  const attributes = new Map();
   return {
     className: "",
     disabled: false,
+    hidden: false,
+    open: false,
+    checked: false,
+    dataset: {},
+    style: {},
     textContent: "",
     value: "",
     children: [],
+    classList: {
+      add() {},
+      remove() {},
+      toggle() {},
+    },
     appendChild(child) {
       this.children.push(child);
     },
-    addEventListener() {},
-    replaceChildren() {
-      this.children = [];
+    append(...children) {
+      this.children.push(...children);
     },
+    addEventListener() {},
+    contains() {
+      return false;
+    },
+    focus() {},
+    getAttribute(name) {
+      return attributes.get(name) ?? null;
+    },
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
+    replaceChildren(...children) {
+      this.children = children;
+    },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+    },
+    setSelectionRange() {},
   };
 }
 
@@ -26,16 +60,28 @@ const context = {
   TextDecoder,
   TextEncoder,
   Uint8Array,
+  URLSearchParams,
   atob: (value) => Buffer.from(value, "base64").toString("binary"),
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   console,
   crypto: crypto.webcrypto,
   document: {
+    addEventListener() {},
     createElement: element,
+    createTextNode(value) {
+      return textNode(value);
+    },
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, element());
       return elements.get(id);
     },
+    querySelector() {
+      return element();
+    },
+    querySelectorAll() {
+      return [];
+    },
+    title: "FiniteBrain",
   },
   window: {
     __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
@@ -180,7 +226,7 @@ assert.match(htmlSource, /class="access-action-stack"/);
 assert.match(htmlSource, /class="access-state-stack"/);
 assert.match(htmlSource, /id="accessAddPersonPanel"/);
 assert.match(htmlSource, />\s*Grant folder access\s*</);
-assert.match(htmlSource, />\s*Choose folder and person\s*</);
+assert.match(htmlSource, />\s*Choose folder and Member Identity\s*</);
 assert.match(htmlSource, /id="accessAdvancedSection"/);
 assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
@@ -207,6 +253,7 @@ assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
 assert.match(htmlSource, /class="vault-access-action-grid"/);
 assert.match(htmlSource, />\s*Give Vault access\s*</);
 assert.match(htmlSource, />\s*Invite, add, promote\s*</);
+assert.match(htmlSource, />\s*Vault Member Identities\s*</);
 assert.match(htmlSource, />\s*Invite by email\s*</);
 assert.match(htmlSource, />\s*Add member now\s*</);
 assert.match(htmlSource, />\s*Make admin\s*</);
@@ -214,9 +261,12 @@ assert.match(htmlSource, />\s*Join with invite\s*</);
 assert.match(htmlSource, />\s*Accept invite code\s*</);
 assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
+assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
+assert.doesNotMatch(htmlSource, />\s*Vault people\s*</);
 assert.doesNotMatch(source, /Invite, add, or promote/);
 assert.doesNotMatch(source, /Accept received invite/);
 assert.doesNotMatch(source, /Admin-only controls/);
+assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
@@ -380,6 +430,247 @@ assert.equal(draftPages[0].folderId, "general");
 assert.equal(draftPages[0].localDraft, true);
 assert.equal(draftPages[0].status, "ready");
 assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page");
+
+const sessionKeyring = client.createSessionKeyring();
+sessionKeyring.keys.set("vault:general:1", { rawKey: "raw-folder-key-sentinel" });
+sessionKeyring.openedGrants.push({
+  folderId: "general",
+  keyVersion: 1,
+  vaultId: "vault",
+});
+const sessionProjection = client.createClientProjection();
+sessionProjection.pages.set("general/page", {
+  folderId: "general",
+  objectId: "page",
+  status: "ready",
+  text: "decrypted-page-sentinel",
+});
+sessionProjection.localDrafts.set("general/draft", {
+  baseRevision: 1,
+  path: "draft.md",
+  text: "plaintext-draft-sentinel",
+});
+sessionProjection.conflicts.push({ plaintext: "conflict-plaintext-sentinel" });
+const sessionState = {
+  accessResult: { detail: "member-access-sentinel" },
+  folderShareLinks: [{ id: "share-link-sentinel" }],
+  identityByNpub: new Map([["npub-member", { display: "member@example.com" }]]),
+  keyring: sessionKeyring,
+  lastEmailInvitePostProof: { invitedEmail: "invitee@example.com" },
+  lastEmailInviteSecret: "invite-secret-sentinel",
+  lastEmailInviteUrl: "https://finite.test/#inviteSecret=invite-secret-sentinel",
+  metadata: { name: "private-vault-sentinel" },
+  okfPlan: { entries: [{ markdown: "okf-plaintext-sentinel" }] },
+  preparedWrite: { envelopeJson: "encrypted-write", plaintext: "prepared-plaintext-sentinel" },
+  preparedWriteTarget: { folderId: "general", objectId: "draft" },
+  projection: sessionProjection,
+  sessionStatus: "unlocked",
+  signerStatus: "connected",
+  vaultInvitations: [{ invitedEmail: "invitee@example.com" }],
+};
+client.clearSessionSecretsAndPlaintext(sessionState);
+assert.equal(sessionState.sessionStatus, "locked");
+assert.equal(sessionState.signerStatus, "connected");
+assert.equal(sessionState.keyring, null);
+assert.equal(sessionKeyring.keys.size, 0);
+assert.equal(sessionKeyring.openedGrants.length, 0);
+assert.equal(sessionState.metadata, null);
+assert.equal(sessionState.projection.pages.size, 0);
+assert.equal(sessionState.projection.localDrafts.size, 0);
+assert.equal(sessionState.projection.conflicts.length, 0);
+assert.equal(sessionState.preparedWrite, null);
+assert.equal(sessionState.preparedWriteTarget, null);
+assert.equal(sessionState.okfPlan, null);
+assert.equal(sessionState.identityByNpub.size, 0);
+assert.equal(sessionState.accessResult, null);
+assert.equal(sessionState.vaultInvitations, null);
+assert.equal(sessionState.folderShareLinks, null);
+assert.equal(sessionState.lastEmailInviteSecret, null);
+assert.equal(sessionState.lastEmailInviteUrl, null);
+assert.equal(sessionState.lastEmailInvitePostProof, null);
+assert.equal(
+  JSON.stringify(client.sessionStatusView("locked")),
+  JSON.stringify({
+    action: "Resume session",
+    detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+    locked: true,
+    title: "Session locked",
+  })
+);
+assert.equal(
+  JSON.stringify(client.sessionStatusView("unlocked")),
+  JSON.stringify({
+    action: "Lock session",
+    detail: "Readable content and Session Folder Keys are held in memory for this session.",
+    locked: false,
+    title: "Session unlocked",
+  })
+);
+assert.equal(
+  JSON.stringify(client.sessionStatusView("resuming")),
+  JSON.stringify({
+    action: "Lock session",
+    detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
+    locked: false,
+    title: "Resuming session",
+  })
+);
+assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
+assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
+assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Resume session</);
+assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(htmlSource, /<span class="pill ready">email invite<\/span>/);
+assert.doesNotMatch(htmlSource, /<span class="pill ready">new Member Identity<\/span>/);
+assert.match(source, /clearSessionSecretsAndPlaintext\(state\)/);
+assert.equal(client.sessionGrantOpeningAllowed("locked"), false);
+assert.equal(client.sessionGrantOpeningAllowed("resuming"), true);
+assert.equal(client.sessionGrantOpeningAllowed("unlocked"), true);
+assert.equal(
+  JSON.stringify(client.lockedVaultSelection("locked", "org-acme", [])),
+  JSON.stringify({ label: "Selected Vault (locked)", value: "org-acme" })
+);
+assert.equal(client.lockedVaultSelection("unlocked", "org-acme", []), null);
+assert.equal(client.lockedVaultSelection("locked", "org-acme", [{ vaultId: "org-acme" }]), null);
+assert.equal(
+  client.missingVisibleVaultFallback(
+    "unlocked",
+    "org-acme",
+    [{ vaultId: "personal-a", kind: "personal" }],
+    "aa".repeat(32),
+    "personal"
+  ),
+  "personal-a"
+);
+assert.equal(
+  client.missingVisibleVaultFallback(
+    "locked",
+    "org-acme",
+    [{ vaultId: "personal-a", kind: "personal" }],
+    "aa".repeat(32),
+    "personal"
+  ),
+  null
+);
+assert.equal(
+  client.missingVisibleVaultFallback(
+    "unlocked",
+    "personal-aaaaaaaaaaaaaaaa",
+    [],
+    "aa".repeat(32),
+    "personal"
+  ),
+  null
+);
+assert.deepEqual(
+  Array.from(
+    client.withActiveVaultOption(
+      [{ vaultId: "personal-a", kind: "personal", name: "Personal vault", role: "owner" }],
+      "org-acme",
+      { vaultId: "org-acme", kind: "organization", name: "Acme", role: "admin" }
+    ),
+    (vault) => vault.vaultId
+  ),
+  ["personal-a", "org-acme"]
+);
+assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
+assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
+assert.equal(client.signerIdentityChanged("aa".repeat(32), "bb".repeat(32)), true);
+assert.equal(
+  client.signedEventMatchesPinnedIdentity("aa".repeat(32), { pubkey: "aa".repeat(32) }),
+  true
+);
+assert.equal(
+  client.signedEventMatchesPinnedIdentity("aa".repeat(32), { pubkey: "bb".repeat(32) }),
+  false
+);
+assert.equal(client.signedEventMatchesPinnedIdentity(null, { pubkey: "aa".repeat(32) }), false);
+assert.equal(client.sessionOperationIsCurrent(4, 4, "unlocked"), true);
+assert.equal(client.sessionOperationIsCurrent(5, 4, "unlocked"), false);
+assert.equal(client.sessionOperationIsCurrent(4, 4, "locked"), false);
+const originalKeyring = client.createSessionKeyring();
+originalKeyring.keys.set("vault/folder@1", "key-sentinel");
+originalKeyring.openedGrants.push({ id: "grant-sentinel" });
+const clonedKeyring = client.cloneSessionKeyring(originalKeyring);
+originalKeyring.keys.clear();
+originalKeyring.openedGrants.length = 0;
+assert.equal(clonedKeyring.keys.get("vault/folder@1"), "key-sentinel");
+assert.equal(clonedKeyring.openedGrants[0].id, "grant-sentinel");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.inviteNavigationFromHash("#invite&code=invite-1&email=MEMBER%40Example.com&inviteSecret=secret-1"))),
+  {
+    inviteCode: "invite-1",
+    inviteEmail: "member@example.com",
+    inviteSecret: "secret-1",
+  }
+);
+assert.equal(client.inviteNavigationFromHash("#section=invite-free"), null);
+assert.equal(client.inviteNavigationFromHash("#code=unrelated"), null);
+const originalWindowLocation = context.window.location;
+const originalWindowHistory = context.window.history;
+let inviteFallbackUrl = null;
+context.window.location = {
+  hash: "#invite&inviteCode=invite-missing-history&inviteSecret=secret-must-not-import",
+  href: "https://finite.test/client#invite&inviteCode=invite-missing-history&inviteSecret=secret-must-not-import",
+  pathname: "/client",
+  search: "",
+  replace(url) {
+    inviteFallbackUrl = url;
+    this.hash = "";
+    this.href = `https://finite.test${url}`;
+  },
+};
+context.window.history = {};
+assert.equal(client.populateInviteFromHash(), false);
+assert.equal(inviteFallbackUrl, "/client");
+assert.equal(client.applyPendingInviteNavigation(), false);
+assert.equal(context.document.getElementById("vaultInviteSecretInput").value, "");
+inviteFallbackUrl = null;
+context.window.location.hash =
+  "#invite&inviteCode=invite-rejected-history&inviteSecret=second-secret-must-not-import";
+context.window.location.href =
+  "https://finite.test/client#invite&inviteCode=invite-rejected-history&inviteSecret=second-secret-must-not-import";
+context.window.history = {
+  replaceState() {
+    throw new Error("history replacement denied");
+  },
+};
+assert.equal(client.populateInviteFromHash(), false);
+assert.equal(inviteFallbackUrl, "/client");
+assert.equal(client.applyPendingInviteNavigation(), false);
+assert.equal(context.document.getElementById("vaultInviteSecretInput").value, "");
+context.window.location = originalWindowLocation;
+context.window.history = originalWindowHistory;
+assert.match(source, /return loadVaultReader\(\{ allowResume: true \}\);/);
+assert.match(source, /window\.addEventListener\?\.\("pagehide", handlePageHide\)/);
+assert.match(source, /window\.addEventListener\?\.\("pageshow", handlePageShow\)/);
+assert.match(source, /openFolderKeyGrants\(keyring, exported, expectedRecipient, \{[\s\S]{0,120}assertCurrent/);
+assert.match(source, /state\.sessionStatus = SESSION_STATUS\.UNLOCKED;[\s\S]{0,160}applyPendingInviteNavigation\(\)/);
+assert.match(
+  source,
+  /setOptionalDisabled\("loadVaultButton", state\.sessionStatus !== SESSION_STATUS\.UNLOCKED \|\| !canLoadVault\(\)\)/
+);
+for (const [surface, pattern] of [
+  ["localStorage", /\blocalStorage\b/],
+  ["sessionStorage", /\bsessionStorage\b/],
+  ["IndexedDB", /\bindexedDB\b/],
+  ["Cache Storage", /\b(?:caches|CacheStorage)\b/],
+  ["cookies", /\bdocument\.cookie\b/],
+  ["window.name", /\bwindow\.name\b/],
+  ["storage manager", /\bnavigator\.storage\b/],
+  ["history push", /\bhistory\??\.pushState\b/],
+]) {
+  assert.doesNotMatch(source, pattern, `Product Client must not write session plaintext through ${surface}`);
+}
+const historyReplacements = source.match(/window\.history\.replaceState\([^\n]+/g) || [];
+assert.equal(historyReplacements.length, 1);
+assert.match(historyReplacements[0], /replaceState\(null, "", fallbackUrl\)/);
+assert.equal((source.match(/console\.(?:debug|info|log|warn|error)\(/g) || []).length, 1);
+assert.match(source, /console\.debug\(`\[FiniteBrain\] \$\{message\}`\);/);
+assert.match(source, /SESSION_PLAINTEXT_INPUT_IDS/);
+assert.match(source, /"folderKeyInput"/);
+assert.match(source, /"okfBundleInput"/);
+assert.match(source, /"pageDraftInput"/);
+assert.match(source, /"vaultInviteSecretInput"/);
 
 (async () => {
   const event = await client.buildAuthEventTemplate(
@@ -2631,6 +2922,29 @@ assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page"
     Array.from(guidePersonalVault.map((step) => step.done)),
     [true, false, false]
   );
+
+  context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
+  context.document.getElementById("folderKeyInput").value = "runtime-folder-key-sentinel";
+  context.document.getElementById("okfBundleInput").value = "runtime-okf-sentinel";
+  context.document.getElementById("vaultInviteSecretInput").value = "runtime-invite-secret-sentinel";
+  context.document.getElementById("graphStats").textContent = "12 nodes / 18 links";
+  context.document.getElementById("obsidianNewPageButton");
+  context.document.getElementById("obsidianNewFolderButton");
+  client.lockSession();
+  assert.equal(elements.get("pageDraftInput").value, "");
+  assert.equal(elements.get("folderKeyInput").value, "");
+  assert.equal(elements.get("okfBundleInput").value, "");
+  assert.equal(elements.get("vaultInviteSecretInput").value, "");
+  assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
+  assert.equal(
+    elements.get("readerPageContent").textContent,
+    "Session locked. Resume to reopen encrypted Folder Key Grants."
+  );
+  assert.equal(elements.get("graphCanvas").children.length, 0);
+  assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");
+  assert.equal(elements.get("replayList").children.length, 0);
+  assert.equal(elements.get("obsidianNewPageButton").disabled, true);
+  assert.equal(elements.get("obsidianNewFolderButton").disabled, true);
 
   console.log("product-client deterministic seams ok");
 })().catch((error) => {
