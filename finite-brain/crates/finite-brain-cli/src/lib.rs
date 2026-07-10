@@ -1576,7 +1576,7 @@ fn folder<W: Write>(
             });
             let route = format!("/_admin/vaults/{vault_id}/folders");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
-            update_local_folder_after_create(env, folder_id, &path, &folder_key)?;
+            update_local_folder_after_create(env, folder_id, &path)?;
             write_command_response(output, json, &response)
         }
         other => Err(CliError::InvalidCommand(format!("folder {other}"))),
@@ -1756,7 +1756,8 @@ fn permissions<W: Write>(
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let folder_key = opened_folder_key(env, &folder_id, key_version)?;
+            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
+            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
@@ -2105,6 +2106,7 @@ fn email_invite_create_body(
     let metadata = fetch_vault_metadata(env, args, vault_id)?;
     let scope = email_invite_scope(&metadata, selected_folders)?;
     let auth = load_signer(env)?;
+    let session_keys = open_vault_session_folder_keys(env, args, vault_id)?;
     let unwrap_keys = Keys::generate();
     let invite_unwrap_npub = NostrPublicKey::from_protocol(unwrap_keys.public_key())
         .to_npub()
@@ -2113,7 +2115,8 @@ fn email_invite_create_body(
 
     let mut bootstrap_grants = Vec::new();
     for item in &scope {
-        let folder_key = opened_folder_key(env, &item.folder_id, item.key_version)?;
+        let folder_key =
+            opened_folder_key(&session_keys, vault_id, &item.folder_id, item.key_version)?;
         bootstrap_grants.push(serde_json::json!({
             "folderId": item.folder_id,
             "grant": folder_key_grant_request(
@@ -2263,7 +2266,8 @@ fn share<W: Write>(
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let folder_key = opened_folder_key(env, &folder_id, key_version)?;
+            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
+            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
@@ -2350,7 +2354,8 @@ fn share<W: Write>(
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let folder_key = opened_folder_key(env, &folder_id, key_version)?;
+            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
+            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
@@ -2402,7 +2407,6 @@ mod tests {
     use serde_json::Value;
     use std::io::{ErrorKind, Read};
     use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -2448,7 +2452,9 @@ mod tests {
         import_identity_for(&env_for(tmp), secret);
     }
 
-    fn start_conflict_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    fn start_conflict_sync_server(
+        export_grants: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2480,7 +2486,7 @@ mod tests {
                                 "sharedFolderSource": false,
                                 "accessible": true
                             }],
-                            "keyGrants": [],
+                            "keyGrants": export_grants.clone(),
                             "accessState": {
                                 "members": [],
                                 "admins": []
@@ -2532,7 +2538,7 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 requests.push(request_line.clone());
                 let body = if request_line.contains("/export") {
-                    empty_export_body()
+                    export_body(&[])
                 } else if request_line.contains("/sync/records") {
                     serde_json::json!({
                         "vaultId": "vault",
@@ -2562,7 +2568,7 @@ mod tests {
         (url, handle)
     }
 
-    fn empty_export_body() -> String {
+    fn export_body(key_grants: &[Value]) -> String {
         serde_json::json!({
             "vault": {
                 "id": "vault",
@@ -2578,7 +2584,7 @@ mod tests {
                 "sharedFolderSource": false,
                 "accessible": true
             }],
-            "keyGrants": [],
+            "keyGrants": key_grants,
             "accessState": {
                 "members": [],
                 "admins": []
@@ -2589,6 +2595,7 @@ mod tests {
 
     fn start_incremental_remote_sync_server(
         ciphertext: String,
+        export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2604,7 +2611,7 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 requests.push(request_line.clone());
                 let (status, body) = if request_line.contains("/export") {
-                    ("200 OK", empty_export_body())
+                    ("200 OK", export_body(&export_grants))
                 } else if request_line.contains("/sync/records") {
                     (
                         "200 OK",
@@ -2649,6 +2656,7 @@ mod tests {
 
     fn start_expired_cursor_sync_server(
         ciphertext: String,
+        export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2664,7 +2672,7 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 requests.push(request_line.clone());
                 let (status, body) = if request_line.contains("/export") {
-                    ("200 OK", empty_export_body())
+                    ("200 OK", export_body(&export_grants))
                 } else if request_line.contains("/sync/records") {
                     (
                         "410 Gone",
@@ -2705,7 +2713,9 @@ mod tests {
         (url, handle)
     }
 
-    fn start_two_agent_incremental_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    fn start_two_agent_incremental_sync_server(
+        export_grants: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2721,7 +2731,7 @@ mod tests {
                 let (request_line, body) = read_http_request(&mut stream);
                 requests.push(request_line.clone());
                 let (status, response_body) = if request_line.contains("/export") {
-                    ("200 OK", empty_export_body())
+                    ("200 OK", export_body(&export_grants))
                 } else if request_line.starts_with("PUT ") {
                     let path = request_line.split_whitespace().nth(1).unwrap_or_default();
                     let object_id = path.rsplit('/').next().unwrap_or_default().to_owned();
@@ -2844,34 +2854,16 @@ mod tests {
             .canonical_json()
     }
 
-    fn setup_incremental_tree(
-        tmp: &TempDir,
-        folder_key: &FolderKey,
-        latest_sequence: u64,
-    ) -> PathBuf {
-        setup_incremental_tree_named(tmp, "vault", folder_key, latest_sequence)
+    fn setup_incremental_tree(tmp: &TempDir, latest_sequence: u64) -> PathBuf {
+        setup_incremental_tree_named(tmp, "vault", latest_sequence)
     }
 
-    fn setup_incremental_tree_named(
-        tmp: &TempDir,
-        name: &str,
-        folder_key: &FolderKey,
-        latest_sequence: u64,
-    ) -> PathBuf {
+    fn setup_incremental_tree_named(tmp: &TempDir, name: &str, latest_sequence: u64) -> PathBuf {
         let tree = tmp.path().join(name);
         fs::create_dir_all(tree.join(".finitebrain")).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         let now = "2026-06-24T20:46:36Z";
-        let mut state = AgentState::new("vault", now);
-        state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("vault".to_owned()),
-            folder_id: "general".to_owned(),
-            key_version: 1,
-            key_base64: folder_key.to_base64(),
-            source: "test".to_owned(),
-            opened_at: now.to_owned(),
-        });
-        write_agent_state(&tree, &state).unwrap();
+        write_agent_state(&tree, &AgentState::new("vault", now)).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
@@ -2891,8 +2883,9 @@ mod tests {
         tree
     }
 
-    fn start_metadata_and_grant_server(
+    fn start_metadata_export_and_grant_server(
         admin_npub: String,
+        export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2900,7 +2893,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -2930,6 +2923,29 @@ mod tests {
                         "grantCount": 1
                     })
                     .to_string()
+                } else if request_line.contains("/export") {
+                    serde_json::json!({
+                        "vault": {
+                            "id": "acme",
+                            "kind": "organization",
+                            "name": "Acme",
+                            "ownerUserId": null
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "general",
+                            "access": "all_members",
+                            "currentKeyVersion": 1,
+                            "sharedFolderSource": false,
+                            "accessible": true
+                        }],
+                        "keyGrants": export_grants,
+                        "accessState": {
+                            "members": [admin_npub],
+                            "admins": [admin_npub]
+                        }
+                    })
+                    .to_string()
                 } else {
                     serde_json::json!({ "status": "ok" }).to_string()
                 };
@@ -2945,8 +2961,102 @@ mod tests {
         (url, handle)
     }
 
+    fn start_session_key_sync_server(
+        export_grant: Value,
+        ciphertext: String,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/export") {
+                    serde_json::json!({
+                        "vault": {
+                            "id": "vault",
+                            "kind": "personal",
+                            "name": "Vault",
+                            "ownerUserId": null
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "General",
+                            "access": "owner",
+                            "currentKeyVersion": 1,
+                            "sharedFolderSource": false,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
+                        "accessState": {
+                            "members": [],
+                            "admins": []
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "latestSequence": 1,
+                        "objects": [{
+                            "folderId": "general",
+                            "objectId": "obj_remote000001",
+                            "revision": 1,
+                            "ciphertext": ciphertext,
+                            "deleted": false
+                        }]
+                    })
+                    .to_string()
+                };
+                requests.push(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn export_grant_for_test(
+        env: &CliEnvironment,
+        vault_id: &str,
+        folder_id: &str,
+        key_version: u32,
+        folder_key: &FolderKey,
+        recipient_npub: &str,
+    ) -> Value {
+        let auth = load_signer(env).unwrap();
+        let grant = folder_key_grant_request(
+            &auth,
+            vault_id,
+            folder_id,
+            key_version,
+            recipient_npub,
+            folder_key,
+            env,
+        )
+        .unwrap();
+        serde_json::json!({
+            "folderId": folder_id,
+            "keyVersion": key_version,
+            "issuerNpub": auth.npub,
+            "recipientNpub": recipient_npub,
+            "wrappedEventJson": grant["wrappedEventJson"]
+        })
+    }
+
     fn start_email_invite_server(
         admin_npub: String,
+        export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2954,7 +3064,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -2996,6 +3106,39 @@ mod tests {
                         ],
                         "mountedFolders": [],
                         "grantCount": 2
+                    })
+                    .to_string()
+                } else if request_line.contains("/export") {
+                    serde_json::json!({
+                        "vault": {
+                            "id": "acme",
+                            "kind": "organization",
+                            "name": "Acme",
+                            "ownerUserId": null
+                        },
+                        "folders": [
+                            {
+                                "id": "getting-started",
+                                "path": "getting-started",
+                                "access": "all_members",
+                                "currentKeyVersion": 1,
+                                "sharedFolderSource": false,
+                                "accessible": true
+                            },
+                            {
+                                "id": "restricted",
+                                "path": "restricted",
+                                "access": "restricted",
+                                "currentKeyVersion": 1,
+                                "sharedFolderSource": false,
+                                "accessible": true
+                            }
+                        ],
+                        "keyGrants": export_grants,
+                        "accessState": {
+                            "members": [admin_npub],
+                            "admins": [admin_npub]
+                        }
                     })
                     .to_string()
                 } else {
@@ -3151,26 +3294,6 @@ mod tests {
         (url, handle)
     }
 
-    fn write_opened_test_folder_key(tree: &Path, folder_id: &str, folder_key: &FolderKey) {
-        write_opened_test_folder_keys(tree, &[(folder_id, folder_key)]);
-    }
-
-    fn write_opened_test_folder_keys(tree: &Path, keys: &[(&str, &FolderKey)]) {
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
-        let mut state = AgentState::new("acme", "2026-06-24T20:46:36Z");
-        for (folder_id, folder_key) in keys {
-            state.local_folder_keys.push(LocalFolderKey {
-                vault_id: Some("acme".to_owned()),
-                folder_id: (*folder_id).to_owned(),
-                key_version: 1,
-                key_base64: folder_key.to_base64(),
-                source: "test".to_owned(),
-                opened_at: "2026-06-24T20:46:36Z".to_owned(),
-            });
-        }
-        write_agent_state(tree, &state).unwrap();
-    }
-
     fn grant_plaintext_folder_key(body: &Value, secret: &str, recipient_npub: &str) -> String {
         let wrapped = body["grant"]["wrappedEventJson"].as_str().unwrap();
         let event = Event::from_json(wrapped).unwrap();
@@ -3255,7 +3378,9 @@ mod tests {
         )
     }
 
-    fn start_partial_success_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    fn start_partial_success_sync_server(
+        export_grants: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -3289,7 +3414,7 @@ mod tests {
                                 "sharedFolderSource": false,
                                 "accessible": true
                             }],
-                            "keyGrants": [],
+                            "keyGrants": export_grants.clone(),
                             "accessState": {
                                 "members": [],
                                 "admins": []
@@ -3718,18 +3843,22 @@ mod tests {
     }
 
     #[test]
-    fn grant_folder_uses_opened_local_folder_key() {
+    fn grant_folder_opens_session_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
         let secret = "0000000000000000000000000000000000000000000000000000000000000001";
         import_identity_secret(&tmp, secret);
         let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([7; 32]);
         let tree = tmp.path().join("org");
-        write_opened_test_folder_key(&tree, "general", &folder_key);
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
 
-        let (server_url, server) = start_metadata_and_grant_server(admin_npub.clone());
         let mut env = env_for(&tmp);
-        env.cwd = tree;
+        env.cwd = tree.clone();
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) =
+            start_metadata_export_and_grant_server(admin_npub.clone(), vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             [
@@ -3760,6 +3889,125 @@ mod tests {
             grant_plaintext_folder_key(&body, secret, &admin_npub),
             folder_key.to_base64()
         );
+        let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
+        assert!(!durable_state.contains(&folder_key.to_base64()));
+    }
+
+    #[test]
+    fn sync_now_uses_session_key_without_persisting_it() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([17; 32]);
+        let tree = tmp.path().join("vault");
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        let agent_state_path = tree.join(".finitebrain/agent-state.json");
+        let mut durable_state: Value =
+            serde_json::from_str(&fs::read_to_string(&agent_state_path).unwrap()).unwrap();
+        durable_state
+            .as_object_mut()
+            .unwrap()
+            .remove("unlockedFolders");
+        durable_state
+            .as_object_mut()
+            .unwrap()
+            .remove("localFolderKeys");
+        write_json_file(&agent_state_path, &durable_state).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &VaultWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: Vec::new(),
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let ciphertext =
+            remote_page_ciphertext(&folder_key, "compiled/session.md", "# Session only\n");
+        let (server_url, server) = start_session_key_sync_server(export_grant, ciphertext, 2);
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tree.join("General/compiled/session.md")).unwrap(),
+            "# Session only\n"
+        );
+        let raw_key = folder_key.to_base64();
+        for path in [
+            ".finitebrain/agent-state.json",
+            ".finitebrain/encrypted-sync/export.json",
+            ".finitebrain/encrypted-sync/bootstrap.json",
+        ] {
+            let body = fs::read_to_string(tree.join(path)).unwrap();
+            assert!(
+                !body.contains(&raw_key),
+                "raw Folder Key persisted in {path}"
+            );
+        }
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sync_now_fails_closed_on_unusable_grant_for_local_member() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([17; 32]);
+        let tree = tmp.path().join("vault");
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &VaultWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: Vec::new(),
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let mut export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        export_grant["wrappedEventJson"] = Value::String("not-a-nostr-event".to_owned());
+        let (server_url, server) = start_session_key_sync_server(export_grant, String::new(), 1);
+
+        let error = run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("encrypted Folder Key Grant"));
+        assert!(error.contains("local signer"));
+        assert!(!error.contains("not-a-nostr-event"));
+        assert!(
+            !fs::read_to_string(tree.join(".finitebrain/agent-state.json"))
+                .unwrap()
+                .contains(&folder_key.to_base64())
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[test]
@@ -4085,7 +4333,7 @@ mod tests {
     }
 
     #[test]
-    fn invites_create_email_bootstrap_uses_opened_keys_without_sending_secret() {
+    fn invites_create_email_bootstrap_uses_one_session_keyring_without_persisting_keys() {
         let tmp = TempDir::new().unwrap();
         let admin_secret = "0000000000000000000000000000000000000000000000000000000000000001";
         import_identity_secret(&tmp, admin_secret);
@@ -4093,17 +4341,23 @@ mod tests {
         let getting_started_key = FolderKey::from_bytes([11; 32]);
         let restricted_key = FolderKey::from_bytes([12; 32]);
         let tree = tmp.path().join("org");
-        write_opened_test_folder_keys(
-            &tree,
-            &[
-                ("getting-started", &getting_started_key),
-                ("restricted", &restricted_key),
-            ],
-        );
-        let (server_url, server) = start_email_invite_server(admin_npub);
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
 
         let mut env = env_for(&tmp);
-        env.cwd = tree;
+        env.cwd = tree.clone();
+        let export_grants = vec![
+            export_grant_for_test(
+                &env,
+                "acme",
+                "getting-started",
+                1,
+                &getting_started_key,
+                &admin_npub,
+            ),
+            export_grant_for_test(&env, "acme", "restricted", 1, &restricted_key, &admin_npub),
+        ];
+        let (server_url, server) = start_email_invite_server(admin_npub, export_grants);
         let mut output = Vec::new();
         run_with_env(
             [
@@ -4135,9 +4389,10 @@ mod tests {
         );
 
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(requests[0].0.contains("/_admin/vaults/acme/metadata"));
-        let (request, body) = &requests[1];
+        assert!(requests[1].0.contains("/_admin/vaults/acme/export"));
+        let (request, body) = &requests[2];
         assert!(request.starts_with("POST /_admin/vaults/acme/invitations"));
         assert!(
             !body.contains(invite_secret),
@@ -4183,6 +4438,9 @@ mod tests {
             grant_plaintext_folder_key(&grants[1], invite_secret, invite_unwrap_npub),
             restricted_key.to_base64()
         );
+        let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
+        assert!(!durable_state.contains(&getting_started_key.to_base64()));
+        assert!(!durable_state.contains(&restricted_key.to_base64()));
     }
 
     #[test]
@@ -4288,7 +4546,7 @@ mod tests {
     }
 
     #[test]
-    fn share_link_uses_opened_local_folder_key() {
+    fn share_link_uses_session_folder_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
         let admin_secret = "0000000000000000000000000000000000000000000000000000000000000001";
         let sharee_secret = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -4301,11 +4559,14 @@ mod tests {
             .to_owned();
         let folder_key = FolderKey::from_bytes([11; 32]);
         let tree = tmp.path().join("org");
-        write_opened_test_folder_key(&tree, "general", &folder_key);
-
-        let (server_url, server) = start_metadata_and_grant_server(admin_npub);
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
         let mut env = env_for(&tmp);
-        env.cwd = tree;
+        env.cwd = tree.clone();
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) =
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             [
@@ -4336,10 +4597,12 @@ mod tests {
             grant_plaintext_folder_key(&body, sharee_secret, &sharee_npub),
             folder_key.to_base64()
         );
+        let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
+        assert!(!durable_state.contains(&folder_key.to_base64()));
     }
 
     #[test]
-    fn share_folder_invite_uses_opened_local_folder_key() {
+    fn share_folder_invite_uses_session_folder_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
         let admin_secret = "0000000000000000000000000000000000000000000000000000000000000001";
         let destination_admin_secret =
@@ -4353,11 +4616,14 @@ mod tests {
             .to_owned();
         let folder_key = FolderKey::from_bytes([13; 32]);
         let tree = tmp.path().join("org");
-        write_opened_test_folder_key(&tree, "general", &folder_key);
-
-        let (server_url, server) = start_metadata_and_grant_server(admin_npub);
+        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
         let mut env = env_for(&tmp);
-        env.cwd = tree;
+        env.cwd = tree.clone();
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) =
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             [
@@ -4390,6 +4656,8 @@ mod tests {
             grant_plaintext_folder_key(&body, destination_admin_secret, &destination_admin_npub),
             folder_key.to_base64()
         );
+        let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
+        assert!(!durable_state.contains(&folder_key.to_base64()));
     }
 
     #[test]
@@ -4598,12 +4866,16 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let folder_key = FolderKey::from_bytes([8; 32]);
-        let tree = setup_incremental_tree(&tmp, &folder_key, 0);
+        let tree = setup_incremental_tree(&tmp, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/daemon.md", "# Daemon\n");
-        let (server_url, server) = start_incremental_remote_sync_server(ciphertext);
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) =
+            start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             [
@@ -4735,12 +5007,16 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let folder_key = FolderKey::from_bytes([4; 32]);
-        let tree = setup_incremental_tree(&tmp, &folder_key, 0);
+        let tree = setup_incremental_tree(&tmp, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/remote.md", "# Remote\n");
-        let (server_url, server) = start_incremental_remote_sync_server(ciphertext);
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) =
+            start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -4794,12 +5070,16 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let folder_key = FolderKey::from_bytes([7; 32]);
-        let tree = setup_incremental_tree(&tmp, &folder_key, 0);
+        let tree = setup_incremental_tree(&tmp, 0);
         let ciphertext = remote_page_ciphertext(&folder_key, "compiled/summary.md", "# Summary\n");
-        let (server_url, server) = start_incremental_remote_sync_server(ciphertext);
 
         let mut env = env_for(&tmp);
         env.cwd = tree;
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) =
+            start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--summary"],
@@ -4831,13 +5111,16 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let folder_key = FolderKey::from_bytes([5; 32]);
-        let tree = setup_incremental_tree(&tmp, &folder_key, 2);
+        let tree = setup_incremental_tree(&tmp, 2);
         let ciphertext =
             remote_page_ciphertext(&folder_key, "compiled/rebootstrap.md", "# Bootstrap\n");
-        let (server_url, server) = start_expired_cursor_sync_server(ciphertext);
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) = start_expired_cursor_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -4886,10 +5169,9 @@ mod tests {
         // Both agents share the one Finite identity: import once.
         import_identity_for(&agent_a_auth_env, nsec);
         let folder_key = FolderKey::from_bytes([6; 32]);
-        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", &folder_key, 0);
-        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", &folder_key, 0);
+        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
+        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
         fs::write(agent_b_tree.join("General/shared.md"), "# Shared\n").unwrap();
-        let (server_url, server) = start_two_agent_incremental_sync_server();
 
         let env_b = CliEnvironment {
             cwd: agent_b_tree.clone(),
@@ -4898,6 +5180,10 @@ mod tests {
             identity_authority_url: None,
             finite_home: Some(tmp.path().join("finite-home")),
         };
+        let actor_npub = load_signer(&env_b).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env_b, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) = start_two_agent_incremental_sync_server(vec![export_grant]);
         let mut output_b = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -4969,19 +5255,12 @@ mod tests {
         fs::create_dir_all(tree.join(".finitebrain")).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/new.md"), "# New\n").unwrap();
+        let folder_key = FolderKey::from_bytes([9; 32]);
 
         let now = "2026-06-24T20:46:36Z";
         let mut state = AgentState::new("vault", now);
         state.server_url = Some("http://127.0.0.1:9".to_owned());
         state.daemon.state = DaemonRunState::Running;
-        state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("vault".to_owned()),
-            folder_id: "general".to_owned(),
-            key_version: 1,
-            key_base64: FolderKey::from_bytes([9; 32]).to_base64(),
-            source: "test".to_owned(),
-            opened_at: now.to_owned(),
-        });
         write_agent_state(&tree, &state).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
@@ -5000,9 +5279,12 @@ mod tests {
         )
         .unwrap();
 
-        let (server_url, server) = start_conflict_sync_server();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) = start_conflict_sync_server(vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -5052,19 +5334,12 @@ mod tests {
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/a.md"), "# Accepted\n").unwrap();
         fs::write(tree.join("General/b.md"), "# Conflict\n").unwrap();
+        let folder_key = FolderKey::from_bytes([9; 32]);
 
         let now = "2026-06-24T20:46:36Z";
         let mut state = AgentState::new("vault", now);
         state.server_url = Some("http://127.0.0.1:9".to_owned());
         state.daemon.state = DaemonRunState::Running;
-        state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("vault".to_owned()),
-            folder_id: "general".to_owned(),
-            key_version: 1,
-            key_base64: FolderKey::from_bytes([9; 32]).to_base64(),
-            source: "test".to_owned(),
-            opened_at: now.to_owned(),
-        });
         write_agent_state(&tree, &state).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
@@ -5083,9 +5358,12 @@ mod tests {
         )
         .unwrap();
 
-        let (server_url, server) = start_partial_success_sync_server();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) = start_partial_success_sync_server(vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],

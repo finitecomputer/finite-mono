@@ -10,10 +10,10 @@ use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Kind, Tag};
 
 use crate::{
-    APP_SPECIFIC_KIND, CliEnvironment, CliError, LocalFolderKey, LocalSigner, UnlockedFolder,
-    VaultMetadataView, current_tree_root, deterministic_id, find_agent_state, load_signer,
-    mutate_agent_state, normalize_folder_access, read_agent_state, read_working_tree_state,
-    sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp, write_json_file,
+    APP_SPECIFIC_KIND, CliEnvironment, CliError, LocalSigner, SessionFolderKeyring,
+    VaultMetadataView, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
+    normalize_folder_access, read_working_tree_state, sign_event, signed_json_request, tag_vec,
+    timestamp, unix_timestamp, write_json_file,
 };
 
 pub(crate) fn fetch_vault_metadata(
@@ -157,28 +157,19 @@ pub(crate) fn folder_key_grant_request(
 }
 
 pub(crate) fn opened_folder_key(
-    env: &CliEnvironment,
+    keyring: &SessionFolderKeyring,
+    vault_id: &str,
     folder_id: &str,
     key_version: u32,
 ) -> Result<FolderKey, CliError> {
-    let root = current_tree_root(env)?;
-    let state = read_agent_state(&root)?;
-    let local_key = state
-        .local_folder_keys
-        .iter()
-        .find(|key| {
-            key.vault_id.as_deref().unwrap_or(state.vault_id.as_str())
-                == state.vault_id.as_str()
-                && key.folder_id == folder_id
-                && key.key_version == key_version
-        })
+    keyring
+        .get(vault_id, folder_id, key_version)
+        .cloned()
         .ok_or_else(|| {
             CliError::InvalidInput(format!(
-                "Folder Key for {folder_id} v{key_version} is not opened locally; run fbrain open/sync as an admin first"
+                "Folder Key for {vault_id}/{folder_id} v{key_version} is unavailable for this operation; ensure the acting Member Identity has a current encrypted grant"
             ))
-        })?;
-    FolderKey::from_base64(&local_key.key_base64)
-        .map_err(|error| CliError::InvalidInput(error.to_string()))
+        })
 }
 
 pub(crate) fn admin_access_change_event(
@@ -260,7 +251,6 @@ pub(crate) fn update_local_folder_after_create(
     env: &CliEnvironment,
     folder_id: &str,
     path: &str,
-    folder_key: &FolderKey,
 ) -> Result<(), CliError> {
     let Some(root) = find_agent_state(&env.cwd)? else {
         return Ok(());
@@ -296,33 +286,6 @@ pub(crate) fn update_local_folder_after_create(
         fs::create_dir_all(root.join(path).join(subdir))?;
     }
     mutate_agent_state(env, |state, now| {
-        if !state
-            .local_folder_keys
-            .iter()
-            .any(|key| key.folder_id == folder_id && key.key_version == 1)
-        {
-            state.local_folder_keys.push(LocalFolderKey {
-                vault_id: Some(state.vault_id.clone()),
-                folder_id: folder_id.to_owned(),
-                key_version: 1,
-                key_base64: folder_key.to_base64(),
-                source: "created-by-fbrain".to_owned(),
-                opened_at: now.clone(),
-            });
-        }
-        if !state
-            .unlocked_folders
-            .iter()
-            .any(|folder| folder.folder_id == folder_id)
-        {
-            state.unlocked_folders.push(UnlockedFolder {
-                vault_id: Some(state.vault_id.clone()),
-                folder_id: folder_id.to_owned(),
-                key_version: 1,
-                opened_at: now.clone(),
-                source: "created-by-fbrain".to_owned(),
-            });
-        }
         state.add_activity(now, "folder.created", format!("Folder {folder_id} created"));
         Ok(())
     })
