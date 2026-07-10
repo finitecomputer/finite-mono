@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH]', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'push-drain [options]', or 'smoke'"
         )
         .into()),
     }
@@ -31,13 +31,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let options = ServeOptions::parse(args)?;
     let addr = options.addr.parse::<SocketAddr>()?;
-    let state = match options.sqlite_path {
+    let public_url = options
+        .public_url
+        .or_else(|| env::var("FINITECHAT_PUBLIC_URL").ok())
+        .filter(|value| !value.trim().is_empty());
+    let mut state = match options.sqlite_path {
         Some(path) => {
             create_sqlite_parent_dir(&path)?;
             HttpServerState::from_sqlite_path(path)?
         }
         None => HttpServerState::default(),
     };
+    if let Some(public_url) = public_url {
+        state = state.with_public_url(public_url)?;
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("finitechat-server: listening on http://{addr}");
     axum::serve(listener, http_router(state)).await?;
@@ -69,12 +76,14 @@ fn smoke() {
 struct ServeOptions {
     addr: String,
     sqlite_path: Option<String>,
+    public_url: Option<String>,
 }
 
 impl ServeOptions {
     fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut addr = None;
         let mut sqlite_path = None;
+        let mut public_url = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -84,6 +93,13 @@ impl ServeOptions {
                         return Err("missing value for --sqlite".into());
                     };
                     sqlite_path = Some(path.clone());
+                }
+                "--public-url" => {
+                    index += 1;
+                    let Some(url) = args.get(index) else {
+                        return Err("missing value for --public-url".into());
+                    };
+                    public_url = Some(url.clone());
                 }
                 value if value.starts_with("--") => {
                     return Err(format!("unknown serve option '{value}'").into());
@@ -99,13 +115,14 @@ impl ServeOptions {
         Ok(Self {
             addr: addr.unwrap_or_else(|| "127.0.0.1:8787".to_owned()),
             sqlite_path,
+            public_url,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create_sqlite_parent_dir;
+    use super::{ServeOptions, create_sqlite_parent_dir};
 
     #[test]
     fn sqlite_parent_dir_is_created_before_open() {
@@ -119,5 +136,23 @@ mod tests {
         create_sqlite_parent_dir(db_path.to_str().expect("utf8 path")).expect("create parent dir");
 
         assert!(db_path.parent().expect("parent").is_dir());
+    }
+
+    #[test]
+    fn serve_options_accept_canonical_public_url() {
+        let options = ServeOptions::parse(&[
+            "127.0.0.1:8788".to_owned(),
+            "--sqlite".to_owned(),
+            "/tmp/finitechat.sqlite3".to_owned(),
+            "--public-url".to_owned(),
+            "https://chat.finite.computer".to_owned(),
+        ])
+        .expect("serve options");
+
+        assert_eq!(options.addr, "127.0.0.1:8788");
+        assert_eq!(
+            options.public_url.as_deref(),
+            Some("https://chat.finite.computer")
+        );
     }
 }

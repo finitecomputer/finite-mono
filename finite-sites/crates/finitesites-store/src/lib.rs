@@ -2862,11 +2862,48 @@ impl Store {
     ) -> Result<(), StoreError> {
         assert!(token_hash.len() == 64);
         assert!(expires_at > now);
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+
+        // Token rows are operational credentials, not an audit log. Prune
+        // consumed and expired rows on every issuance so ordinary use cannot
+        // accumulate them forever.
+        tx.execute(
+            "DELETE FROM login_tokens WHERE used_at IS NOT NULL OR expires_at < ?1",
+            params![now],
+        )?;
+
+        // Keep a durable bound even if the process-local abuse limiter resets.
+        // Removing the oldest outstanding links preserves the newest reloads
+        // and concurrent tabs while retaining one-time redemption semantics.
+        let active_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM login_tokens
+             WHERE site_id = ?1 AND email = ?2 AND used_at IS NULL AND expires_at >= ?3",
+            params![site_id, email, now],
+            |row| row.get(0),
+        )?;
+        let active_limit =
+            i64::from(finitesites_proto::limits::MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL);
+        if active_count >= active_limit {
+            let remove_count = active_count - active_limit + 1;
+            tx.execute(
+                "DELETE FROM login_tokens
+                 WHERE token_hash IN (
+                   SELECT token_hash FROM login_tokens
+                   WHERE site_id = ?1 AND email = ?2
+                     AND used_at IS NULL AND expires_at >= ?3
+                   ORDER BY created_at, token_hash
+                   LIMIT ?4
+                 )",
+                params![site_id, email, now, remove_count],
+            )?;
+        }
+
+        tx.execute(
             "INSERT INTO login_tokens (token_hash, site_id, email, expires_at, used_at, created_at)
              VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
             params![token_hash, site_id, email, expires_at, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -4053,6 +4090,81 @@ mod tests {
             store.redeem_login_token(&"9".repeat(64), NOW),
             Err(StoreError::NotFound("login token"))
         ));
+    }
+
+    #[test]
+    fn login_token_issuance_prunes_consumed_and_expired_rows() {
+        let mut store = store_with_site("hello");
+        let consumed = format!("{:064x}", 1);
+        let expired = format!("{:064x}", 2);
+        let current = format!("{:064x}", 3);
+
+        store
+            .create_login_token(&consumed, "site_1", "a@example.com", NOW + 900, NOW)
+            .unwrap();
+        store.redeem_login_token(&consumed, NOW + 1).unwrap();
+        store
+            .create_login_token(&expired, "site_1", "b@example.com", NOW + 1, NOW)
+            .unwrap();
+        store
+            .create_login_token(&current, "site_1", "a@example.com", NOW + 902, NOW + 2)
+            .unwrap();
+
+        let remaining: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM login_tokens", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert!(matches!(
+            store.redeem_login_token(&consumed, NOW + 2),
+            Err(StoreError::NotFound("login token"))
+        ));
+        assert!(matches!(
+            store.redeem_login_token(&expired, NOW + 2),
+            Err(StoreError::NotFound("login token"))
+        ));
+        assert!(store.redeem_login_token(&current, NOW + 2).is_ok());
+    }
+
+    #[test]
+    fn active_login_tokens_are_bounded_per_site_and_email() {
+        let mut store = store_with_site("hello");
+        let limit = finitesites_proto::limits::MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL;
+        for index in 0..(limit + 5) {
+            let token_hash = format!("{index:064x}");
+            store
+                .create_login_token(
+                    &token_hash,
+                    "site_1",
+                    "a@example.com",
+                    NOW + 900 + u64::from(index),
+                    NOW + u64::from(index),
+                )
+                .unwrap();
+        }
+
+        let active: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM login_tokens
+                 WHERE site_id = 'site_1' AND email = 'a@example.com' AND used_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, i64::from(limit));
+
+        let evicted = format!("{:064x}", 0);
+        assert!(matches!(
+            store.redeem_login_token(&evicted, NOW + u64::from(limit) + 5),
+            Err(StoreError::NotFound("login token"))
+        ));
+        let newest = format!("{:064x}", limit + 4);
+        assert!(
+            store
+                .redeem_login_token(&newest, NOW + u64::from(limit) + 5)
+                .is_ok()
+        );
     }
 
     #[test]

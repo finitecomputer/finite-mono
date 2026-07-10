@@ -280,6 +280,13 @@ CREATE TABLE IF NOT EXISTS login_tokens (
   created_at INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS login_tokens_expiry_used
+  ON login_tokens(expires_at, used_at);
+
+CREATE INDEX IF NOT EXISTS login_tokens_site_email_active
+  ON login_tokens(site_id, email, created_at, token_hash)
+  WHERE used_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS site_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   site_id TEXT,

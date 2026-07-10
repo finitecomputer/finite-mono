@@ -13,7 +13,7 @@ use axum::extract::{Form, Query, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION, SET_COOKIE,
 };
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -28,6 +28,7 @@ use crate::proxy;
 use crate::server::{AppState, now_unix, site_label};
 
 const VIEWER_COOKIE_NAME: &str = "finite_site_auth";
+const PARTITIONED_VIEWER_COOKIE_NAME: &str = "__Host-finite_site_auth_partitioned";
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -66,10 +67,15 @@ fn resolve_request_site(
 
 fn viewer_cookie_value(headers: &HeaderMap) -> Option<String> {
     let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
+    cookie_value_by_name(cookie_header, VIEWER_COOKIE_NAME)
+        .or_else(|| cookie_value_by_name(cookie_header, PARTITIONED_VIEWER_COOKIE_NAME))
+}
+
+fn cookie_value_by_name(cookie_header: &str, name: &str) -> Option<String> {
     // Bounded: header size is bounded by the HTTP server's limits.
     for pair in cookie_header.split(';') {
         let trimmed = pair.trim();
-        if let Some(value) = trimmed.strip_prefix(VIEWER_COOKIE_NAME)
+        if let Some(value) = trimmed.strip_prefix(name)
             && let Some(value) = value.strip_prefix('=')
         {
             return Some(value.to_string());
@@ -495,6 +501,11 @@ async fn redeem_link(
     let Some(token) = params.get("token") else {
         return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
     };
+    let return_to = match params.get("return_to") {
+        Some(path) if crate::api::valid_return_to(path) => path.as_str(),
+        Some(_) => return html_response(StatusCode::BAD_REQUEST, pages::link_invalid()),
+        None => "/",
+    };
 
     let redeemed = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
@@ -506,16 +517,23 @@ async fn redeem_link(
             if token_site.id != site.id {
                 return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
             }
-            let cookie_policy = viewer_cookie_policy(&state.api_url, &state.base_domain);
-            let cookie = format!(
-                "{VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={VIEWER_COOKIE_TTL_SECONDS}; HttpOnly; {cookie_policy}"
-            );
-            Response::builder()
+            let mut response = Response::builder()
                 .status(StatusCode::SEE_OTHER)
-                .header(LOCATION, "/")
-                .header(SET_COOKIE, cookie)
+                .header(LOCATION, return_to)
                 .body(Body::empty())
-                .expect("static response builds")
+                .expect("static response builds");
+            for cookie in viewer_cookie_headers(
+                &cookie_value,
+                VIEWER_COOKIE_TTL_SECONDS,
+                &state.api_url,
+                &state.base_domain,
+            ) {
+                response.headers_mut().append(
+                    SET_COOKIE,
+                    HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
+                );
+            }
+            response
         }
         Err(EngineError::Validation(_)) => {
             html_response(StatusCode::BAD_REQUEST, pages::link_invalid())
@@ -528,30 +546,55 @@ async fn redeem_link(
 }
 
 async fn logout(State(state): State<Arc<AppState>>) -> Response {
-    let cookie_policy = viewer_cookie_policy(&state.api_url, &state.base_domain);
-    let cookie = format!("{VIEWER_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; {cookie_policy}");
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(LOCATION, "/")
-        .header(SET_COOKIE, cookie)
         .body(Body::empty())
-        .expect("static response builds")
+        .expect("static response builds");
+    for cookie in viewer_cookie_headers("", 0, &state.api_url, &state.base_domain) {
+        response.headers_mut().append(
+            SET_COOKIE,
+            HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
+        );
+    }
+    response
 }
 
-fn viewer_cookie_policy(api_url: &str, base_domain: &str) -> &'static str {
-    if api_url.starts_with("https://")
-        || base_domain == "localhost"
-        || base_domain.ends_with(".localhost")
-    {
-        "SameSite=None; Secure"
+fn viewer_cookie_headers(
+    cookie_value: &str,
+    max_age: u64,
+    api_url: &str,
+    base_domain: &str,
+) -> Vec<String> {
+    let secure_context = secure_viewer_cookie_context(api_url, base_domain);
+    let ordinary_policy = if secure_context {
+        "SameSite=Lax; Secure"
     } else {
         "SameSite=Lax"
+    };
+    let mut cookies = vec![format!(
+        "{VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={max_age}; HttpOnly; {ordinary_policy}"
+    )];
+    if secure_context {
+        cookies.push(format!(
+            "{PARTITIONED_VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=None; Secure; Partitioned"
+        ));
     }
+    cookies
+}
+
+fn secure_viewer_cookie_context(api_url: &str, base_domain: &str) -> bool {
+    api_url.starts_with("https://")
+        || base_domain == "localhost"
+        || base_domain.ends_with(".localhost")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_request_path, viewer_cookie_policy};
+    use super::{
+        PARTITIONED_VIEWER_COOKIE_NAME, decode_request_path, secure_viewer_cookie_context,
+        viewer_cookie_headers,
+    };
 
     #[test]
     fn decode_request_path_rules() {
@@ -569,18 +612,39 @@ mod tests {
     }
 
     #[test]
-    fn viewer_cookies_can_reach_https_and_local_dashboard_previews() {
+    fn viewer_cookies_split_top_level_and_partitioned_preview_access() {
+        assert!(secure_viewer_cookie_context(
+            "https://api.finite.chat",
+            "finite.chat"
+        ));
+        assert!(secure_viewer_cookie_context(
+            "http://127.0.0.1:8787",
+            "sites.localhost"
+        ));
+        assert!(!secure_viewer_cookie_context(
+            "http://10.0.0.4:8787",
+            "sites.internal"
+        ));
+
+        let secure =
+            viewer_cookie_headers("signed-value", 60, "https://api.finite.chat", "finite.chat");
+        assert_eq!(secure.len(), 2);
         assert_eq!(
-            viewer_cookie_policy("https://api.finite.chat", "finite.chat"),
-            "SameSite=None; Secure"
+            secure[0],
+            "finite_site_auth=signed-value; Path=/; Max-Age=60; HttpOnly; SameSite=Lax; Secure"
         );
         assert_eq!(
-            viewer_cookie_policy("http://127.0.0.1:8787", "sites.localhost"),
-            "SameSite=None; Secure"
+            secure[1],
+            format!(
+                "{PARTITIONED_VIEWER_COOKIE_NAME}=signed-value; Path=/; Max-Age=60; HttpOnly; SameSite=None; Secure; Partitioned"
+            )
         );
+
+        let internal =
+            viewer_cookie_headers("signed-value", 60, "http://10.0.0.4:8787", "sites.internal");
         assert_eq!(
-            viewer_cookie_policy("http://10.0.0.4:8787", "sites.internal"),
-            "SameSite=Lax"
+            internal,
+            vec!["finite_site_auth=signed-value; Path=/; Max-Age=60; HttpOnly; SameSite=Lax"]
         );
     }
 }

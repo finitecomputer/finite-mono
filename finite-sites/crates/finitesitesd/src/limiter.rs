@@ -17,6 +17,9 @@ pub const MAX_LINKS_PER_EMAIL: u32 = 3;
 /// One client IP may request at most this many links per window, across
 /// all sites it touches.
 pub const MAX_LINKS_PER_IP: u32 = 20;
+/// Dashboard viewer-session exchanges may be reissued for reloads and a few
+/// concurrent tabs, but remain bounded per Site + verified email.
+pub const MAX_VIEWER_SESSIONS_PER_EMAIL: u32 = 30;
 /// Budget window. 10 minutes matches the token TTL order of magnitude:
 /// a legitimate viewer needs at most a couple of tries per visit.
 pub const WINDOW_SECONDS: u64 = 10 * 60;
@@ -66,9 +69,13 @@ impl RateLimiter {
         events.retain(|timestamp| *timestamp > oldest_relevant);
         let allowed = (events.len() as u32) < max_events;
         events.push(now);
-        // Per-key memory is bounded: stale events are pruned above and the
-        // vector cannot exceed max_events live entries plus denied attempts
-        // inside one window, which the retain caps each call.
+        // Keep only the newest bounded window. A denied attempt still moves
+        // the window forward, so sustained hammering remains locked out
+        // without making this in-memory abuse brake itself a memory DoS.
+        let excess = events.len().saturating_sub(max_events as usize);
+        if excess > 0 {
+            events.drain(..excess);
+        }
         allowed
     }
 }
@@ -121,5 +128,15 @@ mod tests {
         assert!(!limiter.check_and_record("k", 1, NOW + 1100));
         // Once attempts actually stop for a full window, the key recovers.
         assert!(limiter.check_and_record("k", 1, NOW + 1800));
+    }
+
+    #[test]
+    fn denied_attempts_keep_each_bucket_bounded() {
+        let limiter = RateLimiter::new(600);
+        for offset in 0..10_000 {
+            let _ = limiter.check_and_record("hammered", 3, NOW + offset % 10);
+        }
+        let buckets = limiter.buckets.lock().unwrap();
+        assert_eq!(buckets["hammered"].len(), 3);
     }
 }

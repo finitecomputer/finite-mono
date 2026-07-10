@@ -152,9 +152,8 @@ impl ConnectionManager {
                     .and_then(|value| value.get("api_key"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let api_key = request.api_key.or(current_key).ok_or_else(|| {
-                    AgentdError::InvalidPayload("OpenRouter key is required".to_owned())
-                })?;
+                let provisioned_key = std::env::var("OPENROUTER_API_KEY").ok();
+                let api_key = select_openrouter_key(request.api_key, current_key, provisioned_key)?;
                 validate_secret("OpenRouter key", &api_key)?;
                 let model = request
                     .model
@@ -560,6 +559,18 @@ fn required_env(name: &str) -> Result<String, AgentdError> {
         .ok_or_else(|| AgentdError::Config(format!("{name} is not available on this agent")))
 }
 
+fn select_openrouter_key(
+    requested: Option<String>,
+    current: Option<String>,
+    provisioned: Option<String>,
+) -> Result<String, AgentdError> {
+    [requested, current, provisioned]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .ok_or_else(|| AgentdError::InvalidPayload("OpenRouter key is required".to_owned()))
+}
+
 fn validate_secret(label: &str, value: &str) -> Result<(), AgentdError> {
     if value.trim().len() < 8 || value.len() > 16 * 1024 || value.chars().any(char::is_control) {
         return Err(AgentdError::InvalidPayload(format!("{label} is invalid")));
@@ -706,5 +717,41 @@ mod tests {
     fn telegram_token_validation_matches_hermes_shape() {
         assert!(validate_telegram_token("123456789:abcdefghijklmnopqrstuvwxyzABCDEFGH").is_ok());
         assert!(validate_telegram_token("not-a-token").is_err());
+    }
+
+    #[test]
+    fn openrouter_prefers_an_explicit_rotation_then_current_then_provisioned_key() {
+        assert_eq!(
+            select_openrouter_key(
+                Some("rotated-key".to_owned()),
+                Some("current-key".to_owned()),
+                Some("provisioned-key".to_owned()),
+            )
+            .unwrap(),
+            "rotated-key"
+        );
+        assert_eq!(
+            select_openrouter_key(
+                None,
+                Some("current-key".to_owned()),
+                Some("provisioned-key".to_owned()),
+            )
+            .unwrap(),
+            "current-key"
+        );
+        assert_eq!(
+            select_openrouter_key(None, None, Some("provisioned-key".to_owned())).unwrap(),
+            "provisioned-key"
+        );
+        assert_eq!(
+            select_openrouter_key(
+                Some("  ".to_owned()),
+                Some("current-key".to_owned()),
+                Some("provisioned-key".to_owned()),
+            )
+            .unwrap(),
+            "current-key"
+        );
+        assert!(select_openrouter_key(None, None, Some("  ".to_owned())).is_err());
     }
 }

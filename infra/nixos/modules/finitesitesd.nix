@@ -69,11 +69,17 @@
           --mail-from "Finite Sites <links@finite.chat>" \
           --app-runner none
       '';
-      # Operator-created, root:root 0640 (or readable by finite-sites).
+      # Operator-created, root:root 0600. systemd reads EnvironmentFile before
+      # starting the service under the finite-sites account.
       # Variable NAMES only (values from lat2's /etc/finite-saas/sites.env):
       #   RESEND_API_KEY
       #   FINITE_IDENTITY_AUTHORITY  (optional; not set live on lat2)
-      EnvironmentFile = "/etc/finite-saas/sites.env";
+      # FINITE_SITES_VIEWER_SESSION_TOKEN in the second file must be exactly
+      # 64 lowercase hex characters (`openssl rand -hex 32`).
+      EnvironmentFile = [
+        "/etc/finite-saas/sites.env"
+        "/etc/finite/sites-viewer-session.env"
+      ];
       Restart = "on-failure";
       RestartSec = 2;
       # Full lat2 hardening applies — no kata drop-in to relax it.

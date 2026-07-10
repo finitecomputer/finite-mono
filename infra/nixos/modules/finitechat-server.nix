@@ -15,6 +15,8 @@
     after = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
 
+    environment.FINITECHAT_PUBLIC_URL = "https://chat.finite.computer";
+
     serviceConfig = {
       ExecStart = "${finitePackages.finitechat-server}/bin/finitechat-server serve 127.0.0.1:8788 --sqlite /var/lib/finite-chat/data/server.sqlite3";
       DynamicUser = true;

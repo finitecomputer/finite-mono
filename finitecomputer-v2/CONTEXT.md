@@ -190,6 +190,9 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - A **Project** has one primary **Agent Runtime** at launch.
 - **Core** stores the **Desired Runtime State** for an **Agent Runtime**.
 - A **Runtime Operation** moves an **Agent Runtime** toward **Desired Runtime State**.
+- A Kata **Runtime Upgrade** is an explicit **Runtime Operation** bound to one
+  promoted immutable artifact; ordinary restart does not select a new Kata
+  image, and upgrade never flows through **Purge User Data** or Runtime destroy.
 - A **Runner** hosts one or more **Agent Runtimes**.
 - **Core** is the source of truth for desired **Agent Runtime** lifecycle state.
 - A **Runner** reattaches to an **Agent Runtime** by its **Provider Runtime Handle**.

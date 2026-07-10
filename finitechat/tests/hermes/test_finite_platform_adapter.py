@@ -444,6 +444,47 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             {"room_id": "room-agent-1", "seq": 12, "message_id": "msg-12"},
         )
 
+    def test_unavailable_encrypted_attachment_delivers_caption_as_text_then_acks(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 13,
+            "message_id": "msg-13",
+            "text": (
+                "Please inspect this\n\n"
+                "An attachment could not be opened. "
+                "Ask the user to resend it if you need to inspect it."
+            ),
+            "message_type": "text",
+            "attachments": [
+                {
+                    "kind": "image",
+                    "name": "image.png",
+                    "mime_type": "image/png",
+                    "path": None,
+                    # This is encrypted blob transport, not model-readable media.
+                    "url": "https://chat.example/blobs/ciphertext",
+                    "blob": {
+                        "url": "https://chat.example/blobs/ciphertext",
+                        "ciphertext_sha256": "c" * 64,
+                    },
+                }
+            ],
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        self.assertEqual(len(adapter.handled_messages), 1)
+        event = adapter.handled_messages[0]
+        self.assertTrue(event.text.startswith("Please inspect this"))
+        self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertEqual(event.media_urls, [])
+        self.assertIn("blob", event.raw_message["attachments"][0])
+        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
+        self.assertEqual(calls[-1][1]["message_id"], "msg-13")
+
     def test_group_poll_event_preserves_authenticated_sender_identity(self):
         adapter = self.adapter(room_id=None)
         calls = []
@@ -1042,6 +1083,54 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(results[1].data["records"][0]["type"], "joined")
         self.assertEqual(results[2].data["records"][0]["event"]["message_id"], "msg-12")
 
+    def test_finitechat_service_stream_worker_surfaces_sidecar_error_record(self):
+        original_urlopen = self.module.urllib.request.urlopen
+
+        class FakeResponse:
+            def __init__(self):
+                self.lines = [
+                    b'{"type":"error","error":"attachment download failed"}\n',
+                ]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def readline(self):
+                return self.lines.pop(0) if self.lines else b""
+
+        async def run_worker():
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue()
+            await asyncio.to_thread(
+                self.module._finitechat_service_stream_worker,
+                "http://127.0.0.1:9999",
+                {"limit": 10, "timeout_millis": 1000},
+                7,
+                loop,
+                queue,
+                self.module.threading.Event(),
+            )
+            await asyncio.sleep(0)
+            results = []
+            while not queue.empty():
+                results.append(await queue.get())
+            return results
+
+        try:
+            self.module.urllib.request.urlopen = lambda request, timeout: FakeResponse()
+            results = asyncio.run(run_worker())
+        finally:
+            self.module.urllib.request.urlopen = original_urlopen
+
+        self.assertTrue(results[0].ok, "opening the stream is a liveness record")
+        self.assertFalse(results[1].ok)
+        self.assertEqual(results[1].error, "attachment download failed")
+        self.assertTrue(results[1].retryable)
+        self.assertFalse(results[1].transport_error)
+
     def test_stream_loop_consumes_inbound_records_and_acks_events(self):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
@@ -1172,7 +1261,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(ack_calls), 1)
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-14")
 
-    def test_stream_loop_reconnects_and_catches_up_without_poll_fallback(self):
+    def test_stream_loop_retries_attachment_materialization_without_poll_or_early_ack(self):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
@@ -1199,9 +1288,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     self.module._FiniteChatResult(
                         False,
                         {},
-                        "connection reset",
+                        "attachment is temporarily unavailable: server returned HTTP 503",
                         True,
-                        transport_error=True,
+                        transport_error=False,
                     ),
                 )
                 return

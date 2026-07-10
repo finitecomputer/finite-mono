@@ -296,6 +296,14 @@ with exactly these meanings.
   email. Redeeming it sets a Viewer Cookie on the site's own host.
 - **Viewer Cookie**: an HMAC-signed `(site, email, expiry)` proof, scoped to
   one site host. It proves login; the Share table decides access.
+- **Verified Email Viewer Session**: a server-to-server exchange that accepts
+  an email already verified by the SaaS account boundary and, only when that
+  email is already on a shared output's Share list, mints the existing
+  single-use Magic Link. It never creates a Share. The browser redeems the
+  link on the output host and ordinary per-request Share checks preserve
+  immediate revocation. Issuance and durable outstanding links are bounded per
+  output/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
+  `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.

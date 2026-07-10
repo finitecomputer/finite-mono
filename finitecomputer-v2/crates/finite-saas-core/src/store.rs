@@ -2,31 +2,32 @@ use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
-    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
-    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
-    FIRST_SELF_SERVE_LAUNCH_CODE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimeRelayCredential, RuntimeStatusSnapshot,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
+    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
+    ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
+    BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
+    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
+    CustomerOrganization, ExistingHostProjectImport, FIRST_SELF_SERVE_LAUNCH_CODE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProjectMembershipRole, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
+    RelayHeartbeat, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimeRelayCredential, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
+    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
+    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, chat_identity_id_for_user, current_time_iso,
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, new_agent_creation_request_id,
@@ -38,7 +39,9 @@ use crate::{
     parse_import_candidate_status, parse_runner_class, parse_runtime_artifact_kind,
     parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_summary_status,
     parse_time, parse_user_link_status, project_room_membership_id_for,
-    project_runtime_link_id_for, runtime_relay_token_hash, should_replace_stripe_subscription,
+    project_runtime_link_id_for, runtime_artifact_material_matches,
+    runtime_artifact_reference_is_immutable_oci, runtime_relay_token_hash,
+    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
     source_import_key, trim_to_option,
 };
 use serde::de::DeserializeOwned;
@@ -516,6 +519,16 @@ impl CoreStore {
         }
     }
 
+    pub async fn admin_request_runtime_upgrade(
+        &self,
+        input: AdminRuntimeUpgradeInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.admin_request_runtime_upgrade(input).await,
+            Self::Postgres(store) => store.admin_request_runtime_upgrade(input).await,
+        }
+    }
+
     pub async fn admin_issue_finite_private_friend_key(
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
@@ -914,6 +927,14 @@ impl MemoryCoreStore {
         state.admin_request_runtime_recover_known_good_chat(input)
     }
 
+    pub async fn admin_request_runtime_upgrade(
+        &self,
+        input: AdminRuntimeUpgradeInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut state = self.state.lock().await;
+        state.admin_request_runtime_upgrade(input)
+    }
+
     pub async fn admin_issue_finite_private_friend_key(
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
@@ -1018,6 +1039,17 @@ impl PostgresCoreStore {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_claim_project_imports(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn admin_request_runtime_upgrade(
+        &self,
+        input: AdminRuntimeUpgradeInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_request_runtime_upgrade(&tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1416,7 +1448,8 @@ impl PostgresCoreStore {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_admin_request_runtime_control(&tx, input, RuntimeControlKind::Restart).await?;
+            postgres_admin_request_runtime_control(&tx, input, RuntimeControlKind::Restart, None)
+                .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1431,6 +1464,7 @@ impl PostgresCoreStore {
             &tx,
             input,
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
+            None,
         )
         .await?;
         tx.commit().await.map_err(store_error)?;
@@ -3224,6 +3258,30 @@ where
         .transpose()
 }
 
+async fn select_core_created_runtime_runner_class<C>(
+    client: &C,
+    runtime_id: &str,
+) -> CoreResult<Option<crate::RunnerClass>>
+where
+    C: GenericClient + Sync,
+{
+    let row = client
+        .query_opt(
+            "SELECT runner_class FROM agent_creation_requests
+             WHERE agent_runtime_id = $1 AND status = 'running'
+             ORDER BY created_at, id LIMIT 1",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
+    row.map(|row| {
+        let value: String = row.get("runner_class");
+        parse_runner_class(&value)
+            .ok_or_else(|| CoreError::Store(format!("invalid agent runner class {value}")))
+    })
+    .transpose()
+}
+
 async fn validate_postgres_agent_creation_launch_code<C>(
     client: &C,
     customer_org_id: &str,
@@ -3803,11 +3861,36 @@ where
 }
 
 fn ensure_artifact_launchable(artifact: &RuntimeArtifact) -> CoreResult<()> {
-    if artifact.promoted_at.is_none() || artifact.retired_at.is_some() {
-        Err(CoreError::RuntimeArtifactNotPromoted)
-    } else {
-        Ok(())
+    if artifact.promoted_at.is_none() {
+        return Err(CoreError::RuntimeArtifactNotPromoted);
     }
+    if artifact.retired_at.is_some() {
+        return Err(CoreError::RuntimeArtifactRetired);
+    }
+    Ok(())
+}
+
+fn ensure_runtime_upgrade_target_compatible(
+    runtime: &AgentRuntime,
+    artifact: &RuntimeArtifact,
+) -> CoreResult<()> {
+    ensure_artifact_launchable(artifact)?;
+    ensure_runtime_upgrade_target_material(runtime, artifact)
+}
+
+fn ensure_runtime_upgrade_target_material(
+    runtime: &AgentRuntime,
+    artifact: &RuntimeArtifact,
+) -> CoreResult<()> {
+    if artifact.kind != crate::RuntimeArtifactKind::OciImage
+        || !runtime_artifact_reference_is_immutable_oci(&artifact.reference)
+    {
+        return Err(CoreError::RuntimeUpgradeUnsupported);
+    }
+    if runtime.state_schema_version.as_deref() != Some(artifact.state_schema_version.as_str()) {
+        return Err(CoreError::RuntimeUpgradeStateSchemaIncompatible);
+    }
+    Ok(())
 }
 
 fn verify_agent_creation_lease(
@@ -4035,6 +4118,7 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
         requested_by_user_id: row.get("requested_by_user_id"),
         kind: parse_runtime_control_kind(&kind)
             .ok_or_else(|| CoreError::Store(format!("invalid runtime control kind {kind}")))?,
+        target_runtime_artifact_id: row.get("target_runtime_artifact_id"),
         status: parse_runtime_control_request_status(&status).ok_or_else(|| {
             CoreError::Store(format!("invalid runtime control request status {status}"))
         })?,
@@ -4049,7 +4133,8 @@ fn runtime_control_request_from_row(row: &Row) -> CoreResult<RuntimeControlReque
 }
 
 const RUNTIME_CONTROL_REQUEST_COLUMNS: &str = "id, project_id, agent_runtime_id, source_host_id,
-    source_machine_id, requested_by_user_id, kind, status, runner_id, lease_token,
+    source_machine_id, requested_by_user_id, kind, target_runtime_artifact_id,
+    status, runner_id, lease_token,
     lease_expires_at::text, failure_message, created_at::text, updated_at::text, completed_at::text";
 
 async fn locked_runtime_control_request<C>(
@@ -4089,7 +4174,8 @@ where
              FROM project_runtime_links AS link
              JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
              WHERE link.project_id = $1 AND link.active
-             LIMIT 1",
+             LIMIT 1
+             FOR UPDATE OF runtime",
             &[&project_id],
         )
         .await
@@ -4106,6 +4192,7 @@ async fn postgres_enqueue_runtime_control_request<C>(
     project: &Project,
     requested_by_user_id: &str,
     kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
     now: &str,
 ) -> CoreResult<RuntimeControlRequest>
 where
@@ -4125,22 +4212,49 @@ where
         return Err(CoreError::RuntimeRestartUnsupported);
     }
 
-    // Dedupe: return the oldest still-in-flight request of this kind for the
-    // runtime rather than enqueuing a duplicate. `FOR UPDATE` serializes
-    // concurrent enqueues for the same runtime+kind.
+    let target_runtime_artifact_id = match kind {
+        RuntimeControlKind::Upgrade => {
+            let target_id = trim_to_option(target_runtime_artifact_id.as_deref())
+                .ok_or(CoreError::MissingRuntimeArtifactId)?;
+            if select_core_created_runtime_runner_class(client, &runtime.id).await?
+                != Some(crate::RunnerClass::Kata)
+            {
+                return Err(CoreError::RuntimeUpgradeUnsupported);
+            }
+            let target = select_runtime_artifact(client, &target_id)
+                .await?
+                .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            ensure_runtime_upgrade_target_compatible(&runtime, &target)?;
+            Some(target.id)
+        }
+        _ => None,
+    };
+
+    // Exactly one control operation may be active for a Runtime. The Runtime
+    // row was locked above, serializing even the zero-existing-row case; the
+    // partial unique index is a database-level backstop.
     let existing_sql = format!(
         "SELECT {RUNTIME_CONTROL_REQUEST_COLUMNS} FROM runtime_control_requests
-         WHERE agent_runtime_id = $1 AND kind = $2 AND status IN ('requested', 'running')
+         WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
          ORDER BY created_at, id
          LIMIT 1
          FOR UPDATE"
     );
     if let Some(row) = client
-        .query_opt(&existing_sql, &[&runtime.id, &kind.as_str()])
+        .query_opt(&existing_sql, &[&runtime.id])
         .await
         .map_err(store_error)?
     {
-        return runtime_control_request_from_row(&row);
+        let existing = runtime_control_request_from_row(&row)?;
+        if existing.kind != kind {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        if kind == RuntimeControlKind::Upgrade
+            && existing.target_runtime_artifact_id != target_runtime_artifact_id
+        {
+            return Err(CoreError::RuntimeUpgradeTargetConflict);
+        }
+        return Ok(existing);
     }
 
     let request = RuntimeControlRequest {
@@ -4151,6 +4265,7 @@ where
         source_machine_id: runtime.source_machine_id,
         requested_by_user_id: requested_by_user_id.to_string(),
         kind,
+        target_runtime_artifact_id,
         status: RuntimeControlRequestStatus::Requested,
         runner_id: None,
         lease_token: None,
@@ -4164,13 +4279,15 @@ where
         .query_one(
             "INSERT INTO runtime_control_requests (
                id, project_id, agent_runtime_id, source_host_id, source_machine_id,
-               requested_by_user_id, kind, status, runner_id, lease_token, lease_expires_at,
+               requested_by_user_id, kind, target_runtime_artifact_id, status,
+               runner_id, lease_token, lease_expires_at,
                failure_message, created_at, updated_at, completed_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'requested', NULL, NULL, NULL, NULL,
-                     $8::text::timestamptz, $8::text::timestamptz, NULL)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'requested', NULL, NULL, NULL, NULL,
+                     $9::text::timestamptz, $9::text::timestamptz, NULL)
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
-                       requested_by_user_id, kind, status, runner_id, lease_token,
+                       requested_by_user_id, kind, target_runtime_artifact_id, status,
+                       runner_id, lease_token,
                        lease_expires_at::text, failure_message, created_at::text,
                        updated_at::text, completed_at::text",
             &[
@@ -4181,6 +4298,7 @@ where
                 &request.source_machine_id,
                 &request.requested_by_user_id,
                 &request.kind.as_str(),
+                &request.target_runtime_artifact_id,
                 &now,
             ],
         )
@@ -4212,13 +4330,14 @@ where
     if project.owner_user_id != user.id {
         return Err(CoreError::ProjectNotFound);
     }
-    postgres_enqueue_runtime_control_request(client, &project, &user.id, kind, &now).await
+    postgres_enqueue_runtime_control_request(client, &project, &user.id, kind, None, &now).await
 }
 
 async fn postgres_admin_request_runtime_control<C>(
     client: &C,
     input: AdminRuntimeControlInput,
     kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
 ) -> CoreResult<RuntimeControlRequest>
 where
     C: GenericClient + Sync,
@@ -4235,12 +4354,19 @@ where
     let project = select_project(client, &input.project_id)
         .await?
         .ok_or(CoreError::ProjectNotFound)?;
-    let request =
-        postgres_enqueue_runtime_control_request(client, &project, &admin_user.id, kind, &now)
-            .await?;
+    let request = postgres_enqueue_runtime_control_request(
+        client,
+        &project,
+        &admin_user.id,
+        kind,
+        target_runtime_artifact_id,
+        &now,
+    )
+    .await?;
     let action = match kind {
         RuntimeControlKind::Restart => "runtime.admin_restart",
         RuntimeControlKind::RecoverKnownGoodChatRuntime => "runtime.admin_recover_known_good_chat",
+        RuntimeControlKind::Upgrade => "runtime.admin_upgrade",
         RuntimeControlKind::Stop => "runtime.admin_stop",
         RuntimeControlKind::Destroy => "runtime.admin_destroy",
     };
@@ -4257,12 +4383,34 @@ where
                 "projectId": request.project_id.clone(),
                 "runtimeControlRequestId": request.id.clone(),
                 "kind": kind.as_str(),
+                "targetRuntimeArtifactId": request.target_runtime_artifact_id.clone(),
             }),
             now: &now,
         },
     )
     .await?;
     Ok(request)
+}
+
+async fn postgres_admin_request_runtime_upgrade<C>(
+    client: &C,
+    input: AdminRuntimeUpgradeInput,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    postgres_admin_request_runtime_control(
+        client,
+        AdminRuntimeControlInput {
+            admin_verified_email: input.admin_verified_email,
+            admin_workos_user_id: input.admin_workos_user_id,
+            project_id: input.project_id,
+            now: input.now,
+        },
+        RuntimeControlKind::Upgrade,
+        Some(input.target_runtime_artifact_id),
+    )
+    .await
 }
 
 /// Partitioned claim: a runner leases only requests routable to it. When the
@@ -4302,8 +4450,9 @@ where
         .map(normalize_source_host_id)
         .transpose()?;
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
-    let Some(row) = client
-        .query_opt(
+    loop {
+        let Some(row) = client
+            .query_opt(
             "WITH candidate AS (
                 SELECT id
                 FROM runtime_control_requests
@@ -4330,7 +4479,8 @@ where
              WHERE request.id = candidate.id
              RETURNING request.id, request.project_id, request.agent_runtime_id,
                        request.source_host_id, request.source_machine_id,
-                       request.requested_by_user_id, request.kind, request.status,
+                       request.requested_by_user_id, request.kind,
+                       request.target_runtime_artifact_id, request.status,
                        request.runner_id, request.lease_token, request.lease_expires_at::text,
                        request.failure_message, request.created_at::text,
                        request.updated_at::text, request.completed_at::text",
@@ -4341,17 +4491,60 @@ where
                 &now,
                 &source_host_id,
             ],
-        )
-        .await
-        .map_err(store_error)?
-    else {
-        return Ok(None);
-    };
-    let request = runtime_control_request_from_row(&row)?;
-    let runtime = select_agent_runtime(client, &request.agent_runtime_id)
-        .await?
-        .ok_or(CoreError::ProjectRuntimeNotFound)?;
-    Ok(Some(RuntimeControlLease { request, runtime }))
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let request = runtime_control_request_from_row(&row)?;
+        let runtime = select_agent_runtime(client, &request.agent_runtime_id)
+            .await?
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        let target_result = async {
+            if request.kind != RuntimeControlKind::Upgrade {
+                return Ok(None);
+            }
+            let artifact_id = request
+                .target_runtime_artifact_id
+                .as_deref()
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let artifact = select_runtime_artifact(client, artifact_id)
+                .await?
+                .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            ensure_runtime_upgrade_target_compatible(&runtime, &artifact)?;
+            Ok(Some(artifact))
+        }
+        .await;
+        let target_runtime_artifact = match target_result {
+            Ok(target) => target,
+            Err(error) if runtime_upgrade_prelease_rejection_is_terminal(&error) => {
+                client
+                    .execute(
+                        "UPDATE runtime_control_requests
+                         SET status = 'failed', runner_id = NULL, lease_token = NULL,
+                             lease_expires_at = NULL, failure_message = $2,
+                             updated_at = $3::text::timestamptz,
+                             completed_at = $3::text::timestamptz
+                         WHERE id = $1",
+                        &[
+                            &request.id,
+                            &format!("runtime upgrade target rejected before lease: {error}"),
+                            &now,
+                        ],
+                    )
+                    .await
+                    .map_err(store_error)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        return Ok(Some(RuntimeControlLease {
+            request,
+            runtime,
+            target_runtime_artifact,
+        }));
+    }
 }
 
 fn verify_runtime_control_lease(
@@ -4376,11 +4569,19 @@ fn verify_runtime_control_lease(
 
 /// Apply the completed runtime status to both the runtime's host facts and its
 /// status snapshot (if one exists), touching only that runtime's two rows.
+struct RuntimeUpgradeCompletion {
+    runtime_artifact_id: String,
+    state_schema_version: String,
+    runtime_host: String,
+    published_app_urls: Vec<String>,
+}
+
 async fn apply_runtime_control_completion<C>(
     client: &C,
     agent_runtime_id: &str,
     status: RuntimeSummaryStatus,
     destroy: bool,
+    upgrade: Option<&RuntimeUpgradeCompletion>,
     now: &str,
 ) -> CoreResult<()>
 where
@@ -4388,6 +4589,13 @@ where
 {
     if let Some(mut runtime) = select_agent_runtime(client, agent_runtime_id).await? {
         runtime.host_facts.runtime_status = status;
+        if let Some(upgrade) = upgrade {
+            runtime.runtime_artifact_id = Some(upgrade.runtime_artifact_id.clone());
+            runtime.state_schema_version = Some(upgrade.state_schema_version.clone());
+            runtime.host_facts.runtime_host = upgrade.runtime_host.clone();
+            runtime.host_facts.published_app_urls = upgrade.published_app_urls.clone();
+            runtime.host_facts.hermes_available = Some(true);
+        }
         if destroy {
             runtime.host_facts.hermes_available = Some(false);
             runtime.host_facts.published_app_urls.clear();
@@ -4395,7 +4603,23 @@ where
         runtime.updated_at = now.to_string();
         upsert_agent_runtime_row(client, &runtime).await?;
     }
-    if destroy {
+    if let Some(upgrade) = upgrade {
+        client
+            .execute(
+                "UPDATE runtime_status_snapshots
+                 SET status = $2, runtime_host = $3, hermes_available = TRUE,
+                     updated_at = $4::text::timestamptz
+                 WHERE agent_runtime_id = $1",
+                &[
+                    &agent_runtime_id,
+                    &status.as_str(),
+                    &upgrade.runtime_host,
+                    &now,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+    } else if destroy {
         client
             .execute(
                 "UPDATE runtime_status_snapshots
@@ -4429,6 +4653,50 @@ where
     let now = input.now.unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
     verify_runtime_control_lease(&locked, &input.runner_id, &input.lease_token)?;
+    let upgrade = if locked.kind == RuntimeControlKind::Upgrade {
+        let target_id = locked
+            .target_runtime_artifact_id
+            .as_deref()
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        let reported_id = trim_to_option(input.runtime_artifact_id.as_deref())
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        let target = select_runtime_artifact(client, target_id)
+            .await?
+            .ok_or(CoreError::RuntimeArtifactNotFound)?;
+        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+            .await?
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        // A target may be retired after the runner leased and swapped it.
+        // Immutable material remains authoritative for committing the actual
+        // compute state; lifecycle policy is enforced at request and lease.
+        ensure_runtime_upgrade_target_material(&runtime, &target)?;
+        let state_schema_version = trim_to_option(input.state_schema_version.as_deref())
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        let runtime_host = trim_to_option(input.runtime_host.as_deref())
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        let published_app_urls = input
+            .published_app_urls
+            .clone()
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        if reported_id != target.id || state_schema_version != target.state_schema_version {
+            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+        }
+        Some(RuntimeUpgradeCompletion {
+            runtime_artifact_id: reported_id,
+            state_schema_version,
+            runtime_host,
+            published_app_urls,
+        })
+    } else {
+        if input.runtime_artifact_id.is_some()
+            || input.state_schema_version.is_some()
+            || input.runtime_host.is_some()
+            || input.published_app_urls.is_some()
+        {
+            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+        }
+        None
+    };
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
@@ -4440,7 +4708,8 @@ where
                  completed_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
-                       requested_by_user_id, kind, status, runner_id, lease_token,
+                       requested_by_user_id, kind, target_runtime_artifact_id, status,
+                       runner_id, lease_token,
                        lease_expires_at::text, failure_message, created_at::text,
                        updated_at::text, completed_at::text",
             &[&input.request_id, &now],
@@ -4449,9 +4718,9 @@ where
         .map_err(store_error)?;
     let request = runtime_control_request_from_row(&row)?;
     let completed_status = match request.kind {
-        RuntimeControlKind::Restart | RuntimeControlKind::RecoverKnownGoodChatRuntime => {
-            RuntimeSummaryStatus::Online
-        }
+        RuntimeControlKind::Restart
+        | RuntimeControlKind::RecoverKnownGoodChatRuntime
+        | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
         RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
     };
     let destroy = request.kind == RuntimeControlKind::Destroy;
@@ -4460,6 +4729,7 @@ where
         &request.agent_runtime_id,
         completed_status,
         destroy,
+        upgrade.as_ref(),
         &now,
     )
     .await?;
@@ -4492,7 +4762,8 @@ where
                  completed_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
-                       requested_by_user_id, kind, status, runner_id, lease_token,
+                       requested_by_user_id, kind, target_runtime_artifact_id, status,
+                       runner_id, lease_token,
                        lease_expires_at::text, failure_message, created_at::text,
                        updated_at::text, completed_at::text",
             &[&input.request_id, &failure_message, &now],
@@ -4707,17 +4978,25 @@ where
     // preserved deterministically under concurrent upserts.
     let existing = client
         .query_opt(
-            "SELECT created_at::text, promoted_at::text, retired_at::text
+            "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
+                    hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
+                    base_image, created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
         )
         .await
-        .map_err(store_error)?;
-    let existing_created_at: Option<String> = existing.as_ref().map(|row| row.get("created_at"));
-    let existing_promoted_at: Option<String> =
-        existing.as_ref().and_then(|row| row.get("promoted_at"));
-    let existing_retired_at: Option<String> =
-        existing.as_ref().and_then(|row| row.get("retired_at"));
+        .map_err(store_error)?
+        .map(|row| runtime_artifact_from_row(&row))
+        .transpose()?;
+    let existing_created_at = existing
+        .as_ref()
+        .map(|artifact| artifact.created_at.clone());
+    let existing_promoted_at = existing
+        .as_ref()
+        .and_then(|artifact| artifact.promoted_at.clone());
+    let existing_retired_at = existing
+        .as_ref()
+        .and_then(|artifact| artifact.retired_at.clone());
     let created_at = existing_created_at.unwrap_or_else(|| now.clone());
     let promoted_at = if input.promoted {
         existing_promoted_at.or_else(|| Some(now.clone()))
@@ -4739,6 +5018,23 @@ where
         promoted_at,
         retired_at: existing_retired_at,
     };
+    if let Some(existing) = existing.as_ref() {
+        let referenced: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM agent_runtimes WHERE runtime_artifact_id = $1
+                 ) AS referenced",
+                &[&id],
+            )
+            .await
+            .map_err(store_error)?
+            .get("referenced");
+        if (existing.promoted_at.is_some() || referenced)
+            && !runtime_artifact_material_matches(existing, &artifact)
+        {
+            return Err(CoreError::RuntimeArtifactImmutable);
+        }
+    }
     let row = client
         .query_one(
             "INSERT INTO runtime_artifacts (
@@ -6338,6 +6634,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_runtime_upgrade_migration_reapplies_and_rescue_refuses_active_work() {
+        with_isolated_postgres(|store| async move {
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            raw.batch_execute(
+                "ALTER TABLE runtime_control_requests
+                   DROP CONSTRAINT runtime_control_requests_kind_check;
+                 ALTER TABLE runtime_control_requests
+                   ADD CONSTRAINT runtime_control_requests_kind_check
+                   CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'stop', 'destroy'));",
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!("../migrations/0002_runtime_upgrade.sql"))
+                .await
+                .unwrap();
+            let oid_before: u32 = raw
+                .query_one(
+                    "SELECT oid FROM pg_constraint
+                     WHERE conrelid = 'runtime_control_requests'::regclass
+                       AND conname = 'runtime_control_requests_kind_check'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get("oid");
+            raw.batch_execute(include_str!("../migrations/0002_runtime_upgrade.sql"))
+                .await
+                .unwrap();
+            let constraint = raw
+                .query_one(
+                    "SELECT oid, pg_get_constraintdef(oid) AS definition
+                     FROM pg_constraint
+                     WHERE conrelid = 'runtime_control_requests'::regclass
+                       AND conname = 'runtime_control_requests_kind_check'",
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(constraint.get::<_, u32>("oid"), oid_before);
+            assert!(constraint.get::<_, String>("definition").contains("upgrade"));
+
+            raw.batch_execute(
+                r#"
+                INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                VALUES ('rescue-user', 'rescue@finite.vip', 'linked', 'workos-rescue', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                VALUES ('rescue-org', 'rescue-user', 'Rescue', 'grandfathered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                VALUES ('rescue-project', 'rescue-org', 'rescue-user', 'Rescue', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO runtime_artifacts (id, kind, reference, version_label, state_schema_version, created_at, promoted_at)
+                VALUES ('rescue-artifact', 'oci_image', 'image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'v1', 'state-v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO agent_runtimes (
+                  id, project_id, source_host_id, source_machine_id, source_import_key,
+                  runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                ) VALUES (
+                  'rescue-runtime', 'rescue-project', 'rescue-host', 'rescue-machine',
+                  'rescue-host/rescue-machine', 'rescue-artifact', 'state-v1', '{}'::jsonb,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                );
+                INSERT INTO runtime_control_requests (
+                  id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                  requested_by_user_id, kind, target_runtime_artifact_id, status,
+                  created_at, updated_at
+                ) VALUES (
+                  'rescue-request', 'rescue-project', 'rescue-runtime', 'rescue-host',
+                  'rescue-machine', 'rescue-user', 'upgrade', 'rescue-artifact', 'requested',
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+
+            let active_error = raw
+                .batch_execute(crate::RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL)
+                .await
+                .unwrap_err();
+            assert!(active_error.to_string().contains("active upgrade requests"));
+            assert_eq!(
+                raw.query_one(
+                    "SELECT kind FROM runtime_control_requests WHERE id = 'rescue-request'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get::<_, String>("kind"),
+                "upgrade"
+            );
+
+            raw.execute(
+                "UPDATE runtime_control_requests
+                 SET status = 'succeeded', completed_at = CURRENT_TIMESTAMP
+                 WHERE id = 'rescue-request'",
+                &[],
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(crate::RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL)
+                .await
+                .unwrap();
+            assert_eq!(
+                raw.query_one(
+                    "SELECT kind FROM runtime_control_requests WHERE id = 'rescue-request'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get::<_, String>("kind"),
+                "restart"
+            );
+            let audit_count: i64 = raw
+                .query_one(
+                    "SELECT count(*) FROM finite_private_admin_audit_events
+                     WHERE action = 'runtime.upgrade.rollback_rescue'
+                       AND target_id = 'rescue-request'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(audit_count, 1);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn postgres_row_native_create_lease_complete_and_visible_reads() {
         with_isolated_postgres(|store| async move {
             store
@@ -6614,6 +7042,10 @@ mod tests {
                     request_id: restart.id.clone(),
                     runner_id: format!("runner-admin-ops-{run}"),
                     lease_token: format!("control-lease-{run}"),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_host: None,
+                    published_app_urls: None,
                     now: None,
                 })
                 .await
@@ -6736,14 +7168,20 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
-                    display_name: "RC Agent".to_string(),
-                    launch_code: "off2026".to_string(),
-                    idempotency_key: format!("{run}-submit"),
-                    now: None,
-                })
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "RC Agent".to_string(),
+                        launch_code: "off2026".to_string(),
+                        idempotency_key: format!("{run}-submit"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        runner_class: crate::RunnerClass::Kata,
+                        profile_picture_url: None,
+                    },
+                )
                 .await
                 .unwrap();
             let lease = store
@@ -6792,6 +7230,34 @@ mod tests {
                 .unwrap();
             let project_id = completed.project.id.clone();
             let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+
+            let exact_artifact_retry = UpsertRuntimeArtifactInput {
+                id: "artifact-rc-v1".to_string(),
+                kind: RuntimeArtifactKind::OciImage,
+                reference: "ghcr.io/finitecomputer/finite-agent-runtime:rc-v1".to_string(),
+                version_label: "rc-v1".to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".to_string(),
+                base_image: None,
+                promoted: true,
+                now: None,
+            };
+            store
+                .upsert_runtime_artifact(exact_artifact_retry.clone())
+                .await
+                .unwrap();
+            let mut material_mutation = exact_artifact_retry;
+            material_mutation.version_label = "mutated-in-place".to_string();
+            assert!(matches!(
+                store
+                    .upsert_runtime_artifact(material_mutation)
+                    .await
+                    .unwrap_err(),
+                CoreError::RuntimeArtifactImmutable
+            ));
 
             // Restart: enqueue is deduped (same in-flight request), leased only by
             // the runtime's own source host, and completion drives it Online.
@@ -6847,6 +7313,10 @@ mod tests {
                     request_id: restart.id.clone(),
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-{run}"),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_host: None,
+                    published_app_urls: None,
                     now: None,
                 })
                 .await
@@ -6860,6 +7330,205 @@ mod tests {
                 .unwrap();
             assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
             assert!(overview_online.runtime_link_active);
+
+            // Upgrade: target is an explicit promoted, digest-pinned artifact;
+            // the lease carries it and completion updates artifact/endpoint
+            // facts without offboarding the Runtime or revoking its key.
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-rc-v2".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                        "b".repeat(64)
+                    ),
+                    version_label: "v2".to_string(),
+                    source_git_sha: Some("git-v2".to_string()),
+                    finitec_version: None,
+                    hermes_source_ref: Some("0.18.2".to_string()),
+                    finite_platform_plugin_ref: Some("plugin-v2".to_string()),
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let upgrade = store
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: format!("admin-{run}@finite.vip"),
+                    admin_workos_user_id: format!("admin-workos-{run}"),
+                    project_id: project_id.clone(),
+                    target_runtime_artifact_id: "artifact-rc-v2".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let conflicting_stop = store
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    project_id: project_id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                conflicting_stop,
+                CoreError::RuntimeControlOperationConflict
+            ));
+
+            let (raw, raw_connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_connection = tokio::spawn(async move {
+                let _ = raw_connection.await;
+            });
+            raw.execute(
+                "UPDATE runtime_artifacts SET retired_at = CURRENT_TIMESTAMP WHERE id = 'artifact-rc-v2'",
+                &[],
+            )
+            .await
+            .unwrap();
+            raw.execute(
+                "INSERT INTO agent_runtimes (
+                   id, project_id, source_host_id, source_machine_id, source_import_key,
+                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                 )
+                 SELECT 'runtime-healthy-behind-poison', project_id, source_host_id,
+                        'healthy-behind-poison', 'rchost/healthy-behind-poison',
+                        runtime_artifact_id, state_schema_version, host_facts,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM agent_runtimes WHERE id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .unwrap();
+            raw.execute(
+                "INSERT INTO runtime_control_requests (
+                   id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                   requested_by_user_id, kind, status, created_at, updated_at
+                 )
+                 SELECT 'runtime_ctl_healthy_behind_poison', $1,
+                        'runtime-healthy-behind-poison', $2, 'healthy-behind-poison',
+                        owner_user_id, 'restart', 'requested',
+                        CURRENT_TIMESTAMP + INTERVAL '1 second',
+                        CURRENT_TIMESTAMP + INTERVAL '1 second'
+                 FROM projects WHERE id = $1",
+                &[&project_id, &host],
+            )
+            .await
+            .unwrap();
+            let healthy_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("ctl-retired-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("poisoned upgrade must not starve a healthy request");
+            assert_eq!(
+                healthy_lease.request.id,
+                "runtime_ctl_healthy_behind_poison"
+            );
+            let poisoned = raw
+                .query_one(
+                    "SELECT status, failure_message
+                     FROM runtime_control_requests WHERE id = $1",
+                    &[&upgrade.id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(poisoned.get::<_, String>("status"), "failed");
+            assert!(poisoned
+                .get::<_, Option<String>>("failure_message")
+                .unwrap_or_default()
+                .contains("retired"));
+            raw.execute(
+                "UPDATE runtime_artifacts SET retired_at = NULL WHERE id = 'artifact-rc-v2'",
+                &[],
+            )
+            .await
+            .unwrap();
+            let upgrade = store
+                .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: format!("admin-{run}@finite.vip"),
+                    admin_workos_user_id: format!("admin-workos-{run}"),
+                    project_id: project_id.clone(),
+                    target_runtime_artifact_id: "artifact-rc-v2".to_string(),
+                    now: Some("2026-07-10T12:00:01Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let upgrade_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("ctl-upgrade-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("upgrade should lease");
+            assert_eq!(upgrade_lease.request.id, upgrade.id);
+            assert_eq!(
+                upgrade_lease
+                    .target_runtime_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.id.as_str()),
+                Some("artifact-rc-v2")
+            );
+            raw.execute(
+                "UPDATE runtime_artifacts SET retired_at = CURRENT_TIMESTAMP WHERE id = 'artifact-rc-v2'",
+                &[],
+            )
+            .await
+            .unwrap();
+            store
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: upgrade.id.clone(),
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("ctl-upgrade-{run}"),
+                    runtime_artifact_id: Some("artifact-rc-v2".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                    published_app_urls: Some(vec![
+                        "http://127.0.0.1:41002/contact".to_string(),
+                    ]),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            drop(raw);
+            raw_connection.abort();
+            let upgraded = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(
+                upgraded.runtime_artifact_id.as_deref(),
+                Some("artifact-rc-v2")
+            );
+            assert!(upgraded.runtime_link_active);
+            let key_before_destroy = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .api_keys
+                .into_iter()
+                .find(|key| key.id == provisioned.api_key.id)
+                .unwrap();
+            assert_eq!(key_before_destroy.status, FinitePrivateApiKeyStatus::Active);
 
             // Destroy: complete offboards the runtime and revokes its keys.
             let destroy = store
@@ -6888,6 +7557,10 @@ mod tests {
                     request_id: destroy.id.clone(),
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-destroy-{run}"),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_host: None,
+                    published_app_urls: None,
                     now: None,
                 })
                 .await

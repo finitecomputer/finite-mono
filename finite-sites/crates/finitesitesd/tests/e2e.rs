@@ -21,7 +21,7 @@ use finitesites_proto::dto::{
     EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse,
     ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse,
-    SharingRequest,
+    SharingRequest, VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -32,6 +32,8 @@ use finitesitesd::mailer::DevMailer;
 use finitesitesd::{ServeOptions, server};
 
 const BASE_DOMAIN: &str = "sites.localhost";
+const VIEWER_SESSION_SERVICE_TOKEN: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn document_base_domain() -> String {
     format!("docs.{BASE_DOMAIN}")
@@ -82,7 +84,14 @@ impl TestServer {
     }
 
     async fn start_without_publish_grant(git_auto_reconcile: bool) -> TestServer {
-        Self::start_inner(None, git_auto_reconcile, None, false).await
+        Self::start_inner(
+            None,
+            git_auto_reconcile,
+            None,
+            false,
+            Some(VIEWER_SESSION_SERVICE_TOKEN),
+        )
+        .await
     }
 
     async fn start_with_identity_authority(
@@ -94,6 +103,7 @@ impl TestServer {
             true,
             Some(identity_authority_url),
             false,
+            Some(VIEWER_SESSION_SERVICE_TOKEN),
         )
         .await
     }
@@ -102,11 +112,29 @@ impl TestServer {
         allowed_pubkey: &str,
         git_auto_reconcile: bool,
     ) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), git_auto_reconcile, None, false).await
+        Self::start_inner(
+            Some(allowed_pubkey),
+            git_auto_reconcile,
+            None,
+            false,
+            Some(VIEWER_SESSION_SERVICE_TOKEN),
+        )
+        .await
     }
 
     async fn start_single_origin(allowed_pubkey: &str) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), true, None, true).await
+        Self::start_inner(
+            Some(allowed_pubkey),
+            true,
+            None,
+            true,
+            Some(VIEWER_SESSION_SERVICE_TOKEN),
+        )
+        .await
+    }
+
+    async fn start_without_viewer_session_service(allowed_pubkey: &str) -> TestServer {
+        Self::start_inner(Some(allowed_pubkey), true, None, false, None).await
     }
 
     async fn start_inner(
@@ -114,6 +142,7 @@ impl TestServer {
         git_auto_reconcile: bool,
         identity_authority_url: Option<String>,
         single_origin_git: bool,
+        viewer_session_service_token: Option<&str>,
     ) -> TestServer {
         let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
@@ -153,6 +182,7 @@ impl TestServer {
             api_url,
             git_base_url,
             identity_authority_url,
+            viewer_session_service_token: viewer_session_service_token.map(str::to_string),
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
             site_url_scheme: "http".to_string(),
@@ -213,6 +243,22 @@ impl TestServer {
         self.agent
             .get(&format!("http://{name}.{BASE_DOMAIN}:{port}{path}"))
             .call()
+    }
+
+    fn viewer_session(
+        &self,
+        token: Option<&str>,
+        request: &VerifiedEmailViewerSessionRequest,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let body = serde_json::to_vec(request).unwrap();
+        let mut call = self
+            .agent
+            .post(&format!("{}/internal/v1/viewer-sessions", self.api_url))
+            .set("Content-Type", "application/json");
+        if let Some(token) = token {
+            call = call.set("Authorization", &format!("Bearer {token}"));
+        }
+        call.send_bytes(&body)
     }
 
     fn document_get(
@@ -1389,6 +1435,315 @@ async fn full_publish_share_and_view_flow() {
                 .unwrap()
                 .contains("No site lives here")
         );
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verified_email_viewer_session_endpoint_is_disabled_without_its_service_token() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start_without_viewer_session_service(&user_pubkey).await;
+    let request = VerifiedEmailViewerSessionRequest {
+        output_url: format!(
+            "http://finitechat-native-mockup.{BASE_DOMAIN}:{}/",
+            server.port()
+        ),
+        verified_email: "friend@example.com".into(),
+        return_to: "/".into(),
+    };
+    let task = tokio::task::spawn_blocking(move || {
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
+            Err(ureq::Error::Status(503, _))
+        ));
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immediately() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>account preview</h1>")],
+            "Viewer session deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+
+        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
+        let request = VerifiedEmailViewerSessionRequest {
+            output_url: format!("{site_base}/"),
+            verified_email: "Friend@Example.com".into(),
+            return_to: "/gallery?view=one#photo".into(),
+        };
+
+        assert!(matches!(
+            server.viewer_session(None, &request),
+            Err(ureq::Error::Status(401, _))
+        ));
+        assert!(matches!(
+            server.viewer_session(Some("wrong-token"), &request),
+            Err(ureq::Error::Status(401, _))
+        ));
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
+            Err(ureq::Error::Status(403, _))
+        ));
+
+        let mut unshared = request.clone();
+        unshared.verified_email = "unshared@example.com".into();
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared),
+            Err(ureq::Error::Status(403, _))
+        ));
+        unshared.verified_email = format!("{}@example.com", "a".repeat(255));
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared),
+            Err(ureq::Error::Status(403, _))
+        ));
+
+        let mut invalid = request.clone();
+        invalid.output_url = "https://example.com/".into();
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
+            Err(ureq::Error::Status(400, _))
+        ));
+        invalid.output_url = format!("{site_base}/not-canonical");
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
+            Err(ureq::Error::Status(400, _))
+        ));
+        invalid = request.clone();
+        invalid.return_to = "//evil.example".into();
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &invalid),
+            Err(ureq::Error::Status(400, _))
+        ));
+
+        let share_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("shared".into()),
+            confirm_public: false,
+            add_emails: vec!["friend@example.com".into(), "rate@example.com".into()],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
+                Some(&share_body),
+            )
+            .unwrap();
+
+        let mut still_unshared = request.clone();
+        still_unshared.verified_email = "unshared@example.com".into();
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &still_unshared),
+            Err(ureq::Error::Status(403, _))
+        ));
+
+        let mut bounded_request = request.clone();
+        bounded_request.verified_email = "rate@example.com".into();
+        let mut first_redeem_url = None;
+        let mut latest_redeem_url = None;
+        for index in 0..finitesitesd::limiter::MAX_VIEWER_SESSIONS_PER_EMAIL {
+            let issued: VerifiedEmailViewerSessionResponse = json_body(
+                server
+                    .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &bounded_request)
+                    .unwrap(),
+            );
+            if index == 0 {
+                first_redeem_url = Some(issued.redeem_url.clone());
+            }
+            latest_redeem_url = Some(issued.redeem_url);
+        }
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &bounded_request),
+            Err(ureq::Error::Status(429, _))
+        ));
+        assert!(matches!(
+            server
+                .agent
+                .get(first_redeem_url.as_deref().unwrap())
+                .call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let latest_redeem_url = latest_redeem_url.unwrap();
+        assert_eq!(
+            server
+                .agent
+                .get(&latest_redeem_url)
+                .call()
+                .unwrap()
+                .status(),
+            303
+        );
+        assert!(matches!(
+            server.agent.get(&latest_redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+
+        let mut second_project = project_init_request(false);
+        second_project.config.project.slug = "second-preview-project".into();
+        let second_output = second_project.config.outputs.get_mut("mockup").unwrap();
+        second_output.site_name = Some("second-preview-site".into());
+        let second_body = serde_json::to_vec(&second_project).unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/init",
+                Some(&second_body),
+            )
+            .unwrap();
+
+        let wrong_site_session: VerifiedEmailViewerSessionResponse = json_body(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
+                .unwrap(),
+        );
+        let wrong_site_url = wrong_site_session.redeem_url.replacen(
+            "finitechat-native-mockup.sites.localhost",
+            "second-preview-site.sites.localhost",
+            1,
+        );
+        assert!(matches!(
+            server.agent.get(&wrong_site_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+        assert!(matches!(
+            server.agent.get(&wrong_site_session.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+
+        let session: VerifiedEmailViewerSessionResponse = json_body(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
+                .unwrap(),
+        );
+        assert!(
+            session
+                .redeem_url
+                .starts_with(&format!("{site_base}/_finite/auth?token="))
+        );
+        assert!(
+            session
+                .redeem_url
+                .contains("&return_to=%2Fgallery%3Fview%3Done%23photo")
+        );
+        assert_eq!(std::fs::read_dir(&server.outbox).unwrap().count(), 0);
+
+        let redeemed = server.agent.get(&session.redeem_url).call().unwrap();
+        assert_eq!(redeemed.status(), 303);
+        assert_eq!(redeemed.header("location"), Some("/gallery?view=one#photo"));
+        let set_cookies = redeemed.all("set-cookie");
+        assert_eq!(set_cookies.len(), 2);
+        let ordinary_set_cookie = set_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("finite_site_auth="))
+            .unwrap();
+        assert!(
+            ordinary_set_cookie.ends_with("Path=/; Max-Age=604800; HttpOnly; SameSite=Lax; Secure")
+        );
+        let partitioned_set_cookie = set_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("__Host-finite_site_auth_partitioned="))
+            .unwrap();
+        assert!(
+            partitioned_set_cookie
+                .ends_with("Path=/; Max-Age=604800; HttpOnly; SameSite=None; Secure; Partitioned")
+        );
+        let ordinary_cookie = ordinary_set_cookie.split(';').next().unwrap().to_string();
+        let partitioned_cookie = partitioned_set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        assert!(matches!(
+            server.agent.get(&session.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let clean_agent = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
+        let page = clean_agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &ordinary_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(page.into_string().unwrap(), "<h1>account preview</h1>");
+        let iframe_page = clean_agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &partitioned_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(
+            iframe_page.into_string().unwrap(),
+            "<h1>account preview</h1>"
+        );
+
+        let logout = clean_agent
+            .get(&format!("{site_base}/_finite/logout"))
+            .call()
+            .unwrap();
+        assert_eq!(logout.status(), 303);
+        assert_eq!(logout.header("location"), Some("/"));
+        let cleared = logout.all("set-cookie");
+        assert_eq!(
+            cleared,
+            vec![
+                "finite_site_auth=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure",
+                "__Host-finite_site_auth_partitioned=; Path=/; Max-Age=0; HttpOnly; SameSite=None; Secure; Partitioned",
+            ]
+        );
+
+        let revoke_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("shared".into()),
+            confirm_public: false,
+            add_emails: vec![],
+            remove_emails: vec!["friend@example.com".into()],
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
+                Some(&revoke_body),
+            )
+            .unwrap();
+        assert!(matches!(
+            clean_agent
+                .get(&format!("{site_base}/"))
+                .set("Cookie", &ordinary_cookie)
+                .call(),
+            Err(ureq::Error::Status(401, _))
+        ));
+        assert!(matches!(
+            clean_agent
+                .get(&format!("{site_base}/"))
+                .set("Cookie", &partitioned_cookie)
+                .call(),
+            Err(ureq::Error::Status(401, _))
+        ));
+        assert!(matches!(
+            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
+            Err(ureq::Error::Status(403, _))
+        ));
     });
     task.await.unwrap();
 }

@@ -30,7 +30,7 @@ use axum::{
 };
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finitechat_blob::{
-    BlossomDownloadHttpResponse, finish_blossom_download_http_response,
+    AttachmentBlobError, BlossomDownloadHttpResponse, finish_blossom_download_http_response,
     prepare_blossom_download_http_request, sha256_hex,
 };
 use finitechat_client::{
@@ -43,16 +43,17 @@ use finitechat_core::{
 };
 use finitechat_hermes::{
     HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
-    HermesMessageStatusV1, HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_POLL_TIMEOUT_MILLIS,
+    HermesMessageStatusV1, HermesMessageTypeV1, HermesPollEventV1, HermesSendRequestV1,
+    MAX_HERMES_METADATA_BYTES, MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
 };
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
     AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
-    RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1, RuntimeCommandDeliveryV1,
-    RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1, RuntimeCommandResultDeliveryV1,
-    RuntimeStateSnapshotDeliveryV1, npub_encode,
+    ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
+    RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
+    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,10 @@ const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 const HERMES_SERVICE_HEARTBEAT_MILLIS: u64 = 250;
+const HERMES_ATTACHMENT_CONNECT_TIMEOUT_SECS: u64 = 5;
+const HERMES_ATTACHMENT_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+const HERMES_ATTACHMENT_UNAVAILABLE_NOTICE: &str =
+    "An attachment could not be opened. Ask the user to resend it if you need to inspect it.";
 /// Match the hosted-device batch ceiling so one Hermes send cannot make the
 /// resident bridge buffer the protocol's per-file maximum sixteen times over.
 const MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
@@ -1613,6 +1618,7 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
             }
             let context = HermesPollEventContext {
                 home_dir,
+                server_url: &home.config.server_url,
                 room_id: &applied.room_id,
                 seq: applied.seq,
                 message_id: &applied.message_id,
@@ -1917,6 +1923,7 @@ fn recover_stored_hermes_events(
         }
         let context = HermesPollEventContext {
             home_dir,
+            server_url: &home.config.server_url,
             room_id: &stored.room_id,
             seq: stored.seq,
             message_id: &stored.message_id,
@@ -2065,6 +2072,7 @@ where
 #[derive(Clone, Copy)]
 struct HermesPollEventContext<'a> {
     home_dir: &'a Path,
+    server_url: &'a str,
     room_id: &'a str,
     seq: u64,
     message_id: &'a str,
@@ -2136,7 +2144,7 @@ fn hermes_poll_event_from_chat_payload(
         if event.segment_id.is_some() {
             event.source.thread_id = event.segment_id.clone();
         }
-        materialize_poll_event_attachments(context.home_dir, &mut event)?;
+        materialize_poll_event_attachments(context.home_dir, context.server_url, &mut event)?;
         return Ok(Some(event));
     }
 
@@ -2170,8 +2178,10 @@ fn hermes_poll_event_from_chat_payload(
 
 fn materialize_poll_event_attachments(
     home_dir: &Path,
+    server_url: &str,
     event: &mut HermesPollEventV1,
 ) -> Result<(), CliError> {
+    let mut unavailable = false;
     for attachment in &mut event.attachments {
         if attachment.path.is_some() {
             continue;
@@ -2179,16 +2189,85 @@ fn materialize_poll_event_attachments(
         let Some(reference) = attachment.blob.clone() else {
             continue;
         };
-        let path = materialize_blob_attachment(home_dir, &reference)?;
-        attachment.path = Some(path.to_string_lossy().into_owned());
+        match materialize_blob_attachment(home_dir, server_url, &reference) {
+            Ok(path) => attachment.path = Some(path.to_string_lossy().into_owned()),
+            Err(AttachmentMaterializationError::Retryable(error)) => {
+                // Recovery owns the cursor until the verified local media is
+                // ready. Returning before enqueue means the resident stream
+                // reconnects and retries this same durable event; it is never
+                // exposed to Hermes or acked while transport is unhealthy.
+                return Err(CliError::Hermes(format!(
+                    "attachment is temporarily unavailable: {error}"
+                )));
+            }
+            Err(AttachmentMaterializationError::Permanent(_)) => {
+                // A deterministically missing or corrupt blob must not poison
+                // this room's durable Hermes cursor. Keep the encrypted
+                // reference in the raw event so the chat UI can still retry or
+                // resend it, but never expose ciphertext as model media.
+                attachment.path = None;
+                attachment.url = None;
+                unavailable = true;
+            }
+        }
+    }
+
+    if unavailable {
+        add_attachment_unavailable_notice(event);
+        if event
+            .attachments
+            .iter()
+            .all(|attachment| attachment.path.is_none() && attachment.url.is_none())
+        {
+            event.message_type = HermesMessageTypeV1::Text;
+        }
+        event
+            .validate_limits()
+            .map_err(|error| CliError::Hermes(error.to_string()))?;
     }
     Ok(())
 }
 
+fn add_attachment_unavailable_notice(event: &mut HermesPollEventV1) {
+    let separator = if event.text.trim().is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let notice = format!("{separator}{HERMES_ATTACHMENT_UNAVAILABLE_NOTICE}");
+    if event.text.len() + notice.len() <= MAX_HERMES_TEXT_BYTES as usize {
+        event.text.push_str(&notice);
+        return;
+    }
+
+    // Preserve a maximum-sized user caption byte-for-byte. If an existing
+    // channel prompt has room, retain it too; otherwise the short recovery
+    // instruction wins so the model never mistakes missing media for success.
+    let existing = event.channel_prompt.take().unwrap_or_default();
+    let separator = if existing.trim().is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let combined = format!("{existing}{separator}{HERMES_ATTACHMENT_UNAVAILABLE_NOTICE}");
+    event.channel_prompt = Some(if combined.len() <= MAX_HERMES_METADATA_BYTES as usize {
+        combined
+    } else {
+        HERMES_ATTACHMENT_UNAVAILABLE_NOTICE.to_owned()
+    });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttachmentMaterializationError {
+    Retryable(String),
+    Permanent(String),
+}
+
 fn materialize_blob_attachment(
     home_dir: &Path,
+    server_url: &str,
     reference: &AttachmentBlobReferenceV1,
-) -> Result<PathBuf, CliError> {
+) -> Result<PathBuf, AttachmentMaterializationError> {
     let path = hermes_attachment_cache_path(home_dir, reference);
     if let Ok(existing) = fs::read(&path)
         && existing.len() as u64 == reference.plaintext_size
@@ -2197,16 +2276,33 @@ fn materialize_blob_attachment(
         return Ok(path);
     }
 
-    let request = prepare_blossom_download_http_request(reference)
-        .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let response = reqwest::blocking::Client::new()
-        .get(request.url)
-        .send()
-        .map_err(|error| CliError::Hermes(format!("attachment download failed: {error}")))?;
+    let request = prepare_blossom_download_http_request(reference).map_err(|error| {
+        AttachmentMaterializationError::Permanent(format!(
+            "attachment reference is invalid: {error}"
+        ))
+    })?;
+    let download_url = hermes_attachment_download_url(request.url, server_url, reference)?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(HERMES_ATTACHMENT_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(HERMES_ATTACHMENT_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| {
+            AttachmentMaterializationError::Retryable(format!("attachment client failed: {error}"))
+        })?;
+    let response = client.get(download_url).send().map_err(|error| {
+        AttachmentMaterializationError::Retryable(format!("attachment download failed: {error}"))
+    })?;
     let status = response.status().as_u16();
+    if !(200..=299).contains(&status) {
+        return Err(classify_attachment_http_error(status));
+    }
     let body = response
         .bytes()
-        .map_err(|error| CliError::Hermes(format!("attachment download failed: {error}")))?
+        .map_err(|error| {
+            AttachmentMaterializationError::Retryable(format!(
+                "attachment download failed: {error}"
+            ))
+        })?
         .to_vec();
     let downloaded = finish_blossom_download_http_response(
         reference,
@@ -2215,15 +2311,65 @@ fn materialize_blob_attachment(
             body: &body,
         },
     )
-    .map_err(|error| CliError::Hermes(format!("attachment verification failed: {error}")))?;
+    .map_err(classify_attachment_verification_error)?;
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| CliError::Hermes(error.to_string()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            AttachmentMaterializationError::Retryable(format!(
+                "attachment cache directory failed: {error}"
+            ))
+        })?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, &downloaded.plaintext).map_err(|error| CliError::Hermes(error.to_string()))?;
-    fs::rename(&tmp, &path).map_err(|error| CliError::Hermes(error.to_string()))?;
+    fs::write(&tmp, &downloaded.plaintext).map_err(|error| {
+        AttachmentMaterializationError::Retryable(format!("attachment cache write failed: {error}"))
+    })?;
+    fs::rename(&tmp, &path).map_err(|error| {
+        AttachmentMaterializationError::Retryable(format!(
+            "attachment cache commit failed: {error}"
+        ))
+    })?;
     Ok(path)
+}
+
+fn classify_attachment_http_error(status: u16) -> AttachmentMaterializationError {
+    let error = format!("attachment server returned HTTP {status}");
+    if status == StatusCode::REQUEST_TIMEOUT.as_u16()
+        || status == StatusCode::TOO_EARLY.as_u16()
+        || status == StatusCode::TOO_MANY_REQUESTS.as_u16()
+        || !(400..=499).contains(&status)
+    {
+        // Redirects without a usable target, throttles, request timeouts, and
+        // server failures may heal without consuming the encrypted message.
+        AttachmentMaterializationError::Retryable(error)
+    } else {
+        // Authentication, authorization, missing-object, and other stable
+        // client failures cannot heal by replaying the same durable event.
+        AttachmentMaterializationError::Permanent(error)
+    }
+}
+
+fn classify_attachment_verification_error(
+    error: AttachmentBlobError,
+) -> AttachmentMaterializationError {
+    let retryable = matches!(
+        &error,
+        AttachmentBlobError::Protocol(ProtocolLimitError::BytesEmpty { field })
+            if field == "attachment.ciphertext"
+    ) || matches!(
+        &error,
+        AttachmentBlobError::CiphertextSizeMismatch { expected, actual }
+            if actual < expected
+    ) || matches!(&error, AttachmentBlobError::HttpStatus { .. });
+    let message = format!("attachment verification failed: {error}");
+    if retryable {
+        AttachmentMaterializationError::Retryable(message)
+    } else {
+        // Exact-size ciphertext hash failures, AEAD failures, plaintext
+        // verification failures, and invalid references are deterministic for
+        // this encrypted message and cannot heal by replaying the same bytes.
+        AttachmentMaterializationError::Permanent(message)
+    }
 }
 
 fn hermes_attachment_cache_path(home_dir: &Path, reference: &AttachmentBlobReferenceV1) -> PathBuf {
@@ -2231,6 +2377,56 @@ fn hermes_attachment_cache_path(home_dir: &Path, reference: &AttachmentBlobRefer
         .join(ATTACHMENT_CACHE_DIR)
         .join(&reference.plaintext_sha256)
         .join(sanitized_attachment_filename(&reference.metadata.filename))
+}
+
+/// Older Hosted Web Devices uploaded through the server's loopback address,
+/// which caused that process-local origin to be written into the encrypted
+/// attachment reference. A different device (including a Kata guest) must use
+/// its trusted Finite Chat server origin for the same content-addressed blob.
+/// The ciphertext hash and AEAD verification still authenticate the bytes.
+fn hermes_attachment_download_url(
+    reference_url: &str,
+    server_url: &str,
+    reference: &AttachmentBlobReferenceV1,
+) -> Result<String, AttachmentMaterializationError> {
+    let reference_url = reqwest::Url::parse(reference_url).map_err(|error| {
+        AttachmentMaterializationError::Permanent(format!("attachment URL is invalid: {error}"))
+    })?;
+    if !matches!(reference_url.scheme(), "http" | "https") {
+        return Err(AttachmentMaterializationError::Permanent(format!(
+            "attachment URL scheme {:?} is not supported",
+            reference_url.scheme()
+        )));
+    }
+    let expected_path = format!("/blobs/{}", reference.ciphertext_sha256);
+    if !url_host_is_loopback(&reference_url) || reference_url.path() != expected_path {
+        return Ok(reference_url.to_string());
+    }
+
+    let mut canonical = reqwest::Url::parse(server_url).map_err(|error| {
+        AttachmentMaterializationError::Retryable(format!(
+            "Finite Chat server URL is invalid: {error}"
+        ))
+    })?;
+    if !matches!(canonical.scheme(), "http" | "https") || canonical.host_str().is_none() {
+        return Err(AttachmentMaterializationError::Retryable(
+            "Finite Chat server is not an HTTP origin".to_owned(),
+        ));
+    }
+    canonical.set_path(&expected_path);
+    canonical.set_query(None);
+    canonical.set_fragment(None);
+    Ok(canonical.to_string())
+}
+
+fn url_host_is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn sanitized_attachment_filename(filename: &str) -> String {
@@ -3142,6 +3338,7 @@ pub(crate) fn hermes_usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
 
     /// `hermes install` requires an initialized agent home; plant the
@@ -3153,6 +3350,70 @@ mod tests {
             r#"{"server_url":"http://127.0.0.1:1","device_id":"agent","account_id":"00"}"#,
         )
         .unwrap();
+    }
+
+    fn encrypted_test_attachment() -> (Vec<u8>, AttachmentBlobReferenceV1) {
+        let mut store = MemoryBlobStore::default();
+        let uploaded = upload_attachment(
+            &mut store,
+            b"finite image bytes",
+            finitechat_proto::AttachmentBlobMetadataV1 {
+                mime_type: "image/png".to_owned(),
+                filename: "image.png".to_owned(),
+                dimensions: None,
+            },
+        )
+        .expect("encrypt attachment");
+        (uploaded.ciphertext, uploaded.reference)
+    }
+
+    fn encoded_media_payload(reference: AttachmentBlobReferenceV1, text: &str) -> Vec<u8> {
+        HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: None,
+            segment_id: None,
+            text: text.to_owned(),
+            kind: finitechat_hermes::HermesSendKindV1::Media,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: vec![finitechat_hermes::HermesAttachmentV1 {
+                kind: finitechat_hermes::HermesAttachmentKindV1::Image,
+                name: "image.png".to_owned(),
+                mime_type: "image/png".to_owned(),
+                path: None,
+                url: Some(reference.url.clone()),
+                blob: Some(reference),
+            }],
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .expect("encode media payload")
+    }
+
+    fn serve_one_blob_response(
+        listener: std::net::TcpListener,
+        status: &str,
+        body: Vec<u8>,
+    ) -> std::thread::JoinHandle<()> {
+        let status = status.to_owned();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept blob request");
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).expect("read blob request");
+            assert!(
+                String::from_utf8_lossy(&request[..size]).starts_with("GET /blobs/"),
+                "materializer must request the content-addressed blob path"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write blob response headers");
+            stream.write_all(&body).expect("write blob response body");
+        })
     }
 
     fn app_state_with_room_members(member_current_device_flags: Vec<bool>) -> AppState {
@@ -3482,6 +3743,7 @@ mod tests {
         let event = hermes_poll_event_from_application_plaintext(
             HermesPollEventContext {
                 home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
                 room_id: "room-main",
                 seq: 1,
                 message_id: "message-1",
@@ -3508,6 +3770,7 @@ mod tests {
         let event = hermes_poll_event_from_application_plaintext(
             HermesPollEventContext {
                 home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
                 room_id: "room-main",
                 seq: 2,
                 message_id: "message-2",
@@ -3522,6 +3785,423 @@ mod tests {
         .expect("typed plain-text chat is still bridge-visible");
         assert_eq!(event.text, "plain hello");
         assert_eq!(event.message_type, HermesMessageTypeV1::Text);
+    }
+
+    #[test]
+    fn hermes_routes_historical_loopback_blob_reference_through_trusted_server() {
+        let hash = "d0311404f15ff0cb53859640000453741bed701ff3df2b5b7f867904c164fb39";
+        let reference = AttachmentBlobReferenceV1 {
+            scheme: "finitechat.attachment.blob.v1".to_owned(),
+            url: format!("http://127.0.0.1:8788/blobs/{hash}"),
+            ciphertext_sha256: hash.to_owned(),
+            plaintext_sha256: "a".repeat(64),
+            plaintext_size: 1,
+            ciphertext_size: 17,
+            encryption: finitechat_proto::AttachmentBlobEncryptionV1 {
+                algorithm: "aes-256-gcm".to_owned(),
+                key_hex: "b".repeat(64),
+                nonce_hex: "c".repeat(24),
+            },
+            metadata: finitechat_proto::AttachmentBlobMetadataV1 {
+                mime_type: "image/png".to_owned(),
+                filename: "image.png".to_owned(),
+                dimensions: None,
+            },
+        };
+
+        let routed = hermes_attachment_download_url(
+            &reference.url,
+            "https://chat.finite.computer",
+            &reference,
+        )
+        .expect("route loopback reference");
+
+        assert_eq!(routed, format!("https://chat.finite.computer/blobs/{hash}"));
+    }
+
+    #[test]
+    fn hermes_preserves_non_loopback_blob_store_reference() {
+        let hash = "d0311404f15ff0cb53859640000453741bed701ff3df2b5b7f867904c164fb39";
+        let reference = AttachmentBlobReferenceV1 {
+            scheme: "finitechat.attachment.blob.v1".to_owned(),
+            url: format!("https://blobs.example/blobs/{hash}"),
+            ciphertext_sha256: hash.to_owned(),
+            plaintext_sha256: "a".repeat(64),
+            plaintext_size: 1,
+            ciphertext_size: 17,
+            encryption: finitechat_proto::AttachmentBlobEncryptionV1 {
+                algorithm: "aes-256-gcm".to_owned(),
+                key_hex: "b".repeat(64),
+                nonce_hex: "c".repeat(24),
+            },
+            metadata: finitechat_proto::AttachmentBlobMetadataV1 {
+                mime_type: "image/png".to_owned(),
+                filename: "image.png".to_owned(),
+                dimensions: None,
+            },
+        };
+
+        let routed = hermes_attachment_download_url(
+            &reference.url,
+            "https://chat.finite.computer",
+            &reference,
+        )
+        .expect("keep external reference");
+
+        assert_eq!(routed, reference.url);
+    }
+
+    #[test]
+    fn attachment_http_status_classification_matches_retry_policy() {
+        let cases = [
+            (302, true),
+            (307, true),
+            (400, false),
+            (401, false),
+            (403, false),
+            (404, false),
+            (408, true),
+            (410, false),
+            (425, true),
+            (429, true),
+            (500, true),
+            (503, true),
+        ];
+
+        for (status, expected_retryable) in cases {
+            let actual = classify_attachment_http_error(status);
+            assert_eq!(
+                matches!(actual, AttachmentMaterializationError::Retryable(_)),
+                expected_retryable,
+                "unexpected classification for HTTP {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_redirect_is_followed_and_final_client_error_is_permanent() {
+        let (_, mut reference) = encrypted_test_attachment();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind redirect blob server");
+        let address = listener.local_addr().expect("redirect blob server address");
+        reference.url = format!("http://{address}/blobs/{}", reference.ciphertext_sha256);
+        let server_url = format!("http://{address}");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept initial blob request");
+            let mut request = [0_u8; 2048];
+            let size = stream
+                .read(&mut request)
+                .expect("read initial blob request");
+            assert!(
+                String::from_utf8_lossy(&request[..size]).starts_with("GET /blobs/"),
+                "materializer must request the content-addressed blob path"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: /missing\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write redirect response");
+
+            let (mut stream, _) = listener.accept().expect("accept redirected blob request");
+            let size = stream
+                .read(&mut request)
+                .expect("read redirected blob request");
+            assert!(
+                String::from_utf8_lossy(&request[..size]).starts_with("GET /missing "),
+                "materializer must follow the redirect exactly once"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 410 Gone\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write final response");
+        });
+
+        let home = tempfile::tempdir().unwrap();
+        let error = materialize_blob_attachment(home.path(), &server_url, &reference)
+            .expect_err("final deterministic client error must degrade");
+        server.join().expect("redirect blob server");
+
+        assert!(matches!(
+            error,
+            AttachmentMaterializationError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn permanently_missing_noncanonical_reference_degrades_instead_of_wedging() {
+        let (_, mut reference) = encrypted_test_attachment();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind missing blob server");
+        let address = listener.local_addr().expect("missing blob server address");
+        reference.url = format!("http://{address}/objects/{}", reference.ciphertext_sha256);
+        let payload = encoded_media_payload(reference, "Keep this caption");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept missing blob request");
+            let mut request = [0_u8; 2048];
+            let size = stream
+                .read(&mut request)
+                .expect("read missing blob request");
+            assert!(
+                String::from_utf8_lossy(&request[..size]).starts_with("GET /objects/"),
+                "the exact noncanonical reference must be requested"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write missing blob response");
+        });
+        let home = tempfile::tempdir().unwrap();
+
+        let degraded = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
+                room_id: "room-main",
+                seq: 1,
+                message_id: "message-missing-media",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &payload,
+        )
+        .expect("exact-reference 404 is permanent")
+        .expect("missing media caption remains deliverable");
+        server.join().expect("missing blob server");
+
+        assert_eq!(
+            degraded.text,
+            format!("Keep this caption\n\n{HERMES_ATTACHMENT_UNAVAILABLE_NOTICE}")
+        );
+        assert_eq!(degraded.message_type, HermesMessageTypeV1::Text);
+        assert!(degraded.attachments[0].path.is_none());
+        assert!(degraded.attachments[0].url.is_none());
+    }
+
+    #[test]
+    fn hermes_materializes_historical_loopback_reference_from_canonical_server() {
+        let plaintext = b"finite image bytes";
+        let mut store = MemoryBlobStore::default();
+        let uploaded = upload_attachment(
+            &mut store,
+            plaintext,
+            finitechat_proto::AttachmentBlobMetadataV1 {
+                mime_type: "image/png".to_owned(),
+                filename: "image.png".to_owned(),
+                dimensions: None,
+            },
+        )
+        .expect("encrypt attachment");
+        let ciphertext = uploaded.ciphertext.clone();
+        let mut reference = uploaded.reference;
+        reference.url = format!("http://127.0.0.1:1/blobs/{}", reference.ciphertext_sha256);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test blob server");
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept blob request");
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).expect("read blob request");
+            assert!(
+                String::from_utf8_lossy(&request[..size]).starts_with("GET /blobs/"),
+                "materializer must request the canonical content-addressed path"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                ciphertext.len()
+            )
+            .expect("write blob response headers");
+            stream
+                .write_all(&ciphertext)
+                .expect("write blob response body");
+        });
+
+        let home = tempfile::tempdir().unwrap();
+        let path = materialize_blob_attachment(home.path(), &server_url, &reference)
+            .expect("materialize historical reference");
+
+        assert_eq!(fs::read(path).unwrap(), plaintext);
+        server.join().expect("blob server");
+    }
+
+    #[test]
+    fn transient_attachment_server_outage_retries_without_advancing_cursor() {
+        let (ciphertext, mut reference) = encrypted_test_attachment();
+        reference.url = format!("http://127.0.0.1:1/blobs/{}", reference.ciphertext_sha256);
+
+        let reservation =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test blob address");
+        let address = reservation.local_addr().expect("reserved address");
+        drop(reservation);
+        let server_url = format!("http://{address}");
+        let media_payload = encoded_media_payload(reference, "Please inspect this");
+        let home = tempfile::tempdir().unwrap();
+        let context = HermesPollEventContext {
+            home_dir: home.path(),
+            server_url: &server_url,
+            room_id: "room-main",
+            seq: 1,
+            message_id: "message-retry-media",
+            sender_account_id: "alice",
+            sender_device_id: "ios",
+            conversation_id: None,
+            segment_id: None,
+        };
+        let mut inbox = HermesInboxState::default();
+
+        let first = hermes_poll_event_from_application_plaintext(context, &media_payload)
+            .expect_err("server outage keeps the durable event pending");
+        assert!(first.to_string().contains("temporarily unavailable"));
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-main"), 0);
+        assert!(pending_hermes_inbox_events(&inbox, None, 10).is_empty());
+
+        let listener = std::net::TcpListener::bind(address).expect("restore test blob server");
+        let server = serve_one_blob_response(listener, "200 OK", ciphertext);
+        let recovered = hermes_poll_event_from_application_plaintext(context, &media_payload)
+            .expect("reconnected stream retries the same event")
+            .expect("media event materializes after recovery");
+        server.join().expect("recovered blob server");
+
+        assert_eq!(recovered.text, "Please inspect this");
+        let path = recovered.attachments[0]
+            .path
+            .as_deref()
+            .expect("verified local media path");
+        assert_eq!(fs::read(path).unwrap(), b"finite image bytes");
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, recovered).unwrap();
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-main"), 1);
+        assert_eq!(pending_hermes_inbox_events(&inbox, None, 10).len(), 1);
+    }
+
+    #[test]
+    fn truncated_attachment_download_is_retryable() {
+        let (ciphertext, reference) = encrypted_test_attachment();
+        let truncated = &ciphertext[..ciphertext.len() - 1];
+        let error = finish_blossom_download_http_response(
+            &reference,
+            BlossomDownloadHttpResponse {
+                status: 200,
+                body: truncated,
+            },
+        )
+        .expect_err("truncated ciphertext fails verification");
+
+        assert!(matches!(
+            classify_attachment_verification_error(error),
+            AttachmentMaterializationError::Retryable(_)
+        ));
+    }
+
+    #[test]
+    fn permanently_corrupt_attachment_degrades_and_does_not_block_following_text() {
+        let (mut corrupt_ciphertext, mut reference) = encrypted_test_attachment();
+        corrupt_ciphertext[0] ^= 0xff;
+        reference.url = format!("http://127.0.0.1:1/blobs/{}", reference.ciphertext_sha256);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind bad blob server");
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_one_blob_response(listener, "200 OK", corrupt_ciphertext);
+        let media_payload = encoded_media_payload(reference, "Please inspect this");
+        let home = tempfile::tempdir().unwrap();
+        let degraded = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: &server_url,
+                room_id: "room-main",
+                seq: 1,
+                message_id: "message-bad-media",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            &media_payload,
+        )
+        .expect("bad attachment degrades instead of failing the stream")
+        .expect("caption remains deliverable");
+        server.join().expect("bad blob server");
+
+        assert_eq!(
+            degraded.text,
+            format!("Please inspect this\n\n{HERMES_ATTACHMENT_UNAVAILABLE_NOTICE}")
+        );
+        assert_eq!(degraded.message_type, HermesMessageTypeV1::Text);
+        assert!(degraded.attachments[0].path.is_none());
+        assert!(degraded.attachments[0].url.is_none());
+        assert!(degraded.attachments[0].blob.is_some());
+
+        let following = hermes_poll_event_from_application_plaintext(
+            HermesPollEventContext {
+                home_dir: home.path(),
+                server_url: &server_url,
+                room_id: "room-main",
+                seq: 2,
+                message_id: "message-following-text",
+                sender_account_id: "alice",
+                sender_device_id: "ios",
+                conversation_id: None,
+                segment_id: None,
+            },
+            b"Following text still arrives",
+        )
+        .expect("following text decodes")
+        .expect("following text is deliverable");
+
+        let mut inbox = HermesInboxState::default();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, degraded).unwrap();
+        enqueue_hermes_inbox_event(home.path(), &mut inbox, following).unwrap();
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|event| event.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message-bad-media", "message-following-text"]
+        );
+
+        let mut output = Vec::new();
+        cmd_ack(
+            home.path(),
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-main".to_owned(),
+                seq: 1,
+                message_id: "message-bad-media".to_owned(),
+            })
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap();
+        let inbox = load_hermes_inbox(home.path()).unwrap();
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "message-following-text");
+    }
+
+    #[test]
+    fn attachment_recovery_guidance_preserves_maximum_caption() {
+        let caption = "x".repeat(MAX_HERMES_TEXT_BYTES as usize);
+        let mut event = HermesPollEventV1::finite_chat_text(
+            "room-main",
+            1,
+            "message-max-caption",
+            "alice",
+            "ios",
+            caption.clone(),
+        )
+        .expect("maximum caption");
+
+        add_attachment_unavailable_notice(&mut event);
+
+        assert_eq!(event.text, caption);
+        assert_eq!(
+            event.channel_prompt.as_deref(),
+            Some(HERMES_ATTACHMENT_UNAVAILABLE_NOTICE)
+        );
+        event.validate_limits().expect("bounded recovery guidance");
     }
 
     #[test]
@@ -3571,6 +4251,7 @@ mod tests {
         let event = hermes_poll_event_from_application_plaintext(
             HermesPollEventContext {
                 home_dir: home.path(),
+                server_url: "https://chat.finite.computer",
                 room_id: "room-main",
                 seq: 3,
                 message_id: "message-3",

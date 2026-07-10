@@ -121,7 +121,19 @@ limits, encrypts/uploads the bytes through the room's pinned blob service, and
 replaces the path with the durable blob reference before appending the MLS
 message. Invalid paths fail before a message is appended. On inbound delivery,
 Finite Chat verifies and materializes encrypted blob references for Hermes.
-Neither direction requires attachment polling.
+Materialization completes before the durable Hermes inbox cursor advances.
+Connect failures, timeouts, retryable server errors, and truncated downloads
+end the inbound stream without delivering or acknowledging that event; the
+streaming adapter reconnects and retries the same durable event after the
+server heals. There is no attachment polling path.
+
+Failures that cannot heal by downloading the same encrypted reference again
+are handled differently. An exact referenced object returning `404` (including
+historical loopback references rerouted through the configured Finite Chat
+origin), ciphertext hash failure, or AEAD/plaintext verification failure is
+delivered as caption text with a short resend instruction. The encrypted blob
+reference remains in the raw event for product recovery, its ciphertext URL is
+never passed to the model as media, and later messages continue normally.
 
 Typing, thinking, and working indicators are not durable chat messages. The
 plugin uses room-scoped `activity` so these states do not create unread counts

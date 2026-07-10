@@ -175,7 +175,7 @@ function InferenceControls({
             name="apiKey"
             type="password"
             autoComplete="off"
-            placeholder={status?.inference.profile === "openrouter" ? "New key (optional)" : "OpenRouter key"}
+            placeholder={status?.inference.profile === "openrouter" ? "New key (optional)" : "Your key (optional)"}
             aria-label="OpenRouter key"
             className="w-52"
           />

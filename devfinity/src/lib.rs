@@ -154,6 +154,7 @@ pub struct Stack {
     ports: Ports,
     core_token: String,
     hosted_web_device_token: String,
+    sites_viewer_session_token: String,
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
@@ -201,6 +202,8 @@ impl Stack {
             },
             core_token: "devfinity-core-token".to_string(),
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
+            sites_viewer_session_token:
+                "dededededededededededededededededededededededededededededededede".to_string(),
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
             inference_mode: InferenceMode::from_environment(),
@@ -866,6 +869,13 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(yaml, "Local Finite Sites server", &self.repo_root, process);
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
+        self.write_environment(
+            yaml,
+            &[(
+                "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                self.sites_viewer_session_token.clone(),
+            )],
+        );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
@@ -1217,6 +1227,15 @@ wait "$postgres_pid"
             ("FC_CORE_API_TOKEN", self.core_token.clone()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
+            (
+                "FC_SITES_UPSTREAM_URL",
+                format!("http://127.0.0.1:{}", self.ports.finitesites),
+            ),
+            ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
+            (
+                "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                self.sites_viewer_session_token.clone(),
+            ),
             // Keep the long-lived local dev server isolated from production
             // and browser-test build artifacts. Next can otherwise combine
             // incompatible manifests and serve every App Router path as 404.
@@ -2055,6 +2074,15 @@ wait "$postgres_pid"
                 self.hosted_web_device_token.clone(),
             ),
             ("FINITE_SITES_API", self.finitesites_api_url()),
+            (
+                "FC_SITES_UPSTREAM_URL",
+                format!("http://127.0.0.1:{}", self.ports.finitesites),
+            ),
+            ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
+            (
+                "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                self.sites_viewer_session_token.clone(),
+            ),
             ("FINITE_BRAIN_URL", self.finite_brain_url()),
             ("FINITE_HOME", self.finite_home_dir().display().to_string()),
             ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
@@ -2647,6 +2675,13 @@ mod tests {
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
+        assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
+        assert!(
+            yaml.contains(
+                "FINITE_SITES_VIEWER_SESSION_TOKEN=dededededededededededededededededededededededededededededededede"
+            )
+        );
         assert!(yaml.contains("NEXT_DIST_DIR=.next-devfinity"));
         assert!(yaml.contains("--listen 0.0.0.0:18789"));
         assert!(yaml.contains("--api-url 'http://host.container.internal:18789'"));

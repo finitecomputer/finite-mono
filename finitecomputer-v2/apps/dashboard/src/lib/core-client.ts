@@ -121,7 +121,8 @@ export type CoreRuntimeControlRequest = {
   source_host_id: string;
   source_machine_id: string;
   requested_by_user_id: string;
-  kind: "restart" | "recover_known_good_chat_runtime" | "stop" | "destroy";
+  kind: "restart" | "recover_known_good_chat_runtime" | "upgrade" | "stop" | "destroy";
+  target_runtime_artifact_id?: string | null;
   status: "requested" | "running" | "succeeded" | "failed";
   failure_message?: string | null;
   created_at: string;
@@ -861,6 +862,26 @@ export async function adminRecoverCoreRuntime(projectId: string) {
       requiredString(projectId, "Project id is required.")
     )}/runtime/recover-known-good-chat`,
     { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminUpgradeCoreRuntime(input: {
+  projectId: string;
+  targetRuntimeArtifactId: string;
+}) {
+  const projectId = requiredString(input.projectId, "Project id is required.");
+  const targetRuntimeArtifactId = requiredString(
+    input.targetRuntimeArtifactId,
+    "Target runtime artifact id is required."
+  );
+  const result = await coreAdminFetch<CoreRuntimeControlRequest>(
+    `/api/core/v1/admin/projects/${encodeURIComponent(projectId)}/runtime/upgrade`,
+    {
+      method: "POST",
+      body: JSON.stringify({ targetRuntimeArtifactId }),
+    }
   );
   invalidateCoreReadCache();
   return result;

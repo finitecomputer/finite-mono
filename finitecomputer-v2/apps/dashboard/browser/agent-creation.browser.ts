@@ -9,6 +9,7 @@ import { chromium, type Browser, type Page } from "playwright";
 
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
+const SITES_VIEWER_SESSION_TOKEN = "browser-sites-viewer-session-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
 const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
 const PNG_BYTES = Buffer.from(
@@ -185,12 +186,30 @@ type AgentConnectionsStatus = {
   };
 };
 
+type FakeSitesState = {
+  exchanges: Array<{
+    authorization: string | null;
+    outputUrl: string;
+    verifiedEmail: string;
+    returnTo: string;
+  }>;
+  redemptions: number;
+  privateContentRequests: number;
+};
+
 test("dashboard agent creation browser states", { timeout: 120_000 }, async () => {
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore();
   const brain = await startFakeBrain();
+  const sites = await startFakeSites();
   const dashboardPort = await freePort();
-  const dashboard = startDashboard(dashboardPort, core.url, hostedDevice.url, brain.url);
+  const dashboard = startDashboard(
+    dashboardPort,
+    core.url,
+    hostedDevice.url,
+    brain.url,
+    sites.apiUrl
+  );
   const dashboardOutput = collectOutput(dashboard);
   let browser: Browser | null = null;
 
@@ -526,7 +545,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
 
-      const localSiteUrl = "http://browser-proof.sites.localhost:18789/";
+      const localSiteUrl = sites.siteUrl;
       hostedDevice.state.app.messages.push(
         hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 7)
       );
@@ -538,9 +557,25 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.getByLabel("Preview URL").waitFor({ state: "visible" });
       assert.equal(await page.getByLabel("Preview URL").inputValue(), localSiteUrl);
       assert.equal(await page.getByLabel("Select site preview").count(), 0);
-      assert.equal(
-        await page.getByLabel("Site preview").locator("iframe").getAttribute("src"),
-        localSiteUrl
+      const siteFrame = page.frameLocator('iframe[title="browser-proof.sites.localhost"]');
+      await siteFrame.getByText("Private site browser proof").waitFor({
+        state: "visible",
+        timeout: 15_000,
+      });
+      assert(sites.state.exchanges.length >= 1);
+      for (const exchange of sites.state.exchanges) {
+        assert.deepEqual(exchange, {
+          authorization: `Bearer ${SITES_VIEWER_SESSION_TOKEN}`,
+          outputUrl: localSiteUrl,
+          verifiedEmail: "browser@finite.vip",
+          returnTo: "/",
+        });
+      }
+      assert.equal(sites.state.redemptions, 1);
+      assert(sites.state.privateContentRequests >= 1);
+      assert.match(
+        (await page.getByLabel("Site preview").locator("iframe").getAttribute("src")) ?? "",
+        /\/_finite\/auth\?token=/u
       );
 
       await waitFor(() =>
@@ -567,6 +602,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
     core.server.close();
     hostedDevice.close();
     brain.server.close();
+    sites.server.close();
     await Promise.race([
       once(dashboard, "exit"),
       new Promise((resolve) => setTimeout(resolve, 2_000)),
@@ -578,7 +614,8 @@ function startDashboard(
   port: number,
   coreUrl: string,
   hostedDeviceUrl: string,
-  brainUrl: string
+  brainUrl: string,
+  sitesUrl: string
 ) {
   return spawn(
     process.execPath,
@@ -592,6 +629,9 @@ function startDashboard(
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
         FC_BRAIN_UPSTREAM_URL: brainUrl,
+        FC_SITES_UPSTREAM_URL: sitesUrl,
+        FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
+        FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
@@ -602,6 +642,87 @@ function startDashboard(
       stdio: "pipe",
     }
   );
+}
+
+async function startFakeSites() {
+  const state: FakeSitesState = {
+    exchanges: [],
+    redemptions: 0,
+    privateContentRequests: 0,
+  };
+  let siteUrl = "";
+  const token = "cd".repeat(32);
+  const server = http.createServer(async (request, response) => {
+    const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    if (request.method === "POST" && requestUrl.pathname === "/internal/v1/viewer-sessions") {
+      const body = (await readJson(request)) as Record<string, unknown>;
+      const exchange = {
+        authorization: singleHeader(request.headers.authorization),
+        outputUrl: String(body.output_url ?? ""),
+        verifiedEmail: String(body.verified_email ?? ""),
+        returnTo: String(body.return_to ?? ""),
+      };
+      state.exchanges.push(exchange);
+      if (
+        exchange.authorization !== `Bearer ${SITES_VIEWER_SESSION_TOKEN}`
+        || exchange.outputUrl !== siteUrl
+        || exchange.verifiedEmail !== "browser@finite.vip"
+        || exchange.returnTo !== "/"
+      ) {
+        writeJson(response, 403, { error: "viewer access unavailable" });
+        return;
+      }
+      writeJson(response, 200, {
+        redeem_url: `${siteUrl}_finite/auth?token=${token}&return_to=%2F`,
+      });
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/_finite/auth") {
+      if (requestUrl.searchParams.get("token") !== token) {
+        response.writeHead(400).end();
+        return;
+      }
+      state.redemptions += 1;
+      response.writeHead(303, {
+        location: requestUrl.searchParams.get("return_to") ?? "/",
+        "set-cookie": [
+          "finite_site_auth=browser-viewer; Path=/; Max-Age=600; HttpOnly; SameSite=None; Secure",
+          "__Host-finite_site_auth_partitioned=browser-viewer; Path=/; Max-Age=600; HttpOnly; SameSite=None; Secure; Partitioned",
+        ],
+      });
+      response.end();
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/") {
+      state.privateContentRequests += 1;
+      const cookie = singleHeader(request.headers.cookie) ?? "";
+      if (
+        !cookie.includes("finite_site_auth=browser-viewer")
+        && !cookie.includes("__Host-finite_site_auth_partitioned=browser-viewer")
+      ) {
+        response.writeHead(401, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><h1>Sign in required</h1>");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><h1>Private site browser proof</h1>");
+      return;
+    }
+    writeJson(response, 404, { error: "not found" });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  siteUrl = `http://browser-proof.sites.localhost:${address.port}/`;
+  return {
+    server,
+    state,
+    apiUrl: `http://127.0.0.1:${address.port}`,
+    siteUrl,
+  };
 }
 
 async function startFakeBrain() {

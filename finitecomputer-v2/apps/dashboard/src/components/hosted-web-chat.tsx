@@ -845,6 +845,7 @@ export function HostedWebChat({
                 <BrowserPanel
                   activeSite={activeSite}
                   className="finite-chat__preview finite-chat__preview--desktop"
+                  machineId={machineId}
                   onClose={() => setBrowserOpen(false)}
                   onSelectSite={setActiveSiteId}
                   sites={sites}
@@ -865,6 +866,7 @@ export function HostedWebChat({
               <BrowserPanel
                 activeSite={activeSite}
                 className="finite-chat__preview finite-chat__preview--sheet"
+                machineId={machineId}
                 onClose={() => setBrowserOpen(false)}
                 onSelectSite={setActiveSiteId}
                 sites={sites}
@@ -1245,8 +1247,48 @@ function ChatLoading({ label }: { label: string }) {
   return <div className="finite-chat__notice"><Loader2Icon className="finite-chat__spin" /><span>{label}</span></div>;
 }
 
-function BrowserPanel({ activeSite, className, onClose, onSelectSite, sites }: { activeSite: PreviewSite; className: string; onClose: () => void; onSelectSite: (id: string) => void; sites: PreviewSite[] }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite, sites }: { activeSite: PreviewSite; className: string; machineId: string; onClose: () => void; onSelectSite: (id: string) => void; sites: PreviewSite[] }) {
+  const [frameState, setFrameState] = useState<{
+    requestKey: string;
+    url: string | null;
+    error: boolean;
+  }>({ requestKey: "", url: null, error: false });
+  const [reloadVersion, setReloadVersion] = useState(0);
+  const requestKey = `${activeSite.id}:${reloadVersion}`;
+  const frameUrl = frameState.requestKey === requestKey ? frameState.url : null;
+  const frameError = frameState.requestKey === requestKey && frameState.error;
+
+  useEffect(() => {
+    let disposed = false;
+    const currentRequestKey = `${activeSite.id}:${reloadVersion}`;
+    fetch(`/api/site-previews/machines/${encodeURIComponent(machineId)}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: activeSite.url }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("preview session unavailable");
+        return response.json() as Promise<{ url?: unknown }>;
+      })
+      .then((payload) => {
+        if (!disposed) {
+          setFrameState({
+            requestKey: currentRequestKey,
+            url: typeof payload.url === "string" ? payload.url : null,
+            error: typeof payload.url !== "string",
+          });
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setFrameState({ requestKey: currentRequestKey, url: null, error: true });
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeSite.id, activeSite.url, machineId, reloadVersion]);
+
   return (
     <aside className={className} aria-label="Site preview">
       <div className="finite-chat__browser">
@@ -1261,12 +1303,18 @@ function BrowserPanel({ activeSite, className, onClose, onSelectSite, sites }: {
           <div className="finite-chat__browser-actions">
             <button type="button" aria-label="Copy preview link" onClick={() => void navigator.clipboard.writeText(activeSite.url)}><CopyIcon className="size-3.5" /></button>
             <a href={activeSite.url} target="_blank" rel="noreferrer" aria-label="Open preview"><ExternalLinkIcon className="size-3.5" /></a>
-            <button type="button" aria-label="Reload preview" onClick={() => { if (iframeRef.current) iframeRef.current.src = activeSite.url; }}><RefreshCwIcon className="size-3.5" /></button>
+            <button type="button" aria-label="Reload preview" onClick={() => setReloadVersion((value) => value + 1)}><RefreshCwIcon className="size-3.5" /></button>
             <button type="button" aria-label="Close preview" onClick={onClose}><XIcon className="size-3.5" /></button>
           </div>
         </div>
         <div className="finite-chat__browser-viewport">
-          <iframe ref={iframeRef} key={activeSite.id} className="finite-chat__browser-iframe" src={activeSite.url} title={activeSite.label} />
+          {frameUrl ? (
+            <iframe key={`${activeSite.id}:${reloadVersion}`} className="finite-chat__browser-iframe" src={frameUrl} title={activeSite.label} sandbox="allow-forms allow-same-origin allow-scripts" referrerPolicy="no-referrer" />
+          ) : frameError ? (
+            <div className="finite-chat__notice">Preview isn&apos;t available right now.</div>
+          ) : (
+            <ChatLoading label="Opening preview…" />
+          )}
         </div>
       </div>
     </aside>

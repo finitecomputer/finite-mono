@@ -204,6 +204,18 @@ For server iteration or local automated testing, start a local delivery server:
 cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
 ```
 
+When the server is behind a proxy or receives uploads from another local
+service, set its externally reachable origin explicitly so encrypted attachment
+references work from every device:
+
+```sh
+FINITECHAT_PUBLIC_URL=https://chat.example.com \
+  finitechat-server serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
+```
+
+`--public-url URL` is the equivalent command-line option. The value must be a
+bare `http` or `https` origin, without a path, query, credentials, or fragment.
+
 Run the iOS simulator app against that server with an explicit override:
 
 ```sh

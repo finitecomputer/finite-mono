@@ -8,7 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-pub const CORE_SCHEMA_SQL: &str = include_str!("../migrations/0001_core.sql");
+pub const CORE_SCHEMA_SQL: &str = concat!(
+    include_str!("../migrations/0001_core.sql"),
+    "\n",
+    include_str!("../migrations/0002_runtime_upgrade.sql")
+);
+pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
+    include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
 const FIRST_SELF_SERVE_LAUNCH_CODE: &str = "off2026";
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
@@ -96,6 +102,7 @@ pub enum RunnerClass {
 pub enum RuntimeControlKind {
     Restart,
     RecoverKnownGoodChatRuntime,
+    Upgrade,
     Stop,
     Destroy,
 }
@@ -210,12 +217,26 @@ pub enum CoreError {
     RuntimeArtifactNotPromoted,
     #[error("runtime artifact is retired")]
     RuntimeArtifactRetired,
+    #[error("a promoted or runtime-referenced artifact is immutable")]
+    RuntimeArtifactImmutable,
     #[error("project was not found")]
     ProjectNotFound,
     #[error("project runtime was not found")]
     ProjectRuntimeNotFound,
     #[error("runtime restart is not supported for this runtime")]
     RuntimeRestartUnsupported,
+    #[error("runtime upgrade is supported only for Kata runtimes created by Core")]
+    RuntimeUpgradeUnsupported,
+    #[error("runtime upgrades are not enabled for this Core generation")]
+    RuntimeUpgradeNotEnabled,
+    #[error("runtime upgrade target is incompatible with the mounted state schema")]
+    RuntimeUpgradeStateSchemaIncompatible,
+    #[error("a different runtime upgrade is already in progress")]
+    RuntimeUpgradeTargetConflict,
+    #[error("another runtime control operation is already in progress")]
+    RuntimeControlOperationConflict,
+    #[error("runtime upgrade completion did not match the requested artifact")]
+    RuntimeUpgradeCompletionMismatch,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not running")]
@@ -548,6 +569,10 @@ pub struct RuntimeControlRequest {
     pub source_machine_id: String,
     pub requested_by_user_id: String,
     pub kind: RuntimeControlKind,
+    /// Present only for an explicit Upgrade operation. Restart deliberately
+    /// remains bound to the Runtime's current artifact.
+    #[serde(default)]
+    pub target_runtime_artifact_id: Option<String>,
     pub status: RuntimeControlRequestStatus,
     pub runner_id: Option<String>,
     pub lease_token: Option<String>,
@@ -562,6 +587,11 @@ pub struct RuntimeControlRequest {
 pub struct RuntimeControlLease {
     pub request: RuntimeControlRequest,
     pub runtime: AgentRuntime,
+    /// Core-resolved immutable target for Upgrade. Runner adapters never choose
+    /// a product release from process-global configuration while handling an
+    /// existing Runtime.
+    #[serde(default)]
+    pub target_runtime_artifact: Option<RuntimeArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -944,6 +974,16 @@ pub type RequestRuntimeDestroyInput = RequestRuntimeRestartInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeUpgradeInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub target_runtime_artifact_id: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminRuntimeControlInput {
     pub admin_verified_email: String,
     pub admin_workos_user_id: String,
@@ -1033,6 +1073,13 @@ pub struct CompleteRuntimeControlRequestInput {
     pub request_id: String,
     pub runner_id: String,
     pub lease_token: String,
+    /// Required for Upgrade and rejected when it does not exactly match the
+    /// Core-bound target artifact/schema. Other lifecycle operations leave
+    /// these fields empty.
+    pub runtime_artifact_id: Option<String>,
+    pub state_schema_version: Option<String>,
+    pub runtime_host: Option<String>,
+    pub published_app_urls: Option<Vec<String>>,
     pub now: Option<String>,
 }
 
@@ -1636,34 +1683,35 @@ impl BridgeCoreState {
         &mut self,
         input: RequestRuntimeRestartInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Restart)
+        self.request_runtime_control(input, RuntimeControlKind::Restart, None)
     }
 
     pub fn request_runtime_recover_known_good_chat(
         &mut self,
         input: RequestRuntimeRecoverKnownGoodChatInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::RecoverKnownGoodChatRuntime)
+        self.request_runtime_control(input, RuntimeControlKind::RecoverKnownGoodChatRuntime, None)
     }
 
     pub fn request_runtime_stop(
         &mut self,
         input: RequestRuntimeStopInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Stop)
+        self.request_runtime_control(input, RuntimeControlKind::Stop, None)
     }
 
     pub fn request_runtime_destroy(
         &mut self,
         input: RequestRuntimeDestroyInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.request_runtime_control(input, RuntimeControlKind::Destroy)
+        self.request_runtime_control(input, RuntimeControlKind::Destroy, None)
     }
 
     fn request_runtime_control(
         &mut self,
         input: RequestRuntimeRestartInput,
         kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
     ) -> CoreResult<RuntimeControlRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
@@ -1681,21 +1729,47 @@ impl BridgeCoreState {
         if project.owner_user_id != user.id {
             return Err(CoreError::ProjectNotFound);
         }
-        self.enqueue_runtime_control_request(&project, &user.id, kind, now)
+        self.enqueue_runtime_control_request(
+            &project,
+            &user.id,
+            kind,
+            target_runtime_artifact_id,
+            now,
+        )
     }
 
     pub fn admin_request_runtime_restart(
         &mut self,
         input: AdminRuntimeControlInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control(input, RuntimeControlKind::Restart)
+        self.admin_request_runtime_control(input, RuntimeControlKind::Restart, None)
     }
 
     pub fn admin_request_runtime_recover_known_good_chat(
         &mut self,
         input: AdminRuntimeControlInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.admin_request_runtime_control(input, RuntimeControlKind::RecoverKnownGoodChatRuntime)
+        self.admin_request_runtime_control(
+            input,
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+            None,
+        )
+    }
+
+    pub fn admin_request_runtime_upgrade(
+        &mut self,
+        input: AdminRuntimeUpgradeInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        self.admin_request_runtime_control(
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Upgrade,
+            Some(input.target_runtime_artifact_id),
+        )
     }
 
     /// Admin variant of `request_runtime_control`: the acting user does not
@@ -1707,6 +1781,7 @@ impl BridgeCoreState {
         &mut self,
         input: AdminRuntimeControlInput,
         kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
     ) -> CoreResult<RuntimeControlRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
@@ -1721,14 +1796,20 @@ impl BridgeCoreState {
             .get(&input.project_id)
             .cloned()
             .ok_or(CoreError::ProjectNotFound)?;
-        let request =
-            self.enqueue_runtime_control_request(&project, &admin_user.id, kind, now.clone())?;
+        let request = self.enqueue_runtime_control_request(
+            &project,
+            &admin_user.id,
+            kind,
+            target_runtime_artifact_id,
+            now.clone(),
+        )?;
         self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
             action: match kind {
                 RuntimeControlKind::Restart => "runtime.admin_restart",
                 RuntimeControlKind::RecoverKnownGoodChatRuntime => {
                     "runtime.admin_recover_known_good_chat"
                 }
+                RuntimeControlKind::Upgrade => "runtime.admin_upgrade",
                 RuntimeControlKind::Stop => "runtime.admin_stop",
                 RuntimeControlKind::Destroy => "runtime.admin_destroy",
             },
@@ -1741,6 +1822,7 @@ impl BridgeCoreState {
                 "projectId": request.project_id.clone(),
                 "runtimeControlRequestId": request.id.clone(),
                 "kind": kind.as_str(),
+                "targetRuntimeArtifactId": request.target_runtime_artifact_id.clone(),
             }),
             created_at: &now,
         });
@@ -1752,6 +1834,7 @@ impl BridgeCoreState {
         project: &Project,
         requested_by_user_id: &str,
         kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
         now: String,
     ) -> CoreResult<RuntimeControlRequest> {
         let runtime = self
@@ -1769,12 +1852,44 @@ impl BridgeCoreState {
             return Err(CoreError::RuntimeRestartUnsupported);
         }
 
+        let target_runtime_artifact_id = match kind {
+            RuntimeControlKind::Upgrade => {
+                let target_id = trim_to_option(target_runtime_artifact_id.as_deref())
+                    .ok_or(CoreError::MissingRuntimeArtifactId)?;
+                let runner_class = self
+                    .agent_creation_requests
+                    .values()
+                    .find(|request| {
+                        request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                            && request.status == AgentCreationRequestStatus::Running
+                    })
+                    .map(|request| request.runner_class)
+                    .ok_or(CoreError::RuntimeUpgradeUnsupported)?;
+                if runner_class != RunnerClass::Kata {
+                    return Err(CoreError::RuntimeUpgradeUnsupported);
+                }
+                let target = self.launchable_runtime_artifact(&target_id)?;
+                if target.kind != RuntimeArtifactKind::OciImage {
+                    return Err(CoreError::RuntimeUpgradeUnsupported);
+                }
+                if !runtime_artifact_reference_is_immutable_oci(&target.reference) {
+                    return Err(CoreError::RuntimeUpgradeUnsupported);
+                }
+                if runtime.state_schema_version.as_deref()
+                    != Some(target.state_schema_version.as_str())
+                {
+                    return Err(CoreError::RuntimeUpgradeStateSchemaIncompatible);
+                }
+                Some(target.id)
+            }
+            _ => None,
+        };
+
         if let Some(existing) = self
             .runtime_control_requests
             .values()
             .filter(|request| {
                 request.agent_runtime_id == runtime.id
-                    && request.kind == kind
                     && matches!(
                         request.status,
                         RuntimeControlRequestStatus::Requested
@@ -1784,6 +1899,14 @@ impl BridgeCoreState {
             .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
             .cloned()
         {
+            if existing.kind != kind {
+                return Err(CoreError::RuntimeControlOperationConflict);
+            }
+            if kind == RuntimeControlKind::Upgrade
+                && existing.target_runtime_artifact_id != target_runtime_artifact_id
+            {
+                return Err(CoreError::RuntimeUpgradeTargetConflict);
+            }
             return Ok(existing);
         }
 
@@ -1795,6 +1918,7 @@ impl BridgeCoreState {
             source_machine_id: runtime.source_machine_id,
             requested_by_user_id: requested_by_user_id.to_string(),
             kind,
+            target_runtime_artifact_id,
             status: RuntimeControlRequestStatus::Requested,
             runner_id: None,
             lease_token: None,
@@ -1907,39 +2031,86 @@ impl BridgeCoreState {
             .transpose()?;
         let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
 
-        let request_id = self
-            .runtime_control_requests
-            .values()
-            .filter(|request| {
-                self.runtime_control_request_is_leasable(request, now_time)
-                    && source_host_id
-                        .as_deref()
-                        .is_none_or(|host_id| request.source_host_id == host_id)
-            })
-            .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
-            .map(|request| request.id.clone());
+        loop {
+            let request_id = self
+                .runtime_control_requests
+                .values()
+                .filter(|request| {
+                    self.runtime_control_request_is_leasable(request, now_time)
+                        && source_host_id
+                            .as_deref()
+                            .is_none_or(|host_id| request.source_host_id == host_id)
+                })
+                .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
+                .map(|request| request.id.clone());
 
-        let Some(request_id) = request_id else {
-            return Ok(None);
-        };
-        let request = {
-            let Some(request) = self.runtime_control_requests.get_mut(&request_id) else {
-                return Err(CoreError::RuntimeControlRequestNotFound);
+            let Some(request_id) = request_id else {
+                return Ok(None);
             };
-            request.status = RuntimeControlRequestStatus::Running;
-            request.runner_id = Some(runner_id);
-            request.lease_token = Some(lease_token);
-            request.lease_expires_at = Some(lease_expires_at);
-            request.failure_message = None;
-            request.updated_at = now;
-            request.clone()
-        };
-        let runtime = self
-            .agent_runtimes
-            .get(&request.agent_runtime_id)
-            .cloned()
-            .ok_or(CoreError::ProjectRuntimeNotFound)?;
-        Ok(Some(RuntimeControlLease { request, runtime }))
+            // Validate the current target before mutating the lease row.
+            // Promotion or retirement may have changed after the admin queued
+            // the request. A permanently invalid target is terminal queue work,
+            // not an error that may poison the oldest-row scan forever.
+            let pending = self
+                .runtime_control_requests
+                .get(&request_id)
+                .cloned()
+                .ok_or(CoreError::RuntimeControlRequestNotFound)?;
+            let runtime = self
+                .agent_runtimes
+                .get(&pending.agent_runtime_id)
+                .cloned()
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            let target_result = if pending.kind == RuntimeControlKind::Upgrade {
+                pending
+                    .target_runtime_artifact_id
+                    .as_deref()
+                    .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)
+                    .and_then(|target_id| {
+                        self.compatible_runtime_upgrade_artifact(&runtime, target_id)
+                    })
+                    .map(Some)
+            } else {
+                Ok(None)
+            };
+            let target_runtime_artifact = match target_result {
+                Ok(target) => target,
+                Err(error) if runtime_upgrade_prelease_rejection_is_terminal(&error) => {
+                    let request = self
+                        .runtime_control_requests
+                        .get_mut(&request_id)
+                        .ok_or(CoreError::RuntimeControlRequestNotFound)?;
+                    request.status = RuntimeControlRequestStatus::Failed;
+                    request.runner_id = None;
+                    request.lease_token = None;
+                    request.lease_expires_at = None;
+                    request.failure_message = Some(format!(
+                        "runtime upgrade target rejected before lease: {error}"
+                    ));
+                    request.updated_at = now.clone();
+                    request.completed_at = Some(now.clone());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let request = {
+                let Some(request) = self.runtime_control_requests.get_mut(&request_id) else {
+                    return Err(CoreError::RuntimeControlRequestNotFound);
+                };
+                request.status = RuntimeControlRequestStatus::Running;
+                request.runner_id = Some(runner_id.clone());
+                request.lease_token = Some(lease_token.clone());
+                request.lease_expires_at = Some(lease_expires_at.clone());
+                request.failure_message = None;
+                request.updated_at = now.clone();
+                request.clone()
+            };
+            return Ok(Some(RuntimeControlLease {
+                request,
+                runtime,
+                target_runtime_artifact,
+            }));
+        }
     }
 
     pub fn complete_runtime_control_request(
@@ -1947,11 +2118,59 @@ impl BridgeCoreState {
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
-        self.verified_runtime_control_request(
+        let verified = self.verified_runtime_control_request(
             &input.request_id,
             &input.runner_id,
             &input.lease_token,
         )?;
+        let upgrade_facts = if verified.kind == RuntimeControlKind::Upgrade {
+            let target_id = verified
+                .target_runtime_artifact_id
+                .as_deref()
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let reported_id = trim_to_option(input.runtime_artifact_id.as_deref())
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let runtime = self
+                .agent_runtimes
+                .get(&verified.agent_runtime_id)
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            let target = self
+                .runtime_artifacts
+                .get(target_id)
+                .cloned()
+                .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            // Retirement after lease must not strand Core behind a target the
+            // runner has already atomically swapped into place. Material is
+            // immutable, so completion verifies exact identity/schema but does
+            // not reapply request-time lifecycle policy.
+            self.ensure_runtime_upgrade_artifact_material(runtime, &target)?;
+            let reported_schema = trim_to_option(input.state_schema_version.as_deref())
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let runtime_host = trim_to_option(input.runtime_host.as_deref())
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let published_app_urls = input
+                .published_app_urls
+                .clone()
+                .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            if reported_id != target.id || reported_schema != target.state_schema_version {
+                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            }
+            Some((
+                reported_id,
+                reported_schema,
+                runtime_host,
+                published_app_urls,
+            ))
+        } else {
+            if input.runtime_artifact_id.is_some()
+                || input.state_schema_version.is_some()
+                || input.runtime_host.is_some()
+                || input.published_app_urls.is_some()
+            {
+                return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+            }
+            None
+        };
         let request = {
             let Some(request) = self.runtime_control_requests.get_mut(&input.request_id) else {
                 return Err(CoreError::RuntimeControlRequestNotFound);
@@ -1965,13 +2184,22 @@ impl BridgeCoreState {
             request.clone()
         };
         let completed_status = match request.kind {
-            RuntimeControlKind::Restart | RuntimeControlKind::RecoverKnownGoodChatRuntime => {
-                RuntimeSummaryStatus::Online
-            }
+            RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
         };
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = completed_status;
+            if let Some((artifact_id, schema, runtime_host, published_app_urls)) =
+                upgrade_facts.as_ref()
+            {
+                runtime.runtime_artifact_id = Some(artifact_id.clone());
+                runtime.state_schema_version = Some(schema.clone());
+                runtime.host_facts.runtime_host = runtime_host.clone();
+                runtime.host_facts.published_app_urls = published_app_urls.clone();
+                runtime.host_facts.hermes_available = Some(true);
+            }
             if request.kind == RuntimeControlKind::Destroy {
                 runtime.host_facts.hermes_available = Some(false);
                 runtime.host_facts.published_app_urls.clear();
@@ -1983,6 +2211,10 @@ impl BridgeCoreState {
             .get_mut(&request.agent_runtime_id)
         {
             snapshot.status = completed_status;
+            if let Some((_, _, runtime_host, _)) = upgrade_facts.as_ref() {
+                snapshot.runtime_host = runtime_host.clone();
+                snapshot.hermes_available = Some(true);
+            }
             if request.kind == RuntimeControlKind::Destroy {
                 snapshot.hermes_available = Some(false);
             }
@@ -3709,16 +3941,20 @@ impl BridgeCoreState {
             .ok_or(CoreError::MissingRuntimeArtifactVersionLabel)?;
         let state_schema_version = trim_to_option(Some(&input.state_schema_version))
             .ok_or(CoreError::MissingRuntimeArtifactStateSchemaVersion)?;
-        let existing = self.runtime_artifacts.get(&id);
+        let existing = self.runtime_artifacts.get(&id).cloned();
         let created_at = existing
+            .as_ref()
             .map(|artifact| artifact.created_at.clone())
             .unwrap_or_else(|| now.clone());
         let promoted_at = if input.promoted {
             existing
+                .as_ref()
                 .and_then(|artifact| artifact.promoted_at.clone())
                 .or_else(|| Some(now.clone()))
         } else {
-            existing.and_then(|artifact| artifact.promoted_at.clone())
+            existing
+                .as_ref()
+                .and_then(|artifact| artifact.promoted_at.clone())
         };
         let artifact = RuntimeArtifact {
             id: id.clone(),
@@ -3733,8 +3969,20 @@ impl BridgeCoreState {
             base_image: trim_to_option(input.base_image.as_deref()),
             created_at,
             promoted_at,
-            retired_at: existing.and_then(|artifact| artifact.retired_at.clone()),
+            retired_at: existing
+                .as_ref()
+                .and_then(|artifact| artifact.retired_at.clone()),
         };
+        if let Some(existing) = existing.as_ref() {
+            let referenced = self.agent_runtimes.values().any(|runtime| {
+                runtime.runtime_artifact_id.as_deref() == Some(existing.id.as_str())
+            });
+            if (existing.promoted_at.is_some() || referenced)
+                && !runtime_artifact_material_matches(existing, &artifact)
+            {
+                return Err(CoreError::RuntimeArtifactImmutable);
+            }
+        }
         self.runtime_artifacts.insert(id, artifact.clone());
         Ok(artifact)
     }
@@ -3752,6 +4000,32 @@ impl BridgeCoreState {
             return Err(CoreError::RuntimeArtifactRetired);
         }
         Ok(artifact)
+    }
+
+    fn compatible_runtime_upgrade_artifact(
+        &self,
+        runtime: &AgentRuntime,
+        id: &str,
+    ) -> CoreResult<RuntimeArtifact> {
+        let artifact = self.launchable_runtime_artifact(id)?;
+        self.ensure_runtime_upgrade_artifact_material(runtime, &artifact)?;
+        Ok(artifact)
+    }
+
+    fn ensure_runtime_upgrade_artifact_material(
+        &self,
+        runtime: &AgentRuntime,
+        artifact: &RuntimeArtifact,
+    ) -> CoreResult<()> {
+        if artifact.kind != RuntimeArtifactKind::OciImage
+            || !runtime_artifact_reference_is_immutable_oci(&artifact.reference)
+        {
+            return Err(CoreError::RuntimeUpgradeUnsupported);
+        }
+        if runtime.state_schema_version.as_deref() != Some(artifact.state_schema_version.as_str()) {
+            return Err(CoreError::RuntimeUpgradeStateSchemaIncompatible);
+        }
+        Ok(())
     }
 
     fn ensure_finite_private_limit_profile(
@@ -3971,6 +4245,7 @@ impl RuntimeControlKind {
         match self {
             Self::Restart => "restart",
             Self::RecoverKnownGoodChatRuntime => "recover_known_good_chat_runtime",
+            Self::Upgrade => "upgrade",
             Self::Stop => "stop",
             Self::Destroy => "destroy",
         }
@@ -4141,6 +4416,7 @@ pub fn parse_runtime_control_kind(value: &str) -> Option<RuntimeControlKind> {
     match value {
         "restart" => Some(RuntimeControlKind::Restart),
         "recover_known_good_chat_runtime" => Some(RuntimeControlKind::RecoverKnownGoodChatRuntime),
+        "upgrade" => Some(RuntimeControlKind::Upgrade),
         "stop" => Some(RuntimeControlKind::Stop),
         "destroy" => Some(RuntimeControlKind::Destroy),
         _ => None,
@@ -4448,6 +4724,45 @@ fn runtime_control_request_id_for(
 
 fn runtime_artifact_supports_control(kind: RuntimeArtifactKind) -> bool {
     matches!(kind, RuntimeArtifactKind::OciImage)
+}
+
+pub(crate) fn runtime_artifact_reference_is_immutable_oci(reference: &str) -> bool {
+    let Some((_, digest)) = reference.rsplit_once("@sha256:") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Release identity is every artifact field other than lifecycle timestamps.
+/// Once promoted or mounted by a Runtime, an id may only be upserted with this
+/// exact material identity; promotion remains a one-way lifecycle transition.
+pub(crate) fn runtime_artifact_material_matches(
+    existing: &RuntimeArtifact,
+    candidate: &RuntimeArtifact,
+) -> bool {
+    existing.id == candidate.id
+        && existing.kind == candidate.kind
+        && existing.reference == candidate.reference
+        && existing.version_label == candidate.version_label
+        && existing.source_git_sha == candidate.source_git_sha
+        && existing.finitec_version == candidate.finitec_version
+        && existing.hermes_source_ref == candidate.hermes_source_ref
+        && existing.finite_platform_plugin_ref == candidate.finite_platform_plugin_ref
+        && existing.state_schema_version == candidate.state_schema_version
+        && existing.base_image == candidate.base_image
+}
+
+pub(crate) fn runtime_upgrade_prelease_rejection_is_terminal(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::MissingRuntimeArtifactId
+            | CoreError::RuntimeArtifactNotFound
+            | CoreError::RuntimeArtifactNotPromoted
+            | CoreError::RuntimeArtifactRetired
+            | CoreError::RuntimeUpgradeUnsupported
+            | CoreError::RuntimeUpgradeStateSchemaIncompatible
+            | CoreError::RuntimeUpgradeCompletionMismatch
+    )
 }
 
 fn finite_private_grant_id_for_user(user_id: &str) -> String {
@@ -5090,6 +5405,84 @@ mod tests {
     }
 
     #[test]
+    fn promoted_or_runtime_referenced_artifact_material_is_immutable() {
+        let mut state = BridgeCoreState::default();
+        let input = UpsertRuntimeArtifactInput {
+            id: "artifact-immutable".to_string(),
+            kind: RuntimeArtifactKind::OciImage,
+            reference: format!("ghcr.io/finite/runtime@sha256:{}", "a".repeat(64)),
+            version_label: "v1".to_string(),
+            source_git_sha: Some("git-v1".to_string()),
+            finitec_version: Some("finitec-v1".to_string()),
+            hermes_source_ref: Some("hermes-v1".to_string()),
+            finite_platform_plugin_ref: Some("plugin-v1".to_string()),
+            state_schema_version: "state-v1".to_string(),
+            base_image: Some("base-v1".to_string()),
+            promoted: false,
+            now: Some(NOW.to_string()),
+        };
+        state.upsert_runtime_artifact(input.clone()).unwrap();
+
+        let mut before_promotion = input.clone();
+        before_promotion.version_label = "v1-corrected".to_string();
+        state
+            .upsert_runtime_artifact(before_promotion.clone())
+            .unwrap();
+        before_promotion.promoted = true;
+        state
+            .upsert_runtime_artifact(before_promotion.clone())
+            .unwrap();
+
+        let mut exact_retry = before_promotion.clone();
+        exact_retry.now = Some(LATER.to_string());
+        state.upsert_runtime_artifact(exact_retry).unwrap();
+        let mut mutation = before_promotion;
+        mutation.reference = format!("ghcr.io/finite/runtime@sha256:{}", "b".repeat(64));
+        assert!(matches!(
+            state.upsert_runtime_artifact(mutation).unwrap_err(),
+            CoreError::RuntimeArtifactImmutable
+        ));
+
+        let runtime_id = "runtime-references-unpromoted".to_string();
+        state
+            .runtime_artifacts
+            .get_mut("artifact-immutable")
+            .unwrap()
+            .promoted_at = None;
+        state.agent_runtimes.insert(
+            runtime_id.clone(),
+            AgentRuntime {
+                id: runtime_id,
+                project_id: "project-test".to_string(),
+                source_host_id: "host-test".to_string(),
+                source_machine_id: "machine-test".to_string(),
+                source_import_key: "host-test/machine-test".to_string(),
+                runtime_artifact_id: Some("artifact-immutable".to_string()),
+                state_schema_version: Some("state-v1".to_string()),
+                host_facts: HostOwnedRuntimeFacts {
+                    display_name: "Test Agent".to_string(),
+                    hostname: None,
+                    runtime_host: "host-test".to_string(),
+                    runtime_status: RuntimeSummaryStatus::Online,
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                },
+                created_at: NOW.to_string(),
+                updated_at: NOW.to_string(),
+            },
+        );
+        let mut referenced_mutation = input;
+        referenced_mutation.version_label = "mutated".to_string();
+        assert!(matches!(
+            state
+                .upsert_runtime_artifact(referenced_mutation)
+                .unwrap_err(),
+            CoreError::RuntimeArtifactImmutable
+        ));
+    }
+
+    #[test]
     fn self_serve_agent_creation_requires_promoted_runtime_artifact() {
         let mut state = BridgeCoreState::default();
         state
@@ -5319,6 +5712,10 @@ mod tests {
                 request_id: restart.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "wrong-token".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_host: None,
+                published_app_urls: None,
                 now: Some("2026-05-25T13:04:30Z".to_string()),
             })
             .unwrap_err();
@@ -5332,6 +5729,10 @@ mod tests {
                 request_id: restart.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "restart-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_host: None,
+                published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -5474,6 +5875,10 @@ mod tests {
                 request_id: stop.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "stop-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_host: None,
+                published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -5512,6 +5917,10 @@ mod tests {
                 request_id: destroy.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_host: None,
+                published_app_urls: None,
                 now: Some("2026-05-25T13:08:00Z".to_string()),
             })
             .unwrap();
@@ -6987,6 +7396,10 @@ mod tests {
                 request_id: restart.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "admin-restart-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_host: None,
+                published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -7240,6 +7653,347 @@ mod tests {
         assert_eq!(overview.active_finite_private_key_count, 1);
         assert!(overview.runtime_link_active);
         assert!(overview.supports_runtime_control);
+    }
+
+    #[test]
+    fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_facts_atomically() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let requested = state
+            .request_agent_creation_configured(
+                RequestAgentCreationInput {
+                    verified_email: "upgrade@finite.vip".to_string(),
+                    workos_user_id: "workos-upgrade".to_string(),
+                    display_name: "Upgrade Agent".to_string(),
+                    launch_code: "off2026".to_string(),
+                    idempotency_key: "upgrade-agent".to_string(),
+                    now: Some(NOW.to_string()),
+                },
+                AgentCreationConfiguration {
+                    runner_class: RunnerClass::Kata,
+                    profile_picture_url: None,
+                },
+            )
+            .unwrap();
+        state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "kata-runner".to_string(),
+                source_host_id: None,
+                lease_token: "launch-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        let completed = state
+            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                request_id: requested.request.id,
+                runner_id: "kata-runner".to_string(),
+                lease_token: "launch-lease".to_string(),
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "finite-kata-upgrade".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: None,
+                display_name: None,
+                hostname: None,
+                runtime_host: Some("http://127.0.0.1:41001".to_string()),
+                runtime_status: Some(RuntimeSummaryStatus::Online),
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: Some(true),
+                published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                now: Some("2026-05-25T13:02:00Z".to_string()),
+            })
+            .unwrap();
+        let runtime_id = completed.request.agent_runtime_id.unwrap();
+        state.runtime_relay_credentials.insert(
+            runtime_id.clone(),
+            RuntimeRelayCredential {
+                agent_runtime_id: runtime_id.clone(),
+                token_hash: "existing-relay-token-hash".to_string(),
+                created_at: "2026-05-25T13:02:00Z".to_string(),
+                updated_at: "2026-05-25T13:02:00Z".to_string(),
+            },
+        );
+        promote_runtime_artifact_version(
+            &mut state,
+            "artifact-mutable",
+            "ghcr.io/finitecomputer/agent-runtime:latest",
+            "mutable",
+            "state-v1",
+            "2026-05-25T13:02:10Z",
+        );
+        let mutable = state
+            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                target_runtime_artifact_id: "artifact-mutable".to_string(),
+                now: Some("2026-05-25T13:02:20Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(mutable, CoreError::RuntimeUpgradeUnsupported));
+        promote_runtime_artifact_version(
+            &mut state,
+            "artifact-incompatible",
+            &format!(
+                "ghcr.io/finitecomputer/agent-runtime:future@sha256:{}",
+                "c".repeat(64)
+            ),
+            "future",
+            "state-v2",
+            "2026-05-25T13:02:30Z",
+        );
+        let incompatible = state
+            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                target_runtime_artifact_id: "artifact-incompatible".to_string(),
+                now: Some("2026-05-25T13:02:40Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            incompatible,
+            CoreError::RuntimeUpgradeStateSchemaIncompatible
+        ));
+        promote_runtime_artifact_version(
+            &mut state,
+            "artifact-v2",
+            &format!(
+                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                "b".repeat(64)
+            ),
+            "v2",
+            "state-v1",
+            "2026-05-25T13:03:00Z",
+        );
+
+        let upgrade = state
+            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                target_runtime_artifact_id: "artifact-v2".to_string(),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(upgrade.kind, RuntimeControlKind::Upgrade);
+        assert_eq!(
+            upgrade.target_runtime_artifact_id.as_deref(),
+            Some("artifact-v2")
+        );
+        let conflicting_stop = state
+            .request_runtime_stop(RequestRuntimeStopInput {
+                verified_email: "upgrade@finite.vip".to_string(),
+                workos_user_id: "workos-upgrade".to_string(),
+                project_id: requested.project.id.clone(),
+                now: Some("2026-05-25T13:04:30Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            conflicting_stop,
+            CoreError::RuntimeControlOperationConflict
+        ));
+        state
+            .runtime_artifacts
+            .get_mut("artifact-v2")
+            .unwrap()
+            .retired_at = Some("2026-05-25T13:04:40Z".to_string());
+        let healthy_runtime_id = "runtime-healthy-behind-poison".to_string();
+        let mut healthy_runtime = state.agent_runtimes[&runtime_id].clone();
+        healthy_runtime.id = healthy_runtime_id.clone();
+        healthy_runtime.source_machine_id = "healthy-behind-poison".to_string();
+        state
+            .agent_runtimes
+            .insert(healthy_runtime_id.clone(), healthy_runtime);
+        let healthy_request_id = "runtime_ctl_healthy_behind_poison".to_string();
+        state.runtime_control_requests.insert(
+            healthy_request_id.clone(),
+            RuntimeControlRequest {
+                id: healthy_request_id.clone(),
+                project_id: requested.project.id.clone(),
+                agent_runtime_id: healthy_runtime_id,
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "healthy-behind-poison".to_string(),
+                requested_by_user_id: "healthy-user".to_string(),
+                kind: RuntimeControlKind::Restart,
+                target_runtime_artifact_id: None,
+                status: RuntimeControlRequestStatus::Requested,
+                runner_id: None,
+                lease_token: None,
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-05-25T13:04:45Z".to_string(),
+                updated_at: "2026-05-25T13:04:45Z".to_string(),
+                completed_at: None,
+            },
+        );
+        let healthy_lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "kata-runner".to_string(),
+                lease_token: "must-not-stick".to_string(),
+                lease_seconds: Some(300),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: None,
+                now: Some("2026-05-25T13:04:50Z".to_string()),
+            })
+            .unwrap()
+            .expect("poisoned upgrade must not starve the next healthy request");
+        assert_eq!(healthy_lease.request.id, healthy_request_id);
+        assert_eq!(
+            state.runtime_control_requests[&upgrade.id].status,
+            RuntimeControlRequestStatus::Failed
+        );
+        assert!(
+            state.runtime_control_requests[&upgrade.id]
+                .failure_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("retired")
+        );
+        state
+            .runtime_artifacts
+            .get_mut("artifact-v2")
+            .unwrap()
+            .retired_at = None;
+        let upgrade = state
+            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                target_runtime_artifact_id: "artifact-v2".to_string(),
+                now: Some("2026-05-25T13:04:55Z".to_string()),
+            })
+            .unwrap();
+        let lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "kata-runner".to_string(),
+                lease_token: "upgrade-lease".to_string(),
+                lease_seconds: Some(300),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:05:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lease
+                .target_runtime_artifact
+                .as_ref()
+                .map(|artifact| artifact.id.as_str()),
+            Some("artifact-v2")
+        );
+
+        let mismatch = state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: upgrade.id.clone(),
+                runner_id: "kata-runner".to_string(),
+                lease_token: "upgrade-lease".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: Some("state-v1".to_string()),
+                runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                now: Some("2026-05-25T13:06:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            mismatch,
+            CoreError::RuntimeUpgradeCompletionMismatch
+        ));
+        assert_eq!(
+            state.runtime_control_requests[&upgrade.id].status,
+            RuntimeControlRequestStatus::Running
+        );
+        assert_eq!(
+            state.agent_runtimes[&runtime_id]
+                .runtime_artifact_id
+                .as_deref(),
+            Some("artifact-v1")
+        );
+
+        state
+            .runtime_artifacts
+            .get_mut("artifact-v2")
+            .unwrap()
+            .retired_at = Some("2026-05-25T13:06:30Z".to_string());
+        state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: upgrade.id.clone(),
+                runner_id: "kata-runner".to_string(),
+                lease_token: "upgrade-lease".to_string(),
+                runtime_artifact_id: Some("artifact-v2".to_string()),
+                state_schema_version: Some("state-v1".to_string()),
+                runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                now: Some("2026-05-25T13:06:40Z".to_string()),
+            })
+            .unwrap();
+        let runtime = &state.agent_runtimes[&runtime_id];
+        assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
+        assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
+        assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
+        assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
+        assert!(
+            state
+                .project_runtime_links
+                .values()
+                .any(|link| { link.agent_runtime_id == runtime_id && link.active })
+        );
+        assert!(state.finite_private_api_keys.values().all(|key| {
+            key.agent_runtime_id.as_deref() != Some(runtime_id.as_str())
+                || key.status == FinitePrivateApiKeyStatus::Active
+        }));
+        assert!(
+            state
+                .finite_private_admin_audit_events
+                .values()
+                .any(|event| {
+                    event.action == "runtime.admin_upgrade"
+                        && event.metadata["targetRuntimeArtifactId"] == "artifact-v2"
+                })
+        );
+    }
+
+    #[test]
+    fn runtime_upgrade_rejects_non_kata_runtime_before_leasing() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "not-kata@finite.vip",
+            "workos-not-kata",
+            "not-kata",
+            "not-kata-runtime",
+            "artifact-v1",
+            LATER,
+        );
+        promote_runtime_artifact_version(
+            &mut state,
+            "artifact-mutable",
+            "ghcr.io/finitecomputer/agent-runtime:latest",
+            "mutable",
+            "state-v1",
+            "2026-05-25T13:03:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let error = state
+            .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id,
+                target_runtime_artifact_id: "artifact-mutable".to_string(),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(error, CoreError::RuntimeUpgradeUnsupported));
+        assert!(state.runtime_control_requests.is_empty());
     }
 
     fn promote_runtime_artifact(state: &mut BridgeCoreState) {

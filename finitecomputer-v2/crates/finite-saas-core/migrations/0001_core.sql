@@ -368,7 +368,8 @@ CREATE TABLE IF NOT EXISTS runtime_control_requests (
   source_host_id TEXT NOT NULL,
   source_machine_id TEXT NOT NULL,
   requested_by_user_id TEXT NOT NULL REFERENCES users(id),
-  kind TEXT NOT NULL CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'stop', 'destroy')),
+  kind TEXT NOT NULL CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'upgrade', 'stop', 'destroy')),
+  target_runtime_artifact_id TEXT REFERENCES runtime_artifacts(id),
   status TEXT NOT NULL CHECK (status IN ('requested', 'running', 'succeeded', 'failed')),
   runner_id TEXT,
   lease_token TEXT,
@@ -379,24 +380,39 @@ CREATE TABLE IF NOT EXISTS runtime_control_requests (
   completed_at TIMESTAMPTZ
 );
 
+ALTER TABLE runtime_control_requests
+  ADD COLUMN IF NOT EXISTS target_runtime_artifact_id TEXT REFERENCES runtime_artifacts(id);
+
 DO $$
+DECLARE
+  current_definition TEXT;
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conname = 'runtime_control_requests_kind_check'
-  ) THEN
+  SELECT pg_get_constraintdef(constraint_row.oid)
+    INTO current_definition
+    FROM pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'runtime_control_requests'::regclass
+      AND constraint_row.conname = 'runtime_control_requests_kind_check';
+
+  IF current_definition IS NULL THEN
+    ALTER TABLE runtime_control_requests
+      ADD CONSTRAINT runtime_control_requests_kind_check
+      CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'upgrade', 'stop', 'destroy'));
+  ELSIF position('''upgrade''' IN current_definition) = 0 THEN
     ALTER TABLE runtime_control_requests
       DROP CONSTRAINT runtime_control_requests_kind_check;
-  END IF;
 
-  ALTER TABLE runtime_control_requests
-    ADD CONSTRAINT runtime_control_requests_kind_check
-    CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'stop', 'destroy'));
+    ALTER TABLE runtime_control_requests
+      ADD CONSTRAINT runtime_control_requests_kind_check
+      CHECK (kind IN ('restart', 'recover_known_good_chat_runtime', 'upgrade', 'stop', 'destroy'));
+  END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS runtime_control_requests_pending_idx
   ON runtime_control_requests(status, source_host_id, created_at, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_control_requests_one_active_per_runtime
+  ON runtime_control_requests(agent_runtime_id)
+  WHERE status IN ('requested', 'running');
 
 CREATE TABLE IF NOT EXISTS source_host_relays (
   source_host_id TEXT PRIMARY KEY,

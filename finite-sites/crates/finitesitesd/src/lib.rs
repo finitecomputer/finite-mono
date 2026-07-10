@@ -41,8 +41,8 @@ use finitesites_store::{
 };
 
 const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
+const VIEWER_SESSION_SERVICE_TOKEN_ENV: &str = "FINITE_SITES_VIEWER_SESSION_TOKEN";
 
-#[derive(Debug)]
 pub struct ServeOptions {
     pub data_dir: PathBuf,
     pub listen: SocketAddr,
@@ -51,6 +51,9 @@ pub struct ServeOptions {
     pub api_url: String,
     pub git_base_url: String,
     pub identity_authority_url: Option<String>,
+    /// Dedicated account-boundary credential for the internal viewer-session
+    /// exchange. It comes from the environment, never argv.
+    pub viewer_session_service_token: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
@@ -227,6 +230,11 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         flag_value(&flags, "identity-authority-url"),
         identity_authority_env.as_deref(),
     )?;
+    let viewer_session_service_token = std::env::var(VIEWER_SESSION_SERVICE_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_viewer_session_service_token(viewer_session_service_token.as_deref())?;
     let git_hook_helper_path = match flag_value(&flags, "git-hook-helper") {
         Some(raw) => PathBuf::from(raw),
         None => std::env::current_exe()
@@ -278,6 +286,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         api_url,
         git_base_url,
         identity_authority_url,
+        viewer_session_service_token,
         git_hook_helper_path,
         git_auto_reconcile,
         site_url_scheme,
@@ -287,6 +296,19 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         app_runner_kind,
         idle_timeout_seconds,
     })
+}
+
+pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Result<(), String> {
+    let Some(token) = token else {
+        // Absent means the internal endpoint is deliberately disabled.
+        return Ok(());
+    };
+    if !hex::is_hex32(token) {
+        return Err(format!(
+            "{VIEWER_SESSION_SERVICE_TOKEN_ENV} must be exactly 64 lowercase hex characters"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_identity_authority_url(
@@ -746,5 +768,32 @@ mod tests {
             parse_identity_authority_url(None, Some("https://identity.env.example/")).unwrap_err(),
             "FINITE_IDENTITY_AUTHORITY must not end with /"
         );
+    }
+
+    #[test]
+    fn viewer_session_service_token_is_a_bounded_32_byte_secret() {
+        assert!(validate_viewer_session_service_token(None).is_ok());
+        assert!(
+            validate_viewer_session_service_token(Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ))
+            .is_ok()
+        );
+        for invalid in [
+            "",
+            "short",
+            "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+        ] {
+            let error = validate_viewer_session_service_token(Some(invalid)).unwrap_err();
+            assert_eq!(
+                error,
+                "FINITE_SITES_VIEWER_SESSION_TOKEN must be exactly 64 lowercase hex characters"
+            );
+            if !invalid.is_empty() {
+                assert!(!error.contains(invalid));
+            }
+        }
     }
 }

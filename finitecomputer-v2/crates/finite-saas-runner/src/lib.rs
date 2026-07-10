@@ -219,7 +219,15 @@ pub enum RunOnceOutcome {
         request_id: String,
         runtime_id: String,
     },
+    RuntimeUpgraded {
+        request_id: String,
+        runtime_id: String,
+    },
     RuntimeRecoveryFailed {
+        request_id: String,
+        failure_message: String,
+    },
+    RuntimeUpgradeFailed {
         request_id: String,
         failure_message: String,
     },
@@ -495,6 +503,9 @@ where
                 lease_token,
                 RuntimeControlKind::RecoverKnownGoodChatRuntime,
             ),
+            RuntimeControlKind::Upgrade => {
+                self.run_runtime_control_operation(lease, lease_token, RuntimeControlKind::Upgrade)
+            }
             RuntimeControlKind::Stop => {
                 self.run_runtime_control_operation(lease, lease_token, RuntimeControlKind::Stop)
             }
@@ -513,24 +524,34 @@ where
         let request_id = lease.request.id.clone();
         let source_machine_id = lease.request.source_machine_id.clone();
         let previous_heartbeat = match kind {
-            RuntimeControlKind::Restart | RuntimeControlKind::RecoverKnownGoodChatRuntime => self
+            RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade => self
                 .queue
                 .runtime_heartbeat_for_machine(&source_machine_id)?
                 .map(|heartbeat| heartbeat.last_seen_at),
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
         };
         let restart_options = RuntimeRestartOptions::new(self.runtime_environment.clone())?;
-        let operation_result = match kind {
-            RuntimeControlKind::Restart => self.launcher.restart_runtime(&lease, &restart_options),
+        let operation_result: Result<Option<RuntimeUpgradeFacts>, RunnerError> = match kind {
+            RuntimeControlKind::Restart => self
+                .launcher
+                .restart_runtime(&lease, &restart_options)
+                .map(|()| None),
             RuntimeControlKind::RecoverKnownGoodChatRuntime => self
                 .launcher
-                .recover_known_good_chat_runtime(&lease, &restart_options),
-            RuntimeControlKind::Stop => self.launcher.stop_runtime(&lease),
-            RuntimeControlKind::Destroy => self.launcher.destroy_runtime(&lease),
+                .recover_known_good_chat_runtime(&lease, &restart_options)
+                .map(|()| None),
+            RuntimeControlKind::Upgrade => self
+                .launcher
+                .upgrade_runtime(&lease, &restart_options)
+                .map(Some),
+            RuntimeControlKind::Stop => self.launcher.stop_runtime(&lease).map(|()| None),
+            RuntimeControlKind::Destroy => self.launcher.destroy_runtime(&lease).map(|()| None),
         };
 
         match operation_result {
-            Ok(()) => match self.wait_for_runtime_control_readiness(
+            Ok(upgrade_facts) => match self.wait_for_runtime_control_readiness(
                 kind,
                 &source_machine_id,
                 previous_heartbeat.as_deref(),
@@ -542,6 +563,18 @@ where
                             request_id: request_id.clone(),
                             runner_id: self.runner_id.clone(),
                             lease_token,
+                            runtime_artifact_id: upgrade_facts
+                                .as_ref()
+                                .map(|facts| facts.runtime_artifact_id.clone()),
+                            state_schema_version: upgrade_facts
+                                .as_ref()
+                                .map(|facts| facts.state_schema_version.clone()),
+                            runtime_host: upgrade_facts
+                                .as_ref()
+                                .map(|facts| facts.runtime_host.clone()),
+                            published_app_urls: upgrade_facts
+                                .as_ref()
+                                .map(|facts| facts.published_app_urls.clone()),
                             now: None,
                         },
                     )?;
@@ -598,7 +631,9 @@ where
         previous_heartbeat: Option<&str>,
     ) -> Result<(), RunnerError> {
         match kind {
-            RuntimeControlKind::Restart | RuntimeControlKind::RecoverKnownGoodChatRuntime => {
+            RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade => {
                 self.wait_for_restart_readiness(source_machine_id, previous_heartbeat)
             }
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => Ok(()),
@@ -818,6 +853,15 @@ pub trait RuntimeLauncher {
             "runtime known-good chat recovery is not supported by this launcher".to_string(),
         ))
     }
+    fn upgrade_runtime(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<RuntimeUpgradeFacts, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "runtime upgrade is not supported by this launcher".to_string(),
+        ))
+    }
     fn stop_runtime(&mut self, _lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         Err(RunnerError::RuntimeLaunch(
             "runtime stop is not supported by this launcher".to_string(),
@@ -882,6 +926,14 @@ where
         (**self).recover_known_good_chat_runtime(lease, options)
     }
 
+    fn upgrade_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
+    ) -> Result<RuntimeUpgradeFacts, RunnerError> {
+        (**self).upgrade_runtime(lease, options)
+    }
+
     fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         (**self).stop_runtime(lease)
     }
@@ -934,6 +986,10 @@ fn runtime_control_success_outcome(
                 runtime_id,
             }
         }
+        RuntimeControlKind::Upgrade => RunOnceOutcome::RuntimeUpgraded {
+            request_id,
+            runtime_id,
+        },
         RuntimeControlKind::Stop => RunOnceOutcome::RuntimeStopped {
             request_id,
             runtime_id,
@@ -956,6 +1012,10 @@ fn runtime_control_failed_outcome(
             failure_message,
         },
         RuntimeControlKind::RecoverKnownGoodChatRuntime => RunOnceOutcome::RuntimeRecoveryFailed {
+            request_id,
+            failure_message,
+        },
+        RuntimeControlKind::Upgrade => RunOnceOutcome::RuntimeUpgradeFailed {
             request_id,
             failure_message,
         },
@@ -984,6 +1044,15 @@ pub struct RuntimeLaunchFacts {
     pub runtime_status: RuntimeSummaryStatus,
     pub active_inference_profile: Option<String>,
     pub hermes_available: Option<bool>,
+    pub published_app_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeUpgradeFacts {
+    pub runtime_artifact_id: String,
+    pub state_schema_version: String,
+    pub runtime_host: String,
     pub published_app_urls: Vec<String>,
 }
 
@@ -3985,6 +4054,46 @@ mod tests {
     }
 
     #[test]
+    fn run_once_upgrades_only_the_core_bound_artifact_and_reports_actual_facts() {
+        let runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).without_core_heartbeat(),
+            FixedLeaseTokens::new(["lease-upgrade"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeUpgraded {
+                request_id: runtime_control.request.id,
+                runtime_id: "runtime_123".to_string(),
+            }
+        );
+        assert_eq!(runner.launcher.upgraded, vec!["oslo-agent-001"]);
+        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
+        let completion = &runner.queue.completed_runtime_control[0];
+        assert_eq!(
+            completion.runtime_artifact_id.as_deref(),
+            Some("artifact-v2")
+        );
+        assert_eq!(completion.state_schema_version.as_deref(), Some("state-v1"));
+        assert_eq!(
+            completion.runtime_host.as_deref(),
+            Some("http://127.0.0.1:41002")
+        );
+        assert_eq!(
+            completion.published_app_urls.as_deref(),
+            Some(["http://127.0.0.1:41002/contact".to_string()].as_slice())
+        );
+        assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
     fn run_once_stops_runtime_control_request_without_waiting_for_heartbeat() {
         let runtime_control =
             sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
@@ -4574,7 +4683,8 @@ mod tests {
             )
         );
 
-        let command = kata::kata_run_command(&config, &plan, &lease);
+        let command =
+            kata::kata_run_command(&config, &plan, &lease, &RuntimeLaunchOptions::default());
         let args = os_strings_to_strings(&command.args);
         assert!(
             args.windows(2)
@@ -5406,6 +5516,7 @@ mod tests {
         restart_options: Vec<RuntimeRestartOptions>,
         restarted: Vec<String>,
         recovered: Vec<String>,
+        upgraded: Vec<String>,
         stopped: Vec<String>,
         destroyed: Vec<String>,
         runner_capacity: RunnerLeaseCapacity,
@@ -5423,6 +5534,7 @@ mod tests {
                 restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
+                upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity::default(),
@@ -5440,6 +5552,7 @@ mod tests {
                 restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
+                upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity::default(),
@@ -5457,6 +5570,7 @@ mod tests {
                 restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
+                upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity::default(),
@@ -5524,6 +5638,28 @@ mod tests {
             self.restart_result
                 .clone()
                 .map_err(RunnerError::RuntimeLaunch)
+        }
+
+        fn upgrade_runtime(
+            &mut self,
+            lease: &RuntimeControlLease,
+            options: &RuntimeRestartOptions,
+        ) -> Result<RuntimeUpgradeFacts, RunnerError> {
+            self.upgraded.push(lease.runtime.source_machine_id.clone());
+            self.restart_options.push(options.clone());
+            self.restart_result
+                .clone()
+                .map_err(RunnerError::RuntimeLaunch)?;
+            let target = lease
+                .target_runtime_artifact
+                .as_ref()
+                .ok_or_else(|| RunnerError::RuntimeLaunch("missing upgrade target".to_string()))?;
+            Ok(RuntimeUpgradeFacts {
+                runtime_artifact_id: target.id.clone(),
+                state_schema_version: target.state_schema_version.clone(),
+                runtime_host: "http://127.0.0.1:41002".to_string(),
+                published_app_urls: vec!["http://127.0.0.1:41002/contact".to_string()],
+            })
         }
 
         fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
@@ -5635,6 +5771,31 @@ mod tests {
         sample_runtime_control_lease_with_kind(request_id, RuntimeControlKind::Restart)
     }
 
+    fn sample_runtime_upgrade_lease(request_id: &str) -> RuntimeControlLease {
+        let mut lease =
+            sample_runtime_control_lease_with_kind(request_id, RuntimeControlKind::Upgrade);
+        lease.request.target_runtime_artifact_id = Some("artifact-v2".to_string());
+        lease.target_runtime_artifact = Some(RuntimeArtifact {
+            id: "artifact-v2".to_string(),
+            kind: RuntimeArtifactKind::OciImage,
+            reference: format!(
+                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                "b".repeat(64)
+            ),
+            version_label: "v2".to_string(),
+            source_git_sha: Some("git-v2".to_string()),
+            finitec_version: None,
+            hermes_source_ref: Some("0.18.2".to_string()),
+            finite_platform_plugin_ref: Some("plugin-v2".to_string()),
+            state_schema_version: "state-v1".to_string(),
+            base_image: None,
+            created_at: "2026-05-25T13:00:00Z".to_string(),
+            promoted_at: Some("2026-05-25T13:01:00Z".to_string()),
+            retired_at: None,
+        });
+        lease
+    }
+
     fn sample_runtime_control_lease_with_kind(
         request_id: &str,
         kind: RuntimeControlKind,
@@ -5648,6 +5809,7 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 requested_by_user_id: "user_123".to_string(),
                 kind,
+                target_runtime_artifact_id: None,
                 status: RuntimeControlRequestStatus::Running,
                 runner_id: Some("runner-1".to_string()),
                 lease_token: Some("lease-1".to_string()),
@@ -5677,6 +5839,7 @@ mod tests {
                 created_at: "2026-05-25T12:00:00Z".to_string(),
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
+            target_runtime_artifact: None,
         }
     }
 

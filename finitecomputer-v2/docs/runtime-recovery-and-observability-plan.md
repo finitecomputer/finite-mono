@@ -321,6 +321,14 @@ Acceptance criteria:
 
 Goal: recover from bad runtime releases without touching user data.
 
+Implementation note (2026-07-10): the first narrow Kata backend operation is
+now implemented as an explicit admin Runtime Upgrade. It binds a promoted,
+digest-pinned, exact-schema artifact in Core; stages and verifies replacement
+compute on the same `/data`; preserves the Agent Principal; rolls the old image
+back on failure; and commits actual artifact/endpoint facts atomically. The
+broader compatibility manifest, user-facing offer UX, off-host snapshot, and
+empty-target restore work described below remain future recovery phases.
+
 Core should know the current runtime artifact and one or more known-good
 artifacts that are compatible with the mounted state schema. Rollback should
 redeploy the selected image against the same `/data` volume and encrypted env

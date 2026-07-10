@@ -3,9 +3,9 @@ use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, BillingOverview,
-    BillingSubscriptionStatus, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
-    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest,
+    BillingOverview, BillingSubscriptionStatus, CancelAgentCreationRequestInput,
+    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
     ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
     FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateGrant,
@@ -64,6 +64,9 @@ pub struct CoreApiState {
     /// Normalized emails allowed to call `/api/core/v1/admin/*`. Empty means
     /// no admins: every admin endpoint fails closed with 403.
     admin_emails: Arc<BTreeSet<String>>,
+    /// First-use deployment gate. Persisting `kind = 'upgrade'` crosses the
+    /// rollback boundary for Core generations that predate that value.
+    runtime_upgrades_enabled: bool,
     relay_store: RelayStore,
     result_waiters: RelayWaiters,
     chat_watchers: ChatWatchers,
@@ -202,6 +205,10 @@ pub struct FailAgentCreationRequest {
 pub struct CompleteRuntimeControlRequest {
     pub runner_id: String,
     pub lease_token: String,
+    pub runtime_artifact_id: Option<String>,
+    pub state_schema_version: Option<String>,
+    pub runtime_host: Option<String>,
+    pub published_app_urls: Option<Vec<String>>,
     pub now: Option<String>,
 }
 
@@ -223,6 +230,7 @@ pub struct RuntimeControlRequestView {
     pub source_machine_id: String,
     pub requested_by_user_id: String,
     pub kind: crate::RuntimeControlKind,
+    pub target_runtime_artifact_id: Option<String>,
     pub status: crate::RuntimeControlRequestStatus,
     pub failure_message: Option<String>,
     pub created_at: String,
@@ -240,6 +248,7 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
             source_machine_id: request.source_machine_id,
             requested_by_user_id: request.requested_by_user_id,
             kind: request.kind,
+            target_runtime_artifact_id: request.target_runtime_artifact_id,
             status: request.status,
             failure_message: request.failure_message,
             created_at: request.created_at,
@@ -317,6 +326,13 @@ pub struct RotateFinitePrivateApiKeyRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimestampRequest {
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeUpgradeRequest {
+    pub target_runtime_artifact_id: String,
     pub now: Option<String>,
 }
 
@@ -493,6 +509,25 @@ pub fn router_with_admin_emails(
     relay_state_dir: impl Into<PathBuf>,
     admin_emails: impl AsRef<str>,
 ) -> Router {
+    let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    router_with_admin_emails_and_runtime_upgrades(
+        store,
+        api_token,
+        relay_state_dir,
+        admin_emails,
+        runtime_upgrades_enabled,
+    )
+}
+
+pub fn router_with_admin_emails_and_runtime_upgrades(
+    store: CoreStore,
+    api_token: impl Into<String>,
+    relay_state_dir: impl Into<PathBuf>,
+    admin_emails: impl AsRef<str>,
+    runtime_upgrades_enabled: bool,
+) -> Router {
     let api_token = api_token.into();
     let admin_emails = parse_admin_email_allowlist(admin_emails.as_ref());
     let finite_private_usage_api_token = env::var("FC_FINITE_PRIVATE_USAGE_API_TOKEN")
@@ -514,6 +549,7 @@ pub fn router_with_admin_emails(
         finite_private_usage_api_token,
         standard_stripe_price_id,
         admin_emails: Arc::new(admin_emails),
+        runtime_upgrades_enabled,
         relay_store: RelayStore::new(relay_state_dir.into()),
         result_waiters: RelayWaiters::default(),
         chat_watchers: ChatWatchers::default(),
@@ -585,6 +621,10 @@ pub fn router_with_admin_emails(
         .route(
             "/api/core/v1/admin/projects/{project_id}/runtime/recover-known-good-chat",
             post(admin_request_runtime_recover_known_good_chat),
+        )
+        .route(
+            "/api/core/v1/admin/projects/{project_id}/runtime/upgrade",
+            post(admin_request_runtime_upgrade),
         )
         .route(
             "/api/core/v1/admin/finite-private/friend-keys",
@@ -1033,6 +1073,29 @@ async fn admin_request_runtime_recover_known_good_chat(
     Ok(Json(RuntimeControlRequestView::from(request)))
 }
 
+async fn admin_request_runtime_upgrade(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(input): Json<AdminRuntimeUpgradeRequest>,
+) -> Result<Json<RuntimeControlRequestView>, ApiError> {
+    let identity = require_admin_identity(&state, &headers)?;
+    if !state.runtime_upgrades_enabled {
+        return Err(CoreError::RuntimeUpgradeNotEnabled.into());
+    }
+    let request = state
+        .store
+        .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+            admin_verified_email: identity.email,
+            admin_workos_user_id: identity.workos_user_id,
+            project_id,
+            target_runtime_artifact_id: input.target_runtime_artifact_id,
+            now: input.now,
+        })
+        .await?;
+    Ok(Json(RuntimeControlRequestView::from(request)))
+}
+
 async fn admin_issue_finite_private_friend_key(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -1471,6 +1534,10 @@ async fn complete_runtime_control_request(
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
+                runtime_artifact_id: input.runtime_artifact_id,
+                state_schema_version: input.state_schema_version,
+                runtime_host: input.runtime_host,
+                published_app_urls: input.published_app_urls,
                 now: input.now,
             })
             .await?,
@@ -2465,7 +2532,14 @@ impl From<CoreError> for ApiError {
             | CoreError::AgentCreationRequestNotCancellable
             | CoreError::RuntimeArtifactNotPromoted
             | CoreError::RuntimeArtifactRetired
+            | CoreError::RuntimeArtifactImmutable
             | CoreError::RuntimeRestartUnsupported
+            | CoreError::RuntimeUpgradeUnsupported
+            | CoreError::RuntimeUpgradeNotEnabled
+            | CoreError::RuntimeUpgradeStateSchemaIncompatible
+            | CoreError::RuntimeUpgradeTargetConflict
+            | CoreError::RuntimeControlOperationConflict
+            | CoreError::RuntimeUpgradeCompletionMismatch
             | CoreError::RuntimeControlRequestNotRunning
             | CoreError::RuntimeControlRequestLeaseConflict
             | CoreError::FinitePrivateGrantNotActive
@@ -2564,6 +2638,7 @@ mod tests {
             source_machine_id: "oslo-agent-001".to_string(),
             requested_by_user_id: "user_123".to_string(),
             kind: crate::RuntimeControlKind::Destroy,
+            target_runtime_artifact_id: None,
             status: crate::RuntimeControlRequestStatus::Running,
             runner_id: Some("runner-1".to_string()),
             lease_token: Some("secret-lease-token".to_string()),
@@ -4074,11 +4149,12 @@ mod tests {
     }
 
     fn admin_router(store: CoreStore) -> Router {
-        router_with_admin_emails(
+        router_with_admin_emails_and_runtime_upgrades(
             store,
             TOKEN,
             default_relay_state_dir(),
             " Admin@Finite.VIP , second@finite.vip ",
+            true,
         )
     }
 
@@ -4125,6 +4201,43 @@ mod tests {
         (status, json)
     }
 
+    #[tokio::test]
+    async fn runtime_upgrade_first_use_gate_is_fail_closed_without_blocking_restart() {
+        let app = router_with_admin_emails_and_runtime_upgrades(
+            CoreStore::memory(),
+            TOKEN,
+            default_relay_state_dir(),
+            "admin@finite.vip",
+            false,
+        );
+        let admin = identity_headers("admin@finite.vip", "true");
+        let (upgrade_status, upgrade_body) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/admin/projects/missing/runtime/upgrade",
+            &admin,
+            Some(serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" })),
+        )
+        .await;
+        assert_eq!(upgrade_status, StatusCode::CONFLICT);
+        assert!(
+            upgrade_body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not enabled")
+        );
+
+        let (restart_status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/admin/projects/missing/runtime/restart",
+            &admin,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(restart_status, StatusCode::NOT_FOUND);
+    }
+
     /// Provision one hosted agent through the same HTTP flow the dashboard and
     /// runner use, returning (project_id, agent_runtime_id).
     async fn provision_hosted_agent(app: &Router) -> (String, String) {
@@ -4157,6 +4270,7 @@ mod tests {
                 "displayName": "Oslo Agent",
                 "launchCode": "off2026",
                 "idempotencyKey": "browser-submit-1",
+                "runnerClass": "kata",
                 "now": "2026-05-25T12:00:00Z"
             })),
         )
@@ -4269,6 +4383,11 @@ mod tests {
                 "POST",
                 "/api/core/v1/admin/projects/project_x/runtime/recover-known-good-chat".to_string(),
                 serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/admin/projects/project_x/runtime/upgrade".to_string(),
+                serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" }),
             ),
             (
                 "POST",
@@ -4389,6 +4508,78 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(completed["status"], "succeeded");
 
+        let target_reference = format!(
+            "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+            "b".repeat(64)
+        );
+        let (status, _) = send_json(
+            &app,
+            "PUT",
+            "/api/core/v1/runtime-artifacts/artifact-v2",
+            &service,
+            Some(serde_json::json!({
+                "kind": "oci_image",
+                "reference": target_reference,
+                "versionLabel": "v2",
+                "stateSchemaVersion": "state-v1",
+                "promoted": true,
+                "now": "2026-05-25T13:05:10Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, upgrade) = send_json(
+            &app,
+            "POST",
+            &format!("/api/core/v1/admin/projects/{project_id}/runtime/upgrade"),
+            &admin,
+            Some(serde_json::json!({
+                "targetRuntimeArtifactId": "artifact-v2",
+                "now": "2026-05-25T13:05:20Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upgrade["kind"], "upgrade");
+        assert_eq!(upgrade["target_runtime_artifact_id"], "artifact-v2");
+        let upgrade_id = upgrade["id"].as_str().unwrap();
+        let (status, lease) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/runtime-control-requests/lease",
+            &service,
+            Some(serde_json::json!({
+                "runnerId": "runner-oslo-1",
+                "leaseToken": "upgrade-lease-1",
+                "leaseSeconds": 60,
+                "sourceHostId": "oslo-host-1",
+                "runnerCapacity": { "runnerClasses": ["kata"] },
+                "now": "2026-05-25T13:05:30Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lease["request"]["id"], upgrade_id);
+        assert_eq!(lease["target_runtime_artifact"]["id"], "artifact-v2");
+        let (status, upgraded) = send_json(
+            &app,
+            "POST",
+            &format!("/api/core/v1/runtime-control-requests/{upgrade_id}/complete"),
+            &service,
+            Some(serde_json::json!({
+                "runnerId": "runner-oslo-1",
+                "leaseToken": "upgrade-lease-1",
+                "runtimeArtifactId": "artifact-v2",
+                "stateSchemaVersion": "state-v1",
+                "runtimeHost": "http://127.0.0.1:41002",
+                "publishedAppUrls": ["http://127.0.0.1:41002/contact"],
+                "now": "2026-05-25T13:05:40Z"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upgraded["status"], "succeeded");
+
         // Recover uses the same machinery.
         let (status, recover) = send_json(
             &app,
@@ -4418,6 +4609,7 @@ mod tests {
             .map(|event| event["action"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
         assert!(admin_actions.contains(&"runtime.admin_restart".to_string()));
+        assert!(admin_actions.contains(&"runtime.admin_upgrade".to_string()));
         assert!(admin_actions.contains(&"runtime.admin_recover_known_good_chat".to_string()));
     }
 

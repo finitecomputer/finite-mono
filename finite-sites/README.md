@@ -370,6 +370,17 @@ fsite project share PROJECT site --public --yes-public --output json
 fsite project share PROJECT site --private --output json
 ```
 
+The Finite dashboard can open an already-shared output for its signed-in user
+without sending another email. It presents the user's verified account email
+to a private Sites endpoint and receives the same single-use viewer link used
+by email login. This does not add the email to the output. The agent or owner
+must still choose `--shared --add-email ...`, and removing that email takes
+effect on the next content request even if the browser still has a cookie.
+The server-to-server credential for this optional exchange is
+`FINITE_SITES_VIEWER_SESSION_TOKEN`, exactly 64 lowercase hex characters
+(`openssl rand -hex 32`). Keep the same value in the Sites and dashboard
+server environment only; an absent value disables the endpoint.
+
 Project Repository visibility is separate from output visibility. Project
 Repositories are private by default. Selected Finite-owned baseline repos may
 be public-read for unauthenticated clone/fetch, but public-read never grants

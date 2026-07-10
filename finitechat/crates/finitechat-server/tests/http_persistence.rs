@@ -100,6 +100,45 @@ async fn sqlite_blob_upload_download_survives_restart_over_http() {
 }
 
 #[tokio::test]
+async fn blob_descriptor_uses_configured_public_url_for_internal_uploads() {
+    let temp = TempDir::new().expect("tempdir");
+    let state = persistent_state(&temp.path().join("delivery.sqlite3"))
+        .with_public_url("https://chat.finite.computer/")
+        .expect("public URL");
+    let app = http_router(state);
+    let ciphertext = b"encrypted attachment from hosted device";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/upload")
+                .header("content-type", "application/octet-stream")
+                .header("host", "127.0.0.1:8788")
+                .body(Body::from(ciphertext.to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let descriptor: BlobDescriptor = read_json(response).await;
+
+    assert_eq!(
+        descriptor.url,
+        format!("https://chat.finite.computer/blobs/{}", descriptor.sha256)
+    );
+}
+
+#[test]
+fn configured_public_url_rejects_path_prefix() {
+    let temp = TempDir::new().expect("tempdir");
+    let error = persistent_state(&temp.path().join("delivery.sqlite3"))
+        .with_public_url("https://chat.finite.computer/internal")
+        .expect_err("public URL is an origin, not a route prefix");
+
+    assert!(error.to_string().contains("bare origin"));
+}
+
+#[tokio::test]
 async fn sqlite_public_image_blob_upload_download_survives_restart_over_http() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");

@@ -45,12 +45,29 @@ pub const NIP98_MAX_SKEW_SECONDS: u64 = 60;
 /// delivery, short enough that a leaked link goes stale quickly.
 pub const LOGIN_TOKEN_TTL_SECONDS: u64 = 15 * 60;
 
+/// Keep only a small number of simultaneously redeemable viewer links for
+/// one Site + email pair. Dashboard reloads and a few concurrent tabs remain
+/// usable, while a caller cannot grow durable token state without bound.
+pub const MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL: u32 = 8;
+
 /// Viewer cookies last 7 days, then the viewer re-authenticates.
 pub const VIEWER_COOKIE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// JSON API request bodies are small control-plane messages. The largest is a
 /// full manifest: 2k files * ~600 bytes/entry stays under this with slack.
 pub const MAX_API_BODY_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The account-to-Sites viewer-session exchange carries only three bounded
+/// strings and uses a smaller limit than the public control-plane API.
+pub const MAX_VIEWER_SESSION_BODY_BYTES: u64 = 4 * 1024;
+
+/// Canonical output URLs are one origin plus `/`; this leaves ample room for
+/// local ports while preventing an internal caller from sending huge values.
+pub const MAX_OUTPUT_URL_BYTES: u32 = 2 * 1024;
+
+/// Post-redeem navigation stays on the output origin and is intentionally
+/// bounded independently of the request body.
+pub const MAX_VIEWER_RETURN_TO_BYTES: u32 = 1024;
 
 /// Git smart HTTP receives pack files. This is deliberately larger than the
 /// JSON API limit but still bounded so a single push cannot consume unbounded

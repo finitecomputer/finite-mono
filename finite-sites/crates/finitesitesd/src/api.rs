@@ -6,18 +6,23 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 
 use finitesites_engine::EngineError;
+use finitesites_engine::validate_email;
 use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE,
     GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
     ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
     ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
+    VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
 };
-use finitesites_proto::limits::MAX_API_BODY_BYTES;
+use finitesites_proto::limits::{
+    MAX_API_BODY_BYTES, MAX_AUTH_HEADER_BYTES, MAX_OUTPUT_URL_BYTES, MAX_VIEWER_RETURN_TO_BYTES,
+    MAX_VIEWER_SESSION_BODY_BYTES,
+};
 use finitesites_proto::{ProtoError, nip98};
 
 use crate::mailer::{ProjectCollaboratorInvite, ViewerInvite};
@@ -38,6 +43,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/projects/{slug}/outputs/{output_id}/sharing",
             post(share_project_output),
+        )
+        .route(
+            "/internal/v1/viewer-sessions",
+            post(create_verified_email_viewer_session).layer(DefaultBodyLimit::max(
+                MAX_VIEWER_SESSION_BODY_BYTES as usize,
+            )),
         )
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES as usize))
         .fallback(api_not_found)
@@ -67,6 +78,22 @@ impl ApiError {
 
     fn bad_request(message: impl Into<String>) -> ApiError {
         ApiError::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    fn forbidden(message: impl Into<String>) -> ApiError {
+        ApiError::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
+    fn unavailable(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        )
+    }
+
+    fn too_many_requests(message: impl Into<String>) -> ApiError {
+        ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
     }
 }
 
@@ -157,6 +184,166 @@ fn authenticate(
 fn parse_json_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(body)
         .map_err(|error| ApiError::bad_request(format!("invalid json: {error}")))
+}
+
+// ---- verified-email viewer session exchange ---------------------------------
+
+async fn create_verified_email_viewer_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let expected_token = state
+        .viewer_session_service_token
+        .as_deref()
+        .ok_or_else(|| ApiError::unavailable("viewer sessions are not configured"))?;
+    authenticate_viewer_session_service(&headers, expected_token)?;
+    if body.len() > MAX_VIEWER_SESSION_BODY_BYTES as usize {
+        return Err(ApiError::bad_request("request body is too large"));
+    }
+    let request: VerifiedEmailViewerSessionRequest = parse_json_body(&body)?;
+    if !valid_return_to(&request.return_to) {
+        return Err(ApiError::bad_request("invalid return path"));
+    }
+
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let site = resolve_canonical_output_url(&state, &engine, &request.output_url)?
+        .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
+    if site.status != finitesites_store::SiteStatus::Published {
+        return Err(ApiError::forbidden("viewer access is unavailable"));
+    }
+    let normalized_email = validate_email(&request.verified_email)
+        .map_err(|_| ApiError::forbidden("viewer access is unavailable"))?;
+    let limiter_key = format!("viewer:{}:{normalized_email}", site.id);
+    let now = now_unix();
+    if !state.login_limiter.check_and_record(
+        &limiter_key,
+        crate::limiter::MAX_VIEWER_SESSIONS_PER_EMAIL,
+        now,
+    ) {
+        return Err(ApiError::too_many_requests(
+            "too many viewer sessions; try again shortly",
+        ));
+    }
+    let link = engine
+        .request_login_for_site(&site, &normalized_email, now)
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?
+        .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
+
+    // Reuse the existing one-time magic-link token. `return_to` is a bounded,
+    // same-origin path and is validated again by the redeem handler.
+    let redeem_url = format!(
+        "{}&return_to={}",
+        link.url,
+        encode_query_component(&request.return_to)
+    );
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(VerifiedEmailViewerSessionResponse { redeem_url }),
+    ))
+}
+
+fn authenticate_viewer_session_service(
+    headers: &HeaderMap,
+    expected_token: &str,
+) -> Result<(), ApiError> {
+    let raw = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() <= MAX_AUTH_HEADER_BYTES as usize)
+        .ok_or_else(|| ApiError::unauthorized("viewer session authorization required"))?;
+    let supplied = raw
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| ApiError::unauthorized("viewer session authorization required"))?;
+    if !constant_time_eq(supplied.as_bytes(), expected_token.as_bytes()) {
+        return Err(ApiError::unauthorized(
+            "viewer session authorization required",
+        ));
+    }
+    Ok(())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut difference = left.len() ^ right.len();
+    for index in 0..max_len {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
+
+fn resolve_canonical_output_url(
+    state: &AppState,
+    engine: &finitesites_engine::Engine,
+    output_url: &str,
+) -> Result<Option<finitesites_store::SiteRecord>, ApiError> {
+    if output_url.is_empty() || output_url.len() > MAX_OUTPUT_URL_BYTES as usize {
+        return Err(ApiError::bad_request("invalid output URL"));
+    }
+    let uri = output_url
+        .parse::<Uri>()
+        .map_err(|_| ApiError::bad_request("invalid output URL"))?;
+    let scheme = uri
+        .scheme_str()
+        .filter(|scheme| *scheme == "http" || *scheme == "https")
+        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
+    if uri.path_and_query().map(|value| value.as_str()) != Some("/") {
+        return Err(ApiError::bad_request(
+            "output URL must be a canonical origin",
+        ));
+    }
+    let output = crate::server::site_label(authority.as_str(), &state.base_domain)
+        .map(|label| ("site", label))
+        .or_else(|| {
+            crate::server::site_label(authority.as_str(), &state.document_base_domain)
+                .map(|label| ("document", label))
+        })
+        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
+    let site = engine
+        .resolve_output(output.0, &output.1)
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    let Some(site) = site else {
+        return Ok(None);
+    };
+    let canonical = engine.output_url_for_site(&site);
+    if canonical != output_url || !canonical.starts_with(&format!("{scheme}://")) {
+        return Err(ApiError::bad_request("output URL must be canonical"));
+    }
+    Ok(Some(site))
+}
+
+pub(crate) fn valid_return_to(return_to: &str) -> bool {
+    !return_to.is_empty()
+        && return_to.len() <= MAX_VIEWER_RETURN_TO_BYTES as usize
+        && return_to.starts_with('/')
+        && !return_to.starts_with("//")
+        && !return_to.contains('\\')
+        && return_to.is_ascii()
+        && !return_to.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+}
+
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+    encoded
 }
 
 /// Best-effort client identity for rate limiting. Spoofable headers only

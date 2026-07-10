@@ -19,6 +19,10 @@
     environment = {
       FC_CORE_BIND = "127.0.0.1:4200";
       FC_CORE_RELAY_STATE_DIR = "/var/lib/finite-saas-core/relay";
+      # Phase 1 ships parser/schema compatibility with first use disabled.
+      # Flip only in a later config generation after that closure is live; see
+      # the rollback-rescue procedure in infra/runbooks/runtime-image.md.
+      FC_CORE_ENABLE_RUNTIME_UPGRADES = "false";
       # Public Stripe price id (ConfigMap value; not a secret).
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
       # Verified emails allowed on /api/core/v1/admin/*; empty fails closed.

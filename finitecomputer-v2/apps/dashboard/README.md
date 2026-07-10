@@ -60,6 +60,24 @@ Brain API operations still require their normal Nostr authorization. Do not
 point this at an independently login-gated public URL or treat WorkOS as a
 replacement for Brain Folder Key grants.
 
+## Sites account preview boundary
+
+Set `FC_SITES_UPSTREAM_URL` to the internal Finite Sites origin and give the
+dashboard and `finitesitesd` the same dedicated
+`FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
+verified account email for Sites' existing one-time viewer link only after
+Core confirms that account can access the selected Agent Runtime. Sites still
+owns the share list and viewer cookie: the exchange never adds a share, and
+removing the email from the output revokes the cookie on the next request.
+
+The service token is server-only. It must not use a `NEXT_PUBLIC_` name, enter
+a browser response, or be shared with an Agent Runtime.
+
+Local `http://*.sites.localhost` previews are disabled by default. Local
+development may set `FC_SITES_ALLOW_LOCAL_OUTPUTS=1`; production ignores that
+flag so chat content cannot turn the dashboard into an iframe for a service on
+the user's own machine.
+
 ## Run locally
 
 ```bash

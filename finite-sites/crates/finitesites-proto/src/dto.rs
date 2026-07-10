@@ -30,6 +30,25 @@ pub struct EmailRedeemResponse {
     pub linked_to_native_principal: bool,
 }
 
+/// Server-to-server request for a viewer session derived from an already
+/// verified account email. This never creates or changes a Site share.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedEmailViewerSessionRequest {
+    /// Exact canonical root URL of an existing Site or Document output.
+    pub output_url: String,
+    /// Email verified by the calling account boundary.
+    pub verified_email: String,
+    /// Same-origin path to visit after the one-time token is redeemed.
+    pub return_to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedEmailViewerSessionResponse {
+    /// Existing one-time Sites magic-link URL. It is safe to use once and
+    /// must never be persisted as a durable account credential.
+    pub redeem_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRegisterResponse {
     pub pubkey: String,

@@ -40,6 +40,7 @@ pub struct AppState {
     pub api_url: String,
     pub git_base_url: String,
     pub identity_authority: Option<IdentityAuthority>,
+    pub viewer_session_service_token: Option<String>,
     pub base_domain: String,
     pub document_base_domain: String,
     pub data_dir: PathBuf,
@@ -218,6 +219,7 @@ pub async fn serve_on(
     apps: Supervisor,
     options: ServeOptions,
 ) -> Result<(), String> {
+    crate::validate_viewer_session_service_token(options.viewer_session_service_token.as_deref())?;
     git::preflight_git_dependency().map_err(|error| {
         format!(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
@@ -234,6 +236,7 @@ pub async fn serve_on(
             .identity_authority_url
             .as_ref()
             .map(IdentityAuthority::new),
+        viewer_session_service_token: options.viewer_session_service_token.clone(),
         base_domain: options.base_domain.clone(),
         document_base_domain: options.document_base_domain.clone(),
         data_dir: options.data_dir.clone(),

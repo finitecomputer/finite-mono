@@ -1131,6 +1131,14 @@ def _finitechat_service_stream_worker(
                         ),
                     )
                     return
+                if isinstance(record, dict) and record.get("type") == "error":
+                    error = str(record.get("error") or "finitechat inbound stream failed")
+                    _put_stream_result(
+                        loop,
+                        queue,
+                        _FiniteChatResult(False, {}, error, True, False),
+                    )
+                    return
                 _put_stream_result(
                     loop,
                     queue,
@@ -1217,7 +1225,13 @@ def _event_media(attachments: list[Any]) -> tuple[list[str], list[str]]:
     for item in attachments:
         if not isinstance(item, dict):
             continue
-        media_ref = _string_or_none(item.get("path")) or _string_or_none(item.get("url"))
+        local_path = _string_or_none(item.get("path"))
+        # Blob URLs point at encrypted bytes. If the resident sidecar could
+        # not materialize a verified local path, retain the blob only in the
+        # raw message for UI recovery/resend and deliver the caption as text.
+        media_ref = local_path
+        if not media_ref and not isinstance(item.get("blob"), dict):
+            media_ref = _string_or_none(item.get("url"))
         if not media_ref:
             continue
         urls.append(media_ref)

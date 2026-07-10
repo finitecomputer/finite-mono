@@ -121,6 +121,9 @@ pub struct HttpServerState {
     push_tokens: Arc<Mutex<BTreeMap<String, PushTokenRecord>>>,
     push_wakes: Arc<Mutex<BTreeMap<String, PushWakeOutboxRecord>>>,
     blob_objects: Arc<Mutex<BTreeMap<String, BlobObject>>>,
+    /// Canonical externally reachable origin used in durable blob references.
+    /// Request-derived hosts remain the local-development fallback only.
+    public_url: Option<String>,
     ops_since_snapshot: Arc<Mutex<u64>>,
     /// Long-poll wake signal (/sync/wait). A single hub: every accepted publish
     /// wakes all waiters, who re-check their own predicates. Sized for the
@@ -181,10 +184,19 @@ impl HttpServerState {
             push_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             push_wakes: Arc::new(Mutex::new(BTreeMap::new())),
             blob_objects: Arc::new(Mutex::new(BTreeMap::new())),
+            public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: None,
         }
+    }
+
+    pub fn with_public_url(
+        mut self,
+        public_url: impl AsRef<str>,
+    ) -> Result<Self, HttpServerConfigurationError> {
+        self.public_url = Some(normalize_public_url(public_url.as_ref())?);
+        Ok(self)
     }
 
     pub fn from_sqlite_path(path: impl AsRef<Path>) -> Result<Self, DurableStoreError> {
@@ -254,6 +266,7 @@ impl HttpServerState {
             push_tokens: Arc::new(Mutex::new(push_tokens)),
             push_wakes: Arc::new(Mutex::new(push_wakes)),
             blob_objects: Arc::new(Mutex::new(blob_objects)),
+            public_url: None,
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             wake: Arc::new(tokio::sync::Notify::new()),
             store: Some(store),
@@ -273,7 +286,7 @@ impl HttpServerState {
         if let Some(existing) = objects.get(&sha256) {
             if existing.bytes.as_slice() == bytes {
                 return Ok(BlobDescriptor {
-                    url: blob_url(headers, &sha256),
+                    url: blob_url(self.public_url.as_deref(), headers, &sha256),
                     sha256,
                     size_bytes: bytes.len() as u64,
                 });
@@ -292,7 +305,7 @@ impl HttpServerState {
             },
         );
         Ok(BlobDescriptor {
-            url: blob_url(headers, &sha256),
+            url: blob_url(self.public_url.as_deref(), headers, &sha256),
             sha256,
             size_bytes: bytes.len() as u64,
         })
@@ -4602,7 +4615,10 @@ fn blob_content_type(headers: &HeaderMap) -> Result<&str, ServerHttpError> {
     Ok(content_type.split(';').next().unwrap_or_default().trim())
 }
 
-fn blob_url(headers: &HeaderMap, sha256: &str) -> String {
+fn blob_url(public_url: Option<&str>, headers: &HeaderMap, sha256: &str) -> String {
+    if let Some(public_url) = public_url {
+        return format!("{public_url}/blobs/{sha256}");
+    }
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -4614,6 +4630,41 @@ fn blob_url(headers: &HeaderMap, sha256: &str) -> String {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("localhost");
     format!("{scheme}://{host}/blobs/{sha256}")
+}
+
+fn normalize_public_url(public_url: &str) -> Result<String, HttpServerConfigurationError> {
+    let trimmed = public_url.trim();
+    let parsed = reqwest::Url::parse(trimmed).map_err(|error| {
+        HttpServerConfigurationError::InvalidPublicUrl {
+            reason: error.to_string(),
+        }
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(HttpServerConfigurationError::InvalidPublicUrl {
+            reason: "scheme must be http or https".to_owned(),
+        });
+    }
+    if parsed.host_str().is_none() {
+        return Err(HttpServerConfigurationError::InvalidPublicUrl {
+            reason: "host is required".to_owned(),
+        });
+    }
+    if parsed.path() != "/" {
+        return Err(HttpServerConfigurationError::InvalidPublicUrl {
+            reason: "URL must be a bare origin without a path".to_owned(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(HttpServerConfigurationError::InvalidPublicUrl {
+            reason: "credentials are not allowed".to_owned(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(HttpServerConfigurationError::InvalidPublicUrl {
+            reason: "query and fragment are not allowed".to_owned(),
+        });
+    }
+    Ok(trimmed.trim_end_matches('/').to_owned())
 }
 
 fn normalize_blob_upload_content_type(content_type: &str) -> Result<&'static str, ServerHttpError> {
@@ -6373,6 +6424,12 @@ fn validate_key_package_claim_batch(owners: &[MemberId]) -> Result<(), ServerHtt
 fn usize_to_u32(field: &'static str, value: usize) -> Result<u32, ServerHttpError> {
     u32::try_from(value)
         .map_err(|_| ServerHttpError::KeyPackageInventoryCountOverflow { field, value })
+}
+
+#[derive(Debug, Error)]
+pub enum HttpServerConfigurationError {
+    #[error("invalid Finite Chat public URL: {reason}")]
+    InvalidPublicUrl { reason: String },
 }
 
 #[derive(Debug, Error)]
