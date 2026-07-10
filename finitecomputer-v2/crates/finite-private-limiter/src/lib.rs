@@ -94,7 +94,10 @@ async fn proxy_openai(
             "missing_authorization",
         );
     };
-    let request_id = request_id(&headers);
+    // Accounting idempotency belongs to this limiter attempt, not to an
+    // untrusted client correlation header. Reusing a caller supplied id would
+    // let a second upstream attempt reuse the first reservation in Core.
+    let request_id = request_id();
     let estimate = estimate_usage(&body);
     let reserve = ReserveRequest {
         request_id: request_id.clone(),
@@ -441,21 +444,13 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-fn request_id(headers: &HeaderMap) -> String {
-    headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let millis = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-            format!("fp_req_{millis}_{counter}")
-        })
+fn request_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("fp_req_{millis}_{counter}")
 }
 
 fn request_is_streaming(body: &[u8]) -> bool {
@@ -693,10 +688,11 @@ struct SettleRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Path, State};
     use finite_saas_core::api::router as core_router;
     use finite_saas_core::store::CoreStore;
     use finite_saas_core::{ApproveFinitePrivateGrantInput, IssueFinitePrivateApiKeyInput};
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tokio::net::TcpListener;
 
@@ -923,6 +919,102 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let _ = response.text().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn limiter_uses_a_fresh_internal_accounting_id_for_duplicate_client_ids() {
+        #[derive(Clone, Default)]
+        struct UsageApiState {
+            reserve_request_ids: Arc<Mutex<Vec<String>>>,
+            settle_request_ids: Arc<Mutex<Vec<String>>>,
+        }
+        async fn reserve(
+            State(state): State<UsageApiState>,
+            Json(input): Json<Value>,
+        ) -> Json<Value> {
+            let request_id = input["requestId"].as_str().unwrap().to_string();
+            state
+                .reserve_request_ids
+                .lock()
+                .unwrap()
+                .push(request_id.clone());
+            Json(json!({
+                "decision": "allow",
+                "reservation_id": format!("reservation-{request_id}"),
+            }))
+        }
+        async fn settle(
+            State(state): State<UsageApiState>,
+            Path(_reservation_id): Path<String>,
+            Json(input): Json<Value>,
+        ) -> Json<Value> {
+            state
+                .settle_request_ids
+                .lock()
+                .unwrap()
+                .push(input["requestId"].as_str().unwrap().to_string());
+            Json(json!({ "settled": true }))
+        }
+
+        let usage_api_state = UsageApiState::default();
+        let usage_api_url = spawn(
+            Router::new()
+                .route("/internal/finite-private/v1/reservations", post(reserve))
+                .route(
+                    "/internal/finite-private/v1/reservations/{reservation_id}/settle",
+                    post(settle),
+                )
+                .with_state(usage_api_state.clone()),
+        )
+        .await;
+        let upstream_url = spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 10,
+                        "total_tokens": 20,
+                    }
+                }))
+            }),
+        ))
+        .await;
+        let limiter_url = spawn(
+            app(LimiterConfig {
+                finite_usage_api_url: usage_api_url,
+                finite_usage_api_service_key: "core-token".to_string(),
+                upstream_base_url: upstream_url,
+                vllm_internal_api_key: "vllm-secret".to_string(),
+                dashboard_url: "https://finite.computer/dashboard".to_string(),
+            })
+            .unwrap(),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            let response = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_duplicate_client_id")
+                .header("x-request-id", "caller-reused-id")
+                .json(&json!({
+                    "model": "kimi-k2-6",
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let reserved = usage_api_state.reserve_request_ids.lock().unwrap().clone();
+        let settled = usage_api_state.settle_request_ids.lock().unwrap().clone();
+        assert_eq!(reserved.len(), 2);
+        assert_eq!(settled, reserved);
+        assert_ne!(reserved[0], reserved[1]);
+        assert!(reserved.iter().all(|id| id != "caller-reused-id"));
     }
 
     async fn spawn(app: Router) -> String {

@@ -119,6 +119,8 @@ Use
 `../infra/hosts/lat1/systemd/runner.env.example` as the template. The
 production shape is:
 
+- `FC_CORE_RUNNER_API_TOKEN=<route-scoped Runner credential>` (never reuse the
+  shared `FC_CORE_API_TOKEN`)
 - `FC_RUNNER_CLASS=kata`
 - `FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>`
 - `FC_RUNNER_KATA_NAMESPACE=finite`
@@ -146,6 +148,22 @@ http://127.0.0.1:<allocated-port>/contact
 `/contact` is a product-facing discovery fact, not a Runner health gate. The
 Runtime may keep compatibility routes internally, but Core and new clients do
 not publish or canonize them.
+
+### Current production preflight (2026-07-10T19:03Z)
+
+**Blocked; this is not Kata readiness proof.** Read-only inspection found the
+`finite-lat-1` runner timer enabled and active, with its last service exit
+`0`. It is configured for `finite-agent-runtime-2026-07-10.5`, a maximum of
+12 Runtimes with 2 active, and 4 CPU / 8G per Runtime; the observed launch
+shape has two read-write host binds at `/data`. The selected `.5` artifact
+returned `503` from both `/healthz` and `/contact`, while the older `.2`
+artifact returned `200`; `finite-agentd` reported `bridge status stream_error`
+after its Finite Chat inbound stream ended. In addition, the live environment
+contains only `FC_CORE_API_TOKEN`, not the required
+`FC_CORE_RUNNER_API_TOKEN`. Do not launch the production canary or treat the
+timer, capacity, artifact selection, or bind configuration as end-to-end
+success until the route-scoped credential is deployed and the selected artifact
+is ready. No live mutation was made during this preflight.
 
 Core issues a runtime-scoped Finite Private key and the runner gives that key
 only to the new runtime at launch. Later inference changes are explicit typed

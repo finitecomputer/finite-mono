@@ -84,6 +84,7 @@ Notes:
 
 - 2026-07-10: Paul moved proactive stuck-launch recovery out of the internal production canary and into the customer-facing run. If the canary actually sticks, that observed failure blocks acceptance and is fixed before retrying.
 - 2026-07-10: the Dashboard currently shows an unbounded waiting state for `requested`/`launching` and exposes reset only after `failed`; Core's cancellation route is service-authenticated rather than owner-scoped.
+- 2026-07-10T19:03Z: read-only Kata preflight on `finite-lat-1` found the runner timer enabled/active and configured capacity/artifact state, but the selected `finite-agent-runtime-2026-07-10.5` returned `503` from `/healthz` and `/contact`; `finite-agentd` reported a Finite Chat inbound `stream_error`. The live runner has only shared `FC_CORE_API_TOKEN`, not the required route-scoped `FC_CORE_RUNNER_API_TOKEN`. No canary launch was attempted; its readiness and launch behavior remain unverified.
 
 ## Brain access when a new Device meets existing encrypted Vaults (opened 2026-07-10)
 

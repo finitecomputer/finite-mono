@@ -58,6 +58,22 @@ The currently deployed legacy-built limiter already generates a fresh accounting
 
 The product contract and dashboard policy select Kata for production, and the Nix module defines an enabled Kata Runner timer, while `infra/README.md` still calls the Runner dormant because of an older Phala/Enclavia path. Before creating the canary request, verify the live Kata timer, route-scoped Core credential, capacity, promoted Runtime artifact, durable-volume binding, and readiness path. Reconcile the operational docs from that evidence. Do not add provider selection UI or use the canary to finish Phala.
 
+**Status: BLOCKED — do not create the canary request.** Read-only production
+preflight at 2026-07-10T19:03Z found `finite-saas-runner.timer` enabled and
+active on `finite-lat-1`, with its last service exit `0`. Its configured Kata
+lane selects `finite-agent-runtime-2026-07-10.5`, capacity is 12 total / 2
+active at 4 CPU and 8G per Runtime, and the observed launch shape has two
+read-write host binds at `/data`. This is configuration evidence, not product
+readiness evidence: artifact `.5` returned `503` from both `/healthz` and
+`/contact`; `finite-agentd` reported `bridge status stream_error` because the
+Finite Chat inbound stream ended. The older `.2` artifact returned `200` for
+those endpoints. The live runner environment also has only the shared
+`FC_CORE_API_TOKEN`; the required route-scoped `FC_CORE_RUNNER_API_TOKEN` is
+not deployed. No production state was changed. The Kata launch, contact,
+two-way-turn, and restart-preservation checks remain unverified until a
+route-scoped Runner credential is deployed and the selected artifact reaches
+readiness.
+
 ### P1 — keep dashboard chat state coherent under real latency
 
 A recent CI product-flow failure showed that an older Hosted Web Device HTTP snapshot can arrive after a newer SSE snapshot and remove the chat-derived Finite Sites preview. The latest rerun passed, so this is a latency-sensitive regression rather than a currently reproducible permanent outage. The Dashboard receives a `rev`, but currently replaces state unconditionally; the Hosted Web Device initializes that revision at zero whenever a per-user runtime is reopened, so a process-lifetime maximum is not restart-safe.
