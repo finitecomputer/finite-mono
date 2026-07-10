@@ -4,8 +4,7 @@ Hard-cut self-serve SaaS codebase for Finite Computer.
 
 This repo is for the product we are building now:
 
-1. A user signs in through Account Auth, names their agent, selects an icon,
-   and chooses a Runner class.
+1. A user signs in through Account Auth, names their agent, and selects an icon.
 2. Core creates a Project and Finite Private grant state.
 3. The selected Runner launches a real Hermes Agent Runtime.
 4. A newly initialized Runtime copies the Product Release's bundled Finite
@@ -147,8 +146,9 @@ rename deployment paths from `finite-computer` to v2.
 ## SaaS Runner
 
 Docker is the local preflight backend. Kata is the first production Runner;
-Phala is the confidential fast-follow candidate. Placement is Project-selected
-and workers advertise exactly one supported adapter class:
+Phala is the confidential fast-follow candidate. Core assigns placement from
+product policy, persists it with the Project, and does not expose provider
+selection in onboarding. Workers advertise exactly one supported adapter class:
 
 ```text
 RuntimeSpec.runner_class = "kata"

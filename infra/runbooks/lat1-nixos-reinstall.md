@@ -111,6 +111,8 @@ Plus the Tinfoil limiter `/health` → `usageApi authenticated: true, 200`
 ## Post-install follow-ups
 
 Enable offsite borg backups first (single-disk = backups are the safety net),
-then a disk mirror. Runner is dormant until the `phala` CLI / Phala Cloud API
-lands. Brain + oauth2-proxy are deferred (still on smoke). See
+then a disk mirror. The Nix configuration enables the Kata Runner timer; verify
+its live credential, capacity, Runtime artifact, and readiness path before the
+internal production canary. Phala remains a fast-follow adapter and does not
+gate Kata. Brain + oauth2-proxy are deferred (still on smoke). See
 `finite-fable/notes/lat1-cutover-complete-2026-07-09.md`.

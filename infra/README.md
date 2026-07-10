@@ -60,12 +60,12 @@ that ARE those boxes' config, plus a captured-state appendix.
 
 | Host | Role | Services |
 |---|---|---|
-| **lat1** (64.34.82.77) | **Consolidated NixOS app server** (`infra/nixos/`) | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (**dormant** — phala CLI gap / enclavia being explored), **one** Caddy edge for `finite.computer` + `chat.finite.computer` + `*.finite.chat` + `*.docs.finite.chat`. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
+| **lat1** (64.34.82.77) | **Consolidated NixOS app server** (`infra/nixos/`) | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata timer defined and enabled in Nix; live canary readiness still to be verified), **one** Caddy edge for `finite.computer` + `chat.finite.computer` + `*.finite.chat` + `*.docs.finite.chat`. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
 | **lat2** (64.34.80.19) | **CI runner box** (still Ubuntu+nix) | GitHub Actions runners: `finite-lat-2-mono` (against finite-mono) plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; finite-brain | finite-brain on :3015 (`brain.smoke.finite.computer`), NixOS-generated systemd unit via the legacy repo. **DEFERRED** from the cutover — migrates with the auth-integration follow-up. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |
 | Tinfoil | Measured enclaves (unchanged) | glm-5-2 inference + finite-private-limiter enclave; searxng enclave. The limiter validates usage against **lat1** Core. Deployed from the public satellite repos (`tinfoil/`). |
-| Phala | hosted-agent CVMs | Launched by the lat1 runner (dormant) from `ghcr.io/finitecomputer/agent-runtime`. |
+| Phala | hosted-agent CVMs | Confidential Runner fast-follow; not the internal production-canary path. |
 
 ## DNS (current)
 

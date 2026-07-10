@@ -41,11 +41,11 @@ wildcard/API routing and keeps chat with the SaaS account plane.
 
 The desired self-serve user flow is:
 
-1. The user logs in through Account Auth, names their agent, selects an icon,
-   and chooses an offered Runner class.
+1. The user logs in through Account Auth, names their agent, and selects an
+   icon. Core assigns the standard Runner class from product policy.
 2. Core creates a Project, Finite Private grant, and Agent Runtime launch
    request without leaking provider-specific handles into the product model.
-3. The selected Runner launches the same compatibility-pinned Hermes Agent
+3. The assigned Runner launches the same compatibility-pinned Hermes Agent
    Runtime image; Kata is the first launch lane and Phala follows through the
    same contract. The image exposes its Product Release's baked Finite Skills
    Revision before the first user turn.

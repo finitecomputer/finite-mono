@@ -49,9 +49,21 @@ The v2 service that owns account-linked Project state, runtime launch state,
 entitlements, and Finite Private grants.
 _Avoid_: Legacy control plane, finited
 
+**Launch Code**:
+A Finite-issued, single-use credential that grants one sponsored agent-creation entitlement outside Stripe.
+_Avoid_: Stripe promotion code, coupon, payment
+
+**Launch Code Batch**:
+A named, bounded set of individually single-use Launch Codes issued for one white-glove training or other approved sponsored cohort.
+_Avoid_: Shared launch code, Stripe promotion campaign
+
 **Runtime-Scoped Finite Private Key**:
 A Finite Private credential issued for one Project or Agent Runtime.
 _Avoid_: User API key, shared provider fallback
+
+**Finite Private Runaway Guard**:
+A per-grant usage bound intended to interrupt an agent that loops on inference continuously.
+_Avoid_: Customer budget, dollar meter, pricing plan
 
 **Account Auth**:
 The dashboard login and billing identity used to create and administer Projects.
@@ -195,10 +207,18 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   image, and upgrade never flows through **Purge User Data** or Runtime destroy.
 - A **Runner** hosts one or more **Agent Runtimes**.
 - **Core** is the source of truth for desired **Agent Runtime** lifecycle state.
+- A **Finite Private Runaway Guard** limits pathological continuous inference;
+  it does not represent customer billing or a dollar-denominated budget.
+- A **Launch Code Batch** contains an explicit number of **Launch Codes** and can expire or be revoked before every code is redeemed.
+- Only an Account Auth administrator may issue a **Launch Code Batch**; participant redemption does not grant administrative authority.
+- A **Launch Code** grants a Core-owned entitlement to exactly one Account Auth organization without creating or proving a paid Stripe subscription.
 - A **Runner** reattaches to an **Agent Runtime** by its **Provider Runtime Handle**.
 - **Phala** is a **Confidential Runner** implementation, not the product model.
 - **Account Auth** owns dashboard access and billing; **User Nostr Identity**
   owns the human's cryptographic chat identity.
+- **Core** verifies the standard Account Auth credential on every user-scoped
+  request; dashboard identity headers and Runner credentials cannot assert a
+  user or administrator.
 - **Account Auth** authorizes access to one **Hosted Web Device**, but that
   device has its own revocable Finite Chat key and durable store.
 - A **Hosted Web Device** is a user device alongside Electron or native
@@ -231,8 +251,9 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - Product features, credentials, chat state, skills commands, shell access,
   filesystem access, and provider APIs never travel over the **Runtime
   Management Pipe**.
-- A **Project** chooses a **Runner** class at launch without exposing its
-  **Provider Runtime Handle** as the product model.
+- **Core** assigns a **Runner** class to a **Project** from product policy at
+  launch; the user does not choose a provider, and the **Provider Runtime
+  Handle** is never the product model.
 - A **Finite Product Release** pins the compatible Core/dashboard, Agent
   Runtime, Hermes, Finite Chat, Finite Sites, Finite Brain, hosted-service
   versions, and the **Finite Skills Revision** bundled for newly created
