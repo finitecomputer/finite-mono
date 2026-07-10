@@ -158,8 +158,15 @@ impl WorkosAuthenticator {
         &self,
         access_token: &str,
     ) -> Result<VerifiedWorkosSession, WorkosAuthError> {
-        let header = decode_header(access_token).map_err(|_| WorkosAuthError::InvalidToken)?;
+        let header = decode_header(access_token).map_err(|_| {
+            tracing::warn!(reason = "malformed_header", "WorkOS JWT validation failed");
+            WorkosAuthError::InvalidToken
+        })?;
         if header.alg != Algorithm::RS256 {
+            tracing::warn!(
+                reason = "unexpected_algorithm",
+                "WorkOS JWT validation failed"
+            );
             return Err(WorkosAuthError::InvalidToken);
         }
         let kid = header
@@ -167,9 +174,22 @@ impl WorkosAuthenticator {
             .as_deref()
             .map(str::trim)
             .filter(|kid| !kid.is_empty())
-            .ok_or(WorkosAuthError::InvalidToken)?;
+            .ok_or_else(|| {
+                tracing::warn!(reason = "missing_key_id", "WorkOS JWT validation failed");
+                WorkosAuthError::InvalidToken
+            })?;
 
-        let key = self.key_for(kid).await?;
+        let key = self.key_for(kid).await.map_err(|error| {
+            tracing::warn!(
+                reason = if error == WorkosAuthError::InvalidToken {
+                    "no_matching_jwk"
+                } else {
+                    "jwks_unavailable"
+                },
+                "WorkOS JWT validation failed"
+            );
+            error
+        })?;
         match self.decode_with_key(access_token, &key) {
             Ok(session) => Ok(session),
             Err(DecodeFailure::InvalidSignature) => {
@@ -240,13 +260,24 @@ impl WorkosAuthenticator {
         validation.validate_aud = false;
 
         let claims = decode::<WorkosClaims>(access_token, key, &validation)
-            .map_err(|error| match error.kind() {
-                ErrorKind::InvalidSignature => DecodeFailure::InvalidSignature,
-                _ => DecodeFailure::InvalidToken,
+            .map_err(|error| {
+                tracing::warn!(reason = ?error.kind(), "WorkOS JWT validation failed");
+                match error.kind() {
+                    ErrorKind::InvalidSignature => DecodeFailure::InvalidSignature,
+                    _ => DecodeFailure::InvalidToken,
+                }
             })?
             .claims;
         let subject = claims.sub.trim();
-        if subject.is_empty() || claims.client_id != self.config.client_id {
+        if subject.is_empty() {
+            tracing::warn!(reason = "empty_subject", "WorkOS JWT validation failed");
+            return Err(DecodeFailure::InvalidToken);
+        }
+        if claims.client_id != self.config.client_id {
+            tracing::warn!(
+                reason = "client_id_mismatch",
+                "WorkOS JWT validation failed"
+            );
             return Err(DecodeFailure::InvalidToken);
         }
         Ok(VerifiedWorkosSession {
