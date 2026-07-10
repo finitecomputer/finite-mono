@@ -1,6 +1,7 @@
 import {
   bootstrapHostedWebChat,
   HostedWebChatError,
+  hostedWebChatErrorMessage,
 } from "@/lib/hosted-web-chat";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +22,10 @@ export async function GET(
 
 function chatErrorResponse(error: unknown) {
   const status = error instanceof HostedWebChatError ? error.status : 502;
-  const message = error instanceof Error ? error.message : "Hosted web chat is unavailable.";
-  return Response.json({ error: message }, { status });
+  if (!(error instanceof HostedWebChatError)) {
+    console.warn("Hosted web chat state failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return Response.json({ error: hostedWebChatErrorMessage(error) }, { status });
 }

@@ -1,4 +1,5 @@
 import { fetchRuntimeAgentNpub } from "@/lib/agent-contact";
+import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 import {
@@ -25,6 +26,10 @@ export class HostedWebChatError extends Error {
   ) {
     super(message);
   }
+}
+
+export function hostedWebChatErrorMessage(error: unknown) {
+  return error instanceof HostedWebChatError ? error.message : CHAT_UNAVAILABLE_MESSAGE;
 }
 
 export async function bootstrapHostedWebChat(machineId: string) {
@@ -87,7 +92,7 @@ async function hostedWebChatContext(machineId: string) {
   }
   const config = hostedDeviceConfig();
   if (!config) {
-    throw new HostedWebChatError("Hosted web chat is not configured.", 503);
+    throw new HostedWebChatError(CHAT_UNAVAILABLE_MESSAGE, 503);
   }
   return {
     account,
@@ -175,7 +180,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
   switch (operation) {
     case "StartRuntime":
       if (input !== null) {
-        throw new HostedWebChatError("Invalid StartRuntime action.", 400);
+        throw new HostedWebChatError("That chat action is not available.", 400);
       }
       return { StartRuntime: null };
     case "OpenRoom": {

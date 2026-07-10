@@ -42,6 +42,12 @@ import {
 } from "lucide-react";
 
 import { FiniteBrand } from "@/components/finite-brand";
+import {
+  CHAT_INVALID_UPDATE_MESSAGE,
+  CHAT_TOPIC_DESCRIPTION,
+  CHAT_UNAVAILABLE_MESSAGE,
+  CHAT_WAITING_FOR_AGENT_MESSAGE,
+} from "@/lib/chat-product-copy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -228,7 +234,7 @@ export function HostedWebChat({
           setError(null);
           setStreamConnected(true);
         } catch {
-          setError("Hosted web chat returned an invalid update.");
+          setError(CHAT_INVALID_UPDATE_MESSAGE);
         }
       };
       nextEvents.addEventListener("open", () => setStreamConnected(true));
@@ -810,7 +816,7 @@ export function HostedWebChat({
                   <textarea
                     ref={textareaRef}
                     aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : "Waiting for the agent room…"}
+                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
                     value={draft}
                     disabled={!connected || sending}
                     rows={1}
@@ -908,7 +914,7 @@ export function HostedWebChat({
           <form className="finite-chat__rename-form" onSubmit={createTopic}>
             <DialogHeader>
               <DialogTitle>New topic</DialogTitle>
-              <DialogDescription>Topics keep related chats together without creating a new encrypted room.</DialogDescription>
+              <DialogDescription>{CHAT_TOPIC_DESCRIPTION}</DialogDescription>
             </DialogHeader>
             <div className="finite-chat__rename-field">
               <label htmlFor="finite-chat-topic-title">Name</label>
@@ -1513,5 +1519,5 @@ async function chatRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Hosted web chat is unavailable.";
+  return error instanceof Error ? error.message : CHAT_UNAVAILABLE_MESSAGE;
 }

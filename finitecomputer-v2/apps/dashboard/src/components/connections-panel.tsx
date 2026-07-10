@@ -13,6 +13,7 @@ import {
 import { ConnectionCard } from "@/components/connection-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { connectionsReadiness } from "@/lib/connections-readiness";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
 
 export function ConnectionsPanel({
@@ -58,7 +59,29 @@ export function ConnectionsPanel({
     }
   }
 
-  const loading = !status && !error;
+  const readiness = connectionsReadiness(Boolean(status), error);
+  if (readiness === "loading") {
+    return (
+      <div
+        className="rounded-xl border border-border bg-white/[0.03] px-4 py-6 text-sm text-muted-foreground"
+        role="status"
+      >
+        Preparing your connections…
+      </div>
+    );
+  }
+  if (readiness === "error") {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+        <span>{error}</span>
+        <Button variant="outline" size="sm" onClick={() => void refresh()}>
+          <RefreshCwIcon />
+          Try again
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {error ? (
@@ -73,7 +96,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Inference"
-        state={loading ? "loading" : "connected"}
+        state="connected"
         account={status ? inferenceLabel(status) : null}
         description="Choose the service your agent uses to think."
         icon={<CpuIcon className="size-5" />}
@@ -83,7 +106,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Telegram"
-        state={loading ? "loading" : status?.telegram.connected ? "connected" : "disconnected"}
+        state={status?.telegram.connected ? "connected" : "disconnected"}
         account={status?.telegram.home_channel ?? null}
         description="Talk to the same agent from Telegram."
         icon={<SendIcon className="size-5" />}
@@ -101,7 +124,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Google Workspace"
-        state={loading ? "loading" : status?.google.connected ? "connected" : "disconnected"}
+        state={status?.google.connected ? "connected" : "disconnected"}
         account={status?.google.email ?? null}
         description="Let your agent work with Gmail, Calendar, Drive, Docs, and Sheets."
         icon={<BriefcaseBusinessIcon className="size-5" />}
