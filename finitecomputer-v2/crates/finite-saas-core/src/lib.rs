@@ -15,7 +15,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0002_runtime_upgrade.sql"),
     "\n",
-    include_str!("../migrations/0003_launch_codes.sql")
+    include_str!("../migrations/0003_launch_codes.sql"),
+    "\n",
+    include_str!("../migrations/0004_membership_archive.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -512,6 +514,16 @@ pub struct ProjectRoomMembership {
     pub chat_identity_id: String,
     pub role: ProjectMembershipRole,
     pub created_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveImportedProjectInput {
+    pub verified_email: String,
+    pub workos_user_id: String,
+    pub project_id: String,
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1531,12 +1543,22 @@ impl BridgeCoreState {
             });
         }
 
-        let allowed_new_agent_runtimes = self
+        let current_allowed_new_agent_runtimes = self
             .agent_creation_entitlements
             .values()
             .find(|entitlement| entitlement.customer_org_id == org.id)
             .map(|entitlement| entitlement.allowed_new_agent_runtimes)
-            .unwrap_or(1);
+            .unwrap_or(0);
+        let allowed_new_agent_runtimes = if selected_launch_code
+            .as_ref()
+            .is_some_and(|record| record.redeemed_customer_org_id.is_none())
+        {
+            current_allowed_new_agent_runtimes.saturating_add(1)
+        } else if selected_launch_code.is_some() {
+            current_allowed_new_agent_runtimes
+        } else {
+            current_allowed_new_agent_runtimes.max(1)
+        };
         let active_request_count = self.active_agent_creation_entitlement_count(&org.id);
         if active_request_count >= allowed_new_agent_runtimes {
             return Err(CoreError::AgentCreationEntitlementExhausted);
@@ -1546,13 +1568,13 @@ impl BridgeCoreState {
         // all-or-nothing Launch Code behavior as the Postgres transaction.
         let request_id = new_agent_creation_request_id()?;
         let project_id = new_self_service_project_id()?;
-        self.ensure_agent_creation_entitlement(
-            &org.id,
-            selected_launch_code
-                .as_ref()
-                .map(|record| record.id.as_str()),
-            &now,
-        )?;
+        if let Some(selected) = selected_launch_code.as_ref() {
+            if selected.redeemed_customer_org_id.is_none() {
+                self.grant_launch_code_agent_creation_entitlement(&org.id, &selected.id, &now);
+            }
+        } else {
+            self.ensure_agent_creation_entitlement(&org.id, None, &now)?;
+        }
         if let Some(selected) = selected_launch_code.as_ref()
             && selected.redeemed_customer_org_id.is_none()
         {
@@ -2863,7 +2885,9 @@ impl BridgeCoreState {
         let project_ids = self
             .project_room_memberships
             .values()
-            .filter(|membership| membership.chat_identity_id == identity.id)
+            .filter(|membership| {
+                membership.chat_identity_id == identity.id && membership.archived_at.is_none()
+            })
             .map(|membership| membership.project_id.as_str())
             .collect::<BTreeSet<_>>();
 
@@ -3053,7 +3077,39 @@ impl BridgeCoreState {
                 chat_identity_id: identity_id,
                 role: ProjectMembershipRole::Owner,
                 created_at: now.to_string(),
+                archived_at: None,
             });
+    }
+
+    pub fn archive_imported_project(
+        &mut self,
+        input: ArchiveImportedProjectInput,
+    ) -> CoreResult<()> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let user = self.ensure_linked_user(&input.verified_email, &input.workos_user_id, &now)?;
+        let project = self
+            .projects
+            .get(&input.project_id)
+            .ok_or(CoreError::ProjectNotFound)?;
+        if project.owner_user_id != user.id || project.import_candidate_id.is_none() {
+            return Err(CoreError::ProjectNotFound);
+        }
+        let identity_ids = self
+            .chat_identities
+            .values()
+            .filter(|identity| identity.user_id == user.id)
+            .map(|identity| identity.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let membership = self
+            .project_room_memberships
+            .values_mut()
+            .find(|membership| {
+                membership.project_id == input.project_id
+                    && identity_ids.contains(membership.chat_identity_id.as_str())
+            })
+            .ok_or(CoreError::ProjectNotFound)?;
+        membership.archived_at = Some(now);
+        Ok(())
     }
 
     fn ensure_agent_creation_entitlement(
@@ -3086,6 +3142,28 @@ impl BridgeCoreState {
             launch_code_id.map(str::to_string),
             now,
         ))
+    }
+
+    fn grant_launch_code_agent_creation_entitlement(
+        &mut self,
+        customer_org_id: &str,
+        launch_code_id: &str,
+        now: &str,
+    ) -> AgentCreationEntitlement {
+        let id = agent_creation_entitlement_id_for(customer_org_id);
+        if let Some(existing) = self.agent_creation_entitlements.get_mut(&id) {
+            existing.allowed_new_agent_runtimes =
+                existing.allowed_new_agent_runtimes.saturating_add(1);
+            existing.launch_code = Some(launch_code_id.to_string());
+            existing.updated_at = now.to_string();
+            return existing.clone();
+        }
+        self.upsert_agent_creation_entitlement(
+            customer_org_id,
+            1,
+            Some(launch_code_id.to_string()),
+            now,
+        )
     }
 
     fn upsert_agent_creation_entitlement(
@@ -6373,7 +6451,7 @@ mod tests {
     }
 
     #[test]
-    fn self_serve_agent_creation_rejects_bad_code_and_exhausted_entitlement() {
+    fn fresh_launch_code_adds_one_creation_to_an_exhausted_entitlement() {
         let mut state = BridgeCoreState::default();
         let launch_code = issue_test_launch_code(&mut state);
 
@@ -6404,7 +6482,32 @@ mod tests {
             .unwrap();
         let unused_launch_code = issue_test_launch_code(&mut state);
         let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
-        let exhausted = state
+        let second = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "new@finite.vip".to_string(),
+                workos_user_id: "user_workos_new".to_string(),
+                display_name: "Second Agent".to_string(),
+                launch_code: unused_launch_code.clone(),
+                idempotency_key: "second-submit".to_string(),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert!(!second.reused);
+        assert!(
+            state.launch_codes[&unused_launch_code_id]
+                .redeemed_at
+                .is_some(),
+            "the top-up code must be consumed"
+        );
+        let entitlement = state
+            .agent_creation_entitlements
+            .values()
+            .find(|entitlement| entitlement.customer_org_id == second.project.customer_org_id)
+            .unwrap();
+        assert_eq!(entitlement.allowed_new_agent_runtimes, 2);
+        let entitlement_id = entitlement.id.clone();
+
+        let retry = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
@@ -6413,16 +6516,11 @@ mod tests {
                 idempotency_key: "second-submit".to_string(),
                 now: Some(LATER.to_string()),
             })
-            .unwrap_err();
-        assert!(matches!(
-            exhausted,
-            CoreError::AgentCreationEntitlementExhausted
-        ));
-        assert!(
-            state.launch_codes[&unused_launch_code_id]
-                .redeemed_at
-                .is_none(),
-            "a rejected second entitlement must not consume its code"
+            .unwrap();
+        assert!(retry.reused);
+        assert_eq!(
+            state.agent_creation_entitlements[&entitlement_id].allowed_new_agent_runtimes, 2,
+            "an identical retry must not apply the top-up twice"
         );
     }
 
@@ -6482,7 +6580,7 @@ mod tests {
 
         let unused_launch_code = issue_test_launch_code(&mut state);
         let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
-        let exhausted = state
+        let second = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: email.to_string(),
                 workos_user_id: workos_user_id.to_string(),
@@ -6491,18 +6589,15 @@ mod tests {
                 idempotency_key: "second-self-serve-submit".to_string(),
                 now: Some("2026-05-25T15:00:00Z".to_string()),
             })
-            .unwrap_err();
-        assert!(matches!(
-            exhausted,
-            CoreError::AgentCreationEntitlementExhausted
-        ));
+            .expect("a second fresh code grants one more hosted agent");
+        assert!(!second.reused);
         assert!(
             state.launch_codes[&unused_launch_code_id]
                 .redeemed_at
-                .is_none()
+                .is_some()
         );
 
-        assert_eq!(state.agent_creation_requests.len(), 1);
+        assert_eq!(state.agent_creation_requests.len(), 2);
         assert_eq!(
             state.project_import_candidates[&candidate_id],
             imported_candidate
@@ -6513,6 +6608,81 @@ mod tests {
             state.project_runtime_links[&imported_link.id],
             imported_link
         );
+    }
+
+    #[test]
+    fn owner_can_archive_imported_project_without_deleting_runtime_history() {
+        let mut state = BridgeCoreState::default();
+        let email = "archive-import@finite.vip";
+        let workos_user_id = "user_workos_archive_import";
+        let reconciled = state
+            .reconcile_existing_host_imports(
+                &[import(
+                    "legacy-host",
+                    "legacy-agent-archive",
+                    "Old Agent",
+                    Some(email),
+                )],
+                options([email], NOW),
+            )
+            .unwrap();
+        let claimed = state
+            .claim_project_imports(ClaimProjectImportsInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                selected_candidate_ids: reconciled.created_candidates,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        let project_id = claimed.claimed_project_ids[0].clone();
+        let runtime_count = state.agent_runtimes.len();
+        let link_count = state.project_runtime_links.len();
+
+        state
+            .archive_imported_project(ArchiveImportedProjectInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-05-25T16:00:00Z".to_string()),
+            })
+            .unwrap();
+
+        assert!(
+            state
+                .visible_projects_for_user(&state.find_user_by_email(email).unwrap().id)
+                .is_empty()
+        );
+        assert!(state.projects.contains_key(&project_id));
+        assert_eq!(state.agent_runtimes.len(), runtime_count);
+        assert_eq!(state.project_runtime_links.len(), link_count);
+        assert!(state.project_room_memberships.values().any(|membership| {
+            membership.project_id == project_id && membership.archived_at.is_some()
+        }));
+    }
+
+    #[test]
+    fn hosted_project_cannot_use_import_archive_path() {
+        let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
+        let created = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "hosted-archive@finite.vip".to_string(),
+                workos_user_id: "user_workos_hosted_archive".to_string(),
+                display_name: "Hosted Agent".to_string(),
+                launch_code,
+                idempotency_key: "hosted-archive".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let error = state
+            .archive_imported_project(ArchiveImportedProjectInput {
+                verified_email: "hosted-archive@finite.vip".to_string(),
+                workos_user_id: "user_workos_hosted_archive".to_string(),
+                project_id: created.project.id,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ProjectNotFound));
     }
 
     #[test]

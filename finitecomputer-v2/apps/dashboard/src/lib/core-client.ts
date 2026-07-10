@@ -650,6 +650,22 @@ export async function requestCoreRuntimeDestroy(projectId: string) {
   return result;
 }
 
+export async function archiveCoreImportedProject(projectId: string) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("Sign in again to remove this old agent.");
+  }
+  await coreFetch(`/api/core/v1/me/projects/${encodeURIComponent(projectId)}/archive`, account, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  invalidateCoreReadCache();
+}
+
 export async function cancelFailedCoreAgentCreationRequest(requestId: string) {
   const trimmed = requestId.trim();
   if (!trimmed) {

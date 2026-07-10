@@ -9,9 +9,9 @@ use crate::{
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
     AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
     AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
-    ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
-    BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
-    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass, BillingOverview,
+    BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
     CustomerOrganization, ExistingHostProjectImport, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
@@ -223,6 +223,16 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.request_runtime_destroy(input).await,
             Self::Postgres(store) => store.request_runtime_destroy(input).await,
+        }
+    }
+
+    pub async fn archive_imported_project(
+        &self,
+        input: ArchiveImportedProjectInput,
+    ) -> CoreResult<()> {
+        match self {
+            Self::Memory(store) => store.archive_imported_project(input).await,
+            Self::Postgres(store) => store.archive_imported_project(input).await,
         }
     }
 
@@ -769,6 +779,14 @@ impl MemoryCoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut state = self.state.lock().await;
         state.request_runtime_destroy(input)
+    }
+
+    pub async fn archive_imported_project(
+        &self,
+        input: ArchiveImportedProjectInput,
+    ) -> CoreResult<()> {
+        let mut state = self.state.lock().await;
+        state.archive_imported_project(input)
     }
 
     pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
@@ -1318,6 +1336,45 @@ impl PostgresCoreStore {
             postgres_request_runtime_control(&tx, input, RuntimeControlKind::Destroy).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
+    }
+
+    pub async fn archive_imported_project(
+        &self,
+        input: ArchiveImportedProjectInput,
+    ) -> CoreResult<()> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let verified_email = normalize_owner_email(Some(&input.verified_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let user = ensure_linked_user_row(
+            &tx,
+            &verified_email,
+            &input.workos_user_id,
+            BillingClass::Standard,
+            &now,
+        )
+        .await?;
+        let updated = tx
+            .execute(
+                "UPDATE project_room_memberships AS membership
+             SET archived_at = $1::timestamptz
+             FROM chat_identities AS identity, projects AS project
+             WHERE membership.project_id = $2
+               AND identity.id = membership.chat_identity_id
+               AND identity.user_id = $3
+               AND project.id = membership.project_id
+               AND project.owner_user_id = $3
+               AND project.import_candidate_id IS NOT NULL",
+                &[&now, &input.project_id, &user.id],
+            )
+            .await
+            .map_err(store_error)?;
+        if updated == 0 {
+            return Err(CoreError::ProjectNotFound);
+        }
+        tx.commit().await.map_err(store_error)?;
+        Ok(())
     }
 
     pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
@@ -2003,17 +2060,34 @@ where
         });
     }
 
-    let allowed_new_agent_runtimes = select_agent_creation_entitlement_by_org(client, &org.id)
-        .await?
-        .map(|entitlement| entitlement.allowed_new_agent_runtimes)
-        .unwrap_or(1);
+    let allowed_new_agent_runtimes = if let Some(locked) = locked_launch_code.as_ref() {
+        if locked.record.redeemed_customer_org_id.is_none() {
+            grant_launch_code_agent_creation_entitlement_row(
+                client,
+                &org.id,
+                &locked.record.id,
+                &now,
+            )
+            .await?
+            .allowed_new_agent_runtimes
+        } else {
+            select_agent_creation_entitlement_by_org(client, &org.id)
+                .await?
+                .map(|entitlement| entitlement.allowed_new_agent_runtimes)
+                .unwrap_or(0)
+        }
+    } else {
+        select_agent_creation_entitlement_by_org(client, &org.id)
+            .await?
+            .map(|entitlement| entitlement.allowed_new_agent_runtimes)
+            .unwrap_or(1)
+    };
     let active_request_count =
         postgres_active_agent_creation_entitlement_count(client, &org.id).await?;
     if active_request_count >= i64::from(allowed_new_agent_runtimes) {
         return Err(CoreError::AgentCreationEntitlementExhausted);
     }
     if let Some(locked) = locked_launch_code.as_ref() {
-        ensure_agent_creation_entitlement_row(client, &org.id, &locked.record.id, &now).await?;
         if locked.record.redeemed_customer_org_id.is_none() {
             redeem_postgres_launch_code(client, &locked.record.id, &org.id, &idempotency_key, &now)
                 .await?;
@@ -3087,6 +3161,7 @@ where
                ON link.project_id = project.id AND link.active
              LEFT JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
              WHERE identity.user_id = $1
+               AND membership.archived_at IS NULL
                AND NOT EXISTS (
                  SELECT 1 FROM agent_creation_requests hidden
                  WHERE hidden.project_id = project.id
@@ -3742,7 +3817,7 @@ where
     customer_org_from_row(&row)
 }
 
-async fn ensure_agent_creation_entitlement_row<C>(
+async fn grant_launch_code_agent_creation_entitlement_row<C>(
     client: &C,
     customer_org_id: &str,
     launch_code_id: &str,
@@ -3751,48 +3826,23 @@ async fn ensure_agent_creation_entitlement_row<C>(
 where
     C: GenericClient + Sync,
 {
-    if let Some(row) = client
-        .query_opt(
-            "SELECT id, customer_org_id, allowed_new_agent_runtimes, launch_code,
-                    created_at::text, updated_at::text
-             FROM agent_creation_entitlements
-             WHERE customer_org_id = $1",
-            &[&customer_org_id],
-        )
-        .await
-        .map_err(store_error)?
-    {
-        let entitlement = agent_creation_entitlement_from_row(&row);
-        if entitlement.launch_code.as_deref() != Some(launch_code_id) {
-            return Err(CoreError::InvalidLaunchCode);
-        }
-        return Ok(entitlement);
-    }
-    let entitlement = AgentCreationEntitlement {
-        id: agent_creation_entitlement_id_for(customer_org_id),
-        customer_org_id: customer_org_id.to_string(),
-        allowed_new_agent_runtimes: 1,
-        launch_code: Some(launch_code_id.to_string()),
-        created_at: now.to_string(),
-        updated_at: now.to_string(),
-    };
-    client
-        .execute(
+    let id = agent_creation_entitlement_id_for(customer_org_id);
+    let row = client
+        .query_one(
             "INSERT INTO agent_creation_entitlements
                (id, customer_org_id, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6::text::timestamptz)",
-            &[
-                &entitlement.id,
-                &entitlement.customer_org_id,
-                &entitlement.allowed_new_agent_runtimes,
-                &entitlement.launch_code,
-                &entitlement.created_at,
-                &entitlement.updated_at,
-            ],
+             VALUES ($1, $2, 1, $3, $4::text::timestamptz, $4::text::timestamptz)
+             ON CONFLICT (customer_org_id) DO UPDATE SET
+               allowed_new_agent_runtimes = agent_creation_entitlements.allowed_new_agent_runtimes + 1,
+               launch_code = EXCLUDED.launch_code,
+               updated_at = EXCLUDED.updated_at
+             RETURNING id, customer_org_id, allowed_new_agent_runtimes, launch_code,
+                       created_at::text, updated_at::text",
+            &[&id, &customer_org_id, &launch_code_id, &now],
         )
         .await
         .map_err(store_error)?;
-    Ok(entitlement)
+    Ok(agent_creation_entitlement_from_row(&row))
 }
 
 async fn ensure_standard_agent_creation_entitlement_row<C>(
@@ -7297,6 +7347,67 @@ mod tests {
                 .get(0);
             assert_eq!(redeemed, 1);
             assert_eq!(requests, 1);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_fresh_launch_code_tops_up_exhausted_org_once() {
+        with_isolated_postgres(|store| async move {
+            let first_code = issue_test_launch_code(&store, "2026-07-10T12:00:00Z").await;
+            let input = |launch_code: String, idempotency_key: &str, display_name: &str| {
+                RequestAgentCreationInput {
+                    verified_email: "top-up@finite.vip".to_string(),
+                    workos_user_id: "workos_top_up".to_string(),
+                    display_name: display_name.to_string(),
+                    launch_code,
+                    idempotency_key: idempotency_key.to_string(),
+                    now: Some("2026-07-10T12:30:00Z".to_string()),
+                }
+            };
+            store
+                .request_agent_creation(input(first_code, "first-request", "First Agent"))
+                .await
+                .unwrap();
+
+            let second_code = issue_test_launch_code(&store, "2026-07-10T13:00:00Z").await;
+            let second = store
+                .request_agent_creation(input(
+                    second_code.clone(),
+                    "second-request",
+                    "Second Agent",
+                ))
+                .await
+                .expect("a fresh code adds one creation to an exhausted org");
+            assert!(!second.reused);
+
+            let retry = store
+                .request_agent_creation(input(second_code, "second-request", "Second Agent"))
+                .await
+                .unwrap();
+            assert!(retry.reused);
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let entitlement: i32 = raw
+                .query_one(
+                    "SELECT allowed_new_agent_runtimes FROM agent_creation_entitlements",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            let requests: i64 = raw
+                .query_one("SELECT COUNT(*) FROM agent_creation_requests", &[])
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(entitlement, 2, "the retry must not increment twice");
+            assert_eq!(requests, 2);
             drop(raw);
             connection.abort();
         })

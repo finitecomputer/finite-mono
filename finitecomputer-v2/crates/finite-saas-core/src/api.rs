@@ -642,6 +642,10 @@ pub fn router_with_runtime_upgrades(
             post(create_agent_request),
         )
         .route(
+            "/api/core/v1/me/projects/{project_id}/archive",
+            post(archive_imported_project),
+        )
+        .route(
             "/api/core/v1/me/projects/{project_id}/runtime/restart",
             post(request_runtime_restart),
         )
@@ -1506,6 +1510,25 @@ async fn request_runtime_destroy(
         })
         .await?;
     Ok(Json(RuntimeControlRequestView::from(request)))
+}
+
+async fn archive_imported_project(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(input): Json<TimestampRequest>,
+) -> Result<StatusCode, ApiError> {
+    let identity = require_verified_identity(&state, &headers).await?;
+    state
+        .store
+        .archive_imported_project(crate::ArchiveImportedProjectInput {
+            verified_email: identity.email,
+            workos_user_id: identity.workos_user_id,
+            project_id,
+            now: input.now,
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn lease_agent_creation_request(
