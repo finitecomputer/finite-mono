@@ -21,12 +21,14 @@ use finite_nostr::{GiftWrapValidation, NostrPublicKey, open_gift_wrap};
 use nostr::{Event, Keys, Kind, Tag};
 use serde::Deserialize;
 
+#[cfg(test)]
+use crate::initialize_private_working_tree;
 use crate::{
     APP_SPECIFIC_KIND, AgentState, CliEnvironment, CliError, ConflictEntry, ConflictState,
     SessionFolderKeyring, SyncChangeReport, SyncOnceReport, current_tree_root, deterministic_id,
     load_signer, read_agent_state, read_working_tree_state, server_url_for_command, sign_event,
     signed_json_request, signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix,
-    unix_timestamp, write_agent_state, write_json_file,
+    unix_timestamp, write_agent_state, write_json_file, write_private_file_atomic,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -85,16 +87,16 @@ pub(crate) fn run_working_tree_sync(
         fetch_mounted_folder_materializations(env, &server_url, mounted_exports)?;
     write_sync_evidence(&root, &export, &remote_result.bootstrap)?;
 
-    materialize_remote_projection(
+    materialize_remote_projection(MaterializeRemoteProjectionContext {
         env,
-        &root,
-        &auth.npub,
-        &export,
-        &remote_result.bootstrap,
-        &mounted_materializations,
-        &local_result.path_overrides,
-        &session_keys,
-    )?;
+        root: &root,
+        actor_npub: &auth.npub,
+        export: &export,
+        bootstrap: &remote_result.bootstrap,
+        mounted_folders: &mounted_materializations,
+        path_overrides: &local_result.path_overrides,
+        session_keys: &session_keys,
+    })?;
     restore_conflicted_files(
         &root,
         &local_result.conflicted_markdown,
@@ -676,7 +678,6 @@ fn write_sync_evidence(
     bootstrap: &CliSyncBootstrap,
 ) -> Result<(), CliError> {
     let sync_dir = root.join(".finitebrain/encrypted-sync");
-    fs::create_dir_all(&sync_dir)?;
     write_json_file(&sync_dir.join("export.json"), export)?;
     write_json_file(&sync_dir.join("bootstrap.json"), bootstrap)?;
     Ok(())
@@ -1234,16 +1235,30 @@ fn tombstone_tags(input: &TombstoneValidation) -> Result<Vec<Tag>, CliError> {
     ])
 }
 
+struct MaterializeRemoteProjectionContext<'a> {
+    env: &'a CliEnvironment,
+    root: &'a Path,
+    actor_npub: &'a str,
+    export: &'a CliEncryptedVaultExport,
+    bootstrap: &'a CliSyncBootstrap,
+    mounted_folders: &'a [MountedFolderMaterializeContext],
+    path_overrides: &'a BTreeMap<(String, String, String), String>,
+    session_keys: &'a SessionFolderKeyring,
+}
+
 fn materialize_remote_projection(
-    env: &CliEnvironment,
-    root: &Path,
-    actor_npub: &str,
-    export: &CliEncryptedVaultExport,
-    bootstrap: &CliSyncBootstrap,
-    mounted_folders: &[MountedFolderMaterializeContext],
-    path_overrides: &BTreeMap<(String, String, String), String>,
-    session_keys: &SessionFolderKeyring,
+    context: MaterializeRemoteProjectionContext<'_>,
 ) -> Result<(), CliError> {
+    let MaterializeRemoteProjectionContext {
+        env,
+        root,
+        actor_npub,
+        export,
+        bootstrap,
+        mounted_folders,
+        path_overrides,
+        session_keys,
+    } = context;
     let prior_state = read_working_tree_state(root)?;
     let vault = vault_from_export(export)?;
     let mut prior_paths = prior_state
@@ -1941,17 +1956,25 @@ fn write_projection_files(
 ) -> Result<(), CliError> {
     for (relative_path, body) in files {
         let path = root.join(relative_path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        if relative_path.starts_with(".finitebrain/") {
+            write_private_file_atomic(&path, body.as_bytes())?;
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, body)?;
         }
-        fs::write(path, body)?;
     }
     for (relative_path, bytes) in binary_files {
         let path = root.join(relative_path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        if relative_path.starts_with(".finitebrain/") {
+            write_private_file_atomic(&path, bytes)?;
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, bytes)?;
         }
-        fs::write(path, bytes)?;
     }
     Ok(())
 }
@@ -2880,7 +2903,7 @@ mod tests {
     fn stale_object_cleanup_removes_old_path_after_move() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(root).unwrap();
         fs::create_dir_all(root.join("General")).unwrap();
         fs::write(root.join("General/old.md"), "# Old\n").unwrap();
         let state = VaultWorkingTreeStateManifest {
@@ -2925,7 +2948,7 @@ mod tests {
     fn materialize_remote_projection_uses_encrypted_page_path_without_prior_state() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(root).unwrap();
         write_json_file(
             &root.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
@@ -2988,16 +3011,16 @@ mod tests {
             }],
         };
 
-        materialize_remote_projection(
-            &env,
+        materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
             root,
-            "npub-owner",
-            &export,
-            &bootstrap,
-            &[],
-            &BTreeMap::new(),
-            &session_keys,
-        )
+            actor_npub: "npub-owner",
+            export: &export,
+            bootstrap: &bootstrap,
+            mounted_folders: &[],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+        })
         .unwrap();
 
         assert_eq!(
@@ -3014,7 +3037,7 @@ mod tests {
     fn materialize_remote_projection_mounts_source_folder_into_destination_tree() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(root).unwrap();
         write_json_file(
             &root.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
@@ -3109,19 +3132,19 @@ mod tests {
             },
         };
 
-        materialize_remote_projection(
-            &env,
+        materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
             root,
-            "npub-dest",
-            &destination_export,
-            &CliSyncBootstrap {
+            actor_npub: "npub-dest",
+            export: &destination_export,
+            bootstrap: &CliSyncBootstrap {
                 latest_sequence: 2,
                 objects: Vec::new(),
             },
-            &[mounted],
-            &BTreeMap::new(),
-            &session_keys,
-        )
+            mounted_folders: &[mounted],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+        })
         .unwrap();
 
         assert_eq!(
@@ -3166,7 +3189,7 @@ mod tests {
     fn historical_session_keys_do_not_make_current_folder_readable() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(root).unwrap();
         write_json_file(
             &root.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
@@ -3212,16 +3235,16 @@ mod tests {
             objects: Vec::new(),
         };
 
-        materialize_remote_projection(
-            &env,
+        materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
             root,
-            "npub-owner",
-            &export,
-            &bootstrap,
-            &[],
-            &BTreeMap::new(),
-            &session_keys,
-        )
+            actor_npub: "npub-owner",
+            export: &export,
+            bootstrap: &bootstrap,
+            mounted_folders: &[],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+        })
         .unwrap();
 
         let state = read_working_tree_state(root).unwrap();

@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 /// CLI error.
 #[derive(Debug)]
@@ -11,6 +12,7 @@ pub enum CliError {
     InvalidInput(String),
     Http(String),
     Identity(String),
+    InsecureWorkingTree { path: PathBuf, reason: String },
     MissingServer,
     MissingWorkingTree,
     MissingArgument(&'static str),
@@ -28,6 +30,11 @@ impl fmt::Display for CliError {
             Self::InvalidInput(reason) => write!(f, "invalid input: {reason}"),
             Self::Http(reason) => write!(f, "http request failed: {reason}"),
             Self::Identity(reason) => write!(f, "finite identity error: {reason}"),
+            Self::InsecureWorkingTree { path, reason } => write!(
+                f,
+                "insecure Vault Working Tree boundary at {}: {reason}; run `fbrain repair` from the Working Tree",
+                path.display()
+            ),
             Self::MissingServer => write!(f, "no FiniteBrain server URL configured"),
             Self::MissingWorkingTree => write!(f, "no Vault Working Tree found"),
             Self::MissingArgument(argument) => write!(f, "missing required argument: {argument}"),

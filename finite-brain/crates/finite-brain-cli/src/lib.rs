@@ -12,6 +12,7 @@ mod output;
 mod signer;
 mod state;
 mod sync_engine;
+mod working_tree_security;
 
 pub use environment::CliEnvironment;
 pub use error::CliError;
@@ -27,6 +28,7 @@ pub(crate) use output::*;
 pub(crate) use signer::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
+pub(crate) use working_tree_security::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -96,6 +98,7 @@ where
         "help" | "--help" | "-h" => help(output),
         "version" | "--version" | "-V" => version(output),
         "doctor" => doctor(&args[1..], &env, json, output),
+        "repair" => repair(&env, json, output),
         "auth" => auth(&args[1..], &env, json, input, output),
         "signer" => signer(&args[1..], &env, json, output),
         "daemon" => daemon(&args[1..], &env, json, output),
@@ -120,7 +123,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nunlock [folder|--all]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nunlock [folder|--all]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -146,11 +149,17 @@ fn doctor<W: Write>(
     let server_url = server_url_for_optional_command(env, args);
     let working_tree = find_agent_state(&env.cwd).ok().flatten();
     let identity = load_identity_optional(env)?;
-    let daemon_state = working_tree
+    let working_tree_boundary = working_tree
         .as_ref()
-        .and_then(|root| read_agent_state(root).ok())
-        .map(|state| state.daemon.state)
-        .unwrap_or(DaemonRunState::Missing);
+        .map(|root| validate_private_working_tree(root));
+    let daemon_state = match working_tree_boundary.as_ref() {
+        Some(Ok(())) => working_tree
+            .as_ref()
+            .and_then(|root| read_agent_state(root).ok())
+            .map(|state| state.daemon.state)
+            .unwrap_or(DaemonRunState::Missing),
+        _ => DaemonRunState::Missing,
+    };
     let server = server_url
         .as_deref()
         .map(check_http_health)
@@ -167,10 +176,13 @@ fn doctor<W: Write>(
                     "no Finite identity yet; it is minted on first signing use, or adopt an existing secret with fbrain auth import",
                 )
             }),
-        working_tree: working_tree
-            .as_ref()
-            .map(|root| CheckState::ok(format!("Vault Working Tree at {}", root.display())))
-            .unwrap_or_else(|| CheckState::warn("not inside a Vault Working Tree")),
+        working_tree: match (working_tree.as_ref(), working_tree_boundary.as_ref()) {
+            (Some(root), Some(Ok(()))) => {
+                CheckState::ok(format!("Vault Working Tree at {}", root.display()))
+            }
+            (Some(_), Some(Err(error))) => CheckState::warn(error.to_string()),
+            _ => CheckState::warn("not inside a Vault Working Tree"),
+        },
         daemon: match daemon_state {
             DaemonRunState::Running => CheckState::ok("daemon marked running"),
             DaemonRunState::Stopped => CheckState::warn("daemon marked stopped"),
@@ -187,6 +199,21 @@ fn doctor<W: Write>(
         writeln!(output, "- working tree: {}", report.working_tree.message)?;
         writeln!(output, "- daemon: {}", report.daemon.message)?;
         writeln!(output, "- server: {}", report.server.message)?;
+        Ok(())
+    }
+}
+
+fn repair<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<(), CliError> {
+    let root = find_agent_state(&env.cwd)?.ok_or(CliError::MissingWorkingTree)?;
+    let report = repair_private_working_tree(&root)?;
+    if json {
+        write_json(output, &report)
+    } else {
+        writeln!(
+            output,
+            "repaired Vault Working Tree boundary at {} ({} directories, {} files)",
+            report.working_tree_path, report.repaired_directories, report.repaired_files
+        )?;
         Ok(())
     }
 }
@@ -901,7 +928,7 @@ fn open_vault<W: Write>(
     if let Some(server_url) = server_url.as_deref() {
         validate_http_url(server_url)?;
     }
-    fs::create_dir_all(path.join(".finitebrain/encrypted-sync"))?;
+    initialize_private_working_tree(&path)?;
     let now = timestamp(env);
     // Opening a Vault Working Tree needs the acting identity (it records the
     // owner npub and immediately attempts a signed sync): mint on use.
@@ -976,11 +1003,16 @@ fn open_vault<W: Write>(
                 "path": path,
                 "daemon": "running",
                 "syncMode": "automatic",
-                "syncStatus": sync_status
+                "syncStatus": sync_status,
+                "plaintextPersistence": "member-authored files persist until the Working Tree is explicitly removed"
             }),
         )
     } else {
         writeln!(output, "opened Vault Working Tree {}", path.display())?;
+        writeln!(
+            output,
+            "member-authored plaintext persists until this Working Tree is explicitly removed"
+        )?;
         Ok(())
     }
 }
@@ -1480,19 +1512,25 @@ fn vault<W: Write>(
             write_command_response(output, json, &response)
         }
         "metadata" | "status" => {
-            let vault_id = option_value(args, "--vault")
-                .or_else(|| positional_values(args).get(1).cloned())
-                .or_else(|| current_vault_id(env))
-                .ok_or(CliError::MissingArgument("vault-id or --vault"))?;
+            let explicit_vault_id =
+                option_value(args, "--vault").or_else(|| positional_values(args).get(1).cloned());
+            let vault_id = match explicit_vault_id {
+                Some(vault_id) => vault_id,
+                None => current_vault_id(env)?
+                    .ok_or(CliError::MissingArgument("vault-id or --vault"))?,
+            };
             let path = format!("/_admin/vaults/{vault_id}/metadata");
             let response = signed_json_request(env, args, "GET", &path, None)?;
             write_command_response(output, json, &response)
         }
         "export" => {
-            let vault_id = option_value(args, "--vault")
-                .or_else(|| positional_values(args).get(1).cloned())
-                .or_else(|| current_vault_id(env))
-                .ok_or(CliError::MissingArgument("vault-id or --vault"))?;
+            let explicit_vault_id =
+                option_value(args, "--vault").or_else(|| positional_values(args).get(1).cloned());
+            let vault_id = match explicit_vault_id {
+                Some(vault_id) => vault_id,
+                None => current_vault_id(env)?
+                    .ok_or(CliError::MissingArgument("vault-id or --vault"))?,
+            };
             let path = format!("/_admin/vaults/{vault_id}/export");
             let response = signed_json_request(env, args, "GET", &path, None)?;
             write_command_response(output, json, &response)
@@ -2406,7 +2444,11 @@ mod tests {
     use nostr::{Event, Keys};
     use serde_json::Value;
     use std::io::{ErrorKind, Read};
+    #[cfg(unix)]
+    use std::io::{Seek, SeekFrom};
     use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -2434,6 +2476,11 @@ mod tests {
         let mut output = Vec::new();
         run_with_env(args.iter().copied(), env_for(tmp), &mut output).unwrap();
         String::from_utf8(output).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &std::path::Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
     }
 
     /// Plant a known secret as the shared Finite identity for this test
@@ -2860,7 +2907,7 @@ mod tests {
 
     fn setup_incremental_tree_named(tmp: &TempDir, name: &str, latest_sequence: u64) -> PathBuf {
         let tree = tmp.path().join(name);
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         let now = "2026-06-24T20:46:36Z";
         write_agent_state(&tree, &AgentState::new("vault", now)).unwrap();
@@ -3830,6 +3877,24 @@ mod tests {
         assert!(tree.join(".finitebrain/vault-directory.json").exists());
         assert!(tree.join(".finitebrain/working-tree-state.json").exists());
         assert!(tree.join(".finitebrain/agent-state.json").exists());
+        #[cfg(unix)]
+        {
+            assert_eq!(unix_mode(&tree), 0o700);
+            assert_eq!(unix_mode(&tree.join(".finitebrain")), 0o700);
+            assert_eq!(unix_mode(&tree.join(".finitebrain/encrypted-sync")), 0o700);
+            assert_eq!(
+                unix_mode(&tree.join(".finitebrain/vault-directory.json")),
+                0o600
+            );
+            assert_eq!(
+                unix_mode(&tree.join(".finitebrain/working-tree-state.json")),
+                0o600
+            );
+            assert_eq!(
+                unix_mode(&tree.join(".finitebrain/agent-state.json")),
+                0o600
+            );
+        }
 
         let mut env = env_for(&tmp);
         env.cwd = tree;
@@ -3842,6 +3907,130 @@ mod tests {
         assert_eq!(json["sync"]["mode"], "automatic");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn insecure_working_tree_fails_closed_and_repair_does_not_touch_member_content() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let member_file = tree.join("General/member-note.md");
+        fs::create_dir_all(member_file.parent().unwrap()).unwrap();
+        fs::write(&member_file, "member plaintext\n").unwrap();
+        fs::set_permissions(&member_file, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&tree, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(tree.join(".finitebrain"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(
+            tree.join(".finitebrain/agent-state.json"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("insecure Vault Working Tree boundary"));
+        assert!(error.contains("fbrain repair"));
+
+        let mut doctor_output = Vec::new();
+        run_with_env(["doctor", "--json"], env.clone(), &mut doctor_output).unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["workingTree"]["state"], "warn");
+        assert!(
+            doctor["workingTree"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("fbrain repair")
+        );
+
+        let mut repair_output = Vec::new();
+        run_with_env(["repair", "--json"], env.clone(), &mut repair_output).unwrap();
+        let repair: Value = serde_json::from_slice(&repair_output).unwrap();
+        assert_eq!(repair["state"], "repaired");
+        run_with_env(["status", "--json"], env, &mut Vec::new()).unwrap();
+
+        assert_eq!(unix_mode(&tree), 0o700);
+        assert_eq!(unix_mode(&tree.join(".finitebrain")), 0o700);
+        assert_eq!(
+            unix_mode(&tree.join(".finitebrain/agent-state.json")),
+            0o600
+        );
+        assert_eq!(unix_mode(&member_file), 0o640);
+        assert_eq!(
+            fs::read_to_string(member_file).unwrap(),
+            "member plaintext\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_symlink_is_rejected_before_external_state_is_read() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let external = tmp.path().join("external-agent-state.json");
+        fs::write(&external, "external sentinel").unwrap();
+        let agent_state = tree.join(".finitebrain/agent-state.json");
+        fs::remove_file(&agent_state).unwrap();
+        symlink(&external, &agent_state).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed symlink"));
+        assert!(error.contains("fbrain repair"));
+        assert_eq!(fs::read_to_string(&external).unwrap(), "external sentinel");
+
+        let mut doctor_output = Vec::new();
+        run_with_env(["doctor", "--json"], env, &mut doctor_output).unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["workingTree"]["state"], "warn");
+        assert!(
+            doctor["workingTree"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("managed symlink")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finite_control_file_replacement_is_private_and_atomic() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let agent_state_path = tree.join(".finitebrain/agent-state.json");
+        let old_body = fs::read_to_string(&agent_state_path).unwrap();
+        let mut old_handle = fs::File::open(&agent_state_path).unwrap();
+        let mut state = read_agent_state(&tree).unwrap();
+        state.sync.status = "atomic-replacement".to_owned();
+
+        write_agent_state(&tree, &state).unwrap();
+
+        let mut body_from_old_inode = String::new();
+        old_handle.seek(SeekFrom::Start(0)).unwrap();
+        old_handle.read_to_string(&mut body_from_old_inode).unwrap();
+        assert_eq!(body_from_old_inode, old_body);
+        assert!(
+            fs::read_to_string(&agent_state_path)
+                .unwrap()
+                .contains("atomic-replacement")
+        );
+        assert_eq!(unix_mode(&agent_state_path), 0o600);
+        assert!(
+            fs::read_dir(tree.join(".finitebrain"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp-"))
+        );
+    }
+
     #[test]
     fn grant_folder_opens_session_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
@@ -3850,7 +4039,7 @@ mod tests {
         let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([7; 32]);
         let tree = tmp.path().join("org");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
 
         let mut env = env_for(&tmp);
@@ -3903,7 +4092,7 @@ mod tests {
         let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([17; 32]);
         let tree = tmp.path().join("vault");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
         let agent_state_path = tree.join(".finitebrain/agent-state.json");
         let mut durable_state: Value =
@@ -3972,7 +4161,7 @@ mod tests {
         let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([17; 32]);
         let tree = tmp.path().join("vault");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
@@ -4341,7 +4530,7 @@ mod tests {
         let getting_started_key = FolderKey::from_bytes([11; 32]);
         let restricted_key = FolderKey::from_bytes([12; 32]);
         let tree = tmp.path().join("org");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
 
         let mut env = env_for(&tmp);
@@ -4559,7 +4748,7 @@ mod tests {
             .to_owned();
         let folder_key = FolderKey::from_bytes([11; 32]);
         let tree = tmp.path().join("org");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
@@ -4616,7 +4805,7 @@ mod tests {
             .to_owned();
         let folder_key = FolderKey::from_bytes([13; 32]);
         let tree = tmp.path().join("org");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
@@ -4915,7 +5104,7 @@ mod tests {
     fn pending_working_tree_change_count_detects_local_markdown() {
         let tmp = TempDir::new().unwrap();
         let tree = tmp.path().join("vault");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
         write_json_file(
@@ -5252,7 +5441,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let tree = tmp.path().join("vault");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/new.md"), "# New\n").unwrap();
         let folder_key = FolderKey::from_bytes([9; 32]);
@@ -5330,7 +5519,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
         let tree = tmp.path().join("vault");
-        fs::create_dir_all(tree.join(".finitebrain")).unwrap();
+        initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/a.md"), "# Accepted\n").unwrap();
         fs::write(tree.join("General/b.md"), "# Conflict\n").unwrap();

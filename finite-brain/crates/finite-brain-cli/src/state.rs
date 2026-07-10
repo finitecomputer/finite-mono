@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::{
     AccessExplanation, AgentState, AuthStatus, CliEnvironment, CliError, ConflictState,
     DaemonRunState, DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional,
-    option_value, timestamp, write_json_file,
+    option_value, timestamp, validate_private_working_tree, write_json_file,
 };
 
 /// Report the shared Finite identity without touching it: status never mints
@@ -184,8 +184,10 @@ where
 pub(crate) fn find_agent_state(start: &Path) -> Result<Option<PathBuf>, CliError> {
     let mut cursor = start.to_path_buf();
     loop {
-        if cursor.join(".finitebrain/agent-state.json").exists() {
-            return Ok(Some(cursor));
+        match fs::symlink_metadata(cursor.join(".finitebrain/agent-state.json")) {
+            Ok(_) => return Ok(Some(cursor)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         if !cursor.pop() {
             return Ok(None);
@@ -194,16 +196,19 @@ pub(crate) fn find_agent_state(start: &Path) -> Result<Option<PathBuf>, CliError
 }
 
 pub(crate) fn read_agent_state(root: &Path) -> Result<AgentState, CliError> {
+    validate_private_working_tree(root)?;
     read_json_file(&root.join(".finitebrain/agent-state.json"))
 }
 
 pub(crate) fn write_agent_state(root: &Path, state: &AgentState) -> Result<(), CliError> {
+    validate_private_working_tree(root)?;
     write_json_file(&root.join(".finitebrain/agent-state.json"), state)
 }
 
 pub(crate) fn read_working_tree_state(
     root: &Path,
 ) -> Result<VaultWorkingTreeStateManifest, CliError> {
+    validate_private_working_tree(root)?;
     read_json_file(&root.join(".finitebrain/working-tree-state.json"))
 }
 
@@ -217,15 +222,15 @@ where
 }
 
 pub(crate) fn command_vault_id(args: &[String], env: &CliEnvironment) -> Result<String, CliError> {
-    option_value(args, "--vault")
-        .or_else(|| current_vault_id(env))
-        .ok_or(CliError::MissingArgument("vault-id or --vault"))
+    if let Some(vault_id) = option_value(args, "--vault") {
+        return Ok(vault_id);
+    }
+    current_vault_id(env)?.ok_or(CliError::MissingArgument("vault-id or --vault"))
 }
 
-pub(crate) fn current_vault_id(env: &CliEnvironment) -> Option<String> {
-    find_agent_state(&env.cwd)
-        .ok()
-        .flatten()
-        .and_then(|root| read_agent_state(&root).ok())
-        .map(|state| state.vault_id)
+pub(crate) fn current_vault_id(env: &CliEnvironment) -> Result<Option<String>, CliError> {
+    let Some(root) = find_agent_state(&env.cwd)? else {
+        return Ok(None);
+    };
+    Ok(Some(read_agent_state(&root)?.vault_id))
 }

@@ -1,20 +1,15 @@
-use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::{ActivityEntry, CliError};
+use crate::{ActivityEntry, CliError, write_private_file_atomic};
 
 pub(crate) fn write_json_file<T>(path: &Path, value: &T) -> Result<(), CliError>
 where
     T: Serialize,
 {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
-    Ok(())
+    write_private_file_atomic(path, &serde_json::to_vec_pretty(value)?)
 }
 
 pub(crate) fn write_json<W, T>(output: &mut W, value: &T) -> Result<(), CliError>
