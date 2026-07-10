@@ -208,6 +208,40 @@ export type CoreAdminRuntimesResult = CoreBridgeStatus & {
   error: string | null;
 };
 
+export type CoreLaunchCodeBatch = {
+  id: string;
+  name: string;
+  code_count: number;
+  expires_at: string;
+  revoked_at?: string | null;
+  revoked_by_workos_user_id?: string | null;
+  created_by_workos_user_id: string;
+  created_at: string;
+};
+
+/** Metadata-only code status returned by later reads and revocation. */
+export type CoreLaunchCodeStatus = {
+  id: string;
+  redeemed_customer_org_id?: string | null;
+  redeemed_at?: string | null;
+};
+
+export type CoreLaunchCodeBatchDetails = {
+  batch: CoreLaunchCodeBatch;
+  codes: CoreLaunchCodeStatus[];
+};
+
+/** Plaintext values exist only in the immediate issuance response. */
+export type CoreIssuedLaunchCodeBatch = {
+  batch: CoreLaunchCodeBatch;
+  codes: Array<{ id: string; code: string }>;
+};
+
+export type CoreLaunchCodeBatchesResult = CoreBridgeStatus & {
+  batches: CoreLaunchCodeBatchDetails[] | null;
+  error: string | null;
+};
+
 /** Raw key is present exactly once in this response and is never persisted. */
 export type CoreAdminIssuedFinitePrivateKey = {
   grant?: CoreFinitePrivateGrant | null;
@@ -848,6 +882,60 @@ export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> 
       error: error instanceof Error ? error.message : "Finite Core is unavailable.",
     };
   }
+}
+
+export async function loadCoreLaunchCodeBatches(): Promise<CoreLaunchCodeBatchesResult> {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    return { ...status, batches: null, error: null };
+  }
+
+  try {
+    return {
+      ...status,
+      batches: await coreAdminFetch<CoreLaunchCodeBatchDetails[]>(
+        "/api/core/v1/admin/launch-code-batches"
+      ),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      batches: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function adminIssueCoreLaunchCodeBatch(input: {
+  name: string;
+  codeCount: number;
+  expiresInHours?: number | null;
+}) {
+  const result = await coreAdminFetch<CoreIssuedLaunchCodeBatch>(
+    "/api/core/v1/admin/launch-code-batches",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        name: requiredString(input.name, "Batch name is required."),
+        codeCount: input.codeCount,
+        expiresInHours: input.expiresInHours ?? undefined,
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminRevokeCoreLaunchCodeBatch(batchId: string) {
+  const result = await coreAdminFetch<CoreLaunchCodeBatchDetails>(
+    `/api/core/v1/admin/launch-code-batches/${encodeURIComponent(
+      requiredString(batchId, "Launch Code batch id is required.")
+    )}/revoke`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
 }
 
 export async function adminRestartCoreRuntime(projectId: string) {

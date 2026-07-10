@@ -4,10 +4,16 @@ import { redirect } from "next/navigation";
 
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
-import type { OneTimeKeyActionState } from "@/lib/admin-ops";
 import {
+  launchCodeBatchFormInput,
+  type OneTimeKeyActionState,
+  type OneTimeLaunchCodeActionState,
+} from "@/lib/admin-ops";
+import {
+  adminIssueCoreLaunchCodeBatch,
   adminIssueCoreFinitePrivateFriendKey,
   adminRecoverCoreRuntime,
+  adminRevokeCoreLaunchCodeBatch,
   adminResetCoreFinitePrivateWindow,
   adminRestartCoreRuntime,
   adminRevokeCoreFinitePrivateApiKey,
@@ -332,6 +338,40 @@ export async function adminOpsRevokeFinitePrivateKeyAction(formData: FormData) {
 export async function adminOpsResetFinitePrivateWindowAction(formData: FormData) {
   await requireAdminViewer("reset Finite Private burst windows");
   await adminResetCoreFinitePrivateWindow(String(formData.get("grantId") ?? ""));
+  revalidatePath("/dashboard/admin");
+}
+
+// One-time Launch Code issuance returns raw values only in this action state.
+// The dashboard never writes them to a URL, log, cache, or later Core read.
+export async function adminOpsIssueLaunchCodeBatchAction(
+  _prevState: OneTimeLaunchCodeActionState,
+  formData: FormData
+): Promise<OneTimeLaunchCodeActionState> {
+  try {
+    await requireAdminViewer("issue Launch Code batches");
+    const issued = await adminIssueCoreLaunchCodeBatch(launchCodeBatchFormInput(formData));
+    revalidatePath("/dashboard/admin");
+    return {
+      status: "issued",
+      batch: {
+        id: issued.batch.id,
+        name: issued.batch.name,
+        codeCount: issued.batch.code_count,
+        expiresAt: issued.batch.expires_at,
+      },
+      codes: issued.codes.map((code) => ({ id: code.id, code: code.code })),
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      error: error instanceof Error ? error.message : "Issuing the Launch Code batch failed.",
+    };
+  }
+}
+
+export async function adminOpsRevokeLaunchCodeBatchAction(formData: FormData) {
+  await requireAdminViewer("revoke Launch Code batches");
+  await adminRevokeCoreLaunchCodeBatch(String(formData.get("batchId") ?? ""));
   revalidatePath("/dashboard/admin");
 }
 
