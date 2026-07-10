@@ -2832,7 +2832,9 @@ impl BridgeCoreState {
             .values()
             .filter(|link| link.active)
             .filter_map(|link| self.projects.get(&link.project_id))
-            .filter(|project| project.customer_org_id == customer_org_id)
+            .filter(|project| {
+                project.customer_org_id == customer_org_id && project.import_candidate_id.is_none()
+            })
             .count();
         let pending_request_count = self
             .agent_creation_requests
@@ -5894,6 +5896,87 @@ mod tests {
             exhausted,
             CoreError::AgentCreationEntitlementExhausted
         ));
+    }
+
+    #[test]
+    fn imported_runtime_does_not_consume_self_serve_launch_entitlement() {
+        let mut state = BridgeCoreState::default();
+        let email = "import-with-launch@finite.vip";
+        let workos_user_id = "user_workos_import_with_launch";
+
+        let reconciled = state
+            .reconcile_existing_host_imports(
+                &[import(
+                    "legacy-host",
+                    "legacy-agent-001",
+                    "Imported Agent",
+                    Some(email),
+                )],
+                options([email], NOW),
+            )
+            .unwrap();
+        let candidate_id = reconciled.created_candidates[0].clone();
+        let claimed = state
+            .claim_project_imports(ClaimProjectImportsInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                selected_candidate_ids: vec![candidate_id.clone()],
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        let imported_project_id = claimed.claimed_project_ids[0].clone();
+        let imported_candidate = state.project_import_candidates[&candidate_id].clone();
+        let imported_runtime_id = imported_candidate
+            .agent_runtime_id
+            .clone()
+            .expect("claimed import has a runtime");
+        let imported_project = state.projects[&imported_project_id].clone();
+        let imported_runtime = state.agent_runtimes[&imported_runtime_id].clone();
+        let imported_link = state
+            .project_runtime_links
+            .values()
+            .find(|link| link.project_id == imported_project_id && link.active)
+            .cloned()
+            .expect("claimed import has an active runtime link");
+
+        let created = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                display_name: "New Hosted Agent".to_string(),
+                launch_code: "off2026".to_string(),
+                idempotency_key: "first-self-serve-submit".to_string(),
+                now: Some("2026-05-25T14:00:00Z".to_string()),
+            })
+            .expect("an imported runtime must not consume the hosted launch");
+        assert!(created.project.import_candidate_id.is_none());
+
+        let exhausted = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                display_name: "Another Hosted Agent".to_string(),
+                launch_code: "off2026".to_string(),
+                idempotency_key: "second-self-serve-submit".to_string(),
+                now: Some("2026-05-25T15:00:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            exhausted,
+            CoreError::AgentCreationEntitlementExhausted
+        ));
+
+        assert_eq!(state.agent_creation_requests.len(), 1);
+        assert_eq!(
+            state.project_import_candidates[&candidate_id],
+            imported_candidate
+        );
+        assert_eq!(state.projects[&imported_project_id], imported_project);
+        assert_eq!(state.agent_runtimes[&imported_runtime_id], imported_runtime);
+        assert_eq!(
+            state.project_runtime_links[&imported_link.id],
+            imported_link
+        );
     }
 
     #[test]

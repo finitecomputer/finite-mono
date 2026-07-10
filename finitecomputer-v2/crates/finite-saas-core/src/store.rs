@@ -1749,21 +1749,8 @@ where
     } else {
         ensure_standard_agent_creation_entitlement_row(client, &org.id, &now).await?
     };
-    let active_request_count: i64 = client
-        .query_one(
-            "SELECT (
-                (SELECT COUNT(*) FROM project_runtime_links links
-                 JOIN projects projects ON projects.id = links.project_id
-                 WHERE projects.customer_org_id = $1 AND links.active = TRUE)
-                +
-                (SELECT COUNT(*) FROM agent_creation_requests
-                 WHERE customer_org_id = $1 AND status IN ('requested', 'launching'))
-             )::BIGINT",
-            &[&org.id],
-        )
-        .await
-        .map_err(store_error)?
-        .get(0);
+    let active_request_count =
+        postgres_active_agent_creation_entitlement_count(client, &org.id).await?;
     if active_request_count >= i64::from(entitlement.allowed_new_agent_runtimes) {
         return Err(CoreError::AgentCreationEntitlementExhausted);
     }
@@ -1900,8 +1887,10 @@ where
         .map(agent_creation_entitlement_from_row))
 }
 
-/// Mirrors `active_agent_creation_entitlement_count`: active runtime links plus
-/// pending (`requested`/`launching`) requests for the org, all row-scoped.
+/// Mirrors `active_agent_creation_entitlement_count`: active self-serve runtime
+/// links plus pending (`requested`/`launching`) self-serve requests for the org,
+/// all row-scoped. Imported legacy runtimes remain visible but do not consume a
+/// hosted/self-serve launch entitlement.
 async fn postgres_active_agent_creation_entitlement_count<C>(
     client: &C,
     customer_org_id: &str,
@@ -1914,7 +1903,9 @@ where
             "SELECT (
                 (SELECT COUNT(*) FROM project_runtime_links links
                  JOIN projects projects ON projects.id = links.project_id
-                 WHERE projects.customer_org_id = $1 AND links.active = TRUE)
+                 WHERE projects.customer_org_id = $1
+                   AND projects.import_candidate_id IS NULL
+                   AND links.active = TRUE)
                 +
                 (SELECT COUNT(*) FROM agent_creation_requests
                  WHERE customer_org_id = $1 AND status IN ('requested', 'launching'))
@@ -7040,6 +7031,144 @@ mod tests {
                 .unwrap();
             assert!(reclaim.claimed_project_ids.is_empty());
             assert_eq!(reclaim.already_claimed_project_ids, vec![project_id]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_imported_runtime_does_not_consume_self_serve_launch_entitlement() {
+        with_isolated_postgres(|store| async move {
+            let email = "postgres-import-with-launch@finite.vip".to_string();
+            let workos_user_id = "workos_postgres_import_with_launch".to_string();
+            let record = ExistingHostProjectImport {
+                source_host_id: "legacy-host".to_string(),
+                source_machine_id: "legacy-agent-001".to_string(),
+                owner_email: Some(email.clone()),
+                display_name: "Imported Agent".to_string(),
+                hostname: None,
+                runtime_host: Some("legacy-host".to_string()),
+                runtime_status: RuntimeSummaryStatus::Online,
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+                known_external_channel_participants: Vec::new(),
+                admin_visible_to_emails: Vec::new(),
+            };
+            let reconciled = store
+                .reconcile_existing_host_imports(
+                    vec![record],
+                    ReconcileExistingHostImportsOptions {
+                        allowlisted_owner_emails: vec![email.clone()],
+                        now: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let candidate_id = reconciled.created_candidates[0].clone();
+            let claimed = store
+                .claim_project_imports(ClaimProjectImportsInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos_user_id.clone(),
+                    selected_candidate_ids: vec![candidate_id.clone()],
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let imported_project_id = claimed.claimed_project_ids[0].clone();
+            let imported_before = store
+                .visible_projects_for_workos_user(&workos_user_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|visible| visible.project.id == imported_project_id)
+                .expect("claimed import must remain visible");
+            let imported_runtime_id = imported_before
+                .runtime
+                .as_ref()
+                .expect("claimed import must expose its runtime")
+                .id
+                .clone();
+
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos_user_id.clone(),
+                    display_name: "New Hosted Agent".to_string(),
+                    launch_code: "off2026".to_string(),
+                    idempotency_key: "first-self-serve-submit".to_string(),
+                    now: None,
+                })
+                .await
+                .expect("an imported runtime must not consume the hosted launch");
+            assert!(created.project.import_candidate_id.is_none());
+
+            let exhausted = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos_user_id.clone(),
+                    display_name: "Another Hosted Agent".to_string(),
+                    launch_code: "off2026".to_string(),
+                    idempotency_key: "second-self-serve-submit".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                exhausted,
+                CoreError::AgentCreationEntitlementExhausted
+            ));
+
+            let requests = store
+                .agent_creation_requests_for_workos_user(&workos_user_id)
+                .await
+                .unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].id, created.request.id);
+
+            let imported_after = store
+                .visible_projects_for_workos_user(&workos_user_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|visible| visible.project.id == imported_project_id)
+                .expect("launch attempts must preserve the imported project");
+            assert_eq!(imported_after, imported_before);
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let candidate = raw
+                .query_one(
+                    "SELECT status, project_id, agent_runtime_id
+                     FROM project_import_candidates WHERE id = $1",
+                    &[&candidate_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(candidate.get::<_, String>("status"), "claimed");
+            assert_eq!(
+                candidate.get::<_, Option<String>>("project_id").as_deref(),
+                Some(imported_project_id.as_str())
+            );
+            assert_eq!(
+                candidate
+                    .get::<_, Option<String>>("agent_runtime_id")
+                    .as_deref(),
+                Some(imported_runtime_id.as_str())
+            );
+            let active_link_count: i64 = raw
+                .query_one(
+                    "SELECT COUNT(*) FROM project_runtime_links
+                     WHERE project_id = $1 AND agent_runtime_id = $2 AND active = TRUE",
+                    &[&imported_project_id, &imported_runtime_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(active_link_count, 1);
+            drop(raw);
+            connection.abort();
         })
         .await;
     }
