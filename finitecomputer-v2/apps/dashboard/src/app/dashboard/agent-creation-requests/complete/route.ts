@@ -29,16 +29,19 @@ export async function GET(request: Request) {
   try {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     if (!billing.billing?.can_create_agent) {
+      dashboard.searchParams.set("new", "1");
       dashboard.searchParams.set("billing", "success");
       return NextResponse.redirect(dashboard, { status: 303 });
     }
-    await requestCoreAgentCreation({
+    const creation = await requestCoreAgentCreation({
       displayName: draft.displayName,
       launchCode: "",
       idempotencyKey: draft.idempotencyKey,
       runnerClass: draft.runnerClass,
       profilePictureUrl: draft.profilePictureUrl,
     });
+    dashboard.searchParams.set("new", "1");
+    dashboard.searchParams.set("creation", creation.request.id);
     const response = NextResponse.redirect(dashboard, { status: 303 });
     response.cookies.set(AGENT_DRAFT_COOKIE, "", {
       httpOnly: true,
@@ -49,6 +52,7 @@ export async function GET(request: Request) {
     });
     return response;
   } catch (error) {
+    dashboard.searchParams.set("new", "1");
     dashboard.searchParams.set(
       "agentCreationError",
       error instanceof Error ? error.message : "Could not create agent."

@@ -210,6 +210,9 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
           `Agent creation form did not render: ${String(error)}\n${await pageText(page)}\n${dashboardOutput()}`
         );
       });
+      await page.getByRole("link", { name: "New agent", exact: true }).waitFor({
+        state: "visible",
+      });
       await agentName.fill("Oslo Bot");
       await page.locator('#coreAgentPicture').setInputFiles({
         name: "oslo-bot.png",
@@ -231,6 +234,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       assert.equal(post.runnerClass, "apple_container");
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
+      await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
       await expectVisibleText(page, "Creating your agent");
       assert(
         hostedDevice.state.authRequests.some((request) => request.path === "/v1/app/images"),
@@ -296,12 +300,34 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
           "Completed Oslo Bot",
           hostedDevice.runtimeStatusUrl
         ),
+        visibleProject(
+          "project_second",
+          "Second Oslo Bot",
+          hostedDevice.runtimeStatusUrl,
+          "second-oslo-bot"
+        ),
+      ],
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_old",
+          projectId: "project_running",
+          displayName: "Completed Oslo Bot",
+          status: "running",
+        }),
+        agentCreationRequest({
+          id: "agent_request_second",
+          projectId: "project_second",
+          displayName: "Second Oslo Bot",
+          status: "running",
+        }),
       ],
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot$/u);
-      await expectVisibleText(page, "Completed Oslo Bot");
+      await page
+        .getByRole("heading", { name: "Completed Oslo Bot", exact: true })
+        .waitFor({ state: "visible" });
       const main = page.getByRole("main");
       await expectVisibleText(page, "Your agent is online.");
       const productNav = page.getByRole("navigation", { name: "Dashboard section" });
@@ -326,6 +352,31 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
       await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
       await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
+
+      const machineSwitcher = page.getByRole("button", {
+        name: "Completed Oslo Bot",
+        exact: true,
+      });
+      await machineSwitcher.waitFor({ state: "visible" });
+      await machineSwitcher.click();
+      const newAgentItem = page.getByRole("menuitem", { name: "New agent", exact: true });
+      await newAgentItem.waitFor({ state: "visible" });
+      await newAgentItem.click();
+      await page.waitForURL(/\/dashboard\?new=1$/u);
+      await page.getByLabel("Agent name").waitFor({ state: "visible" });
+      assert.equal(await page.getByText("Completed Oslo Bot", { exact: true }).count(), 0);
+      await page.getByLabel("Agent name").fill("Second Oslo Bot");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Promo code").waitFor({ state: "visible" });
+
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
+      );
+      await page.waitForURL(/\/dashboard\/machines\/second-oslo-bot$/u);
+
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
+      );
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
@@ -1122,7 +1173,8 @@ function agentCreationRequest({
 function visibleProject(
   projectId: string,
   displayName: string,
-  runtimeStatusUrl: string
+  runtimeStatusUrl: string,
+  machineId = "completed-oslo-bot"
 ): VisibleProject {
   return {
     project: {
@@ -1135,16 +1187,16 @@ function visibleProject(
       updated_at: "2026-05-28T12:01:00Z",
     },
     runtime: {
-      id: "runtime_running",
+      id: `runtime_${machineId}`,
       project_id: projectId,
       source_host_id: "oslo",
-      source_machine_id: "completed-oslo-bot",
-      source_import_key: "oslo:completed-oslo-bot",
+      source_machine_id: machineId,
+      source_import_key: `oslo:${machineId}`,
       runtime_artifact_id: "runtime_artifact_1",
       state_schema_version: "runtime-state-v1",
       host_facts: {
         display_name: "Completed Oslo Bot",
-        hostname: "completed-oslo-bot.finite.computer",
+        hostname: `${machineId}.finite.computer`,
         runtime_host: "oslo",
         runtime_status: "online",
         hermes_available: true,

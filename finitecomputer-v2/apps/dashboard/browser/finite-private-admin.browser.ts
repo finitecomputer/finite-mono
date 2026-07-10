@@ -25,9 +25,21 @@ test("admins keep the SaaS dashboard and separate Finite Private controls", { ti
     const context = await browser.newContext();
     const page = await context.newPage();
 
-    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
     await page
       .getByRole("link", { name: "Agent", exact: true })
+      .waitFor({ state: "visible" });
+    await page.getByLabel("Agent name").waitFor({ state: "visible" });
+    const machineSwitcher = page.locator(".ocean-machine-switcher__button");
+    await machineSwitcher.waitFor({ state: "visible" });
+    assert.equal(await machineSwitcher.evaluate((element) => element.tagName), "BUTTON");
+    assert.equal((await machineSwitcher.textContent())?.trim(), "New agent");
+    await machineSwitcher.click();
+    await page
+      .getByRole("menuitem", { name: "Legacy Agent", exact: true })
+      .waitFor({ state: "visible" });
+    await page
+      .getByRole("menuitem", { name: "New agent", exact: true })
       .waitFor({ state: "visible" });
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
 
@@ -59,6 +71,7 @@ function startDashboard(port: number, coreUrl: string) {
         FC_CORE_API_TOKEN: CORE_TOKEN,
         FC_CORE_BASE_URL: coreUrl,
         FC_DASHBOARD_DEV_ADMIN_EMAILS: "admin@finite.vip",
+        FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "admin@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_admin",
         FC_WORKOS_AUTH_ENABLED: "0",
@@ -103,7 +116,69 @@ async function handleCoreRequest(
     return;
   }
 
+  if (request.method === "GET" && request.url === "/api/core/v1/me") {
+    writeJson(response, 200, {
+      email: "admin@finite.vip",
+      workos_user_id: "user_admin",
+      claimable_candidates: [],
+      projects: [legacyProject()],
+      agent_creation_requests: [],
+    });
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
+    writeJson(response, 200, {
+      customer_org: {
+        id: "org_admin",
+        owner_user_id: "user_admin",
+        name: "Admin",
+        billing_class: "off2026",
+        created_at: "2026-05-28T12:00:00Z",
+        updated_at: "2026-05-28T12:01:00Z",
+      },
+      billing_account: null,
+      agent_creation_entitlement: null,
+      can_create_agent: false,
+      requires_billing: true,
+    });
+    return;
+  }
+
   writeJson(response, 404, { error: "not found" });
+}
+
+function legacyProject() {
+  return {
+    project: {
+      id: "project_legacy",
+      customer_org_id: "org_admin",
+      owner_user_id: "user_admin",
+      display_name: "Legacy Agent",
+      import_candidate_id: "import_legacy",
+      created_at: "2026-05-28T12:00:00Z",
+      updated_at: "2026-05-28T12:01:00Z",
+    },
+    runtime: {
+      id: "runtime_legacy",
+      project_id: "project_legacy",
+      source_host_id: "box1",
+      source_machine_id: "legacy-agent",
+      source_import_key: "box1:legacy-agent",
+      runtime_artifact_id: "runtime_artifact_legacy",
+      state_schema_version: "runtime-state-v1",
+      host_facts: {
+        display_name: "Legacy Agent",
+        hostname: "legacy-agent.finite.computer",
+        runtime_host: "box1",
+        runtime_status: "online",
+        hermes_available: true,
+        published_app_urls: [],
+      },
+      created_at: "2026-05-28T12:00:00Z",
+      updated_at: "2026-05-28T12:01:00Z",
+    },
+  };
 }
 
 function finitePrivateAdminState() {

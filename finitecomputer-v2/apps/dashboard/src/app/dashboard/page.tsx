@@ -81,6 +81,8 @@ type DashboardSearchParams = {
   agentCreationError?: string | string[];
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
+  creation?: string | string[];
+  new?: string | string[];
 };
 
 function firstSearchParam(value: string | string[] | undefined) {
@@ -101,6 +103,8 @@ export default async function DashboardPage({
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
     firstSearchParam(query.billingSyncStartedAt)
   );
+  const isNewAgentFlow = firstSearchParam(query.new) === "1";
+  const trackedCreationRequestId = firstSearchParam(query.creation)?.trim() || null;
   const [viewer, account] = await Promise.all([
     loadOptionalViewerContext(),
     getAccountAuthContext(),
@@ -120,22 +124,43 @@ export default async function DashboardPage({
     const coreProjects = core.me?.projects ?? [];
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const claimableCandidates = core.me?.claimable_candidates ?? [];
-    const pendingAgentCreationRequests = agentCreationRequests.filter(
+    const requestedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching"
     );
     const failedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "failed"
     );
-    const hasPendingAgentCreation = pendingAgentCreationRequests.length > 0;
     // Imports are intentionally hidden from the finite.computer self-serve surface for Oslo.
     const showImportCandidates = false;
     const firstAgentHref = coreProjects
       .map((project) => coreProjectOverviewHref(project))
       .find((href): href is string => Boolean(href));
+    const trackedCreationRequest = trackedCreationRequestId
+      ? agentCreationRequests.find((request) => request.id === trackedCreationRequestId) ?? null
+      : null;
+    const trackedProjectHref = trackedCreationRequest
+      ? coreProjects
+          .filter((project) => project.project.id === trackedCreationRequest.project_id)
+          .map((project) => coreProjectOverviewHref(project))
+          .find((href): href is string => Boolean(href)) ?? null
+      : null;
 
-    if (firstAgentHref) {
+    if (firstAgentHref && !isNewAgentFlow) {
       redirect(firstAgentHref);
     }
+    if (
+      isNewAgentFlow &&
+      trackedCreationRequest?.status === "running" &&
+      trackedProjectHref
+    ) {
+      redirect(trackedProjectHref);
+    }
+
+    const pendingAgentCreationRequests =
+      trackedCreationRequest?.status === "running" && !trackedProjectHref
+        ? [...requestedAgentCreationRequests, trackedCreationRequest]
+        : requestedAgentCreationRequests;
+    const hasPendingAgentCreation = pendingAgentCreationRequests.length > 0;
 
     const billingReturn = resolveBillingReturnStateNow({
       billingParam: billingReturnParam,
@@ -146,7 +171,7 @@ export default async function DashboardPage({
     if (billingReturn.kind === "stamp-sync-start") {
       // First render after a successful checkout while Core still waits on
       // the webhook: stamp the sync window start so the poll stays bounded.
-      redirect(billingSyncStampRedirectPath());
+      redirect(billingSyncStampRedirectPath(undefined, { newAgent: isNewAgentFlow }));
     }
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
@@ -159,7 +184,7 @@ export default async function DashboardPage({
     const showCreateAgent =
       core.configured &&
       Boolean(core.account.email) &&
-      coreProjects.length === 0 &&
+      (coreProjects.length === 0 || isNewAgentFlow) &&
       pendingAgentCreationRequests.length === 0 &&
       !billingSyncPending &&
       failedAgentCreationRequests.length === 0;
@@ -171,7 +196,7 @@ export default async function DashboardPage({
       core.configured &&
       Boolean(core.account.email) &&
       !showCreateAgent &&
-      coreProjects.length === 0 &&
+      (coreProjects.length === 0 || isNewAgentFlow) &&
       pendingAgentCreationRequests.length === 0 &&
       failedAgentCreationRequests.length === 0;
     const showEmptyAccount =
@@ -184,7 +209,7 @@ export default async function DashboardPage({
     return (
       <div className="ocean-page-stack">
         <PendingRefresh enabled={hasPendingAgentCreation} />
-        {coreProjects.length > 0 ? (
+        {coreProjects.length > 0 && !isNewAgentFlow ? (
           <CoreProjectsPanel
             projects={coreProjects}
             agentCreationRequests={agentCreationRequests}

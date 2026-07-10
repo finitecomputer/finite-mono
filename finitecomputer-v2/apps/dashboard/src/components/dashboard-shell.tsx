@@ -11,6 +11,7 @@ import {
   Layers3Icon,
   LogOutIcon,
   MessageSquareIcon,
+  PlusIcon,
   PlugIcon,
   ShieldCheckIcon,
   type LucideIcon,
@@ -121,14 +122,29 @@ function sectionLinks(
 
 function MachineSwitcher({
   activeMachine,
+  creatingNewAgent,
   machines,
   onNavigate,
+  showNewAgent,
 }: {
   activeMachine: MachineNavItem | null;
+  creatingNewAgent: boolean;
   machines: MachineNavItem[];
   onNavigate?: () => void;
+  showNewAgent: boolean;
 }) {
   const [open, setOpen] = useState(false);
+
+  if (machines.length === 0 && showNewAgent) {
+    return (
+      <div className="ocean-machine-switcher">
+        <Link href="/dashboard?new=1" className="ocean-machine-switcher__button">
+          <PlusIcon className="size-4" aria-hidden />
+          <span className="ocean-machine-switcher__label">New agent</span>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="ocean-machine-switcher">
@@ -139,9 +155,15 @@ function MachineSwitcher({
         aria-haspopup="menu"
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="ocean-machine-switcher__dot" aria-hidden />
+        {creatingNewAgent ? (
+          <PlusIcon className="size-4" aria-hidden />
+        ) : (
+          <span className="ocean-machine-switcher__dot" aria-hidden />
+        )}
         <span className="ocean-machine-switcher__label">
-          {activeMachine?.ownerLabel ?? machines[0]?.ownerLabel ?? "No machines"}
+          {creatingNewAgent
+            ? "New agent"
+            : activeMachine?.ownerLabel ?? machines[0]?.ownerLabel ?? "Agents"}
         </span>
         <ChevronRightIcon className={cn("ocean-machine-switcher__chevron", open && "is-open")} />
       </button>
@@ -152,7 +174,10 @@ function MachineSwitcher({
             <Link
               key={machine.id}
               href={`/dashboard/machines/${machine.id}`}
-              className={cn("ocean-menu-item", activeMachine?.id === machine.id && "is-active")}
+              className={cn(
+                "ocean-menu-item",
+                !creatingNewAgent && activeMachine?.id === machine.id && "is-active"
+              )}
               role="menuitem"
               onClick={() => {
                 setOpen(false);
@@ -163,6 +188,23 @@ function MachineSwitcher({
               <span>{machine.ownerLabel}</span>
             </Link>
           ))}
+          {showNewAgent ? (
+            <>
+              {machines.length > 0 ? <div className="ocean-menu-separator" /> : null}
+              <Link
+                href="/dashboard?new=1"
+                className={cn("ocean-menu-item", creatingNewAgent && "is-active")}
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  onNavigate?.();
+                }}
+              >
+                <PlusIcon className="size-4" />
+                <span>New agent</span>
+              </Link>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -175,6 +217,7 @@ function DashboardAppSection({
   machines,
   pathname,
   isAdmin,
+  isNewAgentFlow,
   saasMode,
   showMachineFleet,
   viewerEmail,
@@ -184,6 +227,7 @@ function DashboardAppSection({
   machines: MachineNavItem[];
   pathname: string;
   isAdmin: boolean;
+  isNewAgentFlow: boolean;
   saasMode: boolean;
   showMachineFleet: boolean;
   viewerEmail?: string | null;
@@ -206,7 +250,14 @@ function DashboardAppSection({
         </div>
 
         <div className="ocean-app-header__center">
-          {showMachineFleet ? <MachineSwitcher activeMachine={selectedMachine} machines={machines} /> : null}
+          {showMachineFleet ? (
+            <MachineSwitcher
+              activeMachine={selectedMachine}
+              creatingNewAgent={isNewAgentFlow}
+              machines={machines}
+              showNewAgent={saasMode}
+            />
+          ) : null}
           <nav
             className="ocean-section-tabs"
             aria-label="Dashboard section"
@@ -285,11 +336,12 @@ export function DashboardShell({
   const activeMachineId = activeMachineIdFromPath(pathname);
   const queryMachineId = searchParams.get("machine") ?? searchParams.get("machineId");
   const selectedMachineId = activeMachineId ?? queryMachineId;
+  const isNewAgentFlow = pathname === "/dashboard" && searchParams.get("new") === "1";
   const activeMachine = useMemo(
     () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
     [selectedMachineId, machines]
   );
-  const showMachineFleet = machines.length > 1;
+  const showMachineFleet = saasMode || machines.length > 1;
   const isChatSurface = /^\/dashboard\/machines\/[^/]+\/chat\/?$/u.test(pathname);
 
   if (isChatSurface) {
@@ -303,6 +355,7 @@ export function DashboardShell({
         machines={machines}
         pathname={pathname}
         isAdmin={isAdmin}
+        isNewAgentFlow={isNewAgentFlow}
         saasMode={saasMode}
         showMachineFleet={showMachineFleet}
         viewerEmail={viewerEmail}

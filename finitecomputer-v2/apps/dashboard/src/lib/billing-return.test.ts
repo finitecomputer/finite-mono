@@ -45,6 +45,13 @@ test("billingSyncStampRedirectPath round-trips through the URL parsers", () => {
   );
 });
 
+test("billingSyncStampRedirectPath preserves the explicit new-agent flow", () => {
+  assert.equal(
+    billingSyncStampRedirectPath(RETURN_AT_MS, { newAgent: true }),
+    `/dashboard?new=1&billing=success&billingSyncStartedAt=${RETURN_AT_MS}`
+  );
+});
+
 test("no checkout return renders the dashboard as usual", () => {
   assert.deepEqual(
     resolveBillingReturnState({

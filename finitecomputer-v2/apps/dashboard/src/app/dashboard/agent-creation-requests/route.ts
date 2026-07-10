@@ -24,9 +24,18 @@ import {
 import { stripeBillingStatus } from "@/lib/stripe-billing";
 import { workosBaseUrl } from "@/lib/workos-auth";
 
-function dashboardRedirect(request: Request, error?: unknown) {
+function dashboardRedirect(
+  request: Request,
+  error?: unknown,
+  creationRequestId?: string
+) {
   const url = new URL("/dashboard", workosBaseUrl() ?? request.url);
+  if (creationRequestId) {
+    url.searchParams.set("new", "1");
+    url.searchParams.set("creation", creationRequestId);
+  }
   if (error) {
+    url.searchParams.set("new", "1");
     url.searchParams.set(
       "agentCreationError",
       error instanceof Error ? error.message : "Could not create agent."
@@ -68,8 +77,8 @@ export async function POST(request: Request) {
     const access = String(formData.get("access") ?? "");
 
     if (localLaunchCode || billing.billing?.can_create_agent) {
-      await launchDraft(draft, localLaunchCode);
-      const response = dashboardRedirect(request);
+      const creation = await launchDraft(draft, localLaunchCode);
+      const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
@@ -79,8 +88,8 @@ export async function POST(request: Request) {
       if (!promoCode) {
         throw new Error("Enter your promo code.");
       }
-      await launchDraft(draft, promoCode);
-      const response = dashboardRedirect(request);
+      const creation = await launchDraft(draft, promoCode);
+      const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
@@ -110,7 +119,7 @@ export async function GET(request: Request) {
 }
 
 async function launchDraft(draft: AgentOnboardingDraft, launchCode: string) {
-  await requestCoreAgentCreation({
+  return requestCoreAgentCreation({
     displayName: draft.displayName,
     launchCode,
     idempotencyKey: draft.idempotencyKey,

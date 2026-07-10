@@ -176,8 +176,8 @@ export async function billingCheckoutDestination() {
     customer: stripeCustomerId,
     client_reference_id: billing.billing.customer_org.id,
     allow_promotion_codes: true,
-    success_url: stripeDashboardReturnUrl("/dashboard?billing=success"),
-    cancel_url: stripeDashboardReturnUrl("/dashboard?billing=cancelled"),
+    success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
+    cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
     line_items: [
       {
         price: standardAgentPriceId(),
