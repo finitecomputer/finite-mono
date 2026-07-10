@@ -52,10 +52,12 @@ Trusted local client:
 
 Trusted Agent Runtime:
 
-- May read and write the Vault Working Tree as ordinary files when acting for a
-  User with Folder Access.
-- Does not receive independent Vault Membership, Folder Access, or attribution.
-  Agent actions are User actions.
+- May read and write the Vault Working Tree as ordinary files when operating
+  with a Member Identity that has Folder Access.
+- Receives no authority merely from being an agent; Vault Membership, Folder
+  Access, grants, and attribution belong to the signing npub.
+- FiniteBrain does not classify whether a human, agent, shared client, or
+  several clients control that npub.
 
 FiniteBrain server:
 
@@ -75,9 +77,11 @@ on that Folder as the sole copy of user data.
 
 ### 3.1 User Identity
 
-A User is identified by a Nostr public key encoded as a NIP-19 `npub`. A User
-may use multiple devices with the same Nostr identity. Devices are not modeled
-as separate users or members.
+A User is identified by a Nostr public key encoded as a NIP-19 `npub`; this is
+the protocol's Member Identity, not a claim that its controller is human. A
+human, agent, shared client, or several clients may control it. Multiple
+devices may use the same identity, while separate keypairs are separate Users
+and Members from FiniteBrain's access-control perspective.
 
 Changing Nostr identity creates a new User from the access-control perspective.
 Nostr key loss means existing Folder Key Grants cannot be decrypted by the new
@@ -1993,9 +1997,19 @@ Local plaintext/XSS:
 - Decrypted Page content, opened Folder Keys, local search indexes, and graph
   indexes exist inside the trusted client or Agent Runtime.
 - Browser clients MUST treat XSS as a plaintext compromise.
-- Clients SHOULD keep Folder Keys in memory only unless a future key-backup
-  design is explicitly adopted.
-- Clients MUST NOT persist raw Folder Keys in localStorage.
+- Opened Folder Keys are Session Folder Keys. Trusted clients and Agent
+  Runtimes MUST NOT persist raw Folder Keys in localStorage, browser databases,
+  working-tree control state, logs, diagnostics, OS credential stores, or any
+  other durable client state.
+- A new process MUST reopen encrypted Folder Key Grants through the acting
+  Member Identity's signer and fail closed as locked when that signer or a
+  valid grant is unavailable.
+- Legacy Agent State containing raw Folder Keys is a hard cut: upgraded clients
+  MUST scrub the raw keys, clear stale unlocked status, and MUST NOT retain a
+  legacy fallback that uses them.
+- Scrubbing opened raw keys MUST preserve encrypted Folder Key Grants and any
+  Recovery Principal or Recovery Set material needed to restore access; this
+  hard cut removes redundant plaintext, not recovery authority.
 
 Nonce uniqueness:
 

@@ -45,6 +45,73 @@ Grants, decrypt readable Pages, edit one Page, encrypt and write the Page back
 as a signed revision, and pull/apply sync records without losing unresolved
 local edits.
 
+### Member Identity
+
+A Nostr `npub` that can hold Vault Membership, receive Folder Access, and open
+Folder Key Grants. FiniteBrain does not classify whether a human, agent, shared
+client, or several clients control it; separate keypairs are separate Member
+Identities. A product or Agent Runtime may provision and label separate
+keypairs, but that client-side policy does not create a different FiniteBrain
+authorization class.
+
+### Local Data Security Baseline
+
+The FiniteBrain-wide policy for how trusted clients and Agent Runtimes handle
+local secret material, decrypted content, derived plaintext state, retention,
+and egress. It applies regardless of which UI or editor provides the local
+experience.
+
+### Session Folder Key
+
+A Folder Key opened for one running trusted-client session. It is not durable
+local state and must be reopened from an encrypted Folder Key Grant when a new
+session needs it.
+
+### Session Lock
+
+A trusted-client state in which Session Folder Keys and temporary plaintext
+state are unavailable and automatic grant reopening is blocked until the
+Member explicitly resumes the grant-opening flow. A Session Lock hides client
+content but does not claim to erase a separately created Vault Working Tree.
+
+### Ephemeral Client Plaintext
+
+Decrypted content and derived readable state held by a browser or desktop
+client only while its session is unlocked. It is not retained as durable local
+state after the session ends.
+
+### Encrypted Recovery State
+
+Durable client-side ciphertext that preserves unsent work or other restart
+state without retaining readable plaintext. It becomes readable only after the
+acting Member Identity unlocks the relevant Folder again.
+
+### Plaintext Egress
+
+Any transfer of decrypted content or content-derived readable metadata beyond
+the Trusted Device Boundary. FiniteBrain's cryptographic authorization ends at
+decryption; first-party clients deny automatic Plaintext Egress, while a Member
+Identity's controller remains responsible for explicitly initiated exports and
+for the behavior of third-party clients.
+
+### Paused Vault Working Tree
+
+A Vault Working Tree whose FiniteBrain sync, signing, and automatic Folder Key
+opening are stopped while its existing plaintext files remain on the Trusted
+Device. _Avoid_: Locked Working Tree.
+
+### Vault Working Tree Removal
+
+The explicit deletion of a Vault Working Tree's local plaintext projection.
+It does not claim secure erasure from backups, snapshots, or storage history.
+
+### Trusted Device Boundary
+
+The local OS account and storage boundary trusted to hold a Member Identity's
+persistent secret and authorized plaintext. Obtaining that secret is a complete
+trusted-client compromise for the Member Identity, not a failure contained to
+one Folder or Finite product.
+
 ### Folder-scoped LLM Wiki
 
 The FiniteBrain knowledge model. A Vault is a namespace of many LLM wikis, and
@@ -98,29 +165,35 @@ A local agent-facing file projection built from already-decrypted accessible
 Pages. It materializes readable Folders as Folder-scoped LLM wiki roots with
 local `AGENTS.md` or `HUMANS.md` when present, `_index.md`, `config.md`,
 `log.md`, `raw/`, `wiki/`, `inventory/`, `datasets/`, and `output/`
-conventions. It stores only safe locked metadata for inaccessible Folders, and
-maps file changes back into Product Client encrypted-object write, move, and
-delete intents.
+conventions. It is an explicitly created persistent plaintext copy inside the
+Trusted Device Boundary, remains until its controller removes it, and is
+private to the controlling OS account at its root and FiniteBrain control-state
+boundary. It stores only safe locked metadata for inaccessible Folders and maps
+file changes back into Product Client encrypted-object write, move, and delete
+intents.
 
 ### Agent CLI
 
 The terminal control surface for a trusted Agent Runtime working inside a Vault
-Working Tree. It explains and controls identity, local daemon state, Folder Key
-opening, automatic sync health, blocked edits, activity, and access reasons
-while the agent reads and writes ordinary files.
+Working Tree. It explains and controls identity, local daemon state, automatic
+sync health, blocked edits, activity, and access reasons while the controller
+reads and writes ordinary files; each operation opens the Folder Key Grants it
+needs without creating a durable CLI unlock state.
 
 ### Agent Sync Daemon
 
 The resident trusted-client process that watches a Vault Working Tree, opens
-available Folder Keys for the acting User, detects file changes, syncs with the
-server, and records blocked states that require agent or human resolution.
+available Folder Keys for the acting Member Identity, detects file changes,
+syncs with the server, and records blocked states that require controller
+resolution.
 
 ### Local Agent Signer
 
 A trusted signer available to the Agent Runtime when browser NIP-07 is not
 available. It exposes the same conceptual abilities the Product Client needs:
 identify the acting npub, sign FiniteBrain events, and perform NIP-44
-encryption and decryption for Folder Key Grant handling.
+encryption and decryption for Folder Key Grant handling; its npub is an
+ordinary Member Identity with no agent-specific authorization semantics.
 
 ### Recovery Principal
 
