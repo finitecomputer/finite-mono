@@ -185,12 +185,15 @@ impl KataLauncher {
             program: self.config.nerdctl_bin.clone(),
             cwd: None,
             args: namespaced,
+            env: Vec::new(),
         }
     }
 
     fn execute(&self, command: &PlannedCommand, timeout: Duration) -> Result<Output, RunnerError> {
         let mut process = Command::new(&command.program);
-        process.args(&command.args);
+        process
+            .args(&command.args)
+            .envs(command.env.iter().map(|(key, value)| (key, value)));
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
@@ -484,6 +487,7 @@ impl RuntimeLauncher for KataLauncher {
             program: self.config.kata_runtime_bin.clone(),
             cwd: None,
             args: vec![OsString::from("--version")],
+            env: Vec::new(),
         };
         let output = self.execute(&command, self.config.command_timeout)?;
         if !output.status.success() {
@@ -742,6 +746,7 @@ pub(crate) fn kata_run_command(
         program: config.nerdctl_bin.clone(),
         cwd: None,
         args,
+        env: Vec::new(),
     }
 }
 

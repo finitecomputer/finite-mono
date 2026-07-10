@@ -46,6 +46,9 @@ const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
 const MAX_RUNTIME_ENVIRONMENT_VALUE_BYTES: usize = 4 * 1024;
 const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
+const MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES: usize = 64;
+const MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
+const MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -162,6 +165,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_ready_interval: Duration,
     default_finite_private: Option<FinitePrivateRuntimeDefaults>,
     runtime_environment: BTreeMap<String, String>,
+    runtime_secret_environment: BTreeMap<String, String>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -191,6 +195,7 @@ where
             runtime_ready_interval: DEFAULT_RUNTIME_READY_INTERVAL,
             default_finite_private: None,
             runtime_environment: BTreeMap::new(),
+            runtime_secret_environment: BTreeMap::new(),
         })
     }
 
@@ -216,7 +221,21 @@ where
         environment: BTreeMap<String, String>,
     ) -> Result<Self, RunnerError> {
         validate_runtime_environment(&environment)?;
+        validate_runtime_environment_disjoint(&environment, &self.runtime_secret_environment)?;
         self.runtime_environment = environment;
+        Ok(self)
+    }
+
+    /// Carry operator-selected secret references through the same generic
+    /// RuntimeSpec launch path as every other adapter. Values are never
+    /// interpreted by Runner and diagnostics expose keys only.
+    pub fn with_runtime_secret_environment(
+        mut self,
+        environment: BTreeMap<String, String>,
+    ) -> Result<Self, RunnerError> {
+        validate_runtime_secret_environment(&environment)?;
+        validate_runtime_environment_disjoint(&self.runtime_environment, &environment)?;
+        self.runtime_secret_environment = environment;
         Ok(self)
     }
 
@@ -507,6 +526,7 @@ where
         let mut options = RuntimeLaunchOptions {
             profile_picture_url: lease.request.profile_picture_url.clone(),
             environment: self.runtime_environment.clone(),
+            secret_environment: self.runtime_secret_environment.clone(),
             ..RuntimeLaunchOptions::default()
         };
         let Some(defaults) = self.default_finite_private.clone() else {
@@ -911,6 +931,9 @@ pub struct RuntimeLaunchOptions {
     pub profile_picture_url: Option<String>,
     /// Bounded non-secret values from the provider-neutral RuntimeSpec.
     pub environment: BTreeMap<String, String>,
+    /// Bounded secret values resolved by the operator-side launch boundary.
+    /// Adapters transport these opaquely and never log their values.
+    pub secret_environment: BTreeMap<String, String>,
 }
 
 /// Provider-neutral desired environment carried through a state-preserving
@@ -951,6 +974,10 @@ impl std::fmt::Debug for RuntimeLaunchOptions {
             .field(
                 "environment_keys",
                 &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "secret_environment_keys",
+                &self.secret_environment.keys().collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -997,12 +1024,7 @@ fn validate_runtime_environment(environment: &BTreeMap<String, String>) -> Resul
     }
     let mut total_bytes = 0usize;
     for (key, value) in environment {
-        let valid_key = !key.is_empty()
-            && key.len() <= MAX_RUNTIME_ENVIRONMENT_KEY_BYTES
-            && key.bytes().enumerate().all(|(index, byte)| {
-                byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
-            });
-        if !valid_key {
+        if !valid_runtime_environment_key(key) {
             return Err(RunnerError::InvalidRuntimeEnvironment(format!(
                 "{key:?} is not a bounded uppercase environment name"
             )));
@@ -1035,6 +1057,72 @@ fn validate_runtime_environment(environment: &BTreeMap<String, String>) -> Resul
         )));
     }
     Ok(())
+}
+
+fn validate_runtime_secret_environment(
+    environment: &BTreeMap<String, String>,
+) -> Result<(), RunnerError> {
+    if environment.len() > MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "at most {MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES} secret entries are allowed"
+        )));
+    }
+    let mut total_bytes = 0usize;
+    for (key, value) in environment {
+        if !valid_runtime_environment_key(key) {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key:?} is not a bounded uppercase secret environment name"
+            )));
+        }
+        if reserved_runtime_environment_key(key) {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key} is owned by the Runtime contract"
+            )));
+        }
+        if value.is_empty()
+            || value.len() > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
+            || value.contains('\0')
+            || value
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r'))
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key} has an empty, oversized, or multiline secret value"
+            )));
+        }
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+    if total_bytes > MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "secret values exceed the {MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES}-byte total limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_environment_disjoint(
+    environment: &BTreeMap<String, String>,
+    secret_environment: &BTreeMap<String, String>,
+) -> Result<(), RunnerError> {
+    if let Some(key) = environment
+        .keys()
+        .find(|key| secret_environment.contains_key(*key))
+    {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "{key} appears in both public and secret Runtime environment"
+        )));
+    }
+    Ok(())
+}
+
+fn valid_runtime_environment_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_RUNTIME_ENVIRONMENT_KEY_BYTES
+        && key.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+        })
 }
 
 fn reserved_runtime_environment_key(key: &str) -> bool {
@@ -1447,7 +1535,9 @@ impl DockerLauncher {
         timeout: Duration,
     ) -> Result<String, RunnerError> {
         let mut process = Command::new(&command.program);
-        process.args(&command.args);
+        process
+            .args(&command.args)
+            .envs(command.env.iter().map(|(key, value)| (key, value)));
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
@@ -1512,6 +1602,7 @@ impl DockerLauncher {
                     OsString::from("-f"),
                     OsString::from(container_name),
                 ],
+                env: Vec::new(),
             },
             self.config.command_timeout,
         );
@@ -1588,6 +1679,7 @@ impl RuntimeLauncher for DockerLauncher {
                     OsString::from("restart"),
                     OsString::from(&lease.request.source_machine_id),
                 ],
+                env: Vec::new(),
             },
             self.config.command_timeout,
         )?;
@@ -1630,6 +1722,7 @@ impl RuntimeLauncher for DockerLauncher {
                     OsString::from("stop"),
                     OsString::from(&lease.request.source_machine_id),
                 ],
+                env: Vec::new(),
             },
             self.config.command_timeout,
         )
@@ -1658,6 +1751,7 @@ impl RuntimeLauncher for DockerLauncher {
                     OsString::from("-f"),
                     OsString::from(&lease.request.source_machine_id),
                 ],
+                env: Vec::new(),
             },
             self.config.command_timeout,
         )?;
@@ -1717,6 +1811,7 @@ impl RuntimeLauncher for DockerLauncher {
                     OsString::from("-f"),
                     OsString::from(&facts.source_machine_id),
                 ],
+                env: Vec::new(),
             },
             self.config.command_timeout,
         )
@@ -1809,16 +1904,21 @@ fn docker_run_command(
         args.push(OsString::from("--pull"));
         args.push(OsString::from(policy));
     }
-    for (key, value) in docker_runtime_env(config, plan, lease, options) {
-        args.push(OsString::from("--env"));
-        args.push(OsString::from(format!("{key}={value}")));
-    }
+    let env = docker_runtime_env(config, plan, lease, options)
+        .into_iter()
+        .map(|(key, value)| {
+            args.push(OsString::from("--env"));
+            args.push(OsString::from(&key));
+            (OsString::from(key), OsString::from(value))
+        })
+        .collect();
     args.push(OsString::from(config.image.trim()));
 
     PlannedCommand {
         program: config.docker_bin.clone(),
         cwd: None,
         args,
+        env,
     }
 }
 
@@ -1955,6 +2055,12 @@ fn docker_equivalent_runtime_env(
     entries.extend(
         options
             .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    entries.extend(
+        options
+            .secret_environment
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
@@ -3112,9 +3218,11 @@ fn enclavia_runtime_env(
 
 fn enclavia_env_value_uses_stdin(key: &str) -> bool {
     matches!(key, "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY")
+        || key.ends_with("_KEY")
         || key.ends_with("_SECRET")
         || key.ends_with("_TOKEN")
         || key.ends_with("_PASSWORD")
+        || key.ends_with("_CREDENTIAL")
 }
 
 fn enclavia_endpoint_from_status(
@@ -3241,6 +3349,8 @@ fn phala_compose(
     for (key, value) in &mut env {
         if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
             *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
+        } else if options.secret_environment.contains_key(key) {
+            *value = format!("${{{key}:?{key} is required}}");
         }
     }
 
@@ -3279,6 +3389,12 @@ fn phala_env_file(options: &RuntimeLaunchOptions) -> Option<String> {
     rendered.push_str("FINITE_PRIVATE_API_KEY=");
     rendered.push_str(&dotenv_quote(&finite_private.raw_api_key));
     rendered.push('\n');
+    for (key, value) in &options.secret_environment {
+        rendered.push_str(key);
+        rendered.push('=');
+        rendered.push_str(&dotenv_quote(value));
+        rendered.push('\n');
+    }
     Some(rendered)
 }
 
@@ -3536,6 +3652,7 @@ pub struct PlannedCommand {
     pub program: PathBuf,
     pub cwd: Option<PathBuf>,
     pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
 }
 
 impl std::fmt::Debug for PlannedCommand {
@@ -3558,6 +3675,10 @@ impl std::fmt::Debug for PlannedCommand {
             .field("program", &self.program)
             .field("cwd", &self.cwd)
             .field("args", &redacted_args)
+            .field(
+                "env_keys",
+                &self.env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -4278,6 +4399,7 @@ mod tests {
                 "FINITE_SITES_API".to_string(),
                 "http://192.168.64.1:18789".to_string(),
             )]),
+            secret_environment: BTreeMap::new(),
         };
 
         assert_eq!(plan.container_name, "finite-agent_abc-123");
@@ -4326,12 +4448,12 @@ mod tests {
                 "/var/lib/finite/runner/docker/finite-agent_abc-123:/data",
             ]
         }));
-        assert!(args.windows(2).any(|pair| {
-            pair == [
-                "--env",
-                "FINITECHAT_HERMES_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-            ]
-        }));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--env", "FINITECHAT_HERMES_BASE_URL"] })
+        );
+        assert!(args.iter().all(|arg| !arg.contains("fpk_live_test")));
+        assert!(!format!("{command:?}").contains("fpk_live_test"));
         assert_eq!(
             args.last().map(String::as_str),
             Some("ghcr.io/finitecomputer/finite-chat-hermes-runtime:local")
@@ -4365,6 +4487,10 @@ mod tests {
             environment: BTreeMap::from([(
                 "FINITE_SITES_API".to_string(),
                 "http://10.88.0.1:8789".to_string(),
+            )]),
+            secret_environment: BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal_must_never_reach_argv".to_string(),
             )]),
         };
         let plan = kata::kata_launch_plan(&config, &lease);
@@ -4413,7 +4539,9 @@ mod tests {
             ]
         }));
         assert!(args.iter().all(|arg| !arg.contains("fpk_must_never")));
+        assert!(args.iter().all(|arg| !arg.contains("fal_must_never")));
         assert!(!format!("{command:?}").contains("fpk_must_never"));
+        assert!(!format!("{command:?}").contains("fal_must_never"));
         assert_eq!(args.last().map(String::as_str), Some(config.image.as_str()));
 
         let env = kata::kata_runtime_env(&config, &plan, &lease, &options);
@@ -4424,6 +4552,7 @@ mod tests {
             "https://chat.finite.computer/blobs/profile",
         );
         assert_env(&env, "FINITE_SITES_API", "http://10.88.0.1:8789");
+        assert_env(&env, "FAL_KEY", "fal_must_never_reach_argv");
 
         let temp = tempfile::tempdir().unwrap();
         let env_file = temp.path().join("launch.env");
@@ -4464,9 +4593,26 @@ mod tests {
                     finite_private: None,
                     profile_picture_url: None,
                     environment: valid,
+                    secret_environment: BTreeMap::from([(
+                        "FAL_KEY".to_string(),
+                        "fal_debug_secret".to_string(),
+                    )]),
                 }
             )
             .contains("192.168.64.1")
+        );
+        assert!(
+            !format!(
+                "{:?}",
+                RuntimeLaunchOptions {
+                    secret_environment: BTreeMap::from([(
+                        "FAL_KEY".to_string(),
+                        "fal_debug_secret".to_string(),
+                    )]),
+                    ..RuntimeLaunchOptions::default()
+                }
+            )
+            .contains("fal_debug_secret")
         );
         assert!(!format!("{restart_options:?}").contains("192.168.64.1"));
         assert!(
@@ -4476,6 +4622,41 @@ mod tests {
             )]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn opaque_runtime_secret_environment_is_bounded_disjoint_and_value_redacted() {
+        let secrets = BTreeMap::from([
+            ("FAL_KEY".to_string(), "fal_test_secret".to_string()),
+            ("XAI_API_KEY".to_string(), "xai_test_secret".to_string()),
+        ]);
+        validate_runtime_secret_environment(&secrets).unwrap();
+        validate_runtime_environment_disjoint(&BTreeMap::new(), &secrets).unwrap();
+
+        for key in ["FINITE_PRIVATE_API_KEY", "OPENAI_API_KEY", "lowercase"] {
+            let invalid = BTreeMap::from([(key.to_string(), "secret".to_string())]);
+            assert!(
+                validate_runtime_secret_environment(&invalid).is_err(),
+                "{key}"
+            );
+        }
+        assert!(
+            validate_runtime_environment_disjoint(
+                &BTreeMap::from([("SENTRY_DSN".to_string(), "public".to_string())]),
+                &BTreeMap::from([("SENTRY_DSN".to_string(), "secret".to_string())]),
+            )
+            .is_err()
+        );
+        let debug = format!(
+            "{:?}",
+            RuntimeLaunchOptions {
+                secret_environment: secrets,
+                ..RuntimeLaunchOptions::default()
+            }
+        );
+        assert!(debug.contains("FAL_KEY"));
+        assert!(!debug.contains("fal_test_secret"));
+        assert!(!debug.contains("xai_test_secret"));
     }
 
     #[test]
@@ -4548,6 +4729,10 @@ mod tests {
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
+            secret_environment: BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal_phala_secret".to_string(),
+            )]),
         };
 
         let plan = apple_container::apple_container_launch_plan(&config, &lease);
@@ -4594,8 +4779,11 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--restart" || arg == "--pull"));
         assert!(env_keys.iter().any(|key| key == "FINITE_PRIVATE_API_KEY"));
         assert!(env_keys.iter().any(|key| key == "OPENAI_API_KEY"));
+        assert!(env_keys.iter().any(|key| key == "FAL_KEY"));
         assert!(args.iter().all(|arg| !arg.contains("fpk_super_secret")));
+        assert!(args.iter().all(|arg| !arg.contains("fal_phala_secret")));
         assert!(!debug.contains("fpk_super_secret"));
+        assert!(!debug.contains("fal_phala_secret"));
         assert_eq!(args.last().map(String::as_str), Some(config.image.as_str()));
     }
 
@@ -4638,6 +4826,10 @@ mod tests {
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
+            secret_environment: BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal_phala_secret".to_string(),
+            )]),
         };
 
         assert_eq!(plan.cvm_name, "finite-agent-abc-123");
@@ -4665,11 +4857,14 @@ mod tests {
         assert!(compose.contains(
             "OPENAI_API_KEY: '${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}'"
         ));
+        assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
         assert!(!compose.contains("fpk_live_test"));
+        assert!(!compose.contains("fal_phala_secret"));
         assert!(!compose.contains("phala_test_api_key"));
 
         let env_file = phala_env_file(&options).unwrap();
         assert!(env_file.contains("FINITE_PRIVATE_API_KEY=\"fpk_live_test\""));
+        assert!(env_file.contains("FAL_KEY=\"fal_phala_secret\""));
         assert!(!env_file.contains("phala_test_api_key"));
     }
 
@@ -4700,6 +4895,7 @@ mod tests {
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
+            secret_environment: BTreeMap::new(),
         };
         let env = enclavia_runtime_env(&config, &plan, &lease, &options);
 
@@ -4733,6 +4929,8 @@ mod tests {
     fn enclavia_secret_argv_policy_keeps_raw_keys_on_stdin() {
         assert!(enclavia_env_value_uses_stdin("FINITE_PRIVATE_API_KEY"));
         assert!(enclavia_env_value_uses_stdin("OPENAI_API_KEY"));
+        assert!(enclavia_env_value_uses_stdin("FAL_KEY"));
+        assert!(enclavia_env_value_uses_stdin("XAI_API_KEY"));
         assert!(!enclavia_env_value_uses_stdin("FINITECHAT_SERVER_URL"));
         assert!(!enclavia_env_value_uses_stdin("FINITE_AGENT_NAME"));
     }

@@ -68,6 +68,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     let finite_private_api_key_override =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
     let runtime_environment = optional_runtime_environment()?;
+    let runtime_secret_environment = optional_runtime_secret_environment()?;
     // This identifies the adapter offered by this worker. Placement remains
     // project-selected in Core; product code never toggles a process-global
     // backend to change an existing agent's runtime.
@@ -123,6 +124,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_model,
                     finite_private_api_key_override,
                     runtime_environment,
+                    runtime_secret_environment,
                 },
             )?
         }
@@ -180,6 +182,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_model,
                     finite_private_api_key_override,
                     runtime_environment,
+                    runtime_secret_environment,
                 },
             )?
         }
@@ -237,6 +240,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_model,
                     finite_private_api_key_override,
                     runtime_environment,
+                    runtime_secret_environment,
                 },
             )?
         }
@@ -290,6 +294,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_model,
                     finite_private_api_key_override,
                     runtime_environment,
+                    runtime_secret_environment,
                 },
             )?
         }
@@ -339,6 +344,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_model,
                     finite_private_api_key_override,
                     runtime_environment,
+                    runtime_secret_environment,
                 },
             )?
         }
@@ -403,6 +409,7 @@ struct RunOnceConfig {
     finite_private_model: String,
     finite_private_api_key_override: Option<String>,
     runtime_environment: BTreeMap<String, String>,
+    runtime_secret_environment: BTreeMap<String, String>,
 }
 
 fn run_once_with_launcher<L>(
@@ -426,6 +433,7 @@ where
         api_key_override: config.finite_private_api_key_override,
     })
     .with_runtime_environment(config.runtime_environment)?
+    .with_runtime_secret_environment(config.runtime_secret_environment)?
     .with_runtime_ready_polling(config.runtime_ready_timeout, config.runtime_ready_interval);
     runner.run_once().map_err(Into::into)
 }
@@ -458,6 +466,41 @@ fn optional_runtime_environment() -> Result<BTreeMap<String, String>> {
     };
     serde_json::from_str(&raw)
         .context("FC_RUNNER_RUNTIME_ENV_JSON must be a JSON object of string values")
+}
+
+fn optional_runtime_secret_environment() -> Result<BTreeMap<String, String>> {
+    let Some(path) = optional_env_value("FC_RUNNER_RUNTIME_SECRET_ENV_FILE") else {
+        return Ok(BTreeMap::new());
+    };
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read FC_RUNNER_RUNTIME_SECRET_ENV_FILE {path}"))?;
+    parse_runtime_secret_environment(&contents)
+        .with_context(|| format!("invalid FC_RUNNER_RUNTIME_SECRET_ENV_FILE {path}"))
+}
+
+fn parse_runtime_secret_environment(contents: &str) -> Result<BTreeMap<String, String>> {
+    let mut environment = BTreeMap::new();
+    for (index, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (raw_key, raw_value) = line
+            .split_once('=')
+            .with_context(|| format!("line {} must be KEY=VALUE", index + 1))?;
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if key.is_empty() || value.is_empty() {
+            bail!("line {} must contain a non-empty key and value", index + 1);
+        }
+        if environment
+            .insert(key.to_string(), value.to_string())
+            .is_some()
+        {
+            bail!("line {} repeats {key}", index + 1);
+        }
+    }
+    Ok(environment)
 }
 
 fn optional_env_value(name: &str) -> Option<String> {
@@ -527,4 +570,24 @@ fn host_available_memory_bytes() -> Option<u64> {
         return kib.checked_mul(1024);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_secret_file_parser_is_literal_and_rejects_duplicates() {
+        let parsed = parse_runtime_secret_environment(
+            "# host-owned runtime secrets\nFAL_KEY=fal_test\nXAI_API_KEY=xai=value\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.get("FAL_KEY").map(String::as_str), Some("fal_test"));
+        assert_eq!(
+            parsed.get("XAI_API_KEY").map(String::as_str),
+            Some("xai=value")
+        );
+        assert!(parse_runtime_secret_environment("FAL_KEY=one\nFAL_KEY=two\n").is_err());
+        assert!(parse_runtime_secret_environment("not-an-assignment\n").is_err());
+    }
 }

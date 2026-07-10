@@ -11,9 +11,9 @@ not been exercised yet are marked `TODO:` with what must be learned.
 
 > **Topology as of the 2026-07-09 lat1 consolidation cutover**
 > ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): Core, dashboard,
-> native Postgres, chat, and sites all run on finite-lat-1 (now NixOS, one
-> Caddy edge, no k3s); lat2 is the CI runner box; smoke still runs finite-brain
-> (deferred); clawland is legacy (chat disabled there). **The topology runbooks
+> native Postgres, chat, sites, and Brain all run on finite-lat-1 (now NixOS,
+> one Caddy edge, no k3s); lat2 is the CI runner box; smoke is the Brain
+> rollback source during migration; clawland is legacy. **The topology runbooks
 > below (deploy-core / deploy-sites / deploy-finitechat-server /
 > postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
 > The reinstall runbook and the NixOS config (`infra/nixos/`) are the source
@@ -29,9 +29,9 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
-| [deploy-brain.md](deploy-brain.md) | finite-brain on smoke (deferred from the cutover; auth-integration follow-up) |
-| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image (runner on lat1, currently dormant) |
-| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke brain, clawland legacy) |
+| [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 behind the dashboard's WorkOS session; SQLite migration and rollback |
+| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
+| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke rollback source, clawland legacy) |
 
 ## Release checklist discipline
 

@@ -1,9 +1,7 @@
-# finite-brain — brain.smoke.finite.computer (moving here from ovh-vps-smoke).
-# Mirrors the captured finite-brain-app.service (infra/hosts/smoke/) except:
-# FINITE_BRAIN_ADDR binds 127.0.0.1 instead of 0.0.0.0 — smoke exposed :3015
-# on its public IP (flagged risk in the smoke README); here only Caddy +
-# oauth2-proxy front it.
-# Config is Environment= only — no EnvironmentFile, no secrets (per capture).
+# finite-brain — first-party server behind the finite.computer dashboard.
+# It binds loopback only. Next.js proxies /client and /_admin under the same
+# WorkOS session as the rest of the dashboard; Brain then independently checks
+# Nostr request proofs for agent/user data operations.
 { finitePackages, ... }:
 {
   systemd.services.finite-brain-app = {
@@ -16,8 +14,8 @@
       FBRAIN_CONFIG_DIR = "/var/lib/finitebrain/fbrain";
       FINITE_BRAIN_ADDR = "127.0.0.1:3015";
       FINITE_BRAIN_DB = "/var/lib/finitebrain/finite-brain.sqlite3";
-      FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.smoke.finite.computer";
-      FINITE_BRAIN_SERVER_URL = "https://brain.smoke.finite.computer";
+      FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
+      FINITE_BRAIN_SERVER_URL = "https://finite.computer";
     };
 
     serviceConfig = {

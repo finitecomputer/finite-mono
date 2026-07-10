@@ -95,12 +95,11 @@ The same black-box suite runs against fake, Kata, and Phala adapters:
 
 ## Current Gaps
 
-The current Runner backend is selected by global process configuration, Project
-requests do not yet carry a complete provider-neutral `RuntimeSpec`, and Core
-does not persist a structured handle early enough for full adopt/reconcile.
-The existing destroy path also conflates compute teardown with data deletion.
-Do not add Kata as another global backend branch; split these shared contracts
-first, then make Phala pass the same tests.
+Each worker advertises one adapter class and Core matches it to the class stored
+on the Project. Project requests do not yet carry a complete provider-neutral
+`RuntimeSpec`, and Core does not persist a structured handle early enough for
+full adopt/reconcile. Compute destroy now preserves durable state, but the
+separate Recovery Snapshot/export/purge lifecycle remains open.
 
 The shared launch path now accepts a bounded `FC_RUNNER_RUNTIME_ENV_JSON` map as
 transitional local-development scaffolding. Every adapter carries the same
@@ -111,3 +110,13 @@ URLs without an Apple-specific Sites or Brain branch. Production still needs
 Core-owned per-Project RuntimeSpec persistence and secret references; the
 process-wide JSON setting is not that final contract and must not be used for
 connection credentials.
+
+Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
+root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the
+bounded map, rejects Runtime-contract keys, exposes key names only in
+diagnostics, and transports values through each adapter's secret-safe channel.
+This restores the legacy shared tool-provider set without teaching Runner what
+FAL, xAI, or any product feature means. It is transitional host-wide bootstrap,
+not a replacement for Core-owned per-Project secret references. Runtime
+restart preserves the credential set already held by the Runtime; it does not
+silently rotate shared or inference credentials.

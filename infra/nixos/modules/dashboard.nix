@@ -30,6 +30,7 @@
       FC_DASHBOARD_RUNNER_CLASSES = "kata";
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
+      FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";

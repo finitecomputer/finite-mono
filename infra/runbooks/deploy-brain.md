@@ -1,92 +1,69 @@
-# Deploying finite-brain (smoke)
+# Deploying finite-brain on lat1
 
-> **DEFERRED from the 2026-07-09 lat1 cutover.** finite-brain was intentionally
-> NOT migrated; it still runs on ovh-vps-smoke, deployed from the legacy
-> `finitecomputer` repo. Its move to lat1 (a `modules/finite-brain.nix` +
-> oauth2-proxy already stubbed in `infra/nixos/`) is bundled with the
-> auth-integration follow-up and will happen then. Until then everything below
-> — smoke host, legacy `just host-deploy` flow — is CURRENT. See
-> [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) "Post-install follow-ups".
+Finite Brain runs as `finite-brain-app.service` on finite-lat-1, bound only to
+`127.0.0.1:3015`. The dashboard proxies `/client` and `/_admin/*` to that
+loopback service. WorkOS protects both paths as part of the same
+`finite.computer` session; Brain still verifies Nostr request proofs for its
+data operations. There is no second Brain vhost and no oauth2-proxy.
 
-finite-brain runs on ovh-vps-smoke (15.204.56.61) as the NixOS-generated
-unit `finite-brain-app.service`, listening on :3015, SQLite at
-`/var/lib/private/finitebrain/finite-brain.sqlite3`. Host map:
-`infra/hosts/smoke/README.md`. Deploy detail (current and target):
-`infra/hosts/smoke/deploy.md` — that doc is the flow of record; this runbook
-is the operational wrapper.
+The SQLite database is `/var/lib/private/finitebrain/finite-brain.sqlite3`.
+Compute deployment and data migration are separate operations. Never replace
+the database without a byte-for-byte rollback copy.
 
-## Current flow — legacy `just host-deploy` (pointer)
+## Preconditions
 
-Deploys come from the LEGACY `finitecomputer` repo (deliberately outside
-mono): `workspaces/ovh-vps-smoke && just host-deploy` → rsync to
-`/etc/nixos` → `nixos-rebuild switch --flake .#ovh-vps-smoke`, with
-**clawland (15.204.108.57) as the nix build host**. finite-brain is built by
-nix from vendored source tarballs in the legacy repo's `nix/sources/`
-(0.1.2-6466fcc live at capture). Full steps: `infra/hosts/smoke/deploy.md`.
+- The exact mono commit is pushed and its production NixOS configuration
+  evaluates successfully.
+- `finite.computer` dashboard auth is healthy.
+- A consistent SQLite backup has been copied from the current source and its
+  size plus SHA-256 recorded outside the database contents.
+- The previous NixOS generation and source Brain service remain available for
+  rollback until the lat1 Product Client and `fbrain` proofs pass.
 
-### PRECONDITIONS
+## First migration from smoke
 
-- Operator checkout of the legacy `finitecomputer` repo with its
-  `secrets/workspace.env` (values never in any repo).
-- Know the current NixOS generation (`nixos-rebuild list-generations` /
-  system-237 at capture) — it is your rollback target.
+1. On smoke, make a SQLite online backup (or briefly stop the service if the
+   installed SQLite lacks `.backup`), then restart it immediately. Do not move
+   the live file while the service is writing.
+2. Copy the backup to a root-only staging path on lat1 and record its SHA-256.
+3. Deploy the pinned mono revision. Let systemd create the DynamicUser state
+   directory and an empty database if necessary.
+4. Stop `finite-brain-app` on lat1, keep a rollback copy of any destination
+   database, replace it with the staged backup, match the destination file's
+   owner/mode, and start the service.
+5. Leave smoke unchanged until verification completes.
 
-### VERIFY (after any switch)
+## Normal deploy
 
 ```sh
-curl -fsS https://brain.smoke.finite.computer/health
-curl -fsS https://brain.smoke.finite.computer/client/config.json
-ssh root@15.204.56.61 systemctl status finite-brain-app   # no ssh alias yet
+nixos-rebuild switch --target-host root@64.34.82.77 \
+  --flake github:finitecomputer/finite-mono/<exact-rev>#finite-lat-1
 ```
 
-Route expectations and the fbrain client checks:
-`finite-brain/docs/runbooks/smoke-alpha-backup-restore-cutover.md`.
+Brain is built with the rest of the monorepo from that revision; no source
+tarball or legacy-repo deploy is part of the path.
 
-### ROLLBACK
+## Verify
 
-NixOS generations: `nixos-rebuild switch --rollback` (or boot a previous
-generation). Data rollback is separate — SQLite procedure in the
-smoke-alpha runbook above. **Caution: there is currently no automated backup
-of that SQLite on this host** (fix 1 below).
+```sh
+ssh root@64.34.82.77 systemctl is-active finite-brain-app
+ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
+curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
+```
 
-## The two proposed fixes (do these before feature work)
+The public `/client` request must require a WorkOS session. In an authenticated
+browser, verify the Product Client loads and completes a real `/_admin/*`
+request through the dashboard. Then run `fbrain doctor` and a write/read proof
+from an authorized Nostr identity against `https://finite.computer`.
 
-From `infra/hosts/smoke/deploy.md` (both are changes in the legacy repo):
+## Rollback
 
-1. **Enable borg backups via `backup.json`.** The offsite-borg module
-   (`nix/modules/host-offsite-backup.nix`) already runs on clawland; it is
-   gated on `workspaces/<ws>/host/backup.json` `{"enabled": true}`, which
-   does not exist for ovh-vps-smoke. Add it, and add
-   `/var/lib/private/finitebrain` to the backup paths (defaults do not cover
-   the brain state dir). Until then the brain's SQLite — the only copy —
-   has no protected copy. TODO: after enabling, drill a borg restore of the
-   SQLite before calling this fixed.
-2. **Close the :3015 bind/firewall gap.** `FINITE_BRAIN_ADDR` is
-   `0.0.0.0:3015` on the public IP; if OVH's network firewall does not block
-   external :3015, direct access skips oauth entirely. Either bind
-   `127.0.0.1:3015` (and repoint the manual Endpoints /
-   cluster.json `endpoint_ip` accordingly) or verify the firewall blocks
-   :3015 (and k3s :6443/:10250). TODO: unverified either way at capture —
-   test from outside OVH and record the result in
-   `infra/hosts/smoke/README.md`.
+1. Switch lat1 to the previous NixOS generation.
+2. If Brain data was written on lat1, preserve that database before restoring
+   the pre-migration rollback copy; do not discard either side.
+3. Keep or restore the smoke service as the temporary endpoint while deciding
+   how to reconcile post-cutover writes.
 
-## The bridge: `fbrain/v*` release consumption
-
-Target (not a replatform): mono releases under the `fbrain/v*` tag and the
-legacy nix packaging consumes a **pinned release URL + hash** instead of
-hand-vendored tarballs in `nix/sources/` — killing tarball copying, the
-`nix/sources/` disk growth (smoke's disk was 82% full at capture), and
-making the deployed rev traceable to a public mono tag.
-
-Status and gap:
-
-- `compat/matrix.toml` `[field.fbrain-cli]`: **no public fbrain release
-  yet** (champagne test used a PR-branch build). The first
-  `fbrain/vX.Y.Z` tag follows [release-cli.md](release-cli.md), including
-  the matrix update.
-- `fbrain/v*` releases publish `finite-brain-linux-x86_64.tar.gz` (+ sha256)
-  — the prebuilt `finite-brain` server binary from `finite-brain-app` — for
-  the nix bridge (added 2026-07-08). TODO: adapt the legacy nix packaging to
-  consume this prebuilt binary (or keep source-tarball builds if NixOS purity
-  is preferred — decide when the bridge lands; the release also carries the
-  git tag, so a source build can pin against it either way).
+A NixOS rollback is not a data rollback. Offsite Recovery Snapshot and
+empty-target restore remain TODO; do not claim them until a restore drill has
+passed.

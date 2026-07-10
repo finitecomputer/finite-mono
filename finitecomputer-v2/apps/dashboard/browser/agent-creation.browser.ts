@@ -185,7 +185,7 @@ type AgentConnectionsStatus = {
   };
 };
 
-test("dashboard agent creation browser states", async () => {
+test("dashboard agent creation browser states", { timeout: 120_000 }, async () => {
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore();
   const brain = await startFakeBrain();
@@ -361,6 +361,7 @@ test("dashboard agent creation browser states", async () => {
       await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
       await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
+      await brainFrame.getByText("Brain API ready").waitFor({ state: "visible" });
       await page.getByRole("link", { name: "Chat" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
 
@@ -518,8 +519,8 @@ function startDashboard(
   brainUrl: string
 ) {
   return spawn(
-    "npm",
-    ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(port)],
+    process.execPath,
+    ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
     {
       cwd: process.cwd(),
       env: {
@@ -545,7 +546,11 @@ async function startFakeBrain() {
   const server = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/client") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><html><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p></main></body></html>");
+      response.end(`<!doctype html><html><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/_admin/browser-proof") {
+      writeJson(response, 200, { message: "Brain API ready" });
       return;
     }
     writeJson(response, 404, { error: "not found" });

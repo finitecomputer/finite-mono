@@ -3,7 +3,7 @@
 # chat.finite.computer, smoke's socat->Traefik chain for brain).
 #
 # TLS:
-# - finite.computer, chat.finite.computer, brain.smoke.finite.computer:
+# - finite.computer, chat.finite.computer:
 #   Let's Encrypt (ACME), automatic.
 # - *.finite.chat / *.docs.finite.chat / api.finite.chat: Cloudflare Origin
 #   CA cert pair at /etc/finite-saas/certs/finite-chat-origin.{pem,key},
@@ -51,13 +51,8 @@ in
       tls ${originCert} ${originKey}
       ${sitesBackend}
     '';
-
-    # brain vhosts DEFERRED with the brain + oauth2-proxy modules to the
-    # auth-integration follow-up (Paul, 2026-07-09). Brain stays on smoke;
-    # brain.smoke.finite.computer keeps serving there. Do NOT add a
-    # brain.smoke or brain.finite vhost here until finite-brain.nix +
-    # oauth2-proxy.nix are re-imported — a vhost with no backend would fail
-    # ACME and 502. The forward_auth/oauth2 config is preserved in git
-    # history and in those modules' comments for the follow-up.
+    # Brain intentionally has no second public vhost. The dashboard proxies its
+    # client and API routes under finite.computer so WorkOS protects one
+    # coherent product session; Brain retains its own Nostr authorization.
   };
 }

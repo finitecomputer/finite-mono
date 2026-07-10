@@ -13,7 +13,7 @@ type CoreState = {
   grantResets: string[];
 };
 
-test("dashboard Finite Private admin controls render status and reset grants", async () => {
+test("dashboard Finite Private admin controls render status and reset grants", { timeout: 120_000 }, async () => {
   const core = await startFakeCore();
   const dashboardPort = await freePort();
   const dashboard = startDashboard(dashboardPort, core.url);
@@ -50,8 +50,8 @@ test("dashboard Finite Private admin controls render status and reset grants", a
 
 function startDashboard(port: number, coreUrl: string) {
   return spawn(
-    "npm",
-    ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(port)],
+    process.execPath,
+    ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
     {
       cwd: process.cwd(),
       env: {

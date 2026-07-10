@@ -90,10 +90,24 @@ jobs:
 
           docker tag "$VERSION_REF" "$SHA_REF"
           docker push "$SHA_REF"
-          SHA_DIGEST="$(docker buildx imagetools inspect "$SHA_REF" --format '{{.Manifest.Digest}}')"
+          # finite-lat-2 intentionally runs the host Docker package and does
+          # not require the optional buildx plugin. Pulling the just-pushed
+          # tag records the registry manifest in RepoDigests, which gives us
+          # the same immutable proof without coupling publication to buildx.
+          docker pull "$SHA_REF" >/dev/null
+          SHA_DIGEST="$(
+            docker image inspect "$SHA_REF" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s#^$IMAGE@##p" \
+              | head -n 1
+          )"
           test -n "$SHA_DIGEST"
           docker push "$VERSION_REF"
-          VERSION_DIGEST="$(docker buildx imagetools inspect "$VERSION_REF" --format '{{.Manifest.Digest}}')"
+          docker pull "$VERSION_REF" >/dev/null
+          VERSION_DIGEST="$(
+            docker image inspect "$VERSION_REF" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s#^$IMAGE@##p" \
+              | head -n 1
+          )"
           if [ -z "$VERSION_DIGEST" ] || [ "$VERSION_DIGEST" != "$SHA_DIGEST" ]; then
             echo "::error::version and source-SHA tags did not resolve to one digest"
             cat finitecomputer-v2/runtime-image-report.json
