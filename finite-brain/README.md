@@ -135,11 +135,22 @@ export FBRAIN_CONFIG_DIR="$HOME/.config/finitebrain"
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" auth status --json
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" open <vault-id> "$HOME/finitebrain/<vault-id>"
 cd "$HOME/finitebrain/<vault-id>"
+fbrain --config-dir "$FBRAIN_CONFIG_DIR" doctor
+fbrain --config-dir "$FBRAIN_CONFIG_DIR" repair # only when doctor reports an insecure boundary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" unlock --all
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" conflicts --json
 ```
+
+A Vault Working Tree is intentional persistent plaintext on the Trusted Device.
+Pausing sync, stopping `fbrain`, restarting the device, or clearing Session
+Folder Keys does not hide or remove its member-authored files. `fbrain repair`
+only restores owner-only permissions on the Working Tree root and
+Finite-managed `.finitebrain/` state; it never recursively changes member
+content. Removing a Working Tree is an ordinary filesystem deletion and makes
+no secure-erasure promise for device storage, backups, snapshots, or prior
+copies.
 
 Before editing, read the Vault Working Tree's `AGENTS.md`, `HUMANS.md`,
 Folder-local `_index.md`, `config.md`, and `log.md` files when present.
