@@ -1,3 +1,5 @@
+#[cfg(test)]
+use finite_saas_core::FinitePrivateApiKey;
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
@@ -8,8 +10,6 @@ use finite_saas_core::{
     RuntimeControlRequest, RuntimeSummaryStatus,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
-#[cfg(test)]
-use finite_saas_core::FinitePrivateApiKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
