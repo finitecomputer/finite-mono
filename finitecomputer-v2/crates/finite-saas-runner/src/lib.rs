@@ -4356,14 +4356,54 @@ mod tests {
     }
 
     #[test]
-    fn production_runtime_healthcheck_does_not_source_mounted_secrets() {
+    fn production_runtime_healthcheck_uses_only_the_authoritative_readiness_endpoint() {
         let healthcheck = read_repo_file("deploy/finite-computer/runtime-template/healthcheck.sh");
 
         assert!(!healthcheck.contains("source "));
         assert!(healthcheck.contains("http://${agent_http_host}:${agent_http_port}/healthz"));
-        assert!(healthcheck.contains("finitechat identity"));
-        assert!(healthcheck.contains("fsite describe workflow publish-static-site"));
+        assert!(healthcheck.contains("exec curl -fsS --max-time 4"));
+        assert!(!healthcheck.contains("/runtime/bin/"));
+        assert!(!healthcheck.contains("finitechat identity"));
+        assert!(!healthcheck.contains("finite-agentd status"));
         assert!(!healthcheck.contains("/runtime/env/runtime.env"));
+    }
+
+    #[test]
+    fn production_runtime_healthcheck_targets_the_configured_loopback_service() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_curl = temp.path().join("curl");
+        let args_file = temp.path().join("curl-args");
+        std::fs::write(
+            &fake_curl,
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$PROBE_ARGS_FILE\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut path = std::ffi::OsString::from(temp.path());
+        path.push(":");
+        path.push(existing_path);
+        let output = Command::new("bash")
+            .arg(repo_path(
+                "deploy/finite-computer/runtime-template/healthcheck.sh",
+            ))
+            .env("PATH", path)
+            .env("PROBE_ARGS_FILE", &args_file)
+            .env("FINITE_AGENT_HTTP_HEALTH_HOST", "127.0.0.9")
+            .env("FINITE_AGENT_HTTP_PORT", "18080")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "healthcheck failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(args_file).unwrap(),
+            "-fsS\n--max-time\n4\nhttp://127.0.0.9:18080/healthz\n"
+        );
     }
 
     #[test]

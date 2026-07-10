@@ -17,6 +17,7 @@ RUNTIME_DOCKERFILE = (
 HEALTHCHECK = (
     MONOREPO_ROOT / "finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh"
 )
+RUNTIME_IMAGE_WORKFLOW = MONOREPO_ROOT / ".github/workflows/runtime-image.yml"
 GOOGLE_WORKSPACE_SKILL = MONOREPO_ROOT / "finite-skills/skills/productivity/google-workspace-finite"
 GOOGLE_WORKSPACE_DASHBOARD_SCOPES = (
     MONOREPO_ROOT / "finitecomputer-v2/apps/dashboard/src/contracts/google-workspace-scopes.json"
@@ -191,7 +192,7 @@ class FiniteSkillsSyncTest(unittest.TestCase):
             self.assertEqual(user_marker.read_text(encoding="utf-8"), "keep me\n")
             self.assertFalse((user_skills / "finite").exists())
 
-    def test_runtime_image_packages_one_finite_utility_and_healthchecks_it(self) -> None:
+    def test_runtime_image_packages_one_finite_utility(self) -> None:
         dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
         healthcheck = HEALTHCHECK.read_text(encoding="utf-8")
 
@@ -203,7 +204,7 @@ class FiniteSkillsSyncTest(unittest.TestCase):
             "ln -sf /runtime/bin/finite /usr/local/bin/finite",
             dockerfile,
         )
-        self.assertIn("test -x /runtime/bin/finite", healthcheck)
+        self.assertNotIn("/runtime/bin/finite", healthcheck)
 
 
 class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
@@ -271,7 +272,7 @@ class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
 
     def test_runtime_pins_and_import_checks_google_clients(self) -> None:
         dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
-        healthcheck = HEALTHCHECK.read_text(encoding="utf-8")
+        runtime_image_workflow = RUNTIME_IMAGE_WORKFLOW.read_text(encoding="utf-8")
         setup = (GOOGLE_WORKSPACE_SKILL / "scripts/setup.py").read_text(encoding="utf-8")
         requirements = (
             "google-api-python-client==2.198.0",
@@ -283,7 +284,7 @@ class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
             self.assertIn(requirement, dockerfile)
             self.assertIn(requirement, setup)
         for module in ("googleapiclient", "google_auth_oauthlib", "google_auth_httplib2"):
-            self.assertIn(f"import {module}", healthcheck)
+            self.assertIn(module, runtime_image_workflow)
         ensure_deps = setup.split("def _ensure_deps():", 1)[1].split("def check_auth():", 1)[0]
         self.assertNotIn("install_deps()", ensure_deps)
 

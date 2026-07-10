@@ -60,6 +60,13 @@ runtime image. It packages:
   launcher under `/opt`
 - `/runtime/healthcheck.sh`
 
+The OCI healthcheck performs one bounded loopback request to `/healthz`. That
+endpoint is supervised by `finite-agentd` and returns success only when the
+durable identity is usable, the Finite Chat bridge is healthy, and the
+`finitechat`, health, and Hermes processes are all running. Binary, dependency,
+skill, and version validation happens once while building the image; it is not
+repeated every 30 seconds as part of runtime liveness.
+
 On a genuinely fresh Agent Home, the gateway launcher atomically seeds the
 image baseline into the durable managed-skills directory and exposes that path
 to Hermes with `skills.external_dirs`. A restart or image upgrade never

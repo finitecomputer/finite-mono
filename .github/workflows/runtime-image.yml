@@ -72,6 +72,8 @@ jobs:
             /runtime/bin/finite-agentd --help >/dev/null
             /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
             /runtime/bin/fbrain --help >/dev/null
+            test -x /runtime/bin/finite
+            /runtime/hermes-venv/bin/python -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
             /runtime/hermes-venv/bin/python -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
             /runtime/hermes-venv/bin/python -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
             test -f /runtime/hermes-plugin/finitechat/plugin.yaml
