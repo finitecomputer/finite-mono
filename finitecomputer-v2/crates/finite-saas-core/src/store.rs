@@ -2763,6 +2763,31 @@ where
         .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
+        let key_id = trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+        let key_row = client
+            .query_opt(
+                "SELECT id, grant_id, project_id, agent_runtime_id, key_hash, status,
+                        created_at::text, updated_at::text
+                 FROM finite_private_api_keys WHERE id = $1 FOR UPDATE",
+                &[&key_id],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+        let key = finite_private_api_key_from_row(&key_row)?;
+        if key.project_id.as_deref() != Some(request.project_id.as_str()) {
+            return Err(CoreError::InvalidFinitePrivateApiKey);
+        }
+        postgres_revoke_finite_private_api_key(
+            client,
+            RevokeFinitePrivateApiKeyInput {
+                key_id,
+                now: Some(now.clone()),
+            },
+        )
+        .await?;
+    }
     if let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
@@ -7417,6 +7442,70 @@ mod tests {
             assert_eq!(audit_count, 1);
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_failed_launch_atomically_revokes_its_provisioned_key() {
+        with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-28T11:00:00Z").await;
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "failed-launch-key@finite.vip".to_string(),
+                    workos_user_id: "workos_failed_launch_key".to_string(),
+                    display_name: "Failed Launch Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "failed-launch-key-submit".to_string(),
+                    now: Some("2026-05-28T11:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-failed-launch-key".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-failed-launch-key".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: Some("2026-05-28T11:02:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("failed-launch request should lease");
+            assert_eq!(lease.request.id, created.request.id);
+            let provisioned = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner-failed-launch-key".to_string(),
+                    lease_token: "lease-failed-launch-key".to_string(),
+                    source_host_id: Some("failed-launch-host".to_string()),
+                    source_machine_id: Some("failed-launch-agent".to_string()),
+                    now: Some("2026-05-28T11:03:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+
+            let failed = store
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: lease.request.id,
+                    runner_id: "runner-failed-launch-key".to_string(),
+                    lease_token: "lease-failed-launch-key".to_string(),
+                    failure_message: "runtime did not become ready".to_string(),
+                    provisioned_finite_private_api_key_id: Some(provisioned.api_key.id.clone()),
+                    now: Some("2026-05-28T11:04:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+
+            let admin_state = store.finite_private_admin_state().await.unwrap();
+            let key = admin_state
+                .api_keys
+                .iter()
+                .find(|key| key.id == provisioned.api_key.id)
+                .expect("provisioned key remains in metadata");
+            assert_eq!(key.status, FinitePrivateApiKeyStatus::Revoked);
         })
         .await;
     }

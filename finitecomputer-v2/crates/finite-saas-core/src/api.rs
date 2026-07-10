@@ -204,6 +204,7 @@ pub struct FailAgentCreationRequest {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    pub provisioned_finite_private_api_key_id: Option<String>,
     pub now: Option<String>,
 }
 
@@ -842,7 +843,7 @@ async fn runtime_artifact(
     headers: HeaderMap,
     Path(artifact_id): Path<String>,
 ) -> Result<Json<RuntimeArtifact>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     let Some(artifact) = state.store.runtime_artifact(&artifact_id).await? else {
         return Err(ApiError::not_found("runtime artifact is not configured"));
     };
@@ -1694,6 +1695,7 @@ async fn fail_agent_creation_request(
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 failure_message: input.failure_message,
+                provisioned_finite_private_api_key_id: input.provisioned_finite_private_api_key_id,
                 now: input.now,
             })
             .await?,
@@ -1850,7 +1852,7 @@ async fn runtime_heartbeat_for_machine(
     headers: HeaderMap,
     Path(machine_id): Path<String>,
 ) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -4597,6 +4599,85 @@ mod tests {
             "GET",
             "/api/core/v1/source-host-relays/missing",
             &service,
+            None,
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send_json(
+            &app,
+            "PUT",
+            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+            &service,
+            Some(serde_json::json!({
+                "kind": "oci_image",
+                "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "versionLabel": "auth-boundary",
+                "stateSchemaVersion": "state-v1",
+                "baseImage": "python:3.13-trixie",
+                "promoted": true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for headers in [&service, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, artifact) = send_json(
+            &app,
+            "GET",
+            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+            &runner,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artifact["id"], "artifact-auth-boundary");
+
+        for headers in [&runner, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "PUT",
+                "/api/core/v1/runtime-artifacts/forbidden-artifact",
+                headers,
+                Some(serde_json::json!({
+                    "kind": "oci_image",
+                    "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "versionLabel": "forbidden",
+                    "stateSchemaVersion": "state-v1",
+                    "baseImage": "python:3.13-trixie",
+                    "promoted": true
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+
+        for headers in [&service, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/finite/v1/machines/missing/heartbeat",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = send_json(
+            &app,
+            "GET",
+            "/api/finite/v1/machines/missing/heartbeat",
+            &runner,
             None,
         )
         .await;

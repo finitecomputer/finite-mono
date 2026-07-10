@@ -1,13 +1,15 @@
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateApiKey, LeaseRuntimeControlRequestInput,
+    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
     RuntimeArtifact, RuntimeArtifactKind, RuntimeControlKind, RuntimeControlLease,
     RuntimeControlRequest, RuntimeSummaryStatus,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
+#[cfg(test)]
+use finite_saas_core::FinitePrivateApiKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -381,6 +383,7 @@ where
                         runner_id: self.runner_id.clone(),
                         lease_token,
                         failure_message: failure_message.clone(),
+                        provisioned_finite_private_api_key_id: None,
                         now: None,
                     },
                 )?;
@@ -447,7 +450,6 @@ where
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
-                        self.cleanup_provisioned_finite_private_key(&launch_options);
                         self.queue.fail_agent_creation(
                             &request_id,
                             FailAgentCreationRequestInput {
@@ -455,6 +457,9 @@ where
                                 runner_id: self.runner_id.clone(),
                                 lease_token,
                                 failure_message: failure_message.clone(),
+                                provisioned_finite_private_api_key_id: provisioned_key_to_revoke(
+                                    &launch_options,
+                                ),
                                 now: None,
                             },
                         )?;
@@ -470,7 +475,6 @@ where
             }
             Err(error) => {
                 let failure_message = error.to_string();
-                self.cleanup_provisioned_finite_private_key(&launch_options);
                 self.queue.fail_agent_creation(
                     &request_id,
                     FailAgentCreationRequestInput {
@@ -478,6 +482,9 @@ where
                         runner_id: self.runner_id.clone(),
                         lease_token,
                         failure_message: failure_message.clone(),
+                        provisioned_finite_private_api_key_id: provisioned_key_to_revoke(
+                            &launch_options,
+                        ),
                         now: None,
                     },
                 )?;
@@ -691,15 +698,6 @@ where
         Ok(options)
     }
 
-    fn cleanup_provisioned_finite_private_key(&mut self, options: &RuntimeLaunchOptions) {
-        if let Some(key) = options.finite_private.as_ref()
-            && key.revoke_on_launch_failure
-            && let Err(error) = self.queue.revoke_finite_private_api_key(&key.api_key_id)
-        {
-            eprintln!("warning: failed to revoke Finite Private key after failed launch: {error}");
-        }
-    }
-
     fn wait_for_runtime_heartbeat(&mut self, source_machine_id: &str) -> Result<(), RunnerError> {
         self.wait_for_runtime_heartbeat_after(source_machine_id, None)
     }
@@ -808,8 +806,6 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: ProvisionFinitePrivateRuntimeKeyInput,
     ) -> Result<ProvisionFinitePrivateRuntimeKeyResult, RunnerError>;
-
-    fn revoke_finite_private_api_key(&mut self, key_id: &str) -> Result<(), RunnerError>;
 
     fn fail_agent_creation(
         &mut self,
@@ -1119,6 +1115,14 @@ pub struct FinitePrivateLaunchKey {
     pub base_url: String,
     pub model: String,
     pub revoke_on_launch_failure: bool,
+}
+
+fn provisioned_key_to_revoke(options: &RuntimeLaunchOptions) -> Option<String> {
+    options
+        .finite_private
+        .as_ref()
+        .filter(|key| key.revoke_on_launch_failure)
+        .map(|key| key.api_key_id.clone())
 }
 
 impl std::fmt::Debug for RuntimeLaunchOptions {
@@ -1518,20 +1522,6 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             ),
             &input,
         )
-    }
-
-    fn revoke_finite_private_api_key(&mut self, key_id: &str) -> Result<(), RunnerError> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct TimestampBody {
-            now: Option<String>,
-        }
-
-        let _: FinitePrivateApiKey = self.post_json(
-            &format!("/api/core/v1/finite-private/api-keys/{}/revoke", key_id),
-            &TimestampBody { now: None },
-        )?;
-        Ok(())
     }
 
     fn fail_agent_creation(
@@ -4263,7 +4253,7 @@ mod tests {
                 .as_deref(),
             Some("finite-private")
         );
-        assert!(runner.queue.revoked_keys.is_empty());
+        assert!(runner.queue.failed.is_empty());
     }
 
     #[test]
@@ -4319,6 +4309,11 @@ mod tests {
         );
         assert_eq!(runner.launcher.launch_count, 0);
         assert_eq!(runner.queue.failed.len(), 1);
+        assert!(
+            runner.queue.failed[0]
+                .provisioned_finite_private_api_key_id
+                .is_none()
+        );
         assert!(runner.queue.registered.is_empty());
     }
 
@@ -4338,7 +4333,13 @@ mod tests {
         let outcome = runner.run_once().unwrap();
 
         assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
-        assert_eq!(runner.queue.revoked_keys, vec!["fp_key_123".to_string()]);
+        assert_eq!(runner.queue.failed.len(), 1);
+        assert_eq!(
+            runner.queue.failed[0]
+                .provisioned_finite_private_api_key_id
+                .as_deref(),
+            Some("fp_key_123")
+        );
     }
 
     #[test]
@@ -4361,7 +4362,11 @@ mod tests {
 
         assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
         assert!(runner.queue.provisioned.is_empty());
-        assert!(runner.queue.revoked_keys.is_empty());
+        assert!(
+            runner.queue.failed[0]
+                .provisioned_finite_private_api_key_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -5302,7 +5307,6 @@ mod tests {
         completed_runtime_control: Vec<CompleteRuntimeControlRequestInput>,
         failed_runtime_control: Vec<FailRuntimeControlRequestInput>,
         provisioned: Vec<ProvisionFinitePrivateRuntimeKeyInput>,
-        revoked_keys: Vec<String>,
         registered: Vec<RegisterAgentCreationRuntimeInput>,
         heartbeat_checks: Vec<String>,
         completed: Vec<CompleteAgentCreationRequestInput>,
@@ -5324,7 +5328,6 @@ mod tests {
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
-                revoked_keys: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
@@ -5346,7 +5349,6 @@ mod tests {
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
-                revoked_keys: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
@@ -5368,7 +5370,6 @@ mod tests {
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
-                revoked_keys: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
@@ -5489,11 +5490,6 @@ mod tests {
             }
             self.provisioned.push(input);
             Ok(sample_finite_private_key())
-        }
-
-        fn revoke_finite_private_api_key(&mut self, key_id: &str) -> Result<(), RunnerError> {
-            self.revoked_keys.push(key_id.to_string());
-            Ok(())
         }
 
         fn fail_agent_creation(

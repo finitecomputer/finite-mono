@@ -1236,6 +1236,7 @@ pub struct FailAgentCreationRequestInput {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    pub provisioned_finite_private_api_key_id: Option<String>,
     pub now: Option<String>,
 }
 
@@ -2572,11 +2573,27 @@ impl BridgeCoreState {
         let now = input.now.unwrap_or(current_time_iso()?);
         let failure_message = trim_to_option(Some(&input.failure_message))
             .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
-        self.verified_launching_request(&input.request_id, &input.runner_id, &input.lease_token)?;
-        let provisional_runtime_id = self
-            .agent_creation_requests
-            .get(&input.request_id)
-            .and_then(|request| request.agent_runtime_id.clone());
+        let verified = self.verified_launching_request(
+            &input.request_id,
+            &input.runner_id,
+            &input.lease_token,
+        )?;
+        let provisional_runtime_id = verified.agent_runtime_id.clone();
+        if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
+            let key_id =
+                trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+            let key = self
+                .finite_private_api_keys
+                .get(&key_id)
+                .ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+            if key.project_id.as_deref() != Some(verified.project_id.as_str()) {
+                return Err(CoreError::InvalidFinitePrivateApiKey);
+            }
+            self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
+                key_id,
+                now: Some(now.clone()),
+            })?;
+        }
         let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
             return Err(CoreError::AgentCreationRequestNotFound);
         };
@@ -6204,6 +6221,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runner capacity unavailable".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
             .unwrap();
@@ -6247,6 +6265,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runner capacity unavailable".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
             .unwrap();
@@ -6336,6 +6355,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runtime did not publish a relay heartbeat".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:03:00Z".to_string()),
             })
             .unwrap();
@@ -7020,7 +7040,7 @@ mod tests {
 
         let wrong_lease = state
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: lease.request.id,
+                request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "wrong-token".to_string(),
                 source_host_id: Some("oslo-host-1".to_string()),
@@ -7032,6 +7052,55 @@ mod tests {
             wrong_lease,
             CoreError::AgentCreationRequestLeaseConflict
         ));
+
+        let unrelated_key = state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: provisioned.grant.id.clone(),
+                raw_key: "fpk_live_unrelated_project_key".to_string(),
+                project_id: Some("project-unrelated".to_string()),
+                agent_runtime_id: None,
+                now: Some("2026-05-25T13:01:30Z".to_string()),
+            })
+            .unwrap();
+        let mismatched = state
+            .fail_agent_creation_request(FailAgentCreationRequestInput {
+                request_id: lease.request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "lease-token-1".to_string(),
+                failure_message: "runtime failed".to_string(),
+                provisioned_finite_private_api_key_id: Some(unrelated_key.id.clone()),
+                now: Some("2026-05-25T13:02:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(mismatched, CoreError::InvalidFinitePrivateApiKey));
+        assert_eq!(
+            state.agent_creation_requests[&lease.request.id].status,
+            AgentCreationRequestStatus::Launching
+        );
+        assert_eq!(
+            state.finite_private_api_keys[&unrelated_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
+
+        let failed = state
+            .fail_agent_creation_request(FailAgentCreationRequestInput {
+                request_id: lease.request.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "lease-token-1".to_string(),
+                failure_message: "runtime failed".to_string(),
+                provisioned_finite_private_api_key_id: Some(provisioned.api_key.id.clone()),
+                now: Some("2026-05-25T13:02:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+        assert_eq!(
+            state.finite_private_api_keys[&provisioned.api_key.id].status,
+            FinitePrivateApiKeyStatus::Revoked
+        );
+        assert_eq!(
+            state.finite_private_api_keys[&unrelated_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
     }
 
     #[test]
