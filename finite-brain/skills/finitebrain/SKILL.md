@@ -198,9 +198,10 @@ current skill name is `finitebrain`.
 - Assume identity is provisioned by the runtime or a human runbook via the
   current Finite Home identity file (`$FINITE_HOME/identity/identity.json`, else
   `~/.finite/identity/identity.json`), which Finite tools in that home share.
-  An agent home never adopts the human user's Finite Chat key. Do not
-  run `fbrain auth import`, create, or ask for keypairs unless the user or
-  runbook explicitly asks.
+  FiniteBrain does not require a human/agent key split; follow the identity
+  already provisioned for that Finite Home. Do not run `fbrain auth import`,
+  create, replace, or ask for keypairs unless the user or runbook explicitly
+  asks.
 - Use `--json` for machine inspection, but summarize sensitive results instead
   of pasting raw payloads.
 

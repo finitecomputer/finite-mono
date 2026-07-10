@@ -166,9 +166,13 @@ pub(crate) fn opened_folder_key(
         .get(vault_id, folder_id, key_version)
         .cloned()
         .ok_or_else(|| {
-            CliError::InvalidInput(format!(
-                "Folder Key for {vault_id}/{folder_id} v{key_version} is unavailable for this operation; ensure the acting Member Identity has a current encrypted grant"
-            ))
+            CliError::GrantOpening {
+                vault_id: vault_id.to_owned(),
+                folder_id: folder_id.to_owned(),
+                key_version,
+                reason: "no usable current grant was available for this operation; ensure the acting Member Identity has a valid encrypted grant"
+                    .to_owned(),
+            }
         })
 }
 
