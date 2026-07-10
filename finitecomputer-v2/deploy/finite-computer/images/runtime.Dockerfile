@@ -1,52 +1,33 @@
-# Build context is staged by scripts/build_runtime_image.py:
-#   finitecomputer-v2/
-#   finitechat/
-#   finite-sites/
-#   finite-brain/
+# Build context is the staged finite-mono checkout produced by
+# finitecomputer-v2/scripts/build_runtime_image.py. Rust artifacts are built
+# together from the one root workspace and lockfile.
 
-FROM rust:1-trixie AS finitechat-builder
-WORKDIR /build/finitechat
+FROM rust:1.88-trixie AS finite-rust-builder
+WORKDIR /build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY finitechat/Cargo.toml finitechat/Cargo.lock ./
-COPY finitechat/crates ./crates
-COPY finitechat/integrations ./integrations
-COPY finitechat/uniffi-bindgen ./uniffi-bindgen
-RUN cargo build --release -p finitechat-cli
-
-FROM rust:1-trixie AS fsite-builder
-WORKDIR /build/finite-sites
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY finite-sites/Cargo.toml finite-sites/Cargo.lock ./
-COPY finite-sites/crates ./crates
-RUN cargo build --release -p fsite-cli
-
-FROM rust:1-trixie AS finite-brain-builder
-WORKDIR /build/finite-brain
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY finite-brain/Cargo.toml finite-brain/Cargo.lock ./
-COPY finite-brain/crates ./crates
-RUN cargo build --release -p finite-brain-cli
+COPY Cargo.toml Cargo.lock ./
+COPY devfinity ./devfinity
+COPY finite-brain ./finite-brain
+COPY finite-identity ./finite-identity
+COPY finite-nostr ./finite-nostr
+COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
+COPY finitechat ./finitechat
+COPY finite-sites ./finite-sites
+RUN cargo build --locked --release \
+      --package finitechat-cli \
+      --package fsite-cli \
+      --package finite-brain-cli
 
 FROM python:3.13-slim-trixie
-ARG HERMES_AGENT_VERSION=0.18.0
-ARG FINITECOMPUTER_V2_REV=unknown
-ARG FINITECHAT_REV=unknown
-ARG FINITE_SITES_REV=unknown
-ARG FINITE_BRAIN_REV=unknown
+ARG HERMES_AGENT_VERSION=0.18.2
+ARG FINITE_MONO_REV=unknown
 
 LABEL org.opencontainers.image.title="Finite Computer v2 Agent Runtime"
-LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finitecomputer-v2"
+LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono"
+LABEL org.opencontainers.image.revision="${FINITE_MONO_REV}"
 LABEL computer.finite.runtime.hermes-agent-version="${HERMES_AGENT_VERSION}"
-LABEL computer.finite.source.finitecomputer-v2="${FINITECOMPUTER_V2_REV}"
-LABEL computer.finite.source.finitechat="${FINITECHAT_REV}"
-LABEL computer.finite.source.finite-sites="${FINITE_SITES_REV}"
-LABEL computer.finite.source.finite-brain="${FINITE_BRAIN_REV}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -61,22 +42,30 @@ RUN apt-get update \
 
 RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /runtime/hermes-venv/bin/pip install --no-cache-dir "hermes-agent==${HERMES_AGENT_VERSION}" \
+    && test "${HERMES_AGENT_VERSION}" = "0.18.2" \
+    && /runtime/hermes-venv/bin/pip install --no-cache-dir \
+      "hermes-agent==${HERMES_AGENT_VERSION}" \
+      "google-api-python-client==2.198.0" \
+      "google-auth-oauthlib==1.4.0" \
+      "google-auth-httplib2==0.4.0" \
     && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
     && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
     && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp
 
-COPY --from=finitechat-builder /build/finitechat/target/release/finitechat /usr/local/bin/finitechat
-COPY --from=finitechat-builder /build/finitechat/target/release/finitechat /runtime/bin/finitechat
-COPY --from=fsite-builder /build/finite-sites/target/release/fsite /usr/local/bin/fsite
-COPY --from=fsite-builder /build/finite-sites/target/release/fsite /runtime/bin/fsite
-COPY --from=finite-brain-builder /build/finite-brain/target/release/fbrain /usr/local/bin/fbrain
-COPY --from=finite-brain-builder /build/finite-brain/target/release/fbrain /runtime/bin/fbrain
+COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
+COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
+COPY --from=finite-rust-builder /build/target/release/fsite /usr/local/bin/fsite
+COPY --from=finite-rust-builder /build/target/release/fsite /runtime/bin/fsite
+COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbrain
+COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
+COPY finitechat/containers/agent/finite.py /runtime/bin/finite
 
 COPY finitechat/integrations/hermes/finitechat /root/.hermes/plugins/finitechat
 COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat
+COPY finite-skills/skills /runtime/finite-skills
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
 COPY finitechat/containers/agent/health_server.py /opt/health_server.py
+COPY finitechat/containers/agent/reconcile_hermes_config.py /opt/reconcile_hermes_config.py
 COPY finitechat/containers/agent/run_hermes_gateway.sh /opt/run_hermes_gateway.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh /runtime/healthcheck.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/README.md /runtime/README.md
@@ -84,8 +73,11 @@ COPY finitecomputer-v2/deploy/finite-computer/runtime-template/README.md /runtim
 RUN chmod +x \
       /opt/agent-entrypoint.sh \
       /opt/health_server.py \
+      /opt/reconcile_hermes_config.py \
       /opt/run_hermes_gateway.sh \
+      /runtime/bin/finite \
       /runtime/healthcheck.sh
+RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
 
 ENV PATH="/runtime/hermes-venv/bin:/usr/local/bin:${PATH}"
 ENV FINITECHAT_HOME=/data/agent
@@ -93,6 +85,7 @@ ENV FINITECHAT_HOME=/data/agent
 ENV FINITE_HOME=/data/agent
 ENV HERMES_HOME=/data/agent/hermes-home
 ENV FINITECHAT_WORKSPACE=/data/workspace
+ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
 # The limiter domain keeps the historical kimi-k2-6 name but serves glm-5-2.
 ENV FINITE_PRIVATE_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1

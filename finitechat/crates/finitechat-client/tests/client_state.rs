@@ -298,6 +298,7 @@ fn reqwest_http_runtime_delivery_reads_sync_stream_hints_over_live_server() {
                 room_id: room_id.to_owned(),
                 after_seq: 0,
             }],
+            inbox: None,
             heartbeat_ms: Some(60_000),
         })
         .unwrap();

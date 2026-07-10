@@ -32,7 +32,7 @@ Private keys, and usage decisions.
 7. Core grants one no-launch-code agent creation entitlement when the
    subscription is `active` or `trialing`.
 8. The dashboard shows the create-agent form.
-9. Existing runtimes are never stopped, destroyed, or volume-deleted
+9. Existing runtimes are never stopped, retired, purged, or volume-deleted
    automatically if billing becomes `past_due`, `canceled`, `unpaid`, or
    `paused`. New agent creation is blocked, and any deeper account action must
    go through a human-reviewed grace/support process.
@@ -183,8 +183,9 @@ Inactive subscription states block new agent creation:
 - `paused`
 
 Inactive subscription states do not mutate existing runtime state. Core must
-not issue stop, destroy, recover, provider volume deletion, Finite Private key
-revocation, or data retention actions from Stripe status alone.
+not issue stop, Runtime Retirement, recover, Purge User Data, provider volume
+deletion, Finite Private key revocation, or data retention actions from Stripe
+status alone.
 
 Legacy `off2026` launch-code creation remains only for explicit bridge paths.
 The normal v2 dashboard create-agent flow sends no launch code and requires
@@ -203,10 +204,10 @@ Every Finite Private reservation checks both burst and weekly limits before
 upstream work. Denied weekly requests return `weekly_limit_exceeded` and do not
 create reservations.
 
-## Destroy Offboarding
+## Runtime Retirement And Data Purge
 
-Destroy is a runtime lifecycle operation, not account deletion. When a destroy
-operation succeeds, Core:
+Runtime Retirement is a lifecycle operation, not account deletion or data
+deletion. When retirement succeeds, Core:
 
 - marks the runtime offline
 - clears public runtime URLs
@@ -214,14 +215,23 @@ operation succeeds, Core:
 - deactivates runtime links
 - removes the runtime relay credential
 - revokes active Finite Private API keys scoped to that runtime or project
+- retains a restore-verified Recovery Snapshot through the declared retention
+  period
 
 The subscription and Stripe customer remain in place. Account offboarding,
 refunds, cancellation, and retention policy belong to a later billing support
 flow.
 
-Destroy must never be triggered automatically for non-payment in Billing v0.
-Early users get a generous grace/support process, and provider volume deletion
-requires an explicit destroy lifecycle operation.
+Runtime Retirement must never be triggered automatically for non-payment in
+Billing v0. Early users get a generous grace/support process, and provider
+volume deletion is not part of retirement.
+
+Purge User Data is a later and separately authorized irreversible operation.
+Billing state never authorizes it. Before purge, Core requires the retention
+period to expire, a recent empty-target restore for the Recovery Snapshot, an
+offered user export, explicit user confirmation, and a purpose-bound purge
+authorization. Until that contract exists, the current provider `destroy` path
+must preserve recovery material or remain unavailable.
 
 ## Evaluation Design
 
@@ -231,12 +241,14 @@ Billing v0 is accepted when:
 - Core tests prove active Stripe billing grants one no-launch-code agent
   entitlement.
 - Core tests prove inactive Stripe billing blocks new agent creation.
-- Core tests prove inactive Stripe billing does not stop, destroy, delete, or
-  revoke the already-running runtime.
+- Core tests prove inactive Stripe billing does not stop, retire, purge,
+  delete, or revoke the already-running runtime.
 - Core tests prove Finite Private burst and weekly limits deny before upstream
   work.
-- Core tests prove destroy offboards runtime-scoped credentials and Finite
-  Private keys.
+- Core tests prove Runtime Retirement offboards runtime-scoped credentials and
+  Finite Private keys while preserving restorable recovery material.
+- Core tests prove no Stripe state, stop, or retirement transition can invoke
+  Purge User Data.
 - Stripe test-clock E2E proves the webhook-to-Core path for active, past-due,
   canceled, and stale out-of-order subscription updates against Core on
   Postgres.

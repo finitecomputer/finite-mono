@@ -28,19 +28,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _storage import atomic_private_write_text
+
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 PENDING_AUTH_PATH = HERMES_HOME / "google_oauth_pending.json"
 
+
 def load_scopes():
     """Load the platform-owned Google Workspace scope contract."""
-    candidates = []
+    script_path = Path(__file__).resolve()
+    candidates = [script_path.parent.parent / "references" / "google-workspace-scopes.json"]
     profile_assets_root = os.getenv("FC_PROFILE_ASSETS_ROOT")
     if profile_assets_root:
         candidates.append(Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json")
 
-    script_path = Path(__file__).resolve()
     for parent in script_path.parents:
         if parent.name == "managed-skills":
             candidates.append(parent.parent / "contracts" / "google-workspace-scopes.json")
@@ -49,17 +52,21 @@ def load_scopes():
     for candidate in candidates:
         if not candidate.exists():
             continue
-        data = json.loads(candidate.read_text())
+        data = json.loads(candidate.read_text(encoding="utf-8"))
         if isinstance(data, list) and all(isinstance(item, str) for item in data):
             return data
         raise RuntimeError(f"Invalid Google Workspace scope contract at {candidate}")
 
-    raise RuntimeError("Missing Google Workspace scope contract in profile assets.")
+    raise RuntimeError("Missing Google Workspace scope contract in the installed skill.")
 
 
 SCOPES = load_scopes()
 
-REQUIRED_PACKAGES = ["google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2"]
+REQUIRED_PACKAGES = [
+    "google-api-python-client==2.198.0",
+    "google-auth-oauthlib==1.4.0",
+    "google-auth-httplib2==0.4.0",
+]
 
 # OAuth redirect for "out of band" manual code copy flow.
 # Google deprecated OOB, so we use a localhost redirect and tell the user to
@@ -86,8 +93,10 @@ def granted_scopes():
 def install_deps():
     """Install Google API packages if missing. Returns True on success."""
     try:
-        import googleapiclient  # noqa: F401
+        import google_auth_httplib2  # noqa: F401
         import google_auth_oauthlib  # noqa: F401
+        import googleapiclient  # noqa: F401
+
         print("Dependencies already installed.")
         return True
     except ImportError:
@@ -96,7 +105,7 @@ def install_deps():
     print("Installing Google API dependencies...")
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet"] + REQUIRED_PACKAGES,
+            [sys.executable, "-m", "pip", "install", "--quiet", *REQUIRED_PACKAGES],
             stdout=subprocess.DEVNULL,
         )
         print("Dependencies installed.")
@@ -108,13 +117,18 @@ def install_deps():
 
 
 def _ensure_deps():
-    """Check deps are available, install if not, exit on failure."""
+    """Require the image-pinned dependencies without mutating the runtime."""
     try:
-        import googleapiclient  # noqa: F401
+        import google_auth_httplib2  # noqa: F401
         import google_auth_oauthlib  # noqa: F401
+        import googleapiclient  # noqa: F401
     except ImportError:
-        if not install_deps():
-            sys.exit(1)
+        print(
+            "ERROR: Google Workspace dependencies are missing from this runtime. "
+            "For an unmanaged Hermes install, run setup.py --install-deps explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def check_auth():
@@ -124,8 +138,8 @@ def check_auth():
         return False
 
     _ensure_deps()
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     try:
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), granted_scopes())
@@ -140,7 +154,7 @@ def check_auth():
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            TOKEN_PATH.write_text(creds.to_json())
+            atomic_private_write_text(TOKEN_PATH, creds.to_json())
             print(f"AUTHENTICATED: Token refreshed at {TOKEN_PATH}")
             return True
         except Exception as e:
@@ -169,13 +183,14 @@ def store_client_secret(path: str):
         print("Download the correct file from: https://console.cloud.google.com/apis/credentials")
         sys.exit(1)
 
-    CLIENT_SECRET_PATH.write_text(json.dumps(data, indent=2))
+    atomic_private_write_text(CLIENT_SECRET_PATH, json.dumps(data, indent=2))
     print(f"OK: Client secret saved to {CLIENT_SECRET_PATH}")
 
 
 def _save_pending_auth(*, state: str, code_verifier: str):
     """Persist the OAuth session bits needed for a later token exchange."""
-    PENDING_AUTH_PATH.write_text(
+    atomic_private_write_text(
+        PENDING_AUTH_PATH,
         json.dumps(
             {
                 "state": state,
@@ -183,7 +198,7 @@ def _save_pending_auth(*, state: str, code_verifier: str):
                 "redirect_uri": REDIRECT_URI,
             },
             indent=2,
-        )
+        ),
     )
 
 
@@ -280,7 +295,7 @@ def exchange_auth_code(code: str):
         sys.exit(1)
 
     creds = flow.credentials
-    TOKEN_PATH.write_text(creds.to_json())
+    atomic_private_write_text(TOKEN_PATH, creds.to_json())
     PENDING_AUTH_PATH.unlink(missing_ok=True)
     print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
 
@@ -292,8 +307,8 @@ def revoke():
         return
 
     _ensure_deps()
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     try:
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), granted_scopes())
@@ -301,6 +316,7 @@ def revoke():
             creds.refresh(Request())
 
         import urllib.request
+
         urllib.request.urlopen(
             urllib.request.Request(
                 f"https://oauth2.googleapis.com/revoke?token={creds.token}",
@@ -320,7 +336,9 @@ def revoke():
 def main():
     parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--check", action="store_true", help="Check if auth is valid (exit 0=yes, 1=no)")
+    group.add_argument(
+        "--check", action="store_true", help="Check if auth is valid (exit 0=yes, 1=no)"
+    )
     group.add_argument("--client-secret", metavar="PATH", help="Store OAuth client_secret.json")
     group.add_argument("--auth-url", action="store_true", help="Print OAuth URL for user to visit")
     group.add_argument("--auth-code", metavar="CODE", help="Exchange auth code for token")

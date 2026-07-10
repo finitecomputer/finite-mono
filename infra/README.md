@@ -115,8 +115,12 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
 4. **Deploy scripts / runbooks live here**, are idempotent, take an explicit
    ref/digest, and verify what they deployed (health endpoint reporting
    `source_commit`, like the finitechat server contract gate).
-5. **Backups are only real once restored.** Every stateful service has a backup
-   AND a restore runbook, and the restore has been drilled at least once. lat1
-   is **single-disk** (no mdadm — see the reinstall runbook), so offsite borg
-   backups are the redundancy net and are an open follow-up (`runbooks/`, and
-   `modules/backups.nix` TODO). A disk mirror (2 spare NVMes) is the next step.
+5. **Backups are only real once restored.** Before first-slice user data, every
+   stateful service must have a service-consistent backup, an off-host copy, a
+   restore runbook, and an empty-target restore drill. The current deployment
+   does not satisfy this rule: lat1 is single-disk, the Borg target in
+   `modules/backups.nix` is a placeholder, live SQLite directories are not yet
+   converted into service-owned consistent snapshots, Agent Runtime `/data` is
+   not covered, and the complete restore drill has not run. Paid-cohort launch
+   is blocked on closing those gaps. A disk mirror (2 spare NVMes) remains
+   defense in depth, not a backup.

@@ -3,19 +3,26 @@
 Status: active contract. Changes require a version bump and sign-off from the
 Finite team (Paul, Austin, Alex).
 
+Launch constraint: v1's single local secret is not a complete Recoverability
+Contract. No durable SaaS feature may rely on it as the only Recovery Authority;
+the release must either restore the same key from tested recovery material or
+provide an explicit identity-and-product-data migration path.
+
 ## Problem
 
 Every Finite tool (`finitechat`, `fsite`, `fbrain`, hosted agent runtimes)
-needs the user's Nostr identity. Today each tool mints and stores its own key
-in its own location, so a user has a different identity per tool. This
-contract makes identity install-order symmetric: whichever Finite tool runs
-first mints the key; every other tool finds it.
+needs its identity owner's Nostr key. Today each tool can mint and store its own
+key in its own location. This contract makes install-order symmetric within one
+Finite Home: whichever Finite tool runs first mints the key; every other tool
+in that same home finds it. A human Finite Chat home and an Agent Runtime home
+are separate and never converge on one secret.
 
 ## Non-goals (deliberate, progressive)
 
 - v1 ships a single locally-stored secret. Frostr-based backup arrives as a
   new `kind` in the same file (contract v2), and key rotation arrives on top
-  of Frostr. Nothing in v1 may foreclose that path.
+  of Frostr. Nothing in v1 may foreclose that path, but "future v2" is not a
+  waiver for the first-slice recovery gate.
 - No OS keychain in v1: signing happens in hot loops (finitechat) and must be
   non-interactive; ad-hoc-signed CLI binaries cannot use the macOS keychain
   without prompts. A keychain-backed storage backend may become an optional
@@ -102,6 +109,7 @@ otherwise a fresh identity is minted at first run.
 
 ## Owner
 
-This contract and the `finite-identity` crate are the client-side half of
-Finite auth. Policy (Frostr keyset shape, Agent Signing Sessions, rotation)
-belongs to `finite-auth`; this crate must follow its lead on v2+.
+This contract and the `finite-identity` crate own the shared Finite key and
+Principal Resolution boundary. Future key kinds, backup, and rotation require
+new Finite Identity contract versions; they do not depend on the retired
+`finite-auth` experiment or imply a shared human-agent signer.

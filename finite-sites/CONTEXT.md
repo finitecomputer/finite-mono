@@ -4,8 +4,8 @@ Glossary for Finite Sites. Code, docs, and prompts should use these words
 with exactly these meanings.
 
 - **Finite Site**: one published website living at `{name}.{base domain}`,
-  owned by one User Key, with an immutable version history.
-- **Principal**: the human-facing identity permissions attach to. A Principal
+  owned by one Publishing Principal, with an immutable version history.
+- **Principal**: the authorization subject permissions attach to. A Principal
   may be represented by an email address during bootstrap and by verified key
   identities once available.
 - **Publishing Principal**: a Principal allowed to create Project
@@ -18,7 +18,7 @@ with exactly these meanings.
   agent publishing; later policy may restrict who can complete the bootstrap
   without changing the Principal model.
 - **Self-Registered Publish Grant**: the default v0 Publishing Principal
-  bootstrap. A local User Key signs `fsite auth register`, receives a
+  bootstrap. A local Publishing Key signs `fsite auth register`, receives a
   self-sourced publish grant, and can create Project Repositories and Project
   Outputs up to the Publishing Limit without an operator allowlist round trip.
 - **Publishing Limit**: the product meaning of "unlimited" publishing in v0:
@@ -27,6 +27,9 @@ with exactly these meanings.
 - **Publishing Revocation**: an operator action that removes a Principal's
   ability to create new Project Repositories or Project Outputs without
   necessarily removing existing collaboration or viewing access.
+- **Publishing Ownership Recovery**: an audited transfer that restores control
+  of a Project Repository and its Outputs to a verified replacement Principal
+  without changing or deleting their data.
 - **Output Disable**: an operator action that stops one or more Project
   Outputs from serving while preserving source history and audit context.
 - **Emergency Delete**: a manual operator action reserved for extreme abuse,
@@ -44,6 +47,9 @@ with exactly these meanings.
   Native Principal. It is created only by an explicit email verification flow,
   lets future email-based collaborator grants resolve to the native npub, and
   keeps email optional for npub-primary users.
+- **Email Access Delegation**: a revocable Finite Sites authorization allowing
+  one Agent Principal to exercise one verified email Principal's Sites grants
+  without making them the same Principal.
 - **Project Repository**: the editable git history for a project. It may begin
   with data, grow logic around that data, and later produce one or more Project
   Outputs. A Project Repository may exist before any public-facing UI exists.
@@ -182,13 +188,17 @@ with exactly these meanings.
 - **Pre-User Reset**: a destructive operator action that wipes Finite Sites
   product state during pre-user development so examples can be redeployed
   through the current model without legacy adapters.
-- **User Key / Owner**: the user's nostr keypair (npub). It owns Project
-  Repositories, lists outputs, and may change output sharing. The publish
-  grant cache is keyed on it. It is the shared Finite identity per the
-  Finite Identity Contract: stored at `~/.finite/identity/identity.json`
-  (`$FINITE_HOME/identity/identity.json` in hosted runtimes), minted by
-  whichever Finite tool runs first, and never copied into fsite's own
-  config store.
+- **Publishing Key / Owner**: the Nostr keypair (npub) of the human or agent
+  Publishing Principal. It owns Project Repositories, lists outputs, and may
+  change output sharing. The publish grant cache is keyed on it. It is the
+  shared Finite identity within that principal's Finite Home: stored at
+  `~/.finite/identity/identity.json` (`$FINITE_HOME/identity/identity.json` in
+  hosted runtimes), minted by whichever Finite tool runs first in that home,
+  and never copied into fsite's own config store. A human Finite Home and an
+  agent Finite Home do not share this secret.
+- A private Project Repository must have either an independent collaborator or
+  a tested **Publishing Ownership Recovery** path before it is treated as
+  durable user data.
 - **Project Collaborator**: an email address or key identity granted edit
   rights to a Project Repository. Project collaboration is the default edit
   permission; individual Project Outputs may add narrower rules later.
@@ -198,16 +208,22 @@ with exactly these meanings.
 - **Project Revoke**: a control-plane mutation that removes a Principal's edit
   access to a Project Repository and revokes active Git Credentials scoped to
   that Principal and Project.
-- **Agent Key**: a distinct npub controlled by an agent or device and linked
-  to a Principal. Agent Keys authenticate work without making the agent the
-  human owner.
+- **Agent Principal Key**: the distinct npub controlled by an agent and stored
+  in that agent's Finite Home. It authenticates the agent as its own Native
+  Principal across Finite Sites, Finite Chat, and Finite Brain. It is never
+  presumed to be the human user's key or automatically linked to that human.
 - **Email Bootstrap**: the act of proving control of an email address from a
   Publishing Bootstrap Invite. A successful Email Bootstrap establishes or
-  resolves an External Principal, links the local Agent Key to that Principal,
-  and enables publishing for that Principal within the Publishing Limit.
+  resolves an External Principal and enables publishing for that Principal
+  within the Publishing Limit. It does not by itself make an Agent Principal
+  the same Principal as the human who controls the email.
 - **Agent Delegation**: a Principal-approved authorization that lets one Agent
-  Key act for that Principal on one Project Repository, with bounded
+  Principal Key act for that Principal on one Project Repository, with bounded
   capabilities.
+- An **Email Access Delegation** is product-scoped across Finite Sites email
+  grants; an **Agent Delegation** is bounded to one Project Repository.
+- An agent using either delegation signs as its **Agent Principal Key**, and
+  Sites audit records the delegation separately from actor identity.
 - **Git Remote**: the standard git clone/push endpoint for a Project
   Repository, canonically `https://git.finite.chat/{project}.git` in
   production. Agents use normal git commands against it; Finite Sites maps
@@ -234,8 +250,9 @@ with exactly these meanings.
 - **Email Key**: a local nostr keypair verified for one email address by a
   single-use email token. It signs email-keyed project git credential requests
   without exposing npubs.
-- **Publish Grant Cache**: the local registry table deciding whether a User
-  Key may create Projects, allocate Project Outputs, and deploy new Versions.
+- **Publish Grant Cache**: the local registry table deciding whether a
+  Publishing Key may create Projects, allocate Project Outputs, and deploy new
+  Versions.
   Self-registered grants are the v0 default, operator grants remain the
   manual override/revocation path, and Core grants become the paid-entitlement
   path. If no active, unexpired grant exists, creating Projects or allocating

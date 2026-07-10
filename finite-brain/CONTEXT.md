@@ -122,6 +122,14 @@ available. It exposes the same conceptual abilities the Product Client needs:
 identify the acting npub, sign FiniteBrain events, and perform NIP-44
 encryption and decryption for Folder Key Grant handling.
 
+### Recovery Principal
+
+A distinct, narrowly authorized Principal whose Folder Key Grants provide an independent recovery path when the primary human or agent key is unavailable.
+
+### Email Access Delegation
+
+A revocable Finite Brain authorization allowing one Agent Principal to exercise one verified email Principal's Brain grants without conveying Folder Keys or making them the same Principal.
+
 ### Email Invite Bootstrap
 
 A temporary email-address invitation state where email proof authorizes the
@@ -175,22 +183,26 @@ names, but never Folder Keys or bootstrap plaintext.
 
 ### Email-Targeted Vault Invitation
 
-A Vault Invitation addressed to an email instead of a known User npub. In v1,
+A Vault Invitation addressed to an email instead of a known Native Principal
+npub. In v1,
 external email-shaped targets use an Email Invite Bootstrap even if they have
 prior email-only proof; only concrete npub/hex targets or active Finite VIP
 NIP-05 bindings use the normal npub-bound path. Email targets belong to
 invitation flows; direct permission mutations remain for known User npubs. Any
-invited email must prove control through the Identity Authority; Finite VIP
-emails also receive the Finite-owned NIP-05 binding.
+invited email must prove control through the Identity Authority. Invitation
+proof authorizes only the invitation claim; it does not create or rebind a
+Finite VIP NIP-05 Principal Link unless the claimant separately and explicitly
+uses the identity-link flow as the same Principal.
 
 ### Email Invite Bootstrap Claim
 
-The acceptance act that binds an Email Invite Bootstrap to the recipient's User
-npub after email proof, using the bootstrap material to create durable
-npub-addressed access without requiring the inviting admin to come back online.
-Claim is all-or-nothing: Brain must verify email proof, consume the pending
-bootstrap, bind the recipient npub, create membership/access metadata, and
-insert every required durable Folder Key Grant in one atomic operation.
+The acceptance act that grants the invitation's scoped access to the claimant
+Native Principal npub after email proof, using the bootstrap material to create
+durable npub-addressed access without requiring the inviting admin to come back
+online. This is product authorization, not global identity equivalence. Claim
+is all-or-nothing: Brain must verify email proof, consume the pending bootstrap,
+record the claimant npub, create membership/access metadata, and insert every
+required durable Folder Key Grant in one atomic operation.
 
 ### Email Invite Bootstrap Authorization
 

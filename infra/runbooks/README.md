@@ -43,16 +43,16 @@ Two rules apply to **every** release and promotion, no exceptions:
    must be a deliberate, reviewed act — an edit to that file — never an
    accident. Each runbook below has this as an explicit step.
 
-2. **Rung-ladder: local proof → Docker proof → Phala/Tinfoil promote.**
+2. **Rung-ladder: local proof → Docker proof → Kata → Phala/Tinfoil.**
    Nothing is promoted to a confidential-compute lane without a recorded
    proof at the rung below it. This is the champagne-test discipline encoded
-   in `.github/workflows/hermes-runtime-smoke.yml` (publication of the
-   runtime image is gated on the smoke report) — apply the same ladder
-   manually anywhere a workflow does not enforce it yet. Concretely:
+   in `.github/workflows/hermes-runtime-smoke.yml`, which is a test-only proof
+   of the canonical image; `.github/workflows/runtime-image.yml` is the sole
+   publication path. Use the same source SHA in both. Concretely:
    - local: devfinity / `cargo test` / local smoke scripts pass;
    - Docker: the relevant Docker smoke lane passes and its report artifact
      is kept;
-   - only then: promote the digest to Phala (runner env / Core artifact) or
+   - only then: publish once and promote the digest to Kata/Phala or
      hand off to a Tinfoil satellite repo (`infra/tinfoil/README.md`).
 
 ## Standing rules

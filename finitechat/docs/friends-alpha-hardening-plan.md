@@ -432,6 +432,10 @@ Commit checkpoint:
 
 ## Friends Beta - Trusted Hosted Web Device
 
+Status update 2026-07-09: promoted from deferred Friends Beta work to a Finite
+Computer SaaS launch requirement by ADR 0011. The candidate shape and tests
+below are now launch inputs, not a later milestone.
+
 Goal: provide practical web chat after Friends Alpha, without making browser
 MLS part of the product scope.
 

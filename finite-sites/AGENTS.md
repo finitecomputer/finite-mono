@@ -57,9 +57,12 @@ git clone https://git.finite.chat/PROJECT.git
   replaying `fsite project init --config finite.toml`.
 - Email is optional. Prefer native auth with `fsite auth register`; use
   `fsite auth redeem EMAIL TOKEN --link-native` when an invite token should
-  link that email to the local npub. Use `fsite auth link-email EMAIL` only
-  when you need to request a fresh token. `auth login/redeem` remains the
-  External Principal fallback.
+  link that email to the local npub **and both identify the same Principal**.
+  Never use `--link-native` to give an agent access to a human's email-shaped
+  grants; that requires a revocable Finite Sites Email Access Delegation and
+  grants no Finite Brain authority. Use
+  `fsite auth link-email EMAIL` only when you need to request a fresh token.
+  `auth login/redeem` remains the External Principal fallback.
 - Commit deploy bytes and push the configured Deploy Branch. Finite Sites
   does not run builds.
 - There is no direct bundle upload command. For static sites and apps, commit

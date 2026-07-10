@@ -13,7 +13,7 @@ use serde_json::Value;
 ///
 /// Bump this when client, Hermes bridge, or server behavior changes in a way
 /// that must not silently interoperate with an older deployed server.
-pub const FINITECHAT_SERVER_CONTRACT_VERSION: u32 = 4;
+pub const FINITECHAT_SERVER_CONTRACT_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -138,6 +138,25 @@ pub struct SyncWaitRoom {
     pub after_seq: HttpSequence,
 }
 
+/// Per-device inbox cursor watched by the realtime hint stream. Inbox hints
+/// carry no payload or authority: they only wake the normal bounded
+/// claim/activate/ack sync path when a Welcome arrives for a Device that may
+/// not belong to any rooms yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncWaitInbox {
+    pub recipient: MemberId,
+    pub after_seq: HttpSequence,
+}
+
+impl SyncWaitInbox {
+    pub fn new(recipient: impl Into<Vec<u8>>, after_seq: HttpSequence) -> Self {
+        Self {
+            recipient: MemberId::new(recipient.into()),
+            after_seq,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncWaitResponse {
     pub woke: bool,
@@ -152,6 +171,8 @@ pub struct SyncStreamRequest {
     #[serde(default)]
     pub rooms: Vec<SyncWaitRoom>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<SyncWaitInbox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ms: Option<u64>,
 }
 
@@ -165,6 +186,9 @@ pub enum SyncHintEvent {
     ActivityChanged {
         room_id: String,
         received_at_ms: u64,
+    },
+    InboxAdvanced {
+        seq: HttpSequence,
     },
     Heartbeat,
 }

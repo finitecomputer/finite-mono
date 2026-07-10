@@ -8,10 +8,16 @@ use serde_json::Value;
 fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn std::error::Error>>
 {
     let env = DevfinityEnv::from_env()?;
+    assert_eq!(env.profile, "services-only");
     assert_http_contains("core", &format!("{}/healthz", env.core_url), "\"ok\":true")?;
     assert_http_contains(
         "finitechat",
         &format!("{}/health", env.finitechat_url),
+        "\"status\":\"ok\"",
+    )?;
+    assert_http_contains(
+        "hosted-web-device",
+        &format!("{}/healthz", env.hosted_web_device_url),
         "\"status\":\"ok\"",
     )?;
     assert_http_contains(
@@ -104,10 +110,12 @@ struct DevfinityEnv {
     core_url: String,
     dashboard_url: String,
     finitechat_url: String,
+    hosted_web_device_url: String,
     finitesites_api_url: String,
     core_api_token: String,
     dashboard_dev_email: String,
     dashboard_dev_workos_user_id: String,
+    profile: String,
 }
 
 impl DevfinityEnv {
@@ -116,10 +124,12 @@ impl DevfinityEnv {
             core_url: trim_trailing_slash(env::var("FC_CORE_URL")?),
             dashboard_url: trim_trailing_slash(env::var("FC_DASHBOARD_URL")?),
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
+            hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
             core_api_token: env::var("FC_CORE_API_TOKEN")?,
             dashboard_dev_email: env::var("FC_DASHBOARD_DEV_EMAIL")?,
             dashboard_dev_workos_user_id: env::var("FC_DASHBOARD_DEV_WORKOS_USER_ID")?,
+            profile: env::var("DEVFINITY_PROFILE")?,
         })
     }
 }

@@ -29,8 +29,8 @@ use std::process::{Command, ExitCode, Stdio};
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectInitRequest,
-    ProjectRevokeRequest, SharingRequest,
+    ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE, EmailRedeemResponse, GitAuthRequest,
+    GitAuthResponse, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest, SharingRequest,
 };
 use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
@@ -50,6 +50,7 @@ pub enum CliError {
         method: String,
         path: String,
         status: u16,
+        code: Option<String>,
         message: String,
     },
     #[error("network error: {0}")]
@@ -709,7 +710,9 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
 
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let response = client.init_project(&identity, &request)?;
+    let response = client
+        .init_project(&identity, &request)
+        .map_err(|error| project_init_recovery_error(error, &config_path))?;
     if output_json {
         println!(
             "{}",
@@ -753,6 +756,39 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn project_init_recovery_error(error: CliError, config_path: &Path) -> CliError {
+    let CliError::ApiStatus {
+        method,
+        path,
+        status,
+        code,
+        mut message,
+    } = error
+    else {
+        return error;
+    };
+
+    match code.as_deref() {
+        Some(ERROR_GIT_REPOSITORY_SETUP_FAILED) => message.push_str(&format!(
+            "\n\nThe Project may already exist; do not change its slug or discard local source. After the service operator reports that Git repository setup is repaired, run this repair replay exactly once:\n  fsite project init --config {} --output json",
+            config_path.display()
+        )),
+        Some(ERROR_GIT_UNAVAILABLE) => message.push_str(&format!(
+            "\n\nNo Project Init state changed. After service health has recovered, retry exactly once:\n  fsite project init --config {} --output json",
+            config_path.display()
+        )),
+        _ => {}
+    }
+
+    CliError::ApiStatus {
+        method,
+        path,
+        status,
+        code,
+        message,
+    }
 }
 
 fn read_project_config_file(
@@ -2102,6 +2138,49 @@ fn append_url_path(base: &str, path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_init_repository_failure_has_one_bounded_repair_replay() {
+        let error = super::CliError::ApiStatus {
+            method: "POST".to_string(),
+            path: "/api/v1/projects/init".to_string(),
+            status: 503,
+            code: Some(finitesites_proto::dto::ERROR_GIT_REPOSITORY_SETUP_FAILED.to_string()),
+            message: "Project registry state was saved".to_string(),
+        };
+
+        let repaired = super::project_init_recovery_error(
+            error,
+            std::path::Path::new("workspace/finite.toml"),
+        );
+        let super::CliError::ApiStatus { message, .. } = repaired else {
+            panic!("expected API status error");
+        };
+        assert!(message.contains("Project may already exist"));
+        assert!(message.contains("do not change its slug"));
+        assert!(
+            message.contains("fsite project init --config workspace/finite.toml --output json")
+        );
+        assert_eq!(message.matches("exactly once").count(), 1);
+    }
+
+    #[test]
+    fn project_init_preflight_failure_does_not_claim_partial_state() {
+        let error = super::CliError::ApiStatus {
+            method: "POST".to_string(),
+            path: "/api/v1/projects/init".to_string(),
+            status: 503,
+            code: Some(finitesites_proto::dto::ERROR_GIT_UNAVAILABLE.to_string()),
+            message: "Git publishing is temporarily unavailable".to_string(),
+        };
+
+        let retry = super::project_init_recovery_error(error, std::path::Path::new("finite.toml"));
+        let super::CliError::ApiStatus { message, .. } = retry else {
+            panic!("expected API status error");
+        };
+        assert!(message.contains("No Project Init state changed"));
+        assert_eq!(message.matches("retry exactly once").count(), 1);
+    }
+
     #[test]
     fn credential_config_ops_reset_helpers_before_adding_ours() {
         let context = super::GitCredentialContext {

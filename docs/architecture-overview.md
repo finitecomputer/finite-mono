@@ -24,9 +24,18 @@ The current product split is explicit:
   existing dashboard relay loop, broad `finitec`/`finited` operations, host
   runbooks, and migration bridge code.
 - Product chat for v2: `finitechat` owns the encrypted protocol, server,
-  native clients, CLI/core, and Hermes `finitechat` plugin. v2 displays a
-  Finite Chat invite with no PIN; dashboard chat is intentionally not part of
-  the v2 launch path.
+  native clients, CLI/core, Hosted Web Device behavior, and Hermes `finitechat`
+  plugin. The canonical BoxOne-derived dashboard chat runs through a trusted,
+  revocable Hosted Web Device; Electron and native clients later join as
+  separate local Devices using the same product account and Rooms.
+
+The security ordering is recoverability first, then progressively stronger
+operator privacy. The trusted first cohort targets O1: normal product paths
+minimize Finite access, while an explicit audited Finite-assisted recovery path
+remains available. Kata is isolated but host-operator-trusted; Phala/TEE can
+raise the privacy level only after the same Recovery Set, key-release path, and
+empty-target restore are proven. See
+[ADR 0001](adr/0001-recoverability-precedes-operator-blindness.md).
 
 ## Layer Map
 
@@ -34,6 +43,7 @@ The current product split is explicit:
 flowchart TB
   subgraph Product["Product Surfaces"]
     V2Dashboard["finitecomputer-v2 dashboard"]
+    HostedWeb["Hosted Web Device"]
     NativeChat["Finite Chat native clients"]
     LegacyDashboard["legacy finitecomputer dashboard"]
   end
@@ -42,6 +52,12 @@ flowchart TB
     Core["v2 Core"]
     Runner["Runner"]
     PrivateLimiter["Finite Private limiter"]
+  end
+
+  subgraph Release["Product Release Inputs"]
+    SkillSource["finite-skills source"]
+    SkillRevision["immutable Finite Skills Revision"]
+    SkillSource --> SkillRevision
   end
 
   subgraph Legacy["Legacy Whiteglove Platform"]
@@ -70,7 +86,8 @@ flowchart TB
   Core --> Runner
   Core --> PrivateLimiter
   Runner --> Runtime
-  V2Dashboard --> NativeChat
+  V2Dashboard --> HostedWeb
+  HostedWeb --> ChatServer
   NativeChat --> ChatServer
   ChatServer --> Hermes
   Runtime --> Brain
@@ -79,6 +96,8 @@ flowchart TB
   Finitec --> Runtime
   LegacyFiniteComputer --> Finited
   LegacyFiniteComputer --> Runtime
+  SkillRevision --> SkillBaseline
+  Core -. "desired revision digest" .-> SkillBaseline
   SkillBaseline --> Hermes
   Runtime --> FSite
   FBrainCli --> Brain
@@ -106,9 +125,12 @@ client behavior, chat server contracts, or the Hermes chat bridge, start there.
 For v2 releases, the deploy coordination handoff crosses through
 `finitecomputer-v2`.
 
-`finite-skills` owns the shared skill baseline. It should contain platform-owned
-skills that are shipped into managed Hermes runtimes. User-local or machine
-specific skills should not be developed there first.
+`finite-skills` owns the only editable source for the Managed Skills Baseline.
+CI publishes immutable Finite Skills Revisions; each Runtime image embeds one
+offline revision and compatible promoted revisions activate between turns
+through a narrow Runtime Capability. A Finite Sites repository is a read-only
+distribution mirror, and neither it nor the dashboard nor an old GitHub repo is
+an authoring source. User-local skills remain runtime-owned data.
 
 `finite-search` owns the self-hosted search and extraction services consumed by
 agent tools. It is an ops/integration repo, not a product app.
@@ -128,15 +150,19 @@ state across time.
 
 High-level state buckets:
 
-- Git-owned state: source code, runtime baseline definitions, skill baseline,
-  runbooks, deployment definitions.
+- Git-owned state: source code, runtime baseline definitions, the editable
+  skill baseline, runbooks, and deployment definitions.
+- Release-owned state: immutable skill artifacts, manifests, digests,
+  compatibility evidence, and Product Release pins.
 - SaaS-owned state: v2 Core database records for accounts, Projects, runtime
-  launches, entitlements, and Finite Private grants.
+  launches, entitlements, Finite Private grants, and desired/observed Finite
+  Skills Revision ids.
 - Host-owned state: legacy control plane databases, secrets, rendered
   manifests, deployment state, backups.
-- Runtime-owned state: user home, Hermes state, workspace files, shared Finite
-  identity files for trusted CLI/agent flows, runtime-scoped Finite Private
-  credentials, machine/project-specific skill overrides.
+- Runtime-owned state: agent home, Hermes state, workspace files, that agent's
+  Finite Home identity shared only by its local Finite tools, runtime-scoped
+  Finite Private credentials, managed-revision caches, and user-owned skill
+  overrides. Managed caches are reproducible; user skill content is not.
 - Reporting-owned state: generated snapshots and evidence logs.
 
 Do not assume one repo owns all copies of a concept. For example, a Hermes
@@ -152,10 +178,12 @@ Pick the local loop by product lane:
   The documented lightweight loop is `npm ci`, then `npm run dev`; v2 product
   acceptance still climbs the Hermes runtime test matrix in
   `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md`.
-- v2 runtime proof starts with the same runtime contract under local Docker,
-  then remote Docker, then Phala before dashboard-controlled SaaS launch. The
-  current runtime image path packages `finitechat`, the Hermes `finitechat`
-  plugin, `fsite`, and `fbrain`.
+- v2 runtime proof starts with the resident streaming Hermes sidecar, then the
+  same runtime contract under local full-product Docker, Kata, and Phala before
+  dashboard-controlled SaaS launch. The target Runtime image packages
+  `finitechat`, the Hermes `finitechat` plugin, `fsite`, `fbrain`, and one baked
+  Finite Skills Revision in lockstep; the current image still omits the skills
+  revision and its activation client.
 - Legacy dashboard relay/chat work still uses the old `finitecomputer`
   MicroSandbox harness:
 
@@ -186,9 +214,11 @@ Other repos have local loops, but they are scoped:
 ## Open Questions
 
 - What is the first one-command v2 local proof for Core plus runtime launch
-  once the Docker/Phala ladder is stable?
+  once the Docker/Kata/Phala ladder is stable?
 - Which legacy users and docs remain blocked on `finitecomputer` before the
   migration bridge can be deleted?
 - Which docs are canonical versus historical in older root-level markdown files?
 - Which cross-component changes require synchronized version pins or deployment
   gates?
+- Should stable Finite Skills Revisions automatically activate fleet-wide after
+  a canary cohort, or require per-Project opt-in?

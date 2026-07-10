@@ -209,7 +209,7 @@ def docker_report(
                 restic_backend,
                 repository=repository,
             ),
-            "hermes_agent_version_actual": "0.17.0",
+            "hermes_agent_version_actual": "0.18.2",
             "agent_npub": "npub1agent",
             "agent_npub_after_restore": "npub1agent",
             "real_gateway_runtime": True,
@@ -265,7 +265,7 @@ def handoff_report(image_digest: str = IMAGE_DIGEST) -> dict:
             "digest": image_digest,
         },
         "runtime": {
-            "hermes_agent_version": "0.17.0",
+            "hermes_agent_version": "0.18.2",
             "restic_version": "restic 0.18.0 compiled with go1.24.4 on linux/arm64",
             "finitechat_hermes_inbound_stream": "1",
             "finite_agent_restore_on_start": "1",
@@ -319,7 +319,7 @@ def publish_report(restic_backend: str = "s3") -> dict:
         "repo_digests": [IMAGE_DIGEST],
         "proof": {
             "smoke_status": "passed",
-            "hermes_agent_version_actual": "0.17.0",
+            "hermes_agent_version_actual": "0.18.2",
             "restic_version": "restic 0.18.0 compiled with go1.24.4 on linux/arm64",
             "agent_npub_after_restore": "npub1agent",
             "restic_backend": restic_backend,

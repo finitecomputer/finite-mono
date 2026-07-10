@@ -15,7 +15,7 @@ tools, sync, and prove conflicts are empty.
 Prefer explicit `--config-dir` in agent runtimes. The CLI default is
 `$FBRAIN_CONFIG_DIR`, then `$HOME/.finitebrain/fbrain`, but explicit state avoids
 surprises when shell environment resets between calls. The signing identity is
-not stored there: it is the shared Finite identity, resolved from
+not stored there: it is the current Finite Home's Local Identity Key, resolved from
 `$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/identity.json`)
 regardless of `--config-dir`.
 
@@ -197,8 +197,9 @@ current skill name is `finitebrain`.
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,
   decrypted sync payload internals, local auth files, or rotation bodies.
 - Assume identity is provisioned by the runtime or a human runbook via the
-  shared Finite identity file (`$FINITE_HOME/identity/identity.json`, else
-  `~/.finite/identity/identity.json`), which every Finite tool shares. Do not
+  current Finite Home identity file (`$FINITE_HOME/identity/identity.json`, else
+  `~/.finite/identity/identity.json`), which Finite tools in that home share.
+  An agent home never adopts the human user's Finite Chat key. Do not
   run `fbrain auth import`, create, or ask for keypairs unless the user or
   runbook explicitly asks.
 - Use `--json` for machine inspection, but summarize sensitive results instead

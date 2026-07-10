@@ -8,13 +8,18 @@ default:
 up *args:
     cd .. && cargo run -p devfinity -- up {{ args }}
 
-# Starts the headless stack, runs the smoke test, and tears the stack down
+# Starts an isolated, fresh services-only stack, runs its smoke test, and tears it down.
+# This portable profile is the Linux CI gate; it does not claim to launch an Agent Runtime.
 smoke:
-    cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-smoke
+    cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
+
+# Starts the real Apple Container SaaS stack and proves dashboard -> Core -> Runner -> Runtime.
+saas-smoke:
+    cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:
-    cd .. && cargo run -p devfinity -- up --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
+    cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture
 
 # Prints running devfinity infra status
 status:

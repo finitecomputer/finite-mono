@@ -14,7 +14,9 @@ const REQUIRED_WORKOS_ENV = [
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 
 const PROTECTED_WORKOS_PATH_PREFIXES = [
+  "/_admin",
   "/api",
+  "/client",
   "/dashboard",
   "/dev",
 ] as const;

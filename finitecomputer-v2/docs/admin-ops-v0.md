@@ -140,8 +140,9 @@ Admin Ops v0 is accepted when:
 
 ## Open Decisions
 
-- Whether Admin Ops should also expose stop/destroy (Core supports the audit
-  actions already; the UI intentionally starts with restart/recover only).
+- Whether Admin Ops should also expose stop/Runtime Retirement (the UI starts
+  with restart/recover only). Purge User Data is explicitly not a routine Admin
+  Ops control.
 - A designed weekly-limit override mechanism.
 - Whether the legacy service-token-only finite-private operator endpoints on
   the old admin dashboard should be migrated to `require_admin_identity` and

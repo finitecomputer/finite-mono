@@ -1,42 +1,23 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
-  CheckCircle2Icon,
-  Loader2Icon,
   LogOutIcon,
   MessageSquareIcon,
-  QrCodeIcon,
   RotateCcwIcon,
   ServerCogIcon,
   StopCircleIcon,
-  Trash2Icon,
-  WrenchIcon,
 } from "lucide-react";
 
 import {
-  destroyCoreRuntimeAction,
-  recoverCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
-import { CopyInviteButton } from "@/components/copy-invite-button";
+import { CopyButton } from "@/components/copy-button";
 import { FormActionButton } from "@/components/form-action-button";
-import { PendingRefresh } from "@/components/pending-refresh";
-import { RefreshButton } from "@/components/refresh-button";
 import { SignOutLink } from "@/components/sign-out-link";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
-import {
-  AGENT_INVITE_MAX_POLL_INTERVAL_MS,
-  AGENT_INVITE_POLL_INTERVAL_MS,
-  agentInviteWaitStampRedirectPath,
-  fetchAgentInvite,
-  parseAgentInviteWaitStartedAt,
-  resolveAgentInviteDisplayNow,
-  truncateInviteUrl,
-  truncateNpub,
-  type AgentInviteDisplay,
-} from "@/lib/agent-invite";
+import { fetchRuntimeAgentNpub, truncateNpub } from "@/lib/agent-contact";
 import {
   loadDashboardMachineAccess,
   type DashboardMachineAccess,
@@ -45,8 +26,10 @@ import {
   fetchMachineRelayHeartbeat,
   type RelayEndpointConfig,
 } from "@/lib/finite-relay-client";
-import { coreProjectSupportsHostedRuntimeControl } from "@/lib/core-client";
-import { qrSvgModel } from "@/lib/qr-svg";
+import {
+  coreProjectSupportsHostedRuntimeControl,
+  type CoreRuntimeStatus,
+} from "@/lib/core-client";
 
 const RELAY_FRESH_MS = 60_000;
 
@@ -59,13 +42,10 @@ type RelayOverviewState = {
 
 export default async function MachineDetailPage({
   params,
-  searchParams,
 }: {
   params: Promise<{ machineId: string }>;
-  searchParams: Promise<{ inviteWaitStartedAt?: string | string[] }>;
 }) {
   const { machineId } = await params;
-  const query = await searchParams;
   const access = await loadDashboardMachineAccess(machineId, {
     coreCacheMode: "swr",
   });
@@ -74,45 +54,26 @@ export default async function MachineDetailPage({
     redirect("/");
   }
 
-  // The invite JSON is fetched server-side only; the runtime origin is never
-  // reached from the browser.
-  const invite = access.coreProject?.runtime
-    ? await fetchAgentInvite(access.primaryUrl)
+  // The runtime origin is reached server-side only. Devices use the Agent
+  // Principal's npub for the one canonical MLS Add + Welcome flow.
+  const agentNpub = access.coreProject?.runtime
+    ? await fetchRuntimeAgentNpub(access.primaryUrl)
     : null;
-  const inviteDisplay = invite
-    ? resolveAgentInviteDisplayNow({
-        invite,
-        waitStartedAtMs: parseAgentInviteWaitStartedAt(
-          firstSearchParam(query.inviteWaitStartedAt)
-        ),
-      })
-    : null;
-  if (inviteDisplay?.kind === "stamp-wait-start") {
-    // First render with the invite still pending: stamp the wait window start
-    // so the refresh poll stays bounded (same pattern as the billing sync).
-    redirect(agentInviteWaitStampRedirectPath(access.machineId));
-  }
-
-  return <ImportedMachineOverview access={access} inviteDisplay={inviteDisplay} />;
-}
-
-function firstSearchParam(value: string | string[] | undefined) {
-  if (Array.isArray(value)) {
-    return value[0] ?? null;
-  }
-  return value ?? null;
+  return <ImportedMachineOverview access={access} agentNpub={agentNpub} />;
 }
 
 async function ImportedMachineOverview({
   access,
-  inviteDisplay,
+  agentNpub,
 }: {
   access: DashboardMachineAccess;
-  inviteDisplay: AgentInviteDisplay | null;
+  agentNpub: string | null;
 }) {
-  const relay = await loadRelayOverview(access.machineId, access.relayEndpoint);
-  const prismState = prismStateForRelay(relay);
   const runtime = access.coreProject?.runtime ?? null;
+  const overview = runtime
+    ? coreRuntimeOverview(runtime.host_facts.runtime_status, runtime.updated_at)
+    : await loadRelayOverview(access.machineId, access.relayEndpoint);
+  const prismState = prismStateForRelay(overview);
   const canControlRuntime = access.coreProject
     ? coreProjectSupportsHostedRuntimeControl(access.coreProject)
     : false;
@@ -128,7 +89,7 @@ async function ImportedMachineOverview({
             </div>
             <h1 className="ocean-status-card__title">{access.displayName}</h1>
             <p className="ocean-status-card__description">
-              This agent is available in Finite Chat. {relay.description}
+              This agent is available in Finite Chat. {overview.description}
             </p>
             <div className="ocean-status-card__actions">
               {canControlRuntime ? (
@@ -142,16 +103,6 @@ async function ImportedMachineOverview({
                 </form>
               ) : null}
               {canControlRuntime ? (
-                <form action={recoverCoreRuntimeAction}>
-                  <input type="hidden" name="machineId" value={access.machineId} />
-                  <input type="hidden" name="redirectPath" value={`/dashboard/machines/${access.machineId}`} />
-                  <FormActionButton variant="outline" pendingLabel="Recovering...">
-                    <WrenchIcon />
-                    Recover chat
-                  </FormActionButton>
-                </form>
-              ) : null}
-              {canControlRuntime ? (
                 <form action={stopCoreRuntimeAction}>
                   <input type="hidden" name="machineId" value={access.machineId} />
                   <input type="hidden" name="redirectPath" value={`/dashboard/machines/${access.machineId}`} />
@@ -161,16 +112,12 @@ async function ImportedMachineOverview({
                   </FormActionButton>
                 </form>
               ) : null}
-              {canControlRuntime ? (
-                <form action={destroyCoreRuntimeAction}>
-                  <input type="hidden" name="machineId" value={access.machineId} />
-                  <input type="hidden" name="redirectPath" value={`/dashboard/machines/${access.machineId}`} />
-                  <FormActionButton variant="destructive" pendingLabel="Destroying...">
-                    <Trash2Icon />
-                    Destroy
-                  </FormActionButton>
-                </form>
-              ) : null}
+              <Button asChild variant="secondary">
+                <Link href={`/dashboard/machines/${encodeURIComponent(access.machineId)}/chat`}>
+                  <MessageSquareIcon />
+                  Open web chat
+                </Link>
+              </Button>
               <Button asChild variant="secondary">
                 <SignOutLink>
                   Sign out
@@ -182,9 +129,7 @@ async function ImportedMachineOverview({
         </div>
       </section>
 
-      {inviteDisplay ? (
-        <AgentInviteCard display={inviteDisplay} machineId={access.machineId} />
-      ) : null}
+      {agentNpub ? <AgentContactCard agentNpub={agentNpub} /> : null}
 
       <div className="ocean-action-grid">
         <div className="ocean-action-card">
@@ -194,18 +139,18 @@ async function ImportedMachineOverview({
           <span className="ocean-action-card__body">
             <span className="ocean-action-card__title">Finite Chat</span>
             <span className="ocean-action-card__description">
-              Use the native iOS app for encrypted chat and agent-managed configuration.
+              Open the dashboard Hosted Web Device now; Electron and native clients can join later.
             </span>
           </span>
         </div>
         <div className="ocean-action-card">
           <span className="ocean-action-card__icon">
-            <WrenchIcon className="size-5" />
+            <RotateCcwIcon className="size-5" />
           </span>
           <span className="ocean-action-card__body">
-            <span className="ocean-action-card__title">Runtime recovery</span>
+            <span className="ocean-action-card__title">Runtime restart</span>
             <span className="ocean-action-card__description">
-              Restart normally first; recover chat only when Finite Chat or generated Hermes config is broken.
+              Generic restart preserves the agent&apos;s durable state without adding a chat-specific control path.
             </span>
           </span>
         </div>
@@ -217,149 +162,30 @@ async function ImportedMachineOverview({
   );
 }
 
-function AgentInviteCard({
-  display,
-  machineId,
-}: {
-  display: AgentInviteDisplay;
-  machineId: string;
-}) {
-  // Dropping the query restamps a fresh bounded wait window.
-  const recheckHref = `/dashboard/machines/${encodeURIComponent(machineId)}`;
-  const paired = display.kind === "paired";
-
+function AgentContactCard({ agentNpub }: { agentNpub: string }) {
   return (
     <section className="ocean-utility-card">
       <div className="ocean-utility-card__header">
         <span className="ocean-utility-card__icon" aria-hidden>
-          {paired ? (
-            <CheckCircle2Icon className="size-5" />
-          ) : (
-            <QrCodeIcon className="size-5" />
-          )}
+          <MessageSquareIcon className="size-5" />
         </span>
         <div>
-          <h2 className="ocean-utility-card__title">
-            {paired ? "Paired with Finite Chat" : "Pair with Finite Chat"}
-          </h2>
+          <h2 className="ocean-utility-card__title">Agent identity</h2>
           <p className="text-sm text-muted-foreground">
-            {paired
-              ? "This agent is connected to your Finite Chat account."
-              : "Scan the invite with the Finite Chat iOS app to pair this agent with your phone."}
+            Hosted Web, Electron, and native clients are independent Devices
+            that start a chat with this Agent Principal.
           </p>
         </div>
       </div>
-
-      {display.kind === "paired" ? (
-        <div className="grid gap-3">
-          {display.agentNpub ? (
-            <>
-              <div className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground">
-                {truncateNpub(display.agentNpub)}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <CopyInviteButton value={display.agentNpub} label="Copy agent npub" />
-              </div>
-            </>
-          ) : null}
-          <p className="text-sm text-muted-foreground">
-            Open Finite Chat on your phone to talk to your agent.
-          </p>
+      <div className="grid gap-3">
+        <div className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground">
+          {truncateNpub(agentNpub)}
         </div>
-      ) : null}
-
-      {display.kind === "ready" ? (
-        <div className="grid gap-4 md:grid-cols-[auto_minmax(0,1fr)] md:items-center">
-          <InviteQr inviteUrl={display.inviteUrl} />
-          <div className="grid gap-3">
-            <div className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground">
-              {truncateInviteUrl(display.inviteUrl)}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <CopyInviteButton value={display.inviteUrl} />
-              <Button asChild variant="outline" size="sm">
-                <a href={display.inviteUrl}>
-                  <MessageSquareIcon />
-                  Open in Finite Chat
-                </a>
-              </Button>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              On this device? Open in Finite Chat directly. Otherwise scan the QR
-              code with the app&apos;s camera.
-            </p>
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <CopyButton value={agentNpub} label="Copy agent npub" />
         </div>
-      ) : null}
-
-      {display.kind === "waiting" ? (
-        <>
-          <PendingRefresh
-            enabled
-            intervalMs={AGENT_INVITE_POLL_INTERVAL_MS}
-            maxIntervalMs={AGENT_INVITE_MAX_POLL_INTERVAL_MS}
-            deadlineAtMs={display.deadlineAtMs}
-          />
-          <div className="ocean-agent-spinup" role="status" aria-live="polite">
-            <Loader2Icon className="size-5 animate-spin" aria-hidden />
-            <div>
-              <strong>Preparing your invite</strong>
-              <span>
-                The runtime is up and its Finite Chat invite is being created —
-                this usually takes a few seconds.
-              </span>
-            </div>
-          </div>
-        </>
-      ) : null}
-
-      {display.kind === "wait-timeout" ? (
-        <div className="grid gap-3">
-          <div className="ocean-empty-state">
-            The invite is taking longer than expected. Check again in a moment,
-            or restart the agent if this keeps happening.
-          </div>
-          <Button asChild variant="outline" className="w-fit">
-            <Link href={recheckHref}>
-              <RotateCcwIcon />
-              Check again
-            </Link>
-          </Button>
-        </div>
-      ) : null}
-
-      {display.kind === "error" ? (
-        <div className="grid gap-3">
-          <div className="ocean-empty-state">
-            The runtime reported an invite problem: {display.message}
-          </div>
-          <RefreshButton>
-            <RotateCcwIcon />
-            Retry
-          </RefreshButton>
-        </div>
-      ) : null}
+      </div>
     </section>
-  );
-}
-
-function InviteQr({ inviteUrl }: { inviteUrl: string }) {
-  const { moduleCount, path } = qrSvgModel(inviteUrl);
-  const margin = 2;
-  const span = moduleCount + margin * 2;
-
-  return (
-    <div className="w-fit rounded-[var(--radius-card-inner)] border border-border bg-white p-3">
-      <svg
-        viewBox={`${-margin} ${-margin} ${span} ${span}`}
-        role="img"
-        aria-label="Finite Chat invite QR code"
-        className="size-44"
-        shapeRendering="crispEdges"
-      >
-        <path d={path} fill="#000" />
-      </svg>
-    </div>
   );
 }
 
@@ -434,6 +260,42 @@ function RuntimeFactsCard({ access }: { access: DashboardMachineAccess }) {
       ) : null}
     </section>
   );
+}
+
+function coreRuntimeOverview(
+  status: CoreRuntimeStatus,
+  updatedAt: string
+): RelayOverviewState {
+  if (status === "online") {
+    return {
+      state: "connected",
+      label: "Runtime online.",
+      description: "Runtime is online.",
+      lastSeenAt: updatedAt,
+    };
+  }
+  if (status === "stale") {
+    return {
+      state: "stale",
+      label: "Runtime needs attention.",
+      description: "Runtime needs attention.",
+      lastSeenAt: updatedAt,
+    };
+  }
+  if (status === "offline") {
+    return {
+      state: "missing",
+      label: "Runtime stopped.",
+      description: "Runtime is stopped.",
+      lastSeenAt: updatedAt,
+    };
+  }
+  return {
+    state: "unavailable",
+    label: "Runtime status pending.",
+    description: "Runtime status is not known yet.",
+    lastSeenAt: updatedAt,
+  };
 }
 
 async function loadRelayOverview(

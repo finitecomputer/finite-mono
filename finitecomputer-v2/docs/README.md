@@ -10,17 +10,23 @@
   authority for Core/dashboard, hosted Finite Chat, runtime, and coordinated
   releases.
 - [Hermes runtime test matrix](hermes-runtime-test-matrix.md): local,
-  Docker, remote Docker, and Phala proof ladder for the real hosted-agent
-  runtime.
-- [Runtime control contract](runtime-control-contract.md): dashboard/Core
-  lifecycle controls, runner operations, and known-good chat recovery.
+  Docker, Kata, and Phala proof ladder for the real hosted-agent runtime.
+- [Runtime control contract](runtime-control-contract.md): generic
+  dashboard/Core lifecycle controls and Runner operations.
+- [Runtime Management Contract v1](runtime-management-contract-v1.md): the
+  narrow outbound Runtime→Core health/release telemetry boundary.
+- [Finite managed-skills delivery contract](../../finite-skills/docs/runtime-delivery-contract.md):
+  one editable source, fresh-agent bundled availability, future explicit
+  `finite skills sync`, and user-skill isolation.
+- [Runner Contract v1](runner-contract-v1.md): Core-selected placement,
+  provider-neutral lifecycle, Kata-first and Phala-fast-follow conformance.
 - [Runtime recovery and observability plan](runtime-recovery-and-observability-plan.md):
-  phased startup reports, plugin/config audits, recover-chat boot mode,
-  rollback, break-glass export, logs policy, and recovery material.
-- [Auth and key custody brief](auth-key-custody-brief.md): shareable decision
-  brief for WorkOS account auth, `finite-auth`, Agent Root Secret, and user
-  recovery key decisions.
+  deferred Recovery Snapshot/key-backup TODOs plus startup reports,
+  recover-chat, rollback, Break-Glass Recovery, and logs policy.
+- [Identity Boundary v1](identity-boundary-v1.md): active separation of WorkOS
+  Account Auth, human Finite Chat identity, Devices, and per-agent Finite
+  Identity keys.
 - [Billing v0](billing-v0.md): Stripe Checkout, promo codes, Core
-  entitlements, Finite Private limits, and destroy offboarding.
+  entitlements, Finite Private limits, Runtime Retirement, and purge isolation.
 - [Existing user import bridge](existing-user-import-bridge.md): parked notes
   on the carried-over claim/import path for existing smoke/box1/TRF machines.

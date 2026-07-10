@@ -38,6 +38,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Verify the external Git dependency before the server reports ready or
+/// accepts a Project Init mutation. Finite Sites deliberately delegates the
+/// smart-HTTP protocol to Git instead of carrying an incomplete replacement.
+pub fn preflight_git_dependency() -> Result<(), String> {
+    preflight_git_program(Path::new("git"))
+}
+
+fn preflight_git_program(program: &Path) -> Result<(), String> {
+    let output = Command::new(program)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("cannot execute `git --version`: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`git --version` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if !String::from_utf8_lossy(&output.stdout).starts_with("git version ") {
+        return Err("`git --version` returned an unexpected response".to_string());
+    }
+    Ok(())
+}
+
 pub fn ensure_bare_project_repo(
     data_dir: &Path,
     project_id: &str,
@@ -45,7 +69,7 @@ pub fn ensure_bare_project_repo(
 ) -> Result<PathBuf, String> {
     let root = project_root(data_dir);
     let repo = root.join(format!("{project_id}.git"));
-    if !repo.exists() {
+    if !repository_is_bare(&repo)? {
         std::fs::create_dir_all(&root)
             .map_err(|error| format!("cannot create git project root: {error}"))?;
         let output = Command::new("git")
@@ -78,6 +102,26 @@ pub fn ensure_bare_project_repo(
     configure_default_head(&repo)?;
     install_post_receive_hook(&repo, hook_helper_path)?;
     Ok(repo)
+}
+
+fn repository_is_bare(repo: &Path) -> Result<bool, String> {
+    if !repo.exists() {
+        return Ok(false);
+    }
+    if !repo.is_dir() {
+        return Err(format!(
+            "project repository path is not a directory: {}",
+            repo.display()
+        ));
+    }
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(repo)
+        .arg("rev-parse")
+        .arg("--is-bare-repository")
+        .output()
+        .map_err(|error| format!("cannot inspect bare repo: {error}"))?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
 pub fn project_root(data_dir: &Path) -> PathBuf {
@@ -934,6 +978,12 @@ fn split_cgi_response(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     None
 }
 
+pub(crate) fn is_git_request_path(path: &str) -> bool {
+    parse_git_path(path)
+        .map(|(slug, _)| validate_project_slug(&slug).is_ok())
+        .unwrap_or(false)
+}
+
 fn parse_git_path(path: &str) -> Option<(String, String)> {
     let rest = path.strip_prefix('/')?;
     let (slug, suffix) = rest.split_once(".git")?;
@@ -1021,6 +1071,13 @@ mod tests {
     }
 
     #[test]
+    fn git_dependency_preflight_rejects_a_missing_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = preflight_git_program(&dir.path().join("missing-git")).unwrap_err();
+        assert!(error.contains("cannot execute `git --version`"));
+    }
+
+    #[test]
     fn receive_pack_detection_is_exact_for_service_queries() {
         assert!(wants_receive_pack(
             "/git-receive-pack",
@@ -1087,6 +1144,21 @@ mod tests {
 
         let replay = ensure_bare_project_repo(dir.path(), "proj_abc", &helper).unwrap();
         assert_eq!(replay, repo);
+    }
+
+    #[test]
+    fn ensure_bare_project_repo_repairs_an_interrupted_init_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("hook-helper");
+        std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+        let partial = project_root(dir.path()).join("proj_partial.git");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("interrupted"), "partial init").unwrap();
+
+        let repo = ensure_bare_project_repo(dir.path(), "proj_partial", &helper).unwrap();
+        assert_eq!(repo, partial);
+        assert!(repository_is_bare(&repo).unwrap());
+        assert!(repo.join("hooks/post-receive").is_file());
     }
 
     #[test]

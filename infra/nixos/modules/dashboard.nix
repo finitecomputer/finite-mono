@@ -27,6 +27,7 @@
       FC_WORKOS_AUTH_ENABLED = "true";
       FC_DASHBOARD_RUNTIME_MODE = "canary";
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
+      FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
@@ -46,6 +47,9 @@
     #   GOOGLE_WORKSPACE_CLIENT_SECRET    (optional in the manifest)
     #   FC_RELAY_ADMIN_TOKEN              (optional; absent from the live secret)
     #   FC_RELAY_HOST_ENDPOINTS_JSON      (optional; absent from the live secret)
-    environmentFiles = [ "/etc/finite/dashboard.env" ];
+    environmentFiles = [
+      "/etc/finite/dashboard.env"
+      "/etc/finite/hosted-web-device.env"
+    ];
   };
 }

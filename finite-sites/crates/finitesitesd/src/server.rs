@@ -109,14 +109,37 @@ pub fn plane_for_host(
     Plane::Api
 }
 
+/// Route Git smart-HTTP paths on a shared API/Git origin. Production keeps
+/// separate hosts, while constrained local guests may only be able to reach
+/// one gateway IP and port. The strict `/{slug}.git[/...]` parser prevents
+/// ordinary API paths from being reclassified.
+pub fn plane_for_request(
+    host: &str,
+    path: &str,
+    api_host: &str,
+    git_host: &str,
+    base_domain: &str,
+    document_base_domain: &str,
+) -> Plane {
+    let request_host = strip_port(host);
+    if api_host.eq_ignore_ascii_case(git_host)
+        && request_host.eq_ignore_ascii_case(api_host)
+        && git::is_git_request_path(path)
+    {
+        return Plane::Git;
+    }
+    plane_for_host(host, api_host, git_host, base_domain, document_base_domain)
+}
+
 async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) -> Response {
     let host = request
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let router = match plane_for_host(
+    let router = match plane_for_request(
         host,
+        request.uri().path(),
         &dispatcher.api_host,
         &dispatcher.git_host,
         &dispatcher.base_domain,
@@ -195,6 +218,11 @@ pub async fn serve_on(
     apps: Supervisor,
     options: ServeOptions,
 ) -> Result<(), String> {
+    git::preflight_git_dependency().map_err(|error| {
+        format!(
+            "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
+        )
+    })?;
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         mailer,
@@ -388,6 +416,63 @@ mod tests {
         );
         assert_eq!(
             plane_for_host("127.0.0.1:8787", &api_host, &git_host, base, document_base),
+            Plane::Api
+        );
+    }
+
+    #[test]
+    fn shared_api_and_git_origin_routes_only_repository_paths_to_git() {
+        use super::{Plane, plane_for_request};
+
+        let host = host_of_url("http://192.168.64.1:8787");
+        assert_eq!(
+            plane_for_request(
+                "192.168.64.1:8787",
+                "/demo.git/info/refs",
+                &host,
+                &host,
+                "sites.localhost",
+                "docs.sites.localhost",
+            ),
+            Plane::Git
+        );
+        assert_eq!(
+            plane_for_request(
+                "192.168.64.1:8787",
+                "/api/v1/projects",
+                &host,
+                &host,
+                "sites.localhost",
+                "docs.sites.localhost",
+            ),
+            Plane::Api
+        );
+        assert_eq!(
+            plane_for_request(
+                "192.168.64.1:8787",
+                "/demo.gitx/info/refs",
+                &host,
+                &host,
+                "sites.localhost",
+                "docs.sites.localhost",
+            ),
+            Plane::Api
+        );
+    }
+
+    #[test]
+    fn distinct_api_host_does_not_steal_git_shaped_paths() {
+        use super::{Plane, plane_for_request};
+
+        assert_eq!(
+            plane_for_request(
+                "api.finite.chat",
+                "/demo.git/info/refs",
+                "api.finite.chat",
+                "git.finite.chat",
+                "finite.chat",
+                "docs.finite.chat",
+            ),
             Plane::Api
         );
     }

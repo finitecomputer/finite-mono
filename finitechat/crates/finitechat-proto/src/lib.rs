@@ -72,6 +72,7 @@ pub const MAX_EPHEMERAL_ACTIVITY_PROJECTION_ENTRIES: u32 = 4096;
 pub const MAX_EPHEMERAL_ACTIVITY_EXPIRY_MILLIS: u64 = 30 * 60 * 1000;
 pub const MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE: u32 = 64;
 pub const MAX_CHAT_REACTION_EMOJI_BYTES: u32 = 32;
+pub const MAX_CHAT_TITLE_BYTES: u32 = 256;
 pub const MAX_IDEMPOTENCY_KEY_BYTES: u32 = 128;
 pub const MAX_ACCOUNT_ID_BYTES: u32 = 128;
 pub const MAX_DEVICE_ID_BYTES: u32 = 128;
@@ -90,6 +91,7 @@ pub const FINITECHAT_ACTIVITY_KIND_PRESENT: &str = "present";
 pub const FINITECHAT_ACTIVITY_TYPING_EXPIRY_MILLIS: u64 = 30 * 1000;
 pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
+pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
 
 const _: () = {
     assert!(MAX_ENVELOPE_PAYLOAD_BYTES > 0);
@@ -104,6 +106,8 @@ const _: () = {
     assert!(MAX_RATCHET_TREE_PAYLOAD_BYTES > 0);
     assert!(MAX_LINK_SESSION_PAYLOAD_BYTES > 0);
     assert!(MAX_CHAT_REACTION_EMOJI_BYTES > 0);
+    assert!(MAX_CHAT_TITLE_BYTES > 0);
+    assert!(MAX_CHAT_TITLE_BYTES <= MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_ATTACHMENT_PLAINTEXT_BYTES > MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_ATTACHMENT_CIPHERTEXT_BYTES > MAX_ATTACHMENT_PLAINTEXT_BYTES);
     assert!(MAX_ATTACHMENT_BLOB_URL_BYTES >= MAX_OBJECT_ID_BYTES);
@@ -395,6 +399,17 @@ pub struct DecryptedApplicationEventV1 {
 pub struct ChatReactionV1 {
     pub target_message_id: MessageId,
     pub emoji: String,
+}
+
+/// Durable payload for a user-authored chat title. It is carried by the
+/// encrypted `finitechat.chat.rename.v1` namespaced application event with a
+/// non-notifying delivery policy, so every Device can rebuild the same title
+/// from room replay without involving Hermes storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRenameV1 {
+    pub topic_id: ConversationId,
+    pub chat_id: ConversationSegmentId,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -945,6 +960,10 @@ pub fn generic_activity_kind_v1(
 pub struct DecryptedEphemeralActivityV1 {
     pub activity_kind: ActivityKind,
     pub activity_id: Option<ActivityId>,
+    /// Optional chat/segment scope inside `conversation_id`. This stays in the
+    /// encrypted activity body so older servers remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub action: EphemeralActivityActionV1,
     #[serde(with = "bytes_as_vec")]
     pub payload: Vec<u8>,
@@ -963,6 +982,8 @@ pub struct EphemeralActivityIngressContext<'a> {
 pub struct EphemeralActivityProjectionEntry {
     pub room_id: RoomId,
     pub conversation_id: Option<ConversationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<ConversationSegmentId>,
     pub sender: DeviceRef,
     pub activity_kind: ActivityKind,
     pub activity_id: ActivityId,
@@ -1916,6 +1937,14 @@ impl DecryptedEphemeralActivityV1 {
                 MAX_OBJECT_ID_BYTES,
             )?;
         }
+        if let Some(segment_id) = &self.segment_id {
+            validate_bytes_non_empty("ephemeral_activity.segment_id", segment_id.len())?;
+            validate_string_bytes(
+                "ephemeral_activity.segment_id",
+                segment_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
         match self.action {
             EphemeralActivityActionV1::Set => {
                 validate_bytes_non_empty("ephemeral_activity.payload", self.payload.len())?;
@@ -1986,6 +2015,7 @@ impl EphemeralActivityProjection {
                     EphemeralActivityProjectionEntry {
                         room_id: context.room_id.to_string(),
                         conversation_id: context.conversation_id.map(str::to_string),
+                        segment_id: activity.segment_id.clone(),
                         sender: context.sender.clone(),
                         activity_kind: activity.activity_kind.clone(),
                         activity_id: activity.normalized_activity_id().to_string(),
@@ -2218,6 +2248,19 @@ impl ChatReactionV1 {
         let emoji = self.emoji.trim();
         validate_bytes_non_empty("chat_reaction.emoji", emoji.len())?;
         validate_string_bytes("chat_reaction.emoji", emoji, MAX_CHAT_REACTION_EMOJI_BYTES)?;
+        Ok(())
+    }
+}
+
+impl ChatRenameV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty("chat_rename.topic_id", self.topic_id.len())?;
+        validate_string_bytes("chat_rename.topic_id", &self.topic_id, MAX_OBJECT_ID_BYTES)?;
+        validate_bytes_non_empty("chat_rename.chat_id", self.chat_id.len())?;
+        validate_string_bytes("chat_rename.chat_id", &self.chat_id, MAX_OBJECT_ID_BYTES)?;
+        let title = self.title.trim();
+        validate_bytes_non_empty("chat_rename.title", title.len())?;
+        validate_string_bytes("chat_rename.title", title, MAX_CHAT_TITLE_BYTES)?;
         Ok(())
     }
 }
@@ -2955,6 +2998,45 @@ mod tests {
         assert!(matches!(
             oversized.validate_limits().unwrap_err(),
             ProtocolLimitError::BytesTooLong { field, .. } if field == "chat_reaction.emoji"
+        ));
+    }
+
+    #[test]
+    fn chat_rename_is_bounded_and_namespaced_event_is_non_notifying() {
+        let rename = ChatRenameV1 {
+            topic_id: "topic-build".to_owned(),
+            chat_id: "segment-2".to_owned(),
+            title: "  Ship the dashboard  ".to_owned(),
+        };
+        rename.validate_limits().unwrap();
+        let kind = DurableAppEventKind::Namespaced {
+            name: FINITECHAT_CHAT_RENAME_EVENT_V1.to_owned(),
+            policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+        };
+        assert_eq!(
+            kind.delivery_policy(),
+            ApplicationDeliveryPolicy::NON_NOTIFYING
+        );
+        assert!(!kind.delivery_policy().creates_push());
+        assert!(!kind.delivery_policy().creates_unread());
+
+        let empty = ChatRenameV1 {
+            title: "   ".to_owned(),
+            ..rename.clone()
+        };
+        assert_eq!(
+            empty.validate_limits().unwrap_err(),
+            ProtocolLimitError::BytesEmpty {
+                field: "chat_rename.title".to_owned()
+            }
+        );
+        let oversized = ChatRenameV1 {
+            title: "x".repeat(MAX_CHAT_TITLE_BYTES as usize + 1),
+            ..rename
+        };
+        assert!(matches!(
+            oversized.validate_limits().unwrap_err(),
+            ProtocolLimitError::BytesTooLong { field, .. } if field == "chat_rename.title"
         ));
     }
 
@@ -4050,6 +4132,31 @@ mod tests {
             .unwrap();
         assert_eq!(current.expires_at_ms, 22_000);
         assert_eq!(current.payload, br#"{"pct":20}"#);
+    }
+
+    #[test]
+    fn activity_projection_preserves_encrypted_segment_scope_and_old_json_defaults() {
+        let runtime = device("runtime_npub", "box");
+        let mut projection = EphemeralActivityProjection::default();
+        let mut activity = activity_set("working", None, br#"{"phase":"tools"}"#);
+        activity.segment_id = Some("segment-7".to_owned());
+
+        projection
+            .apply(
+                activity_context("room_1", Some("topic_1"), &runtime, 1_000, 11_000),
+                &activity,
+            )
+            .unwrap();
+        let current = projection
+            .get("room_1", Some("topic_1"), &runtime, "working", None)
+            .unwrap();
+        assert_eq!(current.segment_id.as_deref(), Some("segment-7"));
+
+        let old_json =
+            br#"{"activity_kind":"typing","activity_id":null,"action":"set","payload":[123,125]}"#;
+        let decoded: DecryptedEphemeralActivityV1 = serde_json::from_slice(old_json).unwrap();
+        assert_eq!(decoded.segment_id, None);
+        decoded.validate_limits().unwrap();
     }
 
     #[test]
@@ -5576,6 +5683,7 @@ mod tests {
         DecryptedEphemeralActivityV1 {
             activity_kind: activity_kind.to_string(),
             activity_id: activity_id.map(str::to_string),
+            segment_id: None,
             action: EphemeralActivityActionV1::Set,
             payload: payload.to_vec(),
         }
@@ -5588,6 +5696,7 @@ mod tests {
         DecryptedEphemeralActivityV1 {
             activity_kind: activity_kind.to_string(),
             activity_id: activity_id.map(str::to_string),
+            segment_id: None,
             action: EphemeralActivityActionV1::Clear,
             payload: Vec::new(),
         }

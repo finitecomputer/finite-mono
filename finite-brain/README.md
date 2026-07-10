@@ -62,12 +62,13 @@ Prefer `--json` for commands whose output an agent needs to parse.
 
 ## Identity
 
-`fbrain` signs with the shared Finite identity used by every Finite tool
-(`fsite`, `finitechat`, hosted runtimes). The identity lives at
+`fbrain` signs with the Local Identity Key for the current Finite Home. In a
+hosted runtime this is the agent's key shared only by that runtime's Finite
+tools (`fsite`, `finitechat`, `fbrain`). The identity lives at
 `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and at
 `~/.finite/identity/identity.json` otherwise; whichever Finite tool runs first
-mints the key, and every other tool finds it. `fbrain` never copies the secret
-into its own config directory.
+mints the key, and every other tool in that home finds it. `fbrain` never
+copies the secret into its own config directory.
 
 ```sh
 # Show the identity without creating or changing anything.
@@ -83,6 +84,12 @@ fbrain auth import --file secret.txt
 aside by hand if you mean it. If no identity exists, the first `fbrain`
 command that needs to sign mints one automatically.
 
+Recovery warning: the server cannot reconstruct Folder Keys after loss of the
+sole Nostr key. A server database backup can therefore restore valid ciphertext
+that nobody can open. Durable SaaS use is blocked until each Folder has a tested
+user-held or Finite-assisted Recovery Principal/key path and that path reopens
+the Folder on an empty replacement client.
+
 The legacy `fbrain auth login --nsec` flow and its plaintext
 `<config-dir>/auth.json` are a hard cut and are no longer read. To keep a
 legacy key, import it once:
@@ -97,8 +104,18 @@ rm "$FBRAIN_CONFIG_DIR/auth.json"
 When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
 `fbrain auth login EMAIL` requests an email challenge and
 `fbrain auth redeem EMAIL TOKEN` proves that email with the shared Finite
-identity. For `@finite.vip` emails, redemption binds the email to the local
-User Key in finite-identity and returns the NIP-05 identifier for that email.
+identity. For `@finite.vip` emails, redemption binds the email to the current
+Local Identity Key in finite-identity and returns the NIP-05 identifier for
+that email. Run this binding flow only when the email and current key identify
+the same Principal. An agent must not redeem a human's email this way merely to
+inherit the human's Brain access; that requires a scoped, revocable Email
+Access Delegation or an invitation claim that explicitly grants the agent npub
+access without changing global identity ownership.
+
+A Finite Brain Email Access Delegation is separate from a Sites delegation and
+is not itself a decryption key. Brain must issue current Folder Key Grants to
+the agent npub for every Folder the delegation makes readable; revoking the
+delegation must stop future authorization without rebinding either identity.
 
 External email redemption is recorded as email-only identity proof in
 finite-identity, but FiniteBrain folder sharing still requires an npub target

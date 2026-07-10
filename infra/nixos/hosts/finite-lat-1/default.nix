@@ -8,6 +8,7 @@
     ../../modules/finite-saas-core.nix
     ../../modules/finite-saas-runner.nix
     ../../modules/finitechat-server.nix
+    ../../modules/finitechat-hosted-device.nix
     ../../modules/finitesitesd.nix
     ../../modules/dashboard.nix
     ../../modules/finite-search.nix

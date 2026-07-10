@@ -21,7 +21,7 @@ Current v1 capabilities:
 - Document Outputs served from authored Markdown under the document base
   domain, including clean routes, Markdown companion URLs, `/llms.txt`, and
   `/llms-full.txt`.
-- NIP-98-signed registry mutations through a local User Key.
+- NIP-98-signed registry mutations through a local Publishing Key.
 - Self-registration with `fsite auth register`.
 - Project Repositories over Git smart HTTP through `git-http-backend`.
 - Generated `/llms.txt` for project-backed editable outputs when the project
@@ -107,6 +107,28 @@ curl -H "Host: finitechat-native-mockup.sites.localhost:8787" \
   http://127.0.0.1:8787/
 ```
 
+### Git runtime dependency and Project Init recovery
+
+`finitesitesd` executes the system `git` binary for bare-repository setup and
+Git smart HTTP. The daemon preflights `git --version` before it starts serving;
+`/api/v1/healthz` also returns 503 with `git_unavailable` if that dependency
+disappears. Packaged services must therefore put Git on the daemon's runtime
+`PATH` explicitly (the NixOS module uses `path = [ pkgs.git ];`).
+
+Project Init commits registry state before provisioning the corresponding bare
+repository. That boundary is intentional so an interrupted repository setup
+cannot erase the Project or its claimed outputs. A setup failure returns
+`git_repository_setup_failed`; after fixing Git or repository storage, replay
+the identical Project Init once. The replay uses the existing Project ID,
+repairs a missing or partially initialized bare repository, and returns
+`created: false`. Do not delete the row or mint a replacement slug as normal
+recovery.
+
+For local guests that can reach only one gateway origin, set `--api-url` and
+`--git-url` to that same origin. Requests matching `/{slug}.git` are routed to
+Git smart HTTP while `/api/v1/*` remains on the API plane. This is a server
+transport feature; no Runner-specific Sites configuration is required.
+
 ## Test Expectations
 
 The repo's test bar is in `docs/engineering-style.md`.
@@ -174,4 +196,6 @@ cargo build --locked --release --workspace
 - `docs/bare-repos-and-skills-hosting.md`: source-only Project Repository
   requirements and public-read policy for finitecomputer-managed skills.
 - `docs/technical-debt-ledger.md`: accepted shortcuts with delete conditions.
-- `skills/finite-sites-publishing/SKILL.md`: agent skill for publishing.
+- `../finite-skills/skills/software-development/finite-sites-publishing-finite/SKILL.md`:
+  canonical managed agent skill for publishing. Finite Sites owns the API and
+  CLI contract; `finite-skills` is the only editable deployed skill source.

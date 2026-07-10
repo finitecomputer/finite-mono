@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+need() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 127
+  fi
+}
+
+wait_http() {
+  local name="$1"
+  local url="$2"
+  local timeout_secs="${3:-120}"
+  local started
+  started="$(date +%s)"
+  until curl -fsS --max-time 3 "$url" >/dev/null 2>&1; do
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      echo "$name did not become ready at $url within ${timeout_secs}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+read_core_me() {
+  curl -fsS "${core_identity_headers[@]}" \
+    "$core_url/api/core/v1/me" >"$me_json"
+}
+
+runtime_fields() {
+  node - "$me_json" <<'JS'
+const fs = require("node:fs");
+const me = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const visible = (me.projects || []).find((entry) => entry.runtime);
+if (!visible) process.exit(1);
+const project = visible.project;
+const runtime = visible.runtime;
+process.stdout.write([
+  project.id,
+  runtime.source_machine_id,
+  runtime.host_facts?.runtime_host || "",
+].join("\t"));
+JS
+}
+
+wait_for_runtime() {
+  local started
+  local fields
+  started="$(date +%s)"
+  while true; do
+    read_core_me
+    if fields="$(runtime_fields)"; then
+      IFS=$'\t' read -r project_id machine_id runtime_url <<<"$fields"
+      if [[ -n "$project_id" && -n "$machine_id" && -n "$runtime_url" ]]; then
+        return 0
+      fi
+    fi
+    if node - "$me_json" <<'JS'
+const fs = require("node:fs");
+const me = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const failed = (me.agent_creation_requests || []).find((request) => request.status === "failed");
+if (failed) {
+  console.error(`Agent launch failed: ${failed.failure_message || failed.id}`);
+  process.exit(0);
+}
+process.exit(1);
+JS
+    then
+      return 1
+    fi
+    if (( "$(date +%s)" - started >= 600 )); then
+      echo "Core did not report a launched Apple Container runtime within 600s" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+chat_state() {
+  curl -fsS --max-time 30 \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/state" \
+    >"$chat_state_json"
+}
+
+wait_for_connected_chat() {
+  local started
+  started="$(date +%s)"
+  while true; do
+    if chat_state && node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.exit((state.rooms || []).some((room) => room.is_agent_chat && room.state === "Connected") ? 0 : 1);
+JS
+    then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= 180 )); then
+      echo "Hosted Web Device did not establish the agent chat within 180s" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+max_remote_seq() {
+  node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const seq = (state.messages || [])
+  .filter((message) => !message.is_mine)
+  .reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
+process.stdout.write(String(seq));
+JS
+}
+
+send_chat_message() {
+  local text="$1"
+  node - "$chat_state_json" "$text" >"$chat_action_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const text = process.argv[3];
+const room = (state.rooms || []).find((candidate) => candidate.is_agent_chat && candidate.state === "Connected");
+if (!room) throw new Error("no connected agent room");
+const topic = (state.topics || []).find((candidate) => candidate.room_id === room.room_id);
+const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id)
+  || topic?.chats?.find((candidate) => candidate.active);
+const action = topic && chat
+  ? { SendChatMessage: { room_id: room.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id, text } }
+  : topic
+    ? { SendTopicMessage: { room_id: room.room_id, topic_id: topic.topic_id, text } }
+    : { SendMessage: { room_id: room.room_id, text } };
+process.stdout.write(JSON.stringify(action));
+JS
+  curl -fsS --max-time 30 \
+    -H 'content-type: application/json' \
+    --data-binary "@$chat_action_json" \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/actions" \
+    >"$chat_state_json"
+}
+
+wait_for_remote_reply_after() {
+  local previous_seq="$1"
+  local started
+  started="$(date +%s)"
+  while true; do
+    chat_state
+    if node - "$chat_state_json" "$previous_seq" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const previous = Number(process.argv[3]);
+process.exit((state.messages || []).some((message) => !message.is_mine && Number(message.seq) > previous) ? 0 : 1);
+JS
+    then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= 240 )); then
+      echo "Hermes did not answer the real Hosted Web Device message within 240s" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+send_and_require_reply() {
+  local text="$1"
+  local before
+  chat_state
+  before="$(max_remote_seq)"
+  send_chat_message "$text"
+  wait_for_remote_reply_after "$before"
+}
+
+restart_process() {
+  local process="$1"
+  process-compose \
+    --use-uds \
+    --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
+    process restart "$process" >/dev/null
+}
+
+container_started_at() {
+  container inspect "$machine_id" 2>/dev/null | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const value = JSON.parse(body);
+      process.stdout.write(String(value?.[0]?.status?.startedDate || ""));
+    });
+  ' 2>/dev/null || true
+}
+
+runtime_agent_npub() {
+  curl -fsS --max-time 5 "$runtime_url/healthz" | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const value = JSON.parse(body);
+      const npub = String(value.agent_npub || value.npub || "");
+      if (!value.ready || !npub.startsWith("npub1")) process.exit(1);
+      process.stdout.write(npub);
+    });
+  '
+}
+
+need container
+need curl
+need node
+need process-compose
+
+if [[ "${DEVFINITY_PROFILE:-}" != "apple-saas" ]]; then
+  echo "devfinity SaaS smoke requires the apple-saas profile" >&2
+  exit 64
+fi
+
+core_url="${FC_CORE_URL:?}"
+dashboard_url="${FC_DASHBOARD_URL:?}"
+dashboard_origin="${dashboard_url%/dashboard}"
+chat_url="${FINITECHAT_SERVER_URL:?}"
+hosted_device_url="${FC_HOSTED_WEB_DEVICE_URL:?}"
+state_dir="${DEVFINITY_STATE_DIR:?}"
+me_json="$state_dir/saas-smoke-core-me.json"
+chat_state_json="$state_dir/saas-smoke-chat-state.json"
+chat_action_json="$state_dir/saas-smoke-chat-action.json"
+
+core_identity_headers=(
+  -H "authorization: Bearer ${FC_CORE_API_TOKEN:?}"
+  -H "content-type: application/json"
+  -H "x-finite-workos-user-id: ${FC_DASHBOARD_DEV_WORKOS_USER_ID:?}"
+  -H "x-finite-workos-email: ${FC_DASHBOARD_DEV_EMAIL:?}"
+  -H "x-finite-workos-email-verified: true"
+)
+
+read_core_me
+if ! runtime_fields >/dev/null 2>&1; then
+  if node - "$me_json" <<'JS'
+const fs = require("node:fs");
+const me = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.exit((me.agent_creation_requests || []).some((request) => ["requested", "launching"].includes(request.status)) ? 0 : 1);
+JS
+  then
+    echo "waiting for the existing real agent launch"
+  else
+    run_id="$(date +%s)-$$"
+    curl -fsS \
+      -o /dev/null \
+      -X POST \
+      --data-urlencode "displayName=Devfinity Apple Agent $run_id" \
+      --data-urlencode "idempotencyKey=devfinity-apple-$run_id" \
+      "$dashboard_url/agent-creation-requests"
+    echo "submitted the dashboard agent form"
+  fi
+fi
+
+wait_for_runtime
+wait_http "Agent Runtime" "$runtime_url/healthz" 180
+wait_http "Agent contact" "$runtime_url/contact" 180
+wait_for_connected_chat
+send_and_require_reply "Reply briefly with: devfinity apple chat works"
+
+restart_process finitechat
+wait_http "Finite Chat after restart" "$chat_url/health" 120
+restart_process hosted-web-device
+wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
+wait_for_connected_chat
+send_and_require_reply "Reply briefly with: chat services healed"
+
+runtime_started_before="$(container_started_at)"
+agent_npub_before="$(runtime_agent_npub)"
+curl -fsS \
+  "${core_identity_headers[@]}" \
+  -X POST \
+  --data '{}' \
+  "$core_url/api/core/v1/me/projects/$project_id/runtime/restart" \
+  >/dev/null
+restart_started="$(date +%s)"
+while true; do
+  runtime_started_after="$(container_started_at)"
+  if [[ -n "$runtime_started_after" && "$runtime_started_after" != "$runtime_started_before" ]]; then
+    break
+  fi
+  if (( "$(date +%s)" - restart_started >= 180 )); then
+    echo "Runner did not restart Apple Container $machine_id within 180s" >&2
+    exit 1
+  fi
+  sleep 2
+done
+wait_http "Agent Runtime after restart" "$runtime_url/healthz" 180
+agent_npub_after="$(runtime_agent_npub)"
+if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
+  echo "Agent Principal changed across Apple Container restart" >&2
+  exit 1
+fi
+wait_for_connected_chat
+send_and_require_reply "Reply briefly with: runtime restart healed"
+
+echo "devfinity real SaaS smoke passed"
+echo "project_id=$project_id"
+echo "source_machine_id=$machine_id"

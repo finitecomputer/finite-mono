@@ -27,7 +27,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
 DEFAULT_DOCKER_HOST = "ssh://finite-lat-2"
-DEFAULT_HERMES_VERSION = "0.17.0"
+DEFAULT_HERMES_VERSION = "0.18.2"
 MODEL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",

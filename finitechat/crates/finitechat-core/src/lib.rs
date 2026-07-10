@@ -23,25 +23,29 @@ use finitechat_client::{
     StoredOutboundServerDeliveryState, generate_account_secret, run_room_server_sync_tick,
     run_runtime_sync_tick,
 };
-use finitechat_hermes::{HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1};
+use finitechat_hermes::{
+    HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
+    HermesSendKindV1,
+};
 use finitechat_http::{
     FINITECHAT_SERVER_CONTRACT_VERSION, GetEphemeralActivitiesRequest, HealthResponse,
-    PushPlatform, SyncHintEvent, SyncStreamRequest, SyncWaitRoom,
+    PushPlatform, SyncHintEvent, SyncStreamRequest, SyncWaitInbox, SyncWaitRoom,
 };
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::{
     AppendEphemeralActivityRequest, ApplicationDeliveryPolicy, AttachmentBlobMetadataV1,
-    AttachmentBlobReferenceV1, ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1,
+    AttachmentBlobReferenceV1, ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1, ChatRenameV1,
     ClaimKeyPackageResult, ConversationMetadataV1, ConversationProjection,
     ConversationProjectionEntry, ConversationProjectionEventContext, ConversationSegmentStartV1,
     CreateRoomRequest, DecryptedApplicationEventV1, DecryptedEphemeralActivityV1, DeviceRef,
     DurableAppEventKind, EphemeralActivityAccepted, EphemeralActivityActionV1,
     EphemeralActivityIngressContext, EphemeralActivityProjection, EphemeralActivityProjectionEntry,
     EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
-    FINITECHAT_ACTIVITY_KIND_WORKING, GenericActivityKindV1, ListAccountRoomsRequest,
-    MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol,
-    RuntimeActivityClearV1, nprofile_decode, npub_decode, npub_encode, nsec_decode, nsec_encode,
-    validate_item_count, validate_string_bytes,
+    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_RENAME_EVENT_V1, GenericActivityKindV1,
+    ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_KEY_PACKAGES_PER_DEVICE,
+    MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1,
+    delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
+    nsec_encode, validate_item_count, validate_string_bytes,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -56,6 +60,7 @@ const LOCAL_ROOM_UNAVAILABLE_STATUS: &str = "room is not available on this devic
 const LOCAL_ROOM_UNAVAILABLE_TEXT: &str = "Unavailable on this device";
 const MAX_APP_MESSAGES: usize = 5_000;
 const MAX_APP_MESSAGES_U32: u32 = 5_000;
+const MAX_APP_CHAT_TITLES: usize = 5_000;
 const DEFAULT_TRANSCRIPT_WINDOW: usize = 50;
 const MAX_TRANSCRIPT_PAGE_SIZE: u32 = 100;
 const MAX_OUTBOX_DRAIN_PER_TICK: usize = 16;
@@ -307,6 +312,24 @@ pub struct AppOutboxDebugRow {
     pub idempotency_key_present: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageKind {
+    #[default]
+    Message,
+    Status,
+    Tool,
+    Media,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageStatus {
+    Running,
+    #[default]
+    Complete,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ChatMessage {
     pub room_id: String,
@@ -327,6 +350,12 @@ pub struct ChatMessage {
     pub display_content: String,
     #[serde(default)]
     pub rich_text_json: String,
+    #[serde(default)]
+    pub kind: ChatMessageKind,
+    #[serde(default)]
+    pub status: ChatMessageStatus,
+    #[serde(default)]
+    pub edit_of_message_id: Option<String>,
     pub payload: Vec<u8>,
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
@@ -454,6 +483,10 @@ pub struct AppDeviceSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AppTypingMember {
     pub room_id: String,
+    #[serde(default)]
+    pub topic_id: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
     pub account_id: String,
     pub device_id: String,
     pub display_name: String,
@@ -495,6 +528,8 @@ pub struct AppAcceptedActivity {
 pub struct AppBridgeActivityInput {
     pub room_id: String,
     pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub segment_id: Option<String>,
     pub activity_kind: String,
     pub activity_id: Option<String>,
     pub action: EphemeralActivityActionV1,
@@ -554,6 +589,12 @@ pub enum AppAction {
         room_id: String,
         topic_id: String,
         chat_id: String,
+    },
+    RenameChat {
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        title: String,
     },
     CreateRoom {
         display_name: String,
@@ -769,6 +810,11 @@ enum AppRuntimeCommand {
         preview: String,
         response: mpsc::SyncSender<Result<AppSentMessage, FiniteChatCoreError>>,
     },
+    UploadBridgeAttachment {
+        room_id: String,
+        attachment: OutboundAttachment,
+        response: mpsc::SyncSender<Result<HermesAttachmentV1, FiniteChatCoreError>>,
+    },
     AppendEphemeralActivity {
         input: AppBridgeActivityInput,
         response: mpsc::SyncSender<Result<AppAcceptedActivity, FiniteChatCoreError>>,
@@ -795,13 +841,6 @@ enum AppRuntimeCommand {
         selected_room_id: Option<String>,
         response: mpsc::SyncSender<Result<(), FiniteChatCoreError>>,
     },
-    #[cfg(test)]
-    TestAppendActivity {
-        room_id: String,
-        activity_kind: String,
-        action: EphemeralActivityActionV1,
-        response: mpsc::SyncSender<Result<(), FiniteChatCoreError>>,
-    },
 }
 
 struct AppRuntimeState {
@@ -817,6 +856,7 @@ struct AppRuntimeState {
     revoked_devices: BTreeSet<String>,
     downloading_attachments: BTreeSet<(String, String, String)>,
     bridge_seen_joined_account_ids: BTreeSet<String>,
+    inbox_hint_after_seq: u64,
 }
 
 struct SendAttachmentInput {
@@ -849,10 +889,17 @@ struct CoreSyncProjection {
 struct ChatProjectionState {
     messages: BTreeMap<(String, String), ChatMessage>,
     conversations: ConversationProjection,
+    chat_titles: BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
     reaction_senders: BTreeSet<(String, String, String, String)>,
     poll_votes: BTreeMap<(String, String, String), String>,
     delivered_through: BTreeMap<(String, String), u64>,
     read_through: BTreeMap<(String, String), u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChatTitleProjectionEntry {
+    accepted_seq: u64,
+    title: String,
 }
 
 #[uniffi::export]
@@ -1217,6 +1264,32 @@ impl FiniteChatRuntime {
             })?
     }
 
+    /// Encrypt, upload, and cache one attachment for an agent bridge before
+    /// the bridge appends the E2EE message that references it. Keeping this on
+    /// the runtime actor preserves the room's pinned server selection and the
+    /// same attachment verification path used by native clients.
+    pub fn upload_bridge_attachment_and_wait(
+        &self,
+        room_id: String,
+        attachment: OutboundAttachment,
+    ) -> Result<HermesAttachmentV1, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::UploadBridgeAttachment {
+                room_id,
+                attachment,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before uploading bridge attachment".to_owned(),
+            })?
+    }
+
     pub fn append_ephemeral_activity_and_wait(
         &self,
         input: AppBridgeActivityInput,
@@ -1330,31 +1403,6 @@ impl FiniteChatRuntime {
                 reason: "runtime actor stopped before test room seed".to_owned(),
             })?
     }
-
-    #[cfg(test)]
-    fn test_append_activity(
-        &self,
-        room_id: String,
-        activity_kind: String,
-        action: EphemeralActivityActionV1,
-    ) -> Result<(), FiniteChatCoreError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-        self.command_tx
-            .send(AppRuntimeCommand::TestAppendActivity {
-                room_id,
-                activity_kind,
-                action,
-                response: response_tx,
-            })
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor is stopped".to_owned(),
-            })?;
-        response_rx
-            .recv()
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor stopped before test activity append".to_owned(),
-            })?
-    }
 }
 
 fn spawn_app_runtime_worker(
@@ -1403,8 +1451,8 @@ fn spawn_app_runtime_worker(
                         if matches!(event, SyncHintEvent::Heartbeat) {
                             return Ok(state.app.clone());
                         }
-                        state.apply_sync_hint(event);
                         state.runtime_tick()?;
+                        state.apply_sync_hint(&event);
                         state.bump_rev();
                         let snapshot = state.app.clone();
                         publish_app_update(&snapshot, &shared_state, &reconciler);
@@ -1452,6 +1500,13 @@ fn spawn_app_runtime_worker(
                     })();
                     let _ = response.send(result);
                 }
+                AppRuntimeCommand::UploadBridgeAttachment {
+                    room_id,
+                    attachment,
+                    response,
+                } => {
+                    let _ = response.send(state.upload_bridge_attachment(room_id, attachment));
+                }
                 AppRuntimeCommand::AppendEphemeralActivity { input, response } => {
                     let result = (|| {
                         let accepted = state.append_ephemeral_activity(input)?;
@@ -1484,16 +1539,6 @@ fn spawn_app_runtime_worker(
                     response,
                 } => {
                     let _ = response.send(state.test_seed_room_state(room, selected_room_id));
-                }
-                #[cfg(test)]
-                AppRuntimeCommand::TestAppendActivity {
-                    room_id,
-                    activity_kind,
-                    action,
-                    response,
-                } => {
-                    let _ =
-                        response.send(state.test_append_activity(&room_id, &activity_kind, action));
                 }
             }
         }
@@ -1627,6 +1672,7 @@ impl AppRuntimeState {
             revoked_devices,
             downloading_attachments: BTreeSet::new(),
             bridge_seen_joined_account_ids: BTreeSet::new(),
+            inbox_hint_after_seq: 0,
         };
         state.sync_chat_projection();
         if let Some(room_id) = state.app.selected_room_id.clone() {
@@ -1705,6 +1751,12 @@ impl AppRuntimeState {
                 topic_id,
                 chat_id,
             } => self.open_chat(room_id, topic_id, chat_id)?,
+            AppAction::RenameChat {
+                room_id,
+                topic_id,
+                chat_id,
+                title,
+            } => self.rename_chat(room_id, topic_id, chat_id, title)?,
             AppAction::CreateRoom { display_name } => self.create_room(display_name)?,
             AppAction::CreateTopic { room_id, title } => self.create_topic(room_id, title)?,
             AppAction::StartTopicChat {
@@ -1944,6 +1996,10 @@ impl AppRuntimeState {
             server_url,
             request: SyncStreamRequest {
                 rooms,
+                inbox: Some(SyncWaitInbox::new(
+                    delivery_member_id_for_device(self.core.device.device_ref()),
+                    self.inbox_hint_after_seq,
+                )),
                 heartbeat_ms: Some(normalize_app_update_wait_millis(timeout_millis)),
             },
         }
@@ -1966,7 +2022,11 @@ impl AppRuntimeState {
         Ok(())
     }
 
-    fn apply_sync_hint(&mut self, _event: SyncHintEvent) {}
+    fn apply_sync_hint(&mut self, event: &SyncHintEvent) {
+        if let SyncHintEvent::InboxAdvanced { seq } = event {
+            self.inbox_hint_after_seq = self.inbox_hint_after_seq.max(*seq);
+        }
+    }
 
     fn runtime_tick(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
@@ -1991,8 +2051,9 @@ impl AppRuntimeState {
         if matches!(event, SyncHintEvent::Heartbeat) {
             return Ok(AppBridgeSync::default());
         }
-        self.apply_sync_hint(event);
-        self.agent_bridge_sync_after_change()
+        let bridge = self.agent_bridge_sync_after_change()?;
+        self.apply_sync_hint(&event);
+        Ok(bridge)
     }
 
     fn agent_bridge_sync_after_change(&mut self) -> Result<AppBridgeSync, FiniteChatCoreError> {
@@ -2129,6 +2190,7 @@ impl AppRuntimeState {
         }
         self.persist_app_state()?;
         self.sync_selected_room_messages();
+        self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
     }
@@ -2157,6 +2219,7 @@ impl AppRuntimeState {
             .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
         self.persist_app_state()?;
         self.sync_selected_room_messages();
+        self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
     }
@@ -2182,7 +2245,45 @@ impl AppRuntimeState {
             .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
         self.persist_app_state()?;
         self.sync_selected_room_messages();
+        self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
+        Ok(())
+    }
+
+    fn rename_chat(
+        &mut self,
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        title: String,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
+        let title = normalize_bounded_non_empty_string("chat title", &title, MAX_CHAT_TITLE_BYTES)?;
+        let rename = ChatRenameV1 {
+            topic_id: topic_id.clone(),
+            chat_id: chat_id.clone(),
+            title,
+        };
+        rename.validate_limits().map_err(client_error)?;
+        let payload = serde_json::to_vec(&rename).map_err(client_error)?;
+        let event = self.core.send_application_event_with_segment(
+            &room_id,
+            DurableAppEventKind::Namespaced {
+                name: FINITECHAT_CHAT_RENAME_EVENT_V1.to_owned(),
+                policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+            },
+            Some(topic_id.clone()),
+            Some(chat_id.clone()),
+            &payload,
+            "chat-rename",
+        )?;
+        self.apply_projection_events(vec![event]);
+        self.app.selected_room_id = Some(room_id);
+        self.app.selected_topic_id = Some(topic_id);
+        self.app.selected_chat_id = Some(chat_id);
+        self.persist_app_state()?;
+        self.sync_selected_room_messages();
+        self.app.status = "chat renamed".to_owned();
         Ok(())
     }
 
@@ -3042,6 +3143,19 @@ impl AppRuntimeState {
             self.sync_selected_room_messages();
         }
         Ok(sent)
+    }
+
+    fn upload_bridge_attachment(
+        &mut self,
+        room_id: String,
+        attachment: OutboundAttachment,
+    ) -> Result<HermesAttachmentV1, FiniteChatCoreError> {
+        if !self.room_is_connected(&room_id) {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not ready to upload attachments"),
+            });
+        }
+        self.core.upload_outbound_attachment(&room_id, attachment)
     }
 
     fn send_chat_message_with_local_outbox(
@@ -4304,34 +4418,47 @@ impl AppRuntimeState {
             .map(|room| room.room_id.clone())
             .collect::<Vec<_>>();
         for room_id in room_ids {
-            let records = match self.core.get_ephemeral_activities(&room_id, now_ms) {
-                Ok(records) => records,
-                Err(FiniteChatCoreError::Delivery { .. }) => {
-                    continue;
+            let selected_topic_id = (self.app.selected_room_id.as_deref()
+                == Some(room_id.as_str()))
+            .then(|| self.app.selected_topic_id.clone())
+            .flatten();
+            let scopes = std::iter::once(None)
+                .chain(selected_topic_id.as_deref().map(Some))
+                .collect::<Vec<_>>();
+            for conversation_id in scopes {
+                let records =
+                    match self
+                        .core
+                        .get_ephemeral_activities(&room_id, conversation_id, now_ms)
+                    {
+                        Ok(records) => records,
+                        Err(FiniteChatCoreError::Delivery { .. }) => {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                for record in records {
+                    let Ok(plaintext) = self
+                        .core
+                        .device
+                        .decrypt_activity_payload(&record.room_id, &record.payload)
+                    else {
+                        continue;
+                    };
+                    let Ok(activity) =
+                        serde_json::from_slice::<DecryptedEphemeralActivityV1>(&plaintext)
+                    else {
+                        continue;
+                    };
+                    let context = EphemeralActivityIngressContext {
+                        room_id: &record.room_id,
+                        conversation_id: record.conversation_id.as_deref(),
+                        sender: &record.sender,
+                        received_at_ms: record.received_at_ms,
+                        expires_at_ms: record.expires_at_ms,
+                    };
+                    let _ = self.activity_projection.apply(context, &activity);
                 }
-                Err(error) => return Err(error),
-            };
-            for record in records {
-                let Ok(plaintext) = self
-                    .core
-                    .device
-                    .decrypt_activity_payload(&record.room_id, &record.payload)
-                else {
-                    continue;
-                };
-                let Ok(activity) =
-                    serde_json::from_slice::<DecryptedEphemeralActivityV1>(&plaintext)
-                else {
-                    continue;
-                };
-                let context = EphemeralActivityIngressContext {
-                    room_id: &record.room_id,
-                    conversation_id: record.conversation_id.as_deref(),
-                    sender: &record.sender,
-                    received_at_ms: record.received_at_ms,
-                    expires_at_ms: record.expires_at_ms,
-                };
-                let _ = self.activity_projection.apply(context, &activity);
             }
         }
         self.sync_typing_members();
@@ -4362,7 +4489,6 @@ impl AppRuntimeState {
             .activity_projection
             .entries()
             .filter(|entry| connected_rooms.contains(entry.room_id.as_str()))
-            .filter(|entry| entry.conversation_id.is_none())
             .filter(|entry| is_chat_live_indicator_activity(&entry.activity_kind))
             .filter(|entry| entry.sender != *owner)
             .map(|entry| typing_member_from_activity(entry, &self.profile_cache))
@@ -4370,6 +4496,8 @@ impl AppRuntimeState {
         members.sort_by(|left, right| {
             left.room_id
                 .cmp(&right.room_id)
+                .then_with(|| left.topic_id.cmp(&right.topic_id))
+                .then_with(|| left.chat_id.cmp(&right.chat_id))
                 .then_with(|| left.display_name.cmp(&right.display_name))
                 .then_with(|| left.account_id.cmp(&right.account_id))
                 .then_with(|| left.device_id.cmp(&right.device_id))
@@ -4384,6 +4512,8 @@ impl AppRuntimeState {
                 .last()
                 .map(|existing: &AppTypingMember| {
                     existing.room_id == member.room_id
+                        && existing.topic_id == member.topic_id
+                        && existing.chat_id == member.chat_id
                         && existing.account_id == member.account_id
                         && existing.device_id == member.device_id
                 })
@@ -4499,64 +4629,6 @@ impl AppRuntimeState {
                 },
             )
             .map_err(store_error)
-    }
-
-    #[cfg(test)]
-    fn test_append_activity(
-        &mut self,
-        room_id: &str,
-        activity_kind: &str,
-        action: EphemeralActivityActionV1,
-    ) -> Result<(), FiniteChatCoreError> {
-        let now_ms = self.core.now_millis()?;
-        let is_set = matches!(action, EphemeralActivityActionV1::Set);
-        let activity = DecryptedEphemeralActivityV1 {
-            activity_kind: activity_kind.to_owned(),
-            activity_id: None,
-            action,
-            payload: if is_set {
-                br#"{}"#.to_vec()
-            } else {
-                Vec::new()
-            },
-        };
-        activity.validate_limits().map_err(client_error)?;
-        let plaintext =
-            serde_json::to_vec(&activity).map_err(|error| FiniteChatCoreError::Client {
-                reason: format!("failed to serialize test activity: {error}"),
-            })?;
-        let request = AppendEphemeralActivityRequest {
-            room_id: room_id.to_owned(),
-            mls_group_id: self
-                .core
-                .device
-                .room_mls_group_id(room_id)
-                .map_err(client_error)?,
-            epoch: self
-                .core
-                .device
-                .group_epoch(room_id)
-                .map_err(client_error)?,
-            sender: self.core.device.device_ref().clone(),
-            conversation_id: None,
-            payload: self
-                .core
-                .device
-                .encrypt_activity_payload(room_id, &plaintext)
-                .map_err(client_error)?,
-            received_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(
-                GenericActivityKindV1::from_activity_kind(activity_kind)
-                    .map(|kind| kind.recommended_expiry_millis())
-                    .unwrap_or(60_000),
-            ),
-        };
-        let room_server_url = self.core.room_server_url(room_id);
-        let mut delivery = delivery_for(&room_server_url);
-        delivery
-            .append_activity(&request)
-            .map(|_| ())
-            .map_err(delivery_error)
     }
 
     fn persist_outbox_message(
@@ -5466,28 +5538,9 @@ impl CoreState {
             MAX_ATTACHMENTS_PER_MESSAGE,
         )
         .map_err(client_error)?;
-        let room_server_url = self.room_server_url(&room_id);
         let mut attachments = Vec::with_capacity(input_attachments.len());
         for attachment in input_attachments {
-            let filename = attachment.filename.trim().to_owned();
-            let mime_type = attachment.mime_type.trim().to_owned();
-            let metadata = AttachmentBlobMetadataV1 {
-                mime_type: mime_type.clone(),
-                filename: filename.clone(),
-                dimensions: None,
-            };
-            metadata.validate_limits().map_err(client_error)?;
-            let reference =
-                self.upload_attachment_blob(&room_server_url, &attachment.bytes, metadata)?;
-            self.cache_attachment_plaintext(&reference, &attachment.bytes)?;
-            attachments.push(HermesAttachmentV1 {
-                kind: hermes_attachment_kind(&attachment.kind),
-                name: filename,
-                mime_type,
-                path: None,
-                url: Some(reference.url.clone()),
-                blob: Some(reference),
-            });
+            attachments.push(self.upload_outbound_attachment(&room_id, attachment)?);
         }
         let chat_payload = encode_attachment_message_payload(
             caption.trim(),
@@ -5500,6 +5553,33 @@ impl CoreState {
             self.send_chat_payload(&room_id, conversation_id, chat_id, chat_payload)?;
         self.apply_attachment_cache_paths(&mut result.messages);
         Ok(result)
+    }
+
+    fn upload_outbound_attachment(
+        &self,
+        room_id: &str,
+        attachment: OutboundAttachment,
+    ) -> Result<HermesAttachmentV1, FiniteChatCoreError> {
+        let filename = attachment.filename.trim().to_owned();
+        let mime_type = attachment.mime_type.trim().to_owned();
+        let metadata = AttachmentBlobMetadataV1 {
+            mime_type: mime_type.clone(),
+            filename: filename.clone(),
+            dimensions: None,
+        };
+        metadata.validate_limits().map_err(client_error)?;
+        let room_server_url = self.room_server_url(room_id);
+        let reference =
+            self.upload_attachment_blob(&room_server_url, &attachment.bytes, metadata)?;
+        self.cache_attachment_plaintext(&reference, &attachment.bytes)?;
+        Ok(HermesAttachmentV1 {
+            kind: hermes_attachment_kind(&attachment.kind),
+            name: filename,
+            mime_type,
+            path: None,
+            url: Some(reference.url.clone()),
+            blob: Some(reference),
+        })
     }
 
     fn send_chat_payload(
@@ -5849,6 +5929,7 @@ impl CoreState {
         let activity = DecryptedEphemeralActivityV1 {
             activity_kind: FINITECHAT_ACTIVITY_KIND_TYPING.to_owned(),
             activity_id: None,
+            segment_id: None,
             action: if is_typing {
                 EphemeralActivityActionV1::Set
             } else {
@@ -5892,6 +5973,7 @@ impl CoreState {
         let AppBridgeActivityInput {
             room_id,
             conversation_id,
+            segment_id,
             activity_kind,
             activity_id,
             action,
@@ -5901,6 +5983,7 @@ impl CoreState {
         let activity = DecryptedEphemeralActivityV1 {
             activity_kind: activity_kind.clone(),
             activity_id,
+            segment_id,
             action,
             payload,
         };
@@ -5938,11 +6021,12 @@ impl CoreState {
     fn get_ephemeral_activities(
         &self,
         room_id: &str,
+        conversation_id: Option<&str>,
         now_ms: u64,
     ) -> Result<Vec<finitechat_proto::EphemeralActivityRecord>, FiniteChatCoreError> {
         let request = GetEphemeralActivitiesRequest {
             room_id: room_id.to_owned(),
-            conversation_id: None,
+            conversation_id: conversation_id.map(ToOwned::to_owned),
             requester: self.device.device_ref().clone(),
             now_ms,
         };
@@ -5962,7 +6046,31 @@ impl CoreState {
         payload: &[u8],
         idempotency_prefix: &str,
     ) -> Result<StoredAppEvent, FiniteChatCoreError> {
-        let app_event_plaintext = encode_application_event(kind.clone(), conversation_id, payload)?;
+        self.send_application_event_with_segment(
+            room_id,
+            kind,
+            conversation_id,
+            None,
+            payload,
+            idempotency_prefix,
+        )
+    }
+
+    fn send_application_event_with_segment(
+        &mut self,
+        room_id: &str,
+        kind: DurableAppEventKind,
+        conversation_id: Option<String>,
+        segment_id: Option<String>,
+        payload: &[u8],
+        idempotency_prefix: &str,
+    ) -> Result<StoredAppEvent, FiniteChatCoreError> {
+        let app_event_plaintext = encode_application_event_with_segment(
+            kind.clone(),
+            conversation_id,
+            segment_id,
+            payload,
+        )?;
         let idempotency_key = self
             .device
             .generate_object_id(idempotency_prefix)
@@ -6363,12 +6471,16 @@ enum DecodedAppEvent {
     ChatReaction(ChatReactionV1),
     ChatReceipt(ChatReceiptV1),
     PollVote(ChatPollVoteV1),
+    ChatRename(ChatRenameV1),
     Ignored,
 }
 
 struct ChatProjectionPayload {
     text: String,
     display_content: String,
+    kind: ChatMessageKind,
+    status: ChatMessageStatus,
+    edit_of_message_id: Option<String>,
     conversation_id: Option<String>,
     chat_id: Option<String>,
     reply_to_message_id: Option<String>,
@@ -6430,6 +6542,9 @@ fn project_chat_message(
         text: projection.text,
         display_content: projection.display_content,
         rich_text_json,
+        kind: projection.kind,
+        status: projection.status,
+        edit_of_message_id: projection.edit_of_message_id,
         payload: plaintext,
         reply_to_message_id: projection.reply_to_message_id,
         is_mine,
@@ -6516,6 +6631,7 @@ fn chat_projection_payload_from_application_plaintext(
         DecodedAppEvent::ChatReaction(_)
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
+        | DecodedAppEvent::ChatRename(_)
         | DecodedAppEvent::Ignored => None,
     }
 }
@@ -6548,6 +6664,9 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         return ChatProjectionPayload {
             display_content: question.clone(),
             text: question,
+            kind: ChatMessageKind::Message,
+            status: ChatMessageStatus::Complete,
+            edit_of_message_id: None,
             conversation_id: None,
             chat_id: None,
             reply_to_message_id: None,
@@ -6560,6 +6679,9 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         return ChatProjectionPayload {
             display_content: payload.text.clone(),
             text: payload.text,
+            kind: chat_message_kind(payload.kind),
+            status: chat_message_status(payload.status),
+            edit_of_message_id: payload.edit_of,
             conversation_id: payload.conversation_id,
             chat_id: payload.segment_id,
             reply_to_message_id: payload.reply_to_message_id,
@@ -6577,12 +6699,31 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
     ChatProjectionPayload {
         display_content: text.clone(),
         text,
+        kind: ChatMessageKind::Message,
+        status: ChatMessageStatus::Complete,
+        edit_of_message_id: None,
         conversation_id: None,
         chat_id: None,
         reply_to_message_id: None,
         sender_name: None,
         media: Vec::new(),
         poll: None,
+    }
+}
+
+fn chat_message_kind(kind: HermesSendKindV1) -> ChatMessageKind {
+    match kind {
+        HermesSendKindV1::Message => ChatMessageKind::Message,
+        HermesSendKindV1::Status => ChatMessageKind::Status,
+        HermesSendKindV1::Tool => ChatMessageKind::Tool,
+        HermesSendKindV1::Media => ChatMessageKind::Media,
+    }
+}
+
+fn chat_message_status(status: HermesMessageStatusV1) -> ChatMessageStatus {
+    match status {
+        HermesMessageStatusV1::Running => ChatMessageStatus::Running,
+        HermesMessageStatusV1::Complete => ChatMessageStatus::Complete,
     }
 }
 
@@ -6629,6 +6770,21 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
                 .map(DecodedAppEvent::PollVote)
                 .unwrap_or(DecodedAppEvent::Ignored)
         }
+        DurableAppEventKind::Namespaced { name, policy }
+            if name == FINITECHAT_CHAT_RENAME_EVENT_V1
+                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+        {
+            serde_json::from_slice::<ChatRenameV1>(&event.payload)
+                .ok()
+                .filter(|rename| rename.validate_limits().is_ok())
+                .filter(|rename| event.conversation_id.as_deref() == Some(rename.topic_id.as_str()))
+                .filter(|rename| event.segment_id.as_deref() == Some(rename.chat_id.as_str()))
+                .map(|mut rename| {
+                    rename.title = rename.title.trim().to_owned();
+                    DecodedAppEvent::ChatRename(rename)
+                })
+                .unwrap_or(DecodedAppEvent::Ignored)
+        }
         DurableAppEventKind::ConversationCreate
         | DurableAppEventKind::ConversationUpdate
         | DurableAppEventKind::ConversationArchive
@@ -6656,6 +6812,7 @@ fn conversation_id_from_decoded_event(event: &DecodedAppEvent) -> Option<String>
         DecodedAppEvent::ChatReaction(_)
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
+        | DecodedAppEvent::ChatRename(_)
         | DecodedAppEvent::Ignored => None,
     }
 }
@@ -7052,6 +7209,8 @@ fn typing_member_from_activity(
         .and_then(|profile| profile.picture.clone());
     AppTypingMember {
         room_id: entry.room_id.clone(),
+        topic_id: entry.conversation_id.clone(),
+        chat_id: entry.segment_id.clone(),
         account_id: entry.sender.account_id.clone(),
         device_id: entry.sender.device_id.clone(),
         display_name: sender_display_name(&entry.sender, profile_name, false),
@@ -7247,6 +7406,9 @@ impl ChatProjectionState {
             DecodedAppEvent::PollVote(vote) => {
                 self.apply_poll_vote(&event.room_id, &event.sender, owner, vote);
             }
+            DecodedAppEvent::ChatRename(rename) => {
+                self.apply_chat_rename(&event.room_id, event.seq, rename);
+            }
             DecodedAppEvent::Ignored => {}
         }
         self.trim_to_limit();
@@ -7273,6 +7435,7 @@ impl ChatProjectionState {
                     entry,
                     messages_by_topic.remove(&key).unwrap_or_default(),
                     local_read_seq,
+                    &self.chat_titles,
                 )
             })
             .collect::<Vec<_>>();
@@ -7283,6 +7446,7 @@ impl ChatProjectionState {
                 topic_id,
                 messages,
                 local_read_seq,
+                &self.chat_titles,
             ));
         }
 
@@ -7625,6 +7789,26 @@ impl ChatProjectionState {
             vote.option_id,
         );
         self.refresh_poll_for_message(&message_key, owner);
+    }
+
+    fn apply_chat_rename(&mut self, room_id: &str, accepted_seq: u64, rename: ChatRenameV1) {
+        let key = (room_id.to_owned(), rename.topic_id, rename.chat_id);
+        if !self.chat_titles.contains_key(&key) && self.chat_titles.len() >= MAX_APP_CHAT_TITLES {
+            return;
+        }
+        let should_replace = self
+            .chat_titles
+            .get(&key)
+            .is_none_or(|existing| accepted_seq >= existing.accepted_seq);
+        if should_replace {
+            self.chat_titles.insert(
+                key,
+                ChatTitleProjectionEntry {
+                    accepted_seq,
+                    title: rename.title,
+                },
+            );
+        }
     }
 
     fn refresh_reactions_for_message(&mut self, key: &(String, String), owner: &DeviceRef) {
@@ -8037,6 +8221,7 @@ fn topic_summary_from_projection(
     entry: &ConversationProjectionEntry,
     messages: Vec<&ChatMessage>,
     local_read_seq: &BTreeMap<String, u64>,
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
 ) -> AppTopicSummary {
     let metadata = entry.metadata.as_ref();
     let last_message_preview = latest_message_preview(&messages);
@@ -8063,13 +8248,14 @@ fn topic_summary_from_projection(
         .active_segment_id
         .clone()
         .or_else(|| (entry.conversation_id == HOME_TOPIC_ID).then(|| HOME_CHAT_ID.to_owned()));
-    let mut chats = chat_summaries_for_topic(entry, &messages, local_read_seq);
+    let mut chats = chat_summaries_for_topic(entry, &messages, local_read_seq, chat_titles);
     ensure_default_home_chat(
         &entry.room_id,
         &entry.conversation_id,
         active_chat_id.as_deref(),
         &mut chats,
         local_read_seq,
+        chat_titles,
     );
     AppTopicSummary {
         room_id: entry.room_id.clone(),
@@ -8092,6 +8278,7 @@ fn topic_summary_from_messages(
     topic_id: String,
     messages: Vec<&ChatMessage>,
     local_read_seq: &BTreeMap<String, u64>,
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
 ) -> AppTopicSummary {
     let last_message_preview = latest_message_preview(&messages);
     let created_seq = messages
@@ -8105,13 +8292,15 @@ fn topic_summary_from_messages(
         .max()
         .unwrap_or_default();
     let active_chat_id = (topic_id == HOME_TOPIC_ID).then(|| HOME_CHAT_ID.to_owned());
-    let mut chats = message_only_chat_summaries(&room_id, &messages, local_read_seq);
+    let mut chats =
+        message_only_chat_summaries(&room_id, &topic_id, &messages, local_read_seq, chat_titles);
     ensure_default_home_chat(
         &room_id,
         &topic_id,
         active_chat_id.as_deref(),
         &mut chats,
         local_read_seq,
+        chat_titles,
     );
     AppTopicSummary {
         room_id: room_id.clone(),
@@ -8135,19 +8324,19 @@ fn ensure_default_home_chat(
     active_chat_id: Option<&str>,
     chats: &mut Vec<AppChatSummary>,
     local_read_seq: &BTreeMap<String, u64>,
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
 ) {
     if topic_id != HOME_TOPIC_ID || chats.iter().any(|chat| chat.chat_id == HOME_CHAT_ID) {
         return;
     }
-    chats.push(chat_summary_from_parts(
+    let context = ChatSummaryContext {
         room_id,
-        HOME_CHAT_ID,
-        0,
-        0,
+        topic_id,
         active_chat_id,
-        &[],
         local_read_seq,
-    ));
+        chat_titles,
+    };
+    chats.push(chat_summary_from_parts(&context, HOME_CHAT_ID, 0, 0, &[]));
     chats.sort_by(chat_sort);
 }
 
@@ -8155,6 +8344,7 @@ fn chat_summaries_for_topic(
     entry: &ConversationProjectionEntry,
     messages: &[&ChatMessage],
     local_read_seq: &BTreeMap<String, u64>,
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
 ) -> Vec<AppChatSummary> {
     let mut messages_by_chat = BTreeMap::<String, Vec<&ChatMessage>>::new();
     for message in messages {
@@ -8167,19 +8357,24 @@ fn chat_summaries_for_topic(
             .push(*message);
     }
 
+    let context = ChatSummaryContext {
+        room_id: &entry.room_id,
+        topic_id: &entry.conversation_id,
+        active_chat_id: entry.active_segment_id.as_deref(),
+        local_read_seq,
+        chat_titles,
+    };
     let mut chats = Vec::new();
     for (index, segment) in entry.segments.iter().enumerate() {
         let chat_messages = messages_by_chat
             .remove(&segment.segment_id)
             .unwrap_or_default();
         chats.push(chat_summary_from_parts(
-            &entry.room_id,
+            &context,
             &segment.segment_id,
             index,
             segment.started_seq,
-            entry.active_segment_id.as_deref(),
             &chat_messages,
-            local_read_seq,
         ));
     }
 
@@ -8190,13 +8385,11 @@ fn chat_summaries_for_topic(
             .min()
             .unwrap_or(entry.created_seq);
         chats.push(chat_summary_from_parts(
-            &entry.room_id,
+            &context,
             &chat_id,
             entry.segments.len() + index,
             started_seq,
-            entry.active_segment_id.as_deref(),
             &chat_messages,
-            local_read_seq,
         ));
     }
 
@@ -8206,8 +8399,10 @@ fn chat_summaries_for_topic(
 
 fn message_only_chat_summaries(
     room_id: &str,
+    topic_id: &str,
     messages: &[&ChatMessage],
     local_read_seq: &BTreeMap<String, u64>,
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
 ) -> Vec<AppChatSummary> {
     let mut messages_by_chat = BTreeMap::<String, Vec<&ChatMessage>>::new();
     for message in messages {
@@ -8219,6 +8414,13 @@ fn message_only_chat_summaries(
             .or_default()
             .push(*message);
     }
+    let context = ChatSummaryContext {
+        room_id,
+        topic_id,
+        active_chat_id: None,
+        local_read_seq,
+        chat_titles,
+    };
     let mut chats = messages_by_chat
         .into_iter()
         .enumerate()
@@ -8228,29 +8430,27 @@ fn message_only_chat_summaries(
                 .map(|message| message.seq)
                 .min()
                 .unwrap_or_default();
-            chat_summary_from_parts(
-                room_id,
-                &chat_id,
-                index,
-                started_seq,
-                None,
-                &chat_messages,
-                local_read_seq,
-            )
+            chat_summary_from_parts(&context, &chat_id, index, started_seq, &chat_messages)
         })
         .collect::<Vec<_>>();
     chats.sort_by(chat_sort);
     chats
 }
 
+struct ChatSummaryContext<'a> {
+    room_id: &'a str,
+    topic_id: &'a str,
+    active_chat_id: Option<&'a str>,
+    local_read_seq: &'a BTreeMap<String, u64>,
+    chat_titles: &'a BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
+}
+
 fn chat_summary_from_parts(
-    room_id: &str,
+    context: &ChatSummaryContext<'_>,
     chat_id: &str,
-    index: usize,
+    _index: usize,
     started_seq: u64,
-    active_chat_id: Option<&str>,
     messages: &[&ChatMessage],
-    local_read_seq: &BTreeMap<String, u64>,
 ) -> AppChatSummary {
     let last_message_preview = latest_message_preview(messages);
     let updated_seq = messages
@@ -8260,22 +8460,49 @@ fn chat_summary_from_parts(
         .unwrap_or(started_seq);
     AppChatSummary {
         chat_id: chat_id.to_owned(),
-        title: chat_title(index, &last_message_preview),
+        title: chat_title(
+            context.room_id,
+            context.topic_id,
+            chat_id,
+            messages,
+            context.chat_titles,
+        ),
         last_message_preview,
-        unread_count: topic_unread_count(room_id, messages, local_read_seq),
+        unread_count: topic_unread_count(context.room_id, messages, context.local_read_seq),
         message_count: messages.len().min(u32::MAX as usize) as u32,
         started_seq,
         updated_seq,
-        active: active_chat_id == Some(chat_id),
+        active: context.active_chat_id == Some(chat_id),
     }
 }
 
-fn chat_title(index: usize, last_message_preview: &str) -> String {
-    let preview = last_message_preview.trim();
-    if !preview.is_empty() {
-        return preview.chars().take(48).collect();
+fn chat_title(
+    room_id: &str,
+    topic_id: &str,
+    chat_id: &str,
+    messages: &[&ChatMessage],
+    chat_titles: &BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
+) -> String {
+    let key = (room_id.to_owned(), topic_id.to_owned(), chat_id.to_owned());
+    if let Some(explicit) = chat_titles.get(&key) {
+        return explicit.title.clone();
     }
-    format!("Chat {}", index + 1)
+
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.kind,
+                ChatMessageKind::Message | ChatMessageKind::Media
+            ) && message.edit_of_message_id.is_none()
+        })
+        .filter_map(|message| {
+            let preview = message_preview(message);
+            (!preview.trim().is_empty()).then_some((message, preview))
+        })
+        .min_by(|(left, _), (right, _)| message_sort(left, right))
+        .map(|(_, preview)| preview.chars().take(48).collect())
+        .unwrap_or_else(|| "New chat".to_owned())
 }
 
 fn latest_message_preview(messages: &[&ChatMessage]) -> String {
@@ -9207,6 +9434,18 @@ mod tests {
             .to_owned();
         assert_ne!(second_chat_id, home_chat_id);
         assert!(new_chat.messages.is_empty());
+        let empty_title = new_chat
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == HOME_TOPIC_ID)
+            .and_then(|topic| {
+                topic
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == second_chat_id)
+            })
+            .map(|chat| chat.title.as_str());
+        assert_eq!(empty_title, Some("New chat"));
 
         let second_chat = app
             .dispatch_and_wait(AppAction::SendChatMessage {
@@ -9222,6 +9461,39 @@ mod tests {
             second_chat.messages[0].chat_id.as_deref(),
             Some(second_chat_id.as_str())
         );
+        let initial_title = second_chat
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == HOME_TOPIC_ID)
+            .and_then(|topic| {
+                topic
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == second_chat_id)
+            })
+            .map(|chat| chat.title.as_str());
+        assert_eq!(initial_title, Some("second Home chat"));
+
+        let later_second_chat = app
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: second_chat_id.clone(),
+                text: "a later response must not rename this chat".to_owned(),
+            })
+            .unwrap();
+        let stable_title = later_second_chat
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == HOME_TOPIC_ID)
+            .and_then(|topic| {
+                topic
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == second_chat_id)
+            })
+            .map(|chat| chat.title.as_str());
+        assert_eq!(stable_title, Some("second Home chat"));
 
         let reopened_first = app
             .dispatch_and_wait(AppAction::OpenChat {
@@ -9414,6 +9686,126 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_chat_rename_replays_and_syncs_to_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice_dir = dir.path().join("alice");
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: alice_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("bob").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "bob-electron".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let created = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Rename Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = created.selected_room_id.unwrap();
+        add_runtime_member_named(&alice, &bob, &room_id, "Bob");
+        bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let topic_state = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Build".to_owned(),
+            })
+            .unwrap();
+        let topic_id = topic_state.selected_topic_id.unwrap();
+        let chat_id = topic_state.selected_chat_id.unwrap();
+        let titled_from_first_message = alice
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                chat_id: chat_id.clone(),
+                text: "Implement the chats sidebar".to_owned(),
+            })
+            .unwrap();
+        let fallback_title = titled_from_first_message
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == topic_id)
+            .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
+            .map(|chat| chat.title.as_str());
+        assert_eq!(fallback_title, Some("Implement the chats sidebar"));
+
+        let renamed = alice
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                chat_id: chat_id.clone(),
+                title: "  SaaS chat polish  ".to_owned(),
+            })
+            .unwrap();
+        let explicit_title = renamed
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == topic_id)
+            .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
+            .map(|chat| chat.title.as_str());
+        assert_eq!(explicit_title, Some("SaaS chat polish"));
+
+        let bob_synced = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let bob_title = bob_synced
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == topic_id)
+            .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
+            .map(|chat| chat.title.as_str());
+        assert_eq!(
+            bob_title,
+            Some("SaaS chat polish"),
+            "another Device must project the encrypted non-notifying rename"
+        );
+
+        assert!(
+            alice
+                .dispatch_and_wait(AppAction::RenameChat {
+                    room_id: room_id.clone(),
+                    topic_id: topic_id.clone(),
+                    chat_id: chat_id.clone(),
+                    title: "   ".to_owned(),
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+
+        drop(alice);
+        let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: alice_dir.to_string_lossy().into_owned(),
+            server_url: unavailable_http_server_url(),
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let reopened_state = reopened.state().unwrap();
+        let replayed_title = reopened_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == topic_id)
+            .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
+            .map(|chat| chat.title.as_str());
+        assert_eq!(
+            replayed_title,
+            Some("SaaS chat polish"),
+            "cold replay must not depend on Hermes or a live server"
+        );
+    }
+
+    #[test]
     fn chat_projection_displays_hermes_payload_text() {
         let payload = HermesMessagePayloadV1 {
             payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
@@ -9436,6 +9828,82 @@ mod tests {
             encode_application_event(DurableAppEventKind::ChatMessage, None, &payload).unwrap();
         assert_eq!(chat_display_text(&wrapped), "echo: hello from iOS");
         assert_eq!(chat_display_text(b"plain hello"), "plain hello");
+    }
+
+    #[test]
+    fn chat_projection_preserves_hermes_presentation_and_old_state_defaults() {
+        let payload = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: Some("topic-build".to_owned()),
+            segment_id: Some("segment-7".to_owned()),
+            text: "Running cargo test".to_owned(),
+            kind: HermesSendKindV1::Tool,
+            status: HermesMessageStatusV1::Running,
+            edit_of: Some("tool-message-1".to_owned()),
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: Some("Hermes".to_owned()),
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .unwrap();
+        let plaintext = encode_application_event_with_segment(
+            DurableAppEventKind::ChatMessage,
+            Some("topic-build".to_owned()),
+            Some("segment-7".to_owned()),
+            &payload,
+        )
+        .unwrap();
+        let sender = DeviceRef {
+            account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            device_id: "hermes".to_owned(),
+        };
+        let owner = DeviceRef {
+            account_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_owned(),
+            device_id: "hosted-web".to_owned(),
+        };
+        let message = project_chat_message(
+            "room-main".to_owned(),
+            8,
+            "tool-message-2".to_owned(),
+            sender,
+            plaintext,
+            NOW,
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(message.kind, ChatMessageKind::Tool);
+        assert_eq!(message.status, ChatMessageStatus::Running);
+        assert_eq!(
+            message.edit_of_message_id.as_deref(),
+            Some("tool-message-1")
+        );
+
+        let mut legacy_json = serde_json::to_value(&message).unwrap();
+        let object = legacy_json.as_object_mut().unwrap();
+        object.remove("kind");
+        object.remove("status");
+        object.remove("edit_of_message_id");
+        let legacy: ChatMessage = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.kind, ChatMessageKind::Message);
+        assert_eq!(legacy.status, ChatMessageStatus::Complete);
+        assert_eq!(legacy.edit_of_message_id, None);
+
+        let raw = project_chat_message(
+            "room-main".to_owned(),
+            9,
+            "native-message".to_owned(),
+            owner.clone(),
+            b"native hello".to_vec(),
+            NOW,
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(raw.kind, ChatMessageKind::Message);
+        assert_eq!(raw.status, ChatMessageStatus::Complete);
+        assert_eq!(raw.edit_of_message_id, None);
     }
 
     #[test]
@@ -11026,6 +11494,104 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_agent_bridge_inbox_hint_activates_welcome_without_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let user = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("hosted-web").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let agent_state = agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("agent publishes KeyPackages");
+        assert!(agent_state.rooms.is_empty());
+        assert_eq!(
+            agent
+                .wait_plan(5_000)
+                .unwrap()
+                .request
+                .inbox
+                .expect("every Device watches its own inbox")
+                .after_seq,
+            0
+        );
+
+        let waiting_agent = Arc::clone(&agent);
+        let waiter = std::thread::spawn(move || waiting_agent.agent_bridge_wait_for_update(5_000));
+
+        let agent_account_id = agent_state.identity.account_id;
+        let user_state = user
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: test_profile(&agent_account_id, "Agent"),
+                display_name: "Chat with Agent".to_owned(),
+            })
+            .expect("hosted Device adds the zero-room agent");
+        let room_id = user_state.rooms.first().unwrap().room_id.clone();
+
+        waiter
+            .join()
+            .expect("agent inbox waiter thread")
+            .expect("inbox hint runs the normal sync path");
+        let joined = agent.state().unwrap();
+        assert_eq!(app_room(&joined, &room_id).state, AppRoomState::Connected);
+        assert_eq!(
+            agent
+                .wait_plan(5_000)
+                .unwrap()
+                .request
+                .inbox
+                .expect("inbox watch remains active after Welcome activation")
+                .after_seq,
+            1
+        );
+    }
+
+    #[test]
+    fn app_runtime_failed_inbox_hint_sync_does_not_advance_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = CoreState::open(with_test_secret(OpenOptions {
+            data_dir: dir
+                .path()
+                .join("offline-agent")
+                .to_string_lossy()
+                .into_owned(),
+            server_url: unavailable_http_server_url(),
+            device_id: "offline-agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let mut state = AppRuntimeState::new(core).unwrap();
+
+        state
+            .agent_bridge_apply_sync_hint(SyncHintEvent::InboxAdvanced { seq: 7 })
+            .expect_err("offline full sync must fail");
+        assert_eq!(
+            state
+                .wait_plan(5_000)
+                .request
+                .inbox
+                .expect("offline Device still watches its inbox")
+                .after_seq,
+            0,
+            "a reconnect must retry the same inbox hint until the pull/activate/ack tick succeeds"
+        );
+    }
+
+    #[test]
     fn app_profile_chat_claims_key_package_and_sends_welcome_via_welcome() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
@@ -11772,29 +12338,51 @@ mod tests {
             })
             .unwrap();
         let room_id = alice_state.rooms.first().unwrap().room_id.clone();
+        let topic_id = alice_state.selected_topic_id.clone().unwrap();
+        let chat_id = alice_state.selected_chat_id.clone().unwrap();
         add_runtime_member_named(&alice, &hermes, &room_id, "Hermes");
 
-        append_test_activity(
-            &hermes,
-            &room_id,
-            FINITECHAT_ACTIVITY_KIND_WORKING,
-            EphemeralActivityActionV1::Set,
-        );
+        hermes
+            .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
+                room_id: room_id.clone(),
+                conversation_id: Some(topic_id.clone()),
+                segment_id: Some(chat_id.clone()),
+                activity_kind: FINITECHAT_ACTIVITY_KIND_WORKING.to_owned(),
+                activity_id: None,
+                action: EphemeralActivityActionV1::Set,
+                payload: br#"{}"#.to_vec(),
+                expires_in_millis: 15_000,
+            })
+            .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
         assert_eq!(alice_state.typing_members.len(), 1);
         assert_eq!(alice_state.typing_members[0].room_id, room_id);
+        assert_eq!(
+            alice_state.typing_members[0].topic_id.as_deref(),
+            Some(topic_id.as_str())
+        );
+        assert_eq!(
+            alice_state.typing_members[0].chat_id.as_deref(),
+            Some(chat_id.as_str())
+        );
         assert_eq!(alice_state.typing_members[0].device_id, "hermes-agent");
         assert_eq!(
             alice_state.typing_members[0].activity_kind,
             FINITECHAT_ACTIVITY_KIND_WORKING
         );
 
-        append_test_activity(
-            &hermes,
-            &room_id,
-            FINITECHAT_ACTIVITY_KIND_WORKING,
-            EphemeralActivityActionV1::Clear,
-        );
+        hermes
+            .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
+                room_id: room_id.clone(),
+                conversation_id: Some(topic_id),
+                segment_id: Some(chat_id),
+                activity_kind: FINITECHAT_ACTIVITY_KIND_WORKING.to_owned(),
+                activity_id: None,
+                action: EphemeralActivityActionV1::Clear,
+                payload: Vec::new(),
+                expires_in_millis: 15_000,
+            })
+            .unwrap();
         let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
         assert!(
             alice_state.typing_members.is_empty(),
@@ -14358,17 +14946,6 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         response.json().unwrap()
-    }
-
-    fn append_test_activity(
-        runtime: &FiniteChatRuntime,
-        room_id: &str,
-        activity_kind: &str,
-        action: EphemeralActivityActionV1,
-    ) {
-        runtime
-            .test_append_activity(room_id.to_owned(), activity_kind.to_owned(), action)
-            .unwrap();
     }
 
     fn decode_nip98_event(header: &str) -> NostrHttpAuthEvent {

@@ -238,3 +238,11 @@ pub struct ApiErrorBody {
     pub error: String,
     pub message: String,
 }
+
+/// Stable API error code: the server cannot execute its required Git binary.
+pub const ERROR_GIT_UNAVAILABLE: &str = "git_unavailable";
+
+/// Stable API error code: registry state was saved, but the corresponding
+/// Project Repository could not be provisioned. Replaying the same Project
+/// Init request after service recovery is the repair operation.
+pub const ERROR_GIT_REPOSITORY_SETUP_FAILED: &str = "git_repository_setup_failed";

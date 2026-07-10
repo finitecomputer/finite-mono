@@ -98,9 +98,10 @@ pub enum HermesAttachmentKindV1 {
     File,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HermesSendKindV1 {
+    #[default]
     Message,
     Status,
     Tool,
@@ -231,6 +232,8 @@ pub struct HermesEditRequestV1 {
     pub segment_id: Option<ConversationSegmentId>,
     pub message_id: MessageId,
     pub text: String,
+    #[serde(default)]
+    pub kind: HermesSendKindV1,
     pub status: HermesMessageStatusV1,
     pub finalize: bool,
     #[serde(default)]
@@ -817,7 +820,7 @@ impl HermesMessagePayloadV1 {
             conversation_id: request.conversation_id.clone(),
             segment_id: request.segment_id.clone(),
             text: request.text.clone(),
-            kind: HermesSendKindV1::Message,
+            kind: request.kind,
             status: request.status,
             edit_of: Some(request.message_id.clone()),
             attachments: Vec::new(),
@@ -1030,6 +1033,37 @@ mod tests {
         .expect("status kind is valid");
 
         assert_eq!(request.kind, HermesSendKindV1::Status);
+    }
+
+    #[test]
+    fn edit_preserves_message_kind_and_old_requests_default_to_message() {
+        let request = HermesEditRequestV1 {
+            room_id: "room-agent-1".to_owned(),
+            conversation_id: Some("topic-build".to_owned()),
+            segment_id: Some("segment-7".to_owned()),
+            message_id: "tool-1".to_owned(),
+            text: "cargo test complete".to_owned(),
+            kind: HermesSendKindV1::Tool,
+            status: HermesMessageStatusV1::Complete,
+            finalize: true,
+            metadata: BTreeMap::new(),
+        };
+        let payload = HermesMessagePayloadV1::from_edit(&request);
+        assert_eq!(payload.kind, HermesSendKindV1::Tool);
+        assert_eq!(payload.status, HermesMessageStatusV1::Complete);
+        assert_eq!(payload.edit_of.as_deref(), Some("tool-1"));
+
+        let old_json = r#"{
+            "room_id":"room-agent-1",
+            "conversation_id":null,
+            "message_id":"message-1",
+            "text":"done",
+            "status":"complete",
+            "finalize":true,
+            "metadata":{}
+        }"#;
+        let old: HermesEditRequestV1 = serde_json::from_str(old_json).unwrap();
+        assert_eq!(old.kind, HermesSendKindV1::Message);
     }
 
     #[test]

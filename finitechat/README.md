@@ -64,11 +64,12 @@ routes for debugging.
 
 ## Your Finite Identity
 
-`finitechat` uses the shared Finite identity: one Nostr key per user, stored
+`finitechat` uses the current Finite Home's identity-owner key, stored
 at `~/.finite/identity/identity.json` (or
 `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set, e.g. in
-hosted runtimes). Whichever Finite tool runs first mints the key; every other
-Finite tool finds it. The on-disk format and concurrency rules are the
+hosted runtimes). Whichever Finite tool runs first in that home mints the key;
+every other Finite tool in the same home finds it. Human and Agent Runtime
+homes remain separate. The on-disk format and concurrency rules are the
 [Finite Identity Contract](https://github.com/finitecomputer/finite-identity),
 shared with `fsite` and the rest of the Finite tools. `finitechat` never
 copies the secret into its own stores.
@@ -94,7 +95,7 @@ using it).
 ## Onboard A Hermes Agent
 
 Initialize the agent home against the production server. This mints or reuses
-the shared Finite identity, registers the agent's device state, and publishes
+that agent home's Local Identity Key, registers the agent's device state, and publishes
 an agent profile (skippable with `--skip-agent-profile`):
 
 ```sh
@@ -143,19 +144,13 @@ gateway:
 
 Then `hermes gateway start` brings the agent onto Finite Chat.
 
-## Invite A Human (Or Join A Room)
+## Start A Chat With An Agent
 
-When the Hermes gateway starts with the Finite plugin, it prints a QR code, a
-`finite://join?...` URL, and a rotating 6-digit PIN. A human scans or pastes
-that into the Finite Chat app and types the PIN; the agent verifies the PIN
-proof before admitting them to the encrypted room. You can also drive invites
-directly:
-
-```sh
-finitechat hermes invite --room-name "Ops" --json   # create an invite (URL + PIN)
-finitechat hermes invite-status --url INVITE_URL --json
-finitechat hermes join --url INVITE_URL             # join someone else's invite
-```
+The agent publishes its Agent Principal `npub`; it does not create a room or
+an invite session at gateway startup. A user Device scans/selects that profile,
+publishes its KeyPackage, and starts the room through the normal MLS
+Add/Welcome flow. Hosted Web, Electron, and native clients are independent
+Devices using that same contract.
 
 For the full agent integration surface (message polling, sending, the
 supervised `hermes serve` bridge, smoke tests, and hardening evidence), see
@@ -235,48 +230,25 @@ checkout. It also needs the model provider key used by the Hermes profile. The
 runner loads `.env` when present, or set
 `FINITECHAT_HERMES_ENV_FILE=/path/to/provider.env`.
 
-For the hardened "fresh Hermes instance to Paul's phone" quality loop, use
-`docs/hermes-phone-canary-loop.md`. That runbook defines Finite Chat's local
-phone and remote Docker gates and the evidence required before a human invite
-is handed out.
-
-The product-shaped hosted Hermes runtime ladder for local Docker, remote
-Docker, and Phala belongs to
+The product-shaped Hermes runtime ladder for local Apple Container, Kata, and
+Phala belongs to
 `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md`. Finite Chat's local
 loop proves the app/protocol/plugin contract; v2 proves the hosted-agent
 runtime image and provider deploy shapes.
 
-For team testing, the normal Hermes phone canary is:
+For team testing, run the real local SaaS from the monorepo root:
 
 ```sh
-cp .env.example .env
-# Fill in one model provider key in .env, usually OPENROUTER_API_KEY.
-xcrun devicectl list devices
-scripts/hermes-phone-canary.py \
-  --install-phone-app \
-  --ios-device <device identifier or hardware UDID> \
-  --ios-development-team <Apple team id> \
-  --keep-running
+export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-key>
+just dev up
+just dev saas-smoke
 ```
 
-The script uses `https://chat.finite.computer`, builds the current
-`finitechat` binary, installs the current iOS app on the paired phone, starts
-real Hermes 0.17 with the `finitechat` plugin, proves invite admission
-with a throwaway client, requires a real model reply, then prints the human
-invite URL, report path, and `stop.sh`. Do not hand an invite to a
-human from lower-level scripts that have not produced a passed report.
-
-Remote Docker is the next promotion layer for teammates with access to the
-builder host:
-
-```sh
-scripts/hermes-remote-docker-canary.py --keep-running
-```
-
-That wrapper requires a passed local phone report by default, builds the real
-runtime image on `ssh://finite-lat-2`, proves real Hermes chat before and after
-entrypoint backup/restore, and only then prints the invite URL for the restored
-container.
+That path builds Hermes 0.18.2 in the canonical Runtime image, provisions a
+real Apple VM, opens the Hosted Web Device, and proves independent restart
+healing. Physical-phone and remote-Docker scripts remain historical/manual
+experiments until rewritten against the same Agent Principal + Welcome-first
+contract; they are not promotion gates.
 
 The normal app flow is:
 

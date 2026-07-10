@@ -46,6 +46,10 @@ in
     pname = "finitechat-server";
     dir = "finitechat/crates/finitechat-server";
   };
+  finitechat-hosted-device = mkWorkspaceCrate {
+    pname = "finitechat-hosted-device";
+    dir = "finitechat/crates/finitechat-hosted-device";
+  };
   finitesitesd = mkWorkspaceCrate {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";

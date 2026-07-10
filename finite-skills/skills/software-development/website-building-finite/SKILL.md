@@ -1,6 +1,6 @@
 ---
 name: website-building-finite
-description: Build and ship websites, landing pages, dashboards, and other web products on finitecomputer. Use this when a human wants the actual app built, QAed with Playwright, and published through finite.
+description: Build and ship websites, landing pages, dashboards, documents, and stateful web apps on Finite. Use when a human wants the product implemented, QAed in a real browser, and published through Finite Sites with fsite.
 ---
 
 # Website Building
@@ -16,17 +16,20 @@ If the main problem is art direction, visual quality, hierarchy, polish, or "mak
 
 ## Finite Overrides
 
-The `references/` tree was adapted from a broader web skill. On finite, these rules override anything else:
+The `references/` tree was adapted from a broader web skill. On Finite, these
+rules override anything else:
 
-- publish with `finitec publish`, never `deploy_website`
-- private by default; public exposure requires one standalone human message containing exactly `MAKE PUBLIC`
-- do not edit Traefik or invent host-level networking
+- publish through Finite Sites with `fsite`, never `deploy_website` or a
+  Runtime port-exposure command
+- keep Project Outputs private by default; public sharing requires an explicit
+  human decision and `--yes-public`
+- do not edit proxies, DNS, or host-level networking
 - prefer user-space installs (`npm`, `bun`, `uv`, `pipx`) over asking for host binaries
 - for interactive or data-heavy sites, use Playwright QA before publishing
 - initialize git in new projects and commit after each meaningful milestone
 
-Read the sibling `publish-web-apps-finite` skill before exposing a site.
-Read `/platform/FINITE.md` before publishing.
+Read the sibling `finite-sites-publishing-finite` skill before creating,
+updating, previewing, listing, or sharing any Project Output.
 
 ## Routing
 
@@ -48,8 +51,10 @@ Choose one route, then load the matching references.
 5. Run `git init` if needed and commit after each major milestone.
 6. Build the experience with real assets and a custom SVG logo.
 7. For complex sites, run Playwright QA and iterate until the site actually looks good.
-8. Publish privately first with `finitec publish expose --run ... --cwd ...`.
-9. Only switch to `public` after an explicit `MAKE PUBLIC` confirmation.
+8. Declare the correct `finite.toml` output kind, validate it with
+   `fsite project init --dry-run`, then commit and push the Deploy Branch.
+9. Verify the private served preview before sharing. Only switch to public
+   after explaining the exposure and receiving explicit human agreement.
 
 ## Design Standards
 
@@ -61,11 +66,19 @@ Choose one route, then load the matching references.
 
 ## Operational Rules
 
-- Prefer one long-lived app process per published site.
-- If the site needs a backend, run a real server and have it serve both the app and API when practical.
-- When publishing, include `--run` and `--cwd` so the app survives runtime restarts.
-- For Playwright QA, start the app with a truly detached process group, not a plain `nohup ... &` shell one-liner that can leave the terminal tool hanging. Prefer `setsid sh -lc 'COMMAND >/tmp/app.log 2>&1 < /dev/null' >/dev/null 2>&1 & echo $! >/tmp/app.pid`, then verify it with `curl http://127.0.0.1:PORT` before opening the browser.
-- If the app uses Vite, remember that `vite preview` often needs `preview.allowedHosts` for the published hostname, not just `server.allowedHosts`.
+- Use a static `kind = "site"` output for built browser assets, a
+  `kind = "document"` output for Markdown, and `kind = "app"` only when a
+  server process or durable mutable state is required.
+- If a site needs a backend, prefer one app server that serves both UI and API.
+  For `kind = "app"`, listen on `0.0.0.0:$PORT` and write live mutable state
+  only under `DATA_DIR`.
+- Finite Sites does not run builds. Commit the source and selected deploy
+  bytes or intentional app runtime payload before pushing.
+- For Playwright QA, start the local preview with a truly detached process
+  group, not a plain `nohup ... &` shell one-liner that can leave the terminal
+  tool hanging. Prefer `setsid sh -lc 'COMMAND >/tmp/app.log 2>&1 < /dev/null'
+  >/dev/null 2>&1 & echo $! >/tmp/app.pid`, then verify it with
+  `curl http://127.0.0.1:PORT` before opening the browser.
 - If Playwright is missing, install it in user space inside the project; do not ask for host packages unless user-space install genuinely fails.
 
 ## Reference Map

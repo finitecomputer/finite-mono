@@ -24,12 +24,12 @@ _Avoid_: external handle, external nostr address
 The public `.well-known/nostr.json` HTTP endpoint for the Finite VIP Domain. In v1, the Identity Authority owns the response for this endpoint.
 _Avoid_: static nostr file, nostr profile endpoint
 
-**Recovery**:
-The unresolved future process for regaining or moving control of a Finite identity after key loss. Recovery is not defined in v1 because it also decides how product data follows or does not follow a replacement key.
-_Avoid_: reset, relink, account restore
+**Identity Recovery**:
+The explicit process for restoring control of a Native Principal or moving its product authority to a replacement key without orphaning user data.
+_Avoid_: reset, relink, silent reassignment
 
 **Disabled Binding**:
-A Finite VIP Email or NIP-05 Name binding that the Identity Authority keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Recovery or reassignment.
+A Finite VIP Email or NIP-05 Name binding that the Identity Authority keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Identity Recovery or reassignment.
 _Avoid_: deleted binding, reset binding, transferred binding
 
 **Principal**:
@@ -37,8 +37,12 @@ The identity subject that Finite products attach permissions to. A Principal is 
 _Avoid_: account, user, member
 
 **Native Principal**:
-A Principal backed by a Nostr public key controlled by a Finite identity keypair.
+A Principal backed by a Nostr public key controlled by a human or agent Finite identity keypair.
 _Avoid_: native account, npub user
+
+**Finite Home**:
+The filesystem root that scopes one Local Identity Key and the Finite tool state belonging to that identity owner.
+_Avoid_: User home, shared fleet home, product config directory
 
 **Email-Only Principal**:
 A Principal backed by verified control of an email address before the person has linked that email to a Native Principal.
@@ -49,8 +53,12 @@ Any email address that a Finite product can grant access to before the recipient
 _Avoid_: external email, collaborator email
 
 **Principal Link**:
-A verified relationship from an email address to a Native Principal. Products can use Principal Links during authorization without immediately rewriting their product-owned permission records.
+A verified identity-equivalence relationship from an email address to a Native Principal. Products can use Principal Links during authorization without immediately rewriting their product-owned permission records. A Principal Link says the email and npub are the same Principal; it is never an authorization for a distinct agent to act for that Principal.
 _Avoid_: alias, migration, account merge
+
+**Email Access Delegation**:
+A revocable product-owned authorization allowing a distinct Agent Principal to exercise a verified email Principal's grants inside exactly one Finite product.
+_Avoid_: email link, account link, agent identity binding
 
 **Principal Resolution**:
 The Finite Identity answer to "who does this email, NIP-05 name, npub, or caller prove as right now?" Principal Resolution lets products attach permissions to stable product concepts while delegating identity proof and email-to-native links to Finite Identity.
@@ -77,7 +85,7 @@ A short-lived product-held cache of Principal Resolution answers. A Resolution C
 _Avoid_: identity replica, local identity store
 
 **Local Identity Key**:
-The user's Nostr keypair generated, imported, and stored by the local Finite Identity client contract. The Identity Authority stores public identity state, not Local Identity Key secret material.
+The human- or agent-owned Nostr keypair generated, imported, and stored under one Finite Home by the Finite Identity client contract.
 _Avoid_: server key, account key, hosted key
 
 **Binding Proof**:
@@ -91,3 +99,54 @@ _Avoid_: magic token, signed token, email login
 **Mailer Adapter**:
 The deployment-specific implementation that delivers Email Challenges. Finite Identity owns the challenge flow, while a Mailer Adapter performs delivery through dev outbox, Resend, Postmark, or another provider.
 _Avoid_: email service, notification service
+
+## Relationships
+
+- One **Finite Home** contains exactly one **Local Identity Key**.
+- Each hosted agent has its own **Finite Home** and **Local Identity Key**;
+  `finitechat`, `fsite`, and `fbrain` inside that agent use the same key.
+- A human's Finite Chat identity lives separately from every agent **Finite
+  Home** and may be generated or imported by the human.
+- **Account Auth** is outside Finite Identity; proving a dashboard session does
+  not reveal, replace, or silently mint a **Local Identity Key**.
+- The **Identity Authority** stores public resolution/binding state and never a
+  **Local Identity Key** secret.
+- A **Product Grant** may name an email or Native Principal, but an agent does
+  not satisfy a human email grant merely because the agent belongs to that
+  human's Project.
+- A **Principal Link** proves identity equivalence. An **Email Access
+  Delegation** authorizes a different Principal; the two are never inferred
+  from each other.
+- One **Email Access Delegation** connects one verified email Principal, one
+  Agent Principal, and one Finite product; revocation in that product grants no
+  authority in another product.
+- An Agent Principal exercising an **Email Access Delegation** still signs as
+  itself, and product audit records both the agent and delegation.
+- Finite Identity proves Principal relationships; each product owns issuance,
+  enforcement, revocation, and resource-specific consequences of its **Email
+  Access Delegations**.
+- A Finite Product Release does not satisfy its recoverability promise unless
+  **Identity Recovery** and the affected product-owned grants or encrypted key
+  access are restored together.
+
+## Example Dialogue
+
+> **Dev:** "Do a user's Finite Chat app and hosted agent load the same identity file?"
+> **Domain expert:** "No. Each has its own Finite Home and Local Identity Key; only the agent's tools share the agent key."
+
+> **Dev:** "Does WorkOS become the agent's signing identity?"
+> **Domain expert:** "No. Account Auth gates the dashboard; the agent's Local Identity Key signs agent operations."
+
+> **Dev:** "If I let my agent use Sites shared to my email, does Brain inherit that access?"
+> **Domain expert:** "No. The Sites Email Access Delegation is product-scoped; Brain needs its own delegation and Folder Key Grants to the agent npub."
+
+## Flagged Ambiguities
+
+- "Shared identity" was used to mean both shared code/path conventions and a
+  shared human-agent signer. Resolved: Finite tools in one **Finite Home** share
+  one **Local Identity Key**; humans and agents do not share that secret.
+- The Identity Authority v1 contract deliberately omitted key-loss recovery;
+  that omission is now a launch gap, not an acceptable permanent product state.
+- "Link my email to my agent" previously mixed identity equivalence with
+  authorization. Resolved: same-identity proof creates a **Principal Link**;
+  cross-identity access creates a product-scoped **Email Access Delegation**.

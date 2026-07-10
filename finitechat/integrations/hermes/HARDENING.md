@@ -27,7 +27,9 @@ That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
 - Restart/restore keeps the same agent npub, invite room, user membership, and
   decryptable outbound messages.
 - Attachments, edits, typing/activity, receipts, room filters, and group rooms
-  have focused tests.
+  have focused tests. Agent-local attachments are bounded and promoted to
+  encrypted durable blob references before append; path/read/upload failure
+  appends no media row, and no local path survives in the room log.
 - Docker acceptance proves the real runtime image can chat with iOS before any
   Tinfoil deployment attempt.
 
@@ -35,10 +37,11 @@ That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
 
 - Keep the Python adapter thin. Rust owns identity, MLS, cursors, encrypted
   storage, invite verification, attachment materialization, and bridge JSON.
-- Keep polling working until a streaming sidecar is production-ready.
+- Keep one-shot polling only as a diagnostic/test tool; Finite Computer
+  production requires the resident streaming sidecar and cursor-based reconnect.
 - Do not require SaaS or Tinfoil to test chat correctness.
-- Preserve CLI fallback for environments where the loopback sidecar cannot be
-  supervised.
+- Preserve CLI fallback only for compatibility environments that leave strict
+  inbound streaming disabled.
 - Prefer machine-readable JSON contracts over logs as the test oracle.
 
 ## RCA: 2026-06-26 Tinfoil Join Pending Failure
@@ -278,8 +281,8 @@ live media smoke exposed.
 
 ### Phase 3: Add A Photon-Style Inbound Stream
 
-- Quality: add `GET /v1/hermes/inbound?room_id=...` behind a feature flag using
-  NDJSON or SSE, while keeping `poll` as fallback.
+- Quality: use `GET /v1/hermes/inbound?room_id=...` behind a feature flag using
+  NDJSON or SSE; keep `poll` only when that strict stream flag is disabled.
 - Reliability: stream reconnects with backoff, preserves ack-after-dispatch
   semantics, and never drops events on sidecar restart.
 - Simplicity: Rust owns one sync loop and Python consumes inbound events instead
@@ -288,12 +291,12 @@ live media smoke exposed.
 - Understanding: compare the design directly against Hermes Photon's sidecar
   pattern and record where Finite differs because of MLS/state constraints.
 
-Initial implementation note: the first stream shape is an NDJSON long-poll
-endpoint guarded by `FINITECHAT_HERMES_INBOUND_STREAM=1`. It emits `joined` and
-`event` records from the same Rust poll machinery as the CLI bridge. This is a
-safe intermediate step before a persistent server-owned sync loop because it
-exercises the loopback streaming contract without removing the known-good poll
-fallback.
+The current stream shape is an NDJSON endpoint guarded by
+`FINITECHAT_HERMES_INBOUND_STREAM=1`. It emits `joined` and `event` records from
+the Rust runtime's durable cursor machinery. For the Finite Computer production
+profile this is no longer an optional intermediate mode: remove automatic
+stream-to-poll and service-to-CLI fallback, reconnect with bounded backoff, and
+prove cursor catch-up without duplicate dispatch.
 
 ### Phase 4: Build The Human E2E Matrix
 
@@ -366,7 +369,7 @@ scripts/hermes-sidecar-docker-smoke.sh
 scripts/hermes-sidecar-docker-s3-emulator-smoke.sh
 ```
 
-It builds `containers/agent/Dockerfile` with `hermes-agent==0.17.0`, starts the
+It builds `containers/agent/Dockerfile` with `hermes-agent==0.18.2`, starts the
 real Hermes gateway in Docker, drives `finitechat` CLI users through invite/PIN
 admission before and after restore, and writes
 `target/hermes-docker-smoke/report.json`. This proves the packaged Linux image
@@ -427,7 +430,7 @@ it to GHCR.
 Current CI shape:
 
 - `.github/workflows/ci.yml` pins the adapter test environment and runtime
-  image build arg to `hermes-agent==0.17.0`.
+  image build arg to `hermes-agent==0.18.2`.
 - Every PR and `main`/`codex/**` push runs Rust fmt, clippy, workspace tests,
   the local Hermes sidecar smoke, Ruff, BasedPyright, and Python adapter tests.
 - The local smoke uploads `target/hermes-sidecar-smoke/report.json` as a CI
@@ -630,6 +633,8 @@ The target sidecar contract should look like:
 - `GET /v1/hermes/inbound?room_id=...`: newline-delimited JSON or SSE stream
   of `HermesPollEventV1` values plus join notifications.
 
-The adapter should read inbound events from the stream, dispatch to Hermes, ack
-after successful dispatch, and reconnect with backoff. If the stream fails, it
-can temporarily fall back to `poll` with the same ack semantics.
+The adapter reads inbound events from the stream, dispatches to Hermes, acks
+after successful dispatch, and reconnects with bounded backoff. With
+`FINITECHAT_HERMES_INBOUND_STREAM=1`, a stream failure must never select the
+Python polling loop or a per-action CLI subprocess; reconnecting to the Rust
+service performs durable-cursor catch-up.

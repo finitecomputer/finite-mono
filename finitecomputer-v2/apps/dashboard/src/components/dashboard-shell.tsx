@@ -9,6 +9,7 @@ import {
   LayoutDashboardIcon,
   Layers3Icon,
   LogOutIcon,
+  MessageSquareIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -50,6 +51,7 @@ function sectionLinks(
   saasMode: boolean
 ): SectionLink[] {
   const machineHref = machine ? `/dashboard/machines/${machine.id}` : "/dashboard";
+  const chatHref = machine ? `/dashboard/machines/${machine.id}/chat` : "/dashboard";
   const skillsHref = machine ? `/dashboard/skills?machine=${encodeURIComponent(machine.id)}` : "/dashboard/skills";
 
   if (saasMode) {
@@ -59,6 +61,13 @@ function sectionLinks(
         href: machineHref,
         icon: BotIcon,
         active: pathname === "/dashboard" || (machine ? pathname === `/dashboard/machines/${machine.id}` : false),
+      },
+      {
+        label: "Chat",
+        href: chatHref,
+        icon: MessageSquareIcon,
+        active: machine ? pathname === `/dashboard/machines/${machine.id}/chat` : false,
+        disabled: !machine,
       },
     ];
   }
@@ -75,6 +84,13 @@ function sectionLinks(
       href: machineHref,
       icon: LayoutDashboardIcon,
       active: machine ? pathname === `/dashboard/machines/${machine.id}` : false,
+      disabled: !machine,
+    },
+    {
+      label: "Chat",
+      href: chatHref,
+      icon: MessageSquareIcon,
+      active: machine ? pathname === `/dashboard/machines/${machine.id}/chat` : false,
       disabled: !machine,
     },
     {
@@ -232,6 +248,11 @@ export function DashboardShell({
     [selectedMachineId, machines]
   );
   const showMachineFleet = isAdmin || machines.length > 1;
+  const isChatSurface = /^\/dashboard\/machines\/[^/]+\/(?:chat|brain)\/?$/u.test(pathname);
+
+  if (isChatSurface) {
+    return <div className="ocean-shell ocean-shell--chat">{children}</div>;
+  }
 
   return (
     <div className="ocean-shell">

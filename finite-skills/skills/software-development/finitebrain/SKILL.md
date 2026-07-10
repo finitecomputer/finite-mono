@@ -7,14 +7,17 @@ description: FiniteBrain vault and LLM wiki operations through ordinary file edi
 
 Use `fbrain` as the control plane and the Vault Working Tree as the content
 surface. The repeatable loop is: verify identity, open or enter the tree, sync,
-unlock readable Folders, edit wiki content with ordinary file tools, sync, and
-prove conflicts are empty.
+unlock readable Folders, edit wiki content and source assets with ordinary file
+tools, sync, and prove conflicts are empty.
 
 ## Quick Start
 
 Prefer explicit `--config-dir` in agent runtimes. The CLI default is
 `$FBRAIN_CONFIG_DIR`, then `$HOME/.finitebrain/fbrain`, but explicit state avoids
-surprises when shell environment resets between calls.
+surprises when shell environment resets between calls. The signing identity is
+not stored there: it is the current Finite Home's Local Identity Key, resolved from
+`$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/identity.json`)
+regardless of `--config-dir`.
 
 ```sh
 FBRAIN_CONFIG="$HOME/.config/finitebrain"
@@ -54,8 +57,8 @@ fbrain -- <args>` may be the available entrypoint.
    Completion: the target Folder conventions, access boundary, existing wiki
    shape, and likely duplicate pages are known.
 4. Edit only readable content roots with ordinary file tools. Keep LLM wiki work
-   under Folder-local conventions such as `raw/`, `wiki/`, `inventory/`,
-   `datasets/`, and `output/`.
+   under Folder-local conventions such as `raw/`, `raw/assets/`, `wiki/`,
+   `inventory/`, `datasets/`, and `output/`.
    Completion: the smallest coherent set of markdown files is changed.
 5. Do not edit `.finitebrain/`, locked metadata-only folders, encrypted sync
    evidence, generated convention files, auth files, grant plaintext, or Folder
@@ -71,9 +74,10 @@ fbrain -- <args>` may be the available entrypoint.
 A FiniteBrain Vault is not one wiki with folders. It is a namespace of many
 Folder-scoped LLM wikis. Treat each readable FiniteBrain Folder as an
 independent access-scoped LLM wiki root unless its local instructions say
-otherwise. The wiki is plain Markdown: sources become immutable `raw/` notes,
-synthesized knowledge becomes cross-linked articles, and outputs build on the
-compiled wiki instead of re-deriving context from scratch.
+otherwise. The wiki is Markdown-first: Markdown sources become immutable `raw/`
+notes, non-Markdown source files become Assets under `raw/assets/`, synthesized
+knowledge becomes cross-linked articles, and outputs build on the curated wiki
+instead of re-deriving context from scratch.
 
 The LLM Wiki topic model maps to a FiniteBrain Folder. Folder Keys and Folder
 Access define which topic wikis the active user or agent can read. Indexes and
@@ -89,6 +93,7 @@ uses a different convention:
 |-- log.md
 |-- inbox/
 |-- raw/
+|   `-- assets/
 |-- wiki/
 |   |-- concepts/
 |   |-- topics/
@@ -105,6 +110,11 @@ Core wiki rules:
   then update them after meaningful writes.
 - Keep raw immutable. Once a URL, PDF, transcript, pasted source, or file is
   captured under `raw/`, do not edit it; synthesize corrections in `wiki/`.
+- Store non-Markdown source files under `raw/assets/`. Pair every Asset with a
+  Markdown Source Note that records provenance, content type, hash or extraction
+  status when known, and any extraction/transcription decisions.
+- Query and cite Source Notes before treating an Asset blob as knowledge. The
+  Asset preserves evidence; the Source Note is the agent-readable handle.
 - Synthesize articles, do not copy sources. Articles should connect claims,
   entities, dates, open questions, and related pages.
 - Use structured frontmatter on wiki pages with at least title, summary or
@@ -123,7 +133,7 @@ Core wiki rules:
   deliverables that should compound future work.
 - Archive quietly instead of deleting superseded topics. Prefer `.archive/` or
   the local Folder convention, update indexes, and log the archive.
-- When querying, answer from compiled wiki pages first. If the wiki lacks enough
+- When querying, answer from curated wiki pages first. If the wiki lacks enough
   evidence, say what is missing and suggest what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do
   not stall.
@@ -186,9 +196,12 @@ current skill name is `finitebrain`.
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,
   decrypted sync payload internals, local auth files, or rotation bodies.
-- Assume identity is provisioned by the runtime, `fauth`, or a human runbook. Do
-  not create, import, or ask for keypairs unless the user or runbook explicitly
-  asks.
+- Assume identity is provisioned by the runtime or a human runbook via the
+  current Finite Home identity file (`$FINITE_HOME/identity/identity.json`, else
+  `~/.finite/identity/identity.json`), which Finite tools in that home share.
+  An agent home never adopts the human user's Finite Chat key. Do not
+  run `fbrain auth import`, create, or ask for keypairs unless the user or
+  runbook explicitly asks.
 - Use `--json` for machine inspection, but summarize sensitive results instead
   of pasting raw payloads.
 

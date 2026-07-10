@@ -770,3 +770,19 @@ Import:
 
 The worker's final code and deployment boundary remains a later legacy-fleet
 migration decision rather than an implicit part of this scaffold import.
+
+## Removed Retired `finite-auth` Experiment
+
+Date: 2026-07-09
+
+- Confirmed that no product crate consumed `finite-auth-core` or
+  `finite-auth-store`; only root workspace registration and historical docs
+  referenced them.
+- Deleted the `finite-auth/` source and documentation tree and the superseded
+  v2 auth/key-custody brief.
+- Removed both crates from the root Cargo workspace and lockfile, and removed
+  the `finite-auth` import-sync mapping so the archived source repo cannot be
+  accidentally synchronized back into the monorepo.
+- Retained the earlier import entries in this migration log and monorepo plan
+  as historical facts. `finite-identity` is the active shared identity owner;
+  human and agent Nostr identities remain separate.

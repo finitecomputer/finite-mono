@@ -1,18 +1,20 @@
-# Shared Finite Identity For The User Key
+# Shared Finite Identity Within One Finite Home
 
-The User Key is no longer minted or stored by `fsite` itself. It is the
+The Publishing Key is no longer minted or stored by `fsite` itself. It is the
 shared Finite identity defined by the Finite Identity Contract v1
-(https://github.com/finitecomputer/finite-identity): one Nostr key per user,
-at `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
+(https://github.com/finitecomputer/finite-identity): one Nostr key per Finite
+Home, at `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
 `~/.finite/identity/identity.json` otherwise. Whichever Finite tool
-(`finitechat`, `fsite`, `fbrain`, hosted runtimes) runs first mints the key
-under an exclusive lock; every other tool finds it. This makes identity
-install-order symmetric across Finite tools instead of one identity per tool.
+(`finitechat`, `fsite`, `fbrain`, hosted runtimes) runs first in that home
+mints the key under an exclusive lock; every other tool in the same home finds
+it. This makes identity install-order symmetric across Finite tools instead of
+one identity per tool. Human and agent homes remain distinct principals and do
+not share an nsec.
 
 ## Decision
 
 - `fsite` depends on the `finite-identity` crate, pinned by git rev, and
-  loads the User Key with `FiniteIdentity::load_or_generate` using
+  loads the Publishing Key with `FiniteIdentity::load_or_generate` using
   `created_by = "fsite/<version>"`.
 - The secret is derived into process memory per invocation
   (`expose_secret_bytes`) to sign NIP-98 requests and is never copied into
@@ -25,7 +27,7 @@ install-order symmetric across Finite tools instead of one identity per tool.
   file location, `created_by`, and `created_at` (`--output json` supported);
   `fsite auth import` adopts an existing `nsec1...` or 64-char hex secret
   exactly once and fails closed if a shared identity already exists, because
-  replacing it would fork the user's identity across tools. (These shipped
+  replacing it would fork that principal's identity across tools. (These shipped
   briefly, unreleased, as `fsite identity [import]` and were renamed before
   release; there are no aliases.)
 - `fsite auth import` reads the secret from stdin or `--file PATH`, never
@@ -35,7 +37,7 @@ install-order symmetric across Finite tools instead of one identity per tool.
   the secret string itself.
 - Per-email keys (`~/.config/finite-sites/emails/*.env`) and pending
   email-link markers stay tool-specific and unchanged; only the primary
-  User Key moved.
+  Publishing Key moved.
 
 ## Consequences
 

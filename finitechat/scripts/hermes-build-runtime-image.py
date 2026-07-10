@@ -14,7 +14,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_HERMES_AGENT_VERSION = "0.17.0"
+DEFAULT_HERMES_AGENT_VERSION = "0.18.2"
 
 
 def run(args: list[str], *, timeout: int = 3600) -> subprocess.CompletedProcess[str]:

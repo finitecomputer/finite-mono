@@ -1,7 +1,7 @@
 ---
 name: google-workspace-finite
 description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration via Python. Uses OAuth2 with automatic token refresh. No external binaries needed — runs entirely with Google's Python client libraries in the Hermes venv.
-version: 1.0.0
+version: 1.1.0
 author: Nous Research
 license: MIT
 required_credential_files:
@@ -28,6 +28,7 @@ client setup when the dashboard flow is unavailable or explicitly broken.
 ## References
 
 - `references/gmail-search-syntax.md` — Gmail search operators (is:unread, from:, newer_than:, etc.)
+- `references/google-workspace-scopes.json` — the OAuth scope contract shipped atomically with this skill
 
 ## Scripts
 
@@ -42,7 +43,8 @@ on CLI, Telegram, Discord, or any platform.
 Define a shorthand first:
 
 ```bash
-GSETUP="python /profile-assets/hermes-local/managed-skills/productivity/google-workspace-finite/scripts/setup.py"
+SKILL_ROOT="${FINITECHAT_HOME:-/data/agent}/managed-skills/finite/current/productivity/google-workspace-finite"
+GSETUP="python $SKILL_ROOT/scripts/setup.py"
 ```
 
 ### Step 0: Check if already set up
@@ -130,8 +132,10 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 
 ### Notes
 
-- Token is stored at `~/.hermes/google_token.json` and auto-refreshes.
-- Pending OAuth session state/verifier are stored temporarily at `~/.hermes/google_oauth_pending.json` until exchange completes.
+- Token is stored at `$HERMES_HOME/google_token.json` and auto-refreshes.
+- Pending OAuth session state/verifier are stored temporarily at
+  `$HERMES_HOME/google_oauth_pending.json` until exchange completes.
+- Credential and pending-session writes are atomic mode-0600 replacements.
 - To revoke: `$GSETUP --revoke`
 
 ## Usage
@@ -139,7 +143,7 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 All commands go through the API script. Set `GAPI` as a shorthand:
 
 ```bash
-GAPI="python /profile-assets/hermes-local/managed-skills/productivity/google-workspace-finite/scripts/google_api.py"
+GAPI="python $SKILL_ROOT/scripts/google_api.py"
 ```
 
 ### Gmail
@@ -243,7 +247,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 | `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
 | `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
 | `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
-| `ModuleNotFoundError` | Run `$GSETUP --install-deps` |
+| `ModuleNotFoundError` | Hosted Runtime: report an image packaging failure; dependencies are pinned in the image. Unmanaged Hermes: run `$GSETUP --install-deps` explicitly. |
 | Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |
 
 ## gws CLI (Alternative / Preferred)

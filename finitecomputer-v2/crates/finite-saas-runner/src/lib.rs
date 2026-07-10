@@ -9,6 +9,7 @@ use finite_saas_core::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -18,6 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod apple_container;
+
+pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
@@ -34,6 +39,10 @@ pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
     "https://avatars.githubusercontent.com/u/274919006?v=4";
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
+const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
+const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
+const MAX_RUNTIME_ENVIRONMENT_VALUE_BYTES: usize = 4 * 1024;
+const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -47,16 +56,26 @@ pub enum RunnerError {
     MissingWorkRoot,
     #[error("Docker binary is required")]
     MissingDockerBinary,
+    #[error("Apple Container binary is required")]
+    MissingAppleContainerBinary,
     #[error("Phala CLI binary is required")]
     MissingPhalaBinary,
     #[error("Phala API key is required")]
     MissingPhalaApiKey,
+    #[error("Enclavia CLI binary is required")]
+    MissingEnclaviaBinary,
+    #[error("Enclavia enclave id is required")]
+    MissingEnclaviaEnclaveId,
     #[error("Finite Chat server URL is required")]
     MissingFinitechatServerUrl,
     #[error("Docker host port must be between 1 and 65535")]
     InvalidDockerHostPort,
+    #[error("Apple Container host port must be between 1 and 65535")]
+    InvalidAppleContainerHostPort,
     #[error("runtime artifact reference is required")]
     MissingRuntimeArtifactReference,
+    #[error("invalid opaque runtime environment: {0}")]
+    InvalidRuntimeEnvironment(String),
     #[error("Phala instance type is required")]
     MissingPhalaInstanceType,
     #[error("Phala disk size is required")]
@@ -135,6 +154,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_ready_timeout: Duration,
     runtime_ready_interval: Duration,
     default_finite_private: Option<FinitePrivateRuntimeDefaults>,
+    runtime_environment: BTreeMap<String, String>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -163,6 +183,7 @@ where
             runtime_ready_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
             runtime_ready_interval: DEFAULT_RUNTIME_READY_INTERVAL,
             default_finite_private: None,
+            runtime_environment: BTreeMap::new(),
         })
     }
 
@@ -178,6 +199,18 @@ where
     ) -> Self {
         self.default_finite_private = Some(defaults);
         self
+    }
+
+    /// Carry provider-neutral, non-secret RuntimeSpec environment through the
+    /// shared launch path. Adapters transport it without interpreting which
+    /// product owns a key.
+    pub fn with_runtime_environment(
+        mut self,
+        environment: BTreeMap<String, String>,
+    ) -> Result<Self, RunnerError> {
+        validate_runtime_environment(&environment)?;
+        self.runtime_environment = environment;
+        Ok(self)
     }
 
     pub fn run_once(&mut self) -> Result<RunOnceOutcome, RunnerError> {
@@ -368,11 +401,12 @@ where
                 .map(|heartbeat| heartbeat.last_seen_at),
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
         };
+        let restart_options = RuntimeRestartOptions::new(self.runtime_environment.clone())?;
         let operation_result = match kind {
-            RuntimeControlKind::Restart => self.launcher.restart_runtime(&lease),
-            RuntimeControlKind::RecoverKnownGoodChatRuntime => {
-                self.launcher.recover_known_good_chat_runtime(&lease)
-            }
+            RuntimeControlKind::Restart => self.launcher.restart_runtime(&lease, &restart_options),
+            RuntimeControlKind::RecoverKnownGoodChatRuntime => self
+                .launcher
+                .recover_known_good_chat_runtime(&lease, &restart_options),
             RuntimeControlKind::Stop => self.launcher.stop_runtime(&lease),
             RuntimeControlKind::Destroy => self.launcher.destroy_runtime(&lease),
         };
@@ -458,8 +492,12 @@ where
         lease: &AgentCreationLease,
         lease_token: &str,
     ) -> Result<RuntimeLaunchOptions, RunnerError> {
+        let mut options = RuntimeLaunchOptions {
+            environment: self.runtime_environment.clone(),
+            ..RuntimeLaunchOptions::default()
+        };
         let Some(defaults) = self.default_finite_private.clone() else {
-            return Ok(RuntimeLaunchOptions::default());
+            return Ok(options);
         };
         if let Some(raw_api_key) = defaults
             .api_key_override
@@ -467,15 +505,14 @@ where
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return Ok(RuntimeLaunchOptions {
-                finite_private: Some(FinitePrivateLaunchKey {
-                    api_key_id: "operator-override".to_string(),
-                    raw_api_key: raw_api_key.to_string(),
-                    base_url: defaults.base_url,
-                    model: defaults.model,
-                    revoke_on_launch_failure: false,
-                }),
+            options.finite_private = Some(FinitePrivateLaunchKey {
+                api_key_id: "operator-override".to_string(),
+                raw_api_key: raw_api_key.to_string(),
+                base_url: defaults.base_url,
+                model: defaults.model,
+                revoke_on_launch_failure: false,
             });
+            return Ok(options);
         }
         let source = self.launcher.planned_source(lease);
         let key = self.queue.provision_finite_private_runtime_key(
@@ -489,15 +526,14 @@ where
                 now: None,
             },
         )?;
-        Ok(RuntimeLaunchOptions {
-            finite_private: Some(FinitePrivateLaunchKey {
-                api_key_id: key.api_key.id,
-                raw_api_key: key.raw_api_key,
-                base_url: defaults.base_url,
-                model: defaults.model,
-                revoke_on_launch_failure: true,
-            }),
-        })
+        options.finite_private = Some(FinitePrivateLaunchKey {
+            api_key_id: key.api_key.id,
+            raw_api_key: key.raw_api_key,
+            base_url: defaults.base_url,
+            model: defaults.model,
+            revoke_on_launch_failure: true,
+        });
+        Ok(options)
     }
 
     fn cleanup_provisioned_finite_private_key(&mut self, options: &RuntimeLaunchOptions) {
@@ -641,7 +677,11 @@ pub trait RuntimeLauncher {
     fn planned_source(&self, _lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
         None
     }
-    fn restart_runtime(&mut self, _lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+    fn restart_runtime(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
         Err(RunnerError::RuntimeLaunch(
             "runtime restart is not supported by this launcher".to_string(),
         ))
@@ -649,6 +689,7 @@ pub trait RuntimeLauncher {
     fn recover_known_good_chat_runtime(
         &mut self,
         _lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         Err(RunnerError::RuntimeLaunch(
             "runtime known-good chat recovery is not supported by this launcher".to_string(),
@@ -671,6 +712,67 @@ pub trait RuntimeLauncher {
     ) -> Result<RuntimeLaunchFacts, RunnerError>;
     fn cleanup_failed_launch(&mut self, _facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
         Ok(())
+    }
+}
+
+impl<L> RuntimeLauncher for Box<L>
+where
+    L: RuntimeLauncher + ?Sized,
+{
+    fn validate_ready(&self) -> Result<(), RunnerError> {
+        (**self).validate_ready()
+    }
+
+    fn uses_core_runtime_heartbeat(&self) -> bool {
+        (**self).uses_core_runtime_heartbeat()
+    }
+
+    fn runner_capacity(&self) -> RunnerLeaseCapacity {
+        (**self).runner_capacity()
+    }
+
+    fn source_host_id(&self) -> Option<&str> {
+        (**self).source_host_id()
+    }
+
+    fn planned_source(&self, lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
+        (**self).planned_source(lease)
+    }
+
+    fn restart_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        (**self).restart_runtime(lease, options)
+    }
+
+    fn recover_known_good_chat_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        (**self).recover_known_good_chat_runtime(lease, options)
+    }
+
+    fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        (**self).stop_runtime(lease)
+    }
+
+    fn destroy_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        (**self).destroy_runtime(lease)
+    }
+
+    fn launch(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        (**self).launch(lease, options)
+    }
+
+    fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
+        (**self).cleanup_failed_launch(facts)
     }
 }
 
@@ -784,6 +886,28 @@ impl Default for FinitePrivateRuntimeDefaults {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RuntimeLaunchOptions {
     pub finite_private: Option<FinitePrivateLaunchKey>,
+    /// Bounded non-secret values from the provider-neutral RuntimeSpec.
+    pub environment: BTreeMap<String, String>,
+}
+
+/// Provider-neutral desired environment carried through a state-preserving
+/// Runtime restart. The map is intentionally limited to the same bounded,
+/// non-secret opaque values accepted at launch; inference credentials and
+/// Runtime-contract variables remain owned by the existing Runtime.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RuntimeRestartOptions {
+    environment: BTreeMap<String, String>,
+}
+
+impl RuntimeRestartOptions {
+    pub fn new(environment: BTreeMap<String, String>) -> Result<Self, RunnerError> {
+        validate_runtime_environment(&environment)?;
+        Ok(Self { environment })
+    }
+
+    pub fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -800,8 +924,132 @@ impl std::fmt::Debug for RuntimeLaunchOptions {
         formatter
             .debug_struct("RuntimeLaunchOptions")
             .field("finite_private", &self.finite_private)
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
+}
+
+impl std::fmt::Debug for RuntimeRestartOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeRestartOptions")
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// Reconcile only the explicitly desired non-secret opaque keys. Existing
+/// Runtime-contract values, provider settings, and credentials are retained
+/// byte-for-byte so compute replacement does not silently rotate or erase
+/// them.
+fn merge_desired_runtime_environment(
+    mut existing: Vec<(String, String)>,
+    options: &RuntimeRestartOptions,
+) -> Vec<(String, String)> {
+    for (key, value) in &mut existing {
+        if let Some(desired) = options.environment().get(key) {
+            *value = desired.clone();
+        }
+    }
+    for (key, value) in options.environment() {
+        if !existing.iter().any(|(existing_key, _)| existing_key == key) {
+            existing.push((key.clone(), value.clone()));
+        }
+    }
+    existing
+}
+
+fn validate_runtime_environment(environment: &BTreeMap<String, String>) -> Result<(), RunnerError> {
+    if environment.len() > MAX_RUNTIME_ENVIRONMENT_ENTRIES {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "at most {MAX_RUNTIME_ENVIRONMENT_ENTRIES} entries are allowed"
+        )));
+    }
+    let mut total_bytes = 0usize;
+    for (key, value) in environment {
+        let valid_key = !key.is_empty()
+            && key.len() <= MAX_RUNTIME_ENVIRONMENT_KEY_BYTES
+            && key.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+            });
+        if !valid_key {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key:?} is not a bounded uppercase environment name"
+            )));
+        }
+        if reserved_runtime_environment_key(key) {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key} is owned by the Runtime contract"
+            )));
+        }
+        if secret_runtime_environment_key(key) {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key} looks secret-bearing; use a secret reference instead"
+            )));
+        }
+        if value.is_empty()
+            || value.len() > MAX_RUNTIME_ENVIRONMENT_VALUE_BYTES
+            || value.contains('\0')
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "{key} has an empty, oversized, or NUL-containing value"
+            )));
+        }
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+    if total_bytes > MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "values exceed the {MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES}-byte total limit"
+        )));
+    }
+    Ok(())
+}
+
+fn reserved_runtime_environment_key(key: &str) -> bool {
+    matches!(
+        key,
+        "FINITE_SERVER_URL"
+            | "FINITECHAT_SERVER_URL"
+            | "FINITECHAT_HOME"
+            | "FINITE_HOME"
+            | "HERMES_HOME"
+            | "FINITECHAT_WORKSPACE"
+            | "FINITE_AGENT_HTTP_HOST"
+            | "FINITE_AGENT_HTTP_PORT"
+            | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
+            | "FINITE_AGENT_ID"
+            | "FINITE_AGENT_NAME"
+            | "FINITECHAT_HERMES_AGENT_NAME"
+            | "FINITECHAT_HERMES_ROOM_NAME"
+            | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
+            | "FINITECHAT_HERMES_INBOUND_STREAM"
+            | "FINITECHAT_ALLOW_ALL_USERS"
+            | "FINITE_ALLOW_ALL_USERS"
+            | "GATEWAY_ALLOW_ALL_USERS"
+            | "FINITE_DEFAULT_INFERENCE_PROFILE"
+            | "FINITE_PRIVATE_MODEL"
+            | "FINITE_PRIVATE_BASE_URL"
+            | "FINITE_PRIVATE_API_KEY"
+            | "FINITECHAT_HERMES_MODEL"
+            | "FINITECHAT_HERMES_PROVIDER"
+            | "FINITECHAT_HERMES_BASE_URL"
+            | "FINITECHAT_HERMES_API_MODE"
+            | "OPENAI_API_KEY"
+    )
+}
+
+fn secret_runtime_environment_key(key: &str) -> bool {
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+        .iter()
+        .any(|part| key.split('_').any(|segment| segment == *part))
 }
 
 impl std::fmt::Debug for FinitePrivateLaunchKey {
@@ -1251,12 +1499,6 @@ impl DockerLauncher {
             "Docker runtime /healthz",
             self.config.readiness_timeout,
             self.config.readiness_interval,
-        )?;
-        wait_for_http_json_ready(
-            &plan.invite_status_url,
-            "Docker runtime /invite",
-            self.config.readiness_timeout,
-            self.config.readiness_interval,
         )
     }
 }
@@ -1291,7 +1533,11 @@ impl RuntimeLauncher for DockerLauncher {
         })
     }
 
-    fn restart_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+    fn restart_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
         self.validate_ready()?;
         if lease.runtime.source_host_id != self.config.source_host_id {
             return Err(RunnerError::RuntimeLaunch(format!(
@@ -1328,8 +1574,9 @@ impl RuntimeLauncher for DockerLauncher {
     fn recover_known_good_chat_runtime(
         &mut self,
         lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
-        self.restart_runtime(lease)
+        self.restart_runtime(lease, options)
     }
 
     fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
@@ -1433,7 +1680,7 @@ impl RuntimeLauncher for DockerLauncher {
                 .as_ref()
                 .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
             hermes_available: Some(true),
-            published_app_urls: vec![plan.invite_status_url],
+            published_app_urls: vec![plan.contact_url],
         })
     }
 
@@ -1459,7 +1706,7 @@ pub struct DockerLaunchPlan {
     pub state_root: PathBuf,
     pub public_base_url: String,
     pub health_url: String,
-    pub invite_status_url: String,
+    pub contact_url: String,
     pub host_port: u16,
     pub container_port: u16,
 }
@@ -1484,7 +1731,7 @@ fn docker_launch_plan_for_source_machine(
     DockerLaunchPlan {
         state_root: config.work_root.join("docker").join(&container_name),
         health_url: format!("{public_base_url}/healthz"),
-        invite_status_url: format!("{public_base_url}/invite"),
+        contact_url: format!("{public_base_url}/contact"),
         public_base_url,
         host_port: config.host_port,
         container_port: config.container_port,
@@ -1677,6 +1924,13 @@ fn docker_equivalent_runtime_env(
             ),
         ]);
     }
+
+    entries.extend(
+        options
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
 
     entries
 }
@@ -1933,12 +2187,6 @@ impl PhalaLauncher {
             "Phala runtime /healthz",
             self.config.readiness_timeout,
             self.config.readiness_interval,
-        )?;
-        wait_for_http_json_ready(
-            &endpoint.invite_status_url,
-            "Phala runtime /invite",
-            self.config.readiness_timeout,
-            self.config.readiness_interval,
         )
     }
 
@@ -2025,7 +2273,11 @@ impl RuntimeLauncher for PhalaLauncher {
         })
     }
 
-    fn restart_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+    fn restart_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
         self.validate_ready()?;
         if lease.runtime.source_host_id != self.config.source_host_id {
             return Err(RunnerError::RuntimeLaunch(format!(
@@ -2055,8 +2307,9 @@ impl RuntimeLauncher for PhalaLauncher {
     fn recover_known_good_chat_runtime(
         &mut self,
         lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
-        self.restart_runtime(lease)
+        self.restart_runtime(lease, options)
     }
 
     fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
@@ -2197,7 +2450,7 @@ impl RuntimeLauncher for PhalaLauncher {
                 .as_ref()
                 .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
             hermes_available: Some(true),
-            published_app_urls: vec![endpoint.invite_status_url],
+            published_app_urls: vec![endpoint.contact_url],
         })
     }
 
@@ -2215,6 +2468,691 @@ impl RuntimeLauncher for PhalaLauncher {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EnclaviaConfig {
+    pub enclavia_bin: PathBuf,
+    pub docker_bin: PathBuf,
+    pub source_host_id: String,
+    pub image: String,
+    pub runtime_artifact_id: Option<String>,
+    pub runtime_artifact_kind: Option<RuntimeArtifactKind>,
+    pub runtime_state_schema_version: Option<String>,
+    pub finitechat_server_url: String,
+    pub agent_picture_url: String,
+    pub enclave_id: String,
+    pub pull_policy: Option<String>,
+    pub max_enclave_count: Option<u32>,
+    pub drain_new_leases: bool,
+    pub available_memory_bytes: Option<u64>,
+    pub command_timeout: Duration,
+    pub launch_timeout: Duration,
+    pub readiness_timeout: Duration,
+    pub readiness_interval: Duration,
+}
+
+impl EnclaviaConfig {
+    pub fn validate(&self) -> Result<(), RunnerError> {
+        if self.enclavia_bin.as_os_str().is_empty() {
+            return Err(RunnerError::MissingEnclaviaBinary);
+        }
+        if self.docker_bin.as_os_str().is_empty() {
+            return Err(RunnerError::MissingDockerBinary);
+        }
+        if self.source_host_id.trim().is_empty() {
+            return Err(RunnerError::MissingSourceHostId);
+        }
+        if self.image.trim().is_empty() {
+            return Err(RunnerError::MissingRuntimeArtifactReference);
+        }
+        if self.finitechat_server_url.trim().is_empty() {
+            return Err(RunnerError::MissingFinitechatServerUrl);
+        }
+        if self.enclave_id.trim().is_empty() {
+            return Err(RunnerError::MissingEnclaviaEnclaveId);
+        }
+        if let Some(kind) = self.runtime_artifact_kind
+            && kind != RuntimeArtifactKind::OciImage
+        {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "Enclavia launcher requires an OCI image artifact, got {}",
+                kind.as_str()
+            )));
+        }
+        if let Some(policy) = self.pull_policy.as_deref() {
+            match policy.trim() {
+                "" | "always" | "missing" | "never" => {}
+                other => {
+                    return Err(RunnerError::RuntimeLaunch(format!(
+                        "invalid Enclavia pull policy {other:?}; use always, missing, or never"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for EnclaviaConfig {
+    fn default() -> Self {
+        Self {
+            enclavia_bin: PathBuf::from("enclavia"),
+            docker_bin: PathBuf::from("docker"),
+            source_host_id: String::new(),
+            image: String::new(),
+            runtime_artifact_id: None,
+            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
+            runtime_state_schema_version: None,
+            finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
+            agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
+            enclave_id: String::new(),
+            pull_policy: Some("missing".to_string()),
+            max_enclave_count: Some(1),
+            drain_new_leases: false,
+            available_memory_bytes: None,
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
+            launch_timeout: Duration::from_secs(900),
+            readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
+            readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnclaviaLauncher {
+    config: EnclaviaConfig,
+}
+
+impl EnclaviaLauncher {
+    pub fn new(config: EnclaviaConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn plan_launch(&self, _lease: &AgentCreationLease) -> EnclaviaLaunchPlan {
+        enclavia_launch_plan(&self.config)
+    }
+
+    fn run_enclavia_capture(
+        &self,
+        args: Vec<OsString>,
+        stdin: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String, RunnerError> {
+        let mut command = Command::new(&self.config.enclavia_bin);
+        command
+            .args(&args)
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = command
+            .spawn()
+            .map_err(|error| RunnerError::CommandExecution {
+                program: self.config.enclavia_bin.display().to_string(),
+                message: error.to_string(),
+            })?;
+
+        if let Some(input) = stdin
+            && let Some(mut child_stdin) = child.stdin.take()
+        {
+            child_stdin.write_all(input.as_bytes()).map_err(|error| {
+                RunnerError::CommandExecution {
+                    program: self.config.enclavia_bin.display().to_string(),
+                    message: format!("failed to write command stdin: {error}"),
+                }
+            })?;
+        }
+
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if started.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(RunnerError::CommandTimedOut {
+                            program: self.config.enclavia_bin.display().to_string(),
+                            timeout_secs: timeout.as_secs(),
+                        });
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(RunnerError::CommandExecution {
+                        program: self.config.enclavia_bin.display().to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| RunnerError::CommandExecution {
+                program: self.config.enclavia_bin.display().to_string(),
+                message: error.to_string(),
+            })?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if output.status.success() {
+            return Ok(stdout);
+        }
+        Err(RunnerError::CommandExecution {
+            program: self.config.enclavia_bin.display().to_string(),
+            message: format!("exit status {} stdout={stdout}", output.status),
+        })
+    }
+
+    fn run_enclavia_json(
+        &self,
+        args: Vec<OsString>,
+        stdin: Option<&str>,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, RunnerError> {
+        let stdout = self.run_enclavia_capture(args, stdin, timeout)?;
+        serde_json::from_str(&stdout).map_err(|error| {
+            RunnerError::RuntimeLaunch(format!("invalid Enclavia JSON: {error}: {stdout}"))
+        })
+    }
+
+    fn run_docker_status(&self, args: Vec<OsString>, timeout: Duration) -> Result<(), RunnerError> {
+        let mut child = Command::new(&self.config.docker_bin)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| RunnerError::CommandExecution {
+                program: self.config.docker_bin.display().to_string(),
+                message: error.to_string(),
+            })?;
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    return Err(RunnerError::CommandExecution {
+                        program: self.config.docker_bin.display().to_string(),
+                        message: format!("exit status {status}"),
+                    });
+                }
+                Ok(None) => {
+                    if started.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(RunnerError::CommandTimedOut {
+                            program: self.config.docker_bin.display().to_string(),
+                            timeout_secs: timeout.as_secs(),
+                        });
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(RunnerError::CommandExecution {
+                        program: self.config.docker_bin.display().to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn ensure_local_image(&self) -> Result<(), RunnerError> {
+        let image = self.config.image.trim();
+        match self
+            .config
+            .pull_policy
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+        {
+            "" | "missing" => {
+                let present = self
+                    .run_docker_status(
+                        vec![
+                            OsString::from("image"),
+                            OsString::from("inspect"),
+                            OsString::from(image),
+                        ],
+                        self.config.command_timeout,
+                    )
+                    .is_ok();
+                if !present {
+                    self.run_docker_status(
+                        vec![
+                            OsString::from("pull"),
+                            OsString::from("-q"),
+                            OsString::from(image),
+                        ],
+                        self.config.launch_timeout,
+                    )?;
+                }
+                Ok(())
+            }
+            "always" => self.run_docker_status(
+                vec![
+                    OsString::from("pull"),
+                    OsString::from("-q"),
+                    OsString::from(image),
+                ],
+                self.config.launch_timeout,
+            ),
+            "never" => Ok(()),
+            other => Err(RunnerError::RuntimeLaunch(format!(
+                "invalid Enclavia pull policy {other:?}; use always, missing, or never"
+            ))),
+        }
+    }
+
+    fn set_runtime_secrets(
+        &self,
+        plan: &EnclaviaLaunchPlan,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+    ) -> Result<(), RunnerError> {
+        if options.finite_private.is_none() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Enclavia runtime launch requires a Finite Private key".to_string(),
+            ));
+        }
+
+        let env = enclavia_runtime_env(&self.config, plan, lease, options);
+        let mut positional = Vec::new();
+        let mut sensitive = Vec::new();
+        for (key, value) in env {
+            if enclavia_env_value_uses_stdin(&key) {
+                sensitive.push((key, value));
+            } else {
+                positional.push((key, value));
+            }
+        }
+
+        if !positional.is_empty() {
+            let mut args = vec![
+                OsString::from("--json"),
+                OsString::from("secret"),
+                OsString::from("set"),
+                OsString::from(&plan.enclave_id),
+            ];
+            for (key, value) in positional {
+                args.push(OsString::from(format!("{key}={value}")));
+            }
+            let _ = self.run_enclavia_json(args, None, self.config.command_timeout)?;
+        }
+
+        for (key, value) in sensitive {
+            let _ = self.run_enclavia_json(
+                vec![
+                    OsString::from("--json"),
+                    OsString::from("secret"),
+                    OsString::from("set"),
+                    OsString::from(&plan.enclave_id),
+                    OsString::from("--from-stdin"),
+                    OsString::from("--name"),
+                    OsString::from(key),
+                ],
+                Some(&value),
+                self.config.command_timeout,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn push_image(&self, plan: &EnclaviaLaunchPlan) -> Result<serde_json::Value, RunnerError> {
+        self.run_enclavia_json(
+            vec![
+                OsString::from("--json"),
+                OsString::from("push"),
+                OsString::from(self.config.image.trim()),
+                OsString::from(&plan.enclave_id),
+            ],
+            None,
+            self.config.launch_timeout,
+        )
+    }
+
+    fn status(&self, enclave_id: &str) -> Result<serde_json::Value, RunnerError> {
+        self.run_enclavia_json(
+            vec![
+                OsString::from("--json"),
+                OsString::from("enclave"),
+                OsString::from("status"),
+                OsString::from(enclave_id),
+            ],
+            None,
+            self.config.command_timeout,
+        )
+    }
+
+    fn wait_for_running(&self, enclave_id: &str) -> Result<serde_json::Value, RunnerError> {
+        let started = Instant::now();
+        loop {
+            let last_status = match self.status(enclave_id) {
+                Ok(status) => {
+                    let status_name = status
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    match status_name.as_str() {
+                        "running" => return Ok(status),
+                        "error" => {
+                            let message = status
+                                .get("error_message")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("no error_message returned");
+                            return Err(RunnerError::RuntimeLaunch(format!(
+                                "Enclavia enclave {enclave_id} entered error: {message}"
+                            )));
+                        }
+                        _ => {}
+                    }
+                    status_name
+                }
+                Err(error) => error.to_string(),
+            };
+            if started.elapsed() >= self.config.launch_timeout {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "Enclavia enclave {enclave_id} did not reach running within {}s: {last_status}",
+                    self.config.launch_timeout.as_secs()
+                )));
+            }
+            thread::sleep(self.config.readiness_interval);
+        }
+    }
+
+    fn wait_for_runtime_http(&self, endpoint: &EnclaviaEndpoint) -> Result<(), RunnerError> {
+        wait_for_http_json_ready(
+            &endpoint.health_url,
+            "Enclavia runtime /proxy/healthz",
+            self.config.readiness_timeout,
+            self.config.readiness_interval,
+        )
+    }
+
+    fn run_lifecycle(&self, command: &str, source_machine_id: &str) -> Result<(), RunnerError> {
+        let _ = self.run_enclavia_json(
+            vec![
+                OsString::from("--json"),
+                OsString::from("enclave"),
+                OsString::from(command),
+                OsString::from(source_machine_id),
+            ],
+            None,
+            self.config.command_timeout,
+        )?;
+        Ok(())
+    }
+}
+
+impl RuntimeLauncher for EnclaviaLauncher {
+    fn validate_ready(&self) -> Result<(), RunnerError> {
+        self.config.validate()
+    }
+
+    fn uses_core_runtime_heartbeat(&self) -> bool {
+        false
+    }
+
+    fn runner_capacity(&self) -> RunnerLeaseCapacity {
+        RunnerLeaseCapacity {
+            draining: self.config.drain_new_leases,
+            max_sandbox_count: self.config.max_enclave_count,
+            active_sandbox_count: active_enclavia_enclave_count(&self.config),
+            available_memory_bytes: self.config.available_memory_bytes,
+        }
+    }
+
+    fn source_host_id(&self) -> Option<&str> {
+        Some(&self.config.source_host_id)
+    }
+
+    fn planned_source(&self, lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
+        let plan = self.plan_launch(lease);
+        Some(RuntimeSourceIdentity {
+            source_host_id: self.config.source_host_id.clone(),
+            source_machine_id: plan.enclave_id,
+        })
+    }
+
+    fn restart_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        self.validate_ready()?;
+        ensure_runtime_belongs_to_source(
+            &lease.runtime.source_host_id,
+            &self.config.source_host_id,
+        )?;
+        ensure_runtime_control_source_matches(
+            &lease.runtime.source_machine_id,
+            &lease.request.source_machine_id,
+            "restart",
+        )?;
+        self.run_lifecycle("restart", &lease.request.source_machine_id)?;
+        let status = self.wait_for_running(&lease.request.source_machine_id)?;
+        let endpoint = enclavia_endpoint_from_status(&status, &lease.request.source_machine_id);
+        self.wait_for_runtime_http(&endpoint)
+    }
+
+    fn recover_known_good_chat_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        self.restart_runtime(lease, options)
+    }
+
+    fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        self.validate_ready()?;
+        ensure_runtime_belongs_to_source(
+            &lease.runtime.source_host_id,
+            &self.config.source_host_id,
+        )?;
+        ensure_runtime_control_source_matches(
+            &lease.runtime.source_machine_id,
+            &lease.request.source_machine_id,
+            "stop",
+        )?;
+        self.run_lifecycle("stop", &lease.request.source_machine_id)
+    }
+
+    fn destroy_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        self.validate_ready()?;
+        ensure_runtime_belongs_to_source(
+            &lease.runtime.source_host_id,
+            &self.config.source_host_id,
+        )?;
+        ensure_runtime_control_source_matches(
+            &lease.runtime.source_machine_id,
+            &lease.request.source_machine_id,
+            "destroy",
+        )?;
+        self.run_lifecycle("destroy", &lease.request.source_machine_id)
+    }
+
+    fn launch(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        self.validate_ready()?;
+        let plan = self.plan_launch(lease);
+        self.ensure_local_image()?;
+        self.set_runtime_secrets(&plan, lease, options)?;
+        let push = self.push_image(&plan)?;
+        if push
+            .get("staged")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Enclavia push staged an upgrade instead of launching; upgrade confirmation is not supported by this runner yet".to_string(),
+            ));
+        }
+
+        let status = self.wait_for_running(&plan.enclave_id)?;
+        let endpoint = enclavia_endpoint_from_status(&status, &plan.enclave_id);
+        self.wait_for_runtime_http(&endpoint)?;
+
+        let runtime_bootstrap_token = random_runtime_bootstrap_token();
+        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+
+        Ok(RuntimeLaunchFacts {
+            source_host_id: self.config.source_host_id.clone(),
+            source_machine_id: endpoint.enclave_id.clone(),
+            runtime_artifact_id: self.config.runtime_artifact_id.clone(),
+            state_schema_version: self.config.runtime_state_schema_version.clone(),
+            runtime_relay_token_hash,
+            display_name: Some(lease.project.display_name.clone()),
+            hostname: Some(endpoint.hostname.clone()),
+            runtime_host: Some(endpoint.public_base_url.clone()),
+            runtime_status: RuntimeSummaryStatus::Online,
+            active_inference_profile: options
+                .finite_private
+                .as_ref()
+                .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
+            hermes_available: Some(true),
+            published_app_urls: vec![endpoint.contact_url],
+        })
+    }
+
+    fn cleanup_failed_launch(&mut self, _facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
+        // The Enclavia lane is a pre-created single-enclave test target. Keep a
+        // failed-but-booted enclave around for logs and dashboard inspection.
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnclaviaLaunchPlan {
+    pub enclave_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnclaviaEndpoint {
+    enclave_id: String,
+    hostname: String,
+    public_base_url: String,
+    health_url: String,
+    contact_url: String,
+}
+
+fn enclavia_launch_plan(config: &EnclaviaConfig) -> EnclaviaLaunchPlan {
+    EnclaviaLaunchPlan {
+        enclave_id: config.enclave_id.trim().to_string(),
+    }
+}
+
+fn enclavia_runtime_env(
+    config: &EnclaviaConfig,
+    plan: &EnclaviaLaunchPlan,
+    lease: &AgentCreationLease,
+    options: &RuntimeLaunchOptions,
+) -> Vec<(String, String)> {
+    docker_equivalent_runtime_env(
+        DockerEquivalentRuntimeEnv {
+            finitechat_server_url: &config.finitechat_server_url,
+            agent_picture_url: &config.agent_picture_url,
+            agent_http_port: DEFAULT_DOCKER_CONTAINER_PORT,
+            agent_device_id: &plan.enclave_id,
+            agent_home: "/data/agent",
+            hermes_home: "/data/agent/hermes-home",
+            workspace: "/data/workspace",
+        },
+        lease,
+        options,
+    )
+}
+
+fn enclavia_env_value_uses_stdin(key: &str) -> bool {
+    matches!(key, "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY")
+        || key.ends_with("_SECRET")
+        || key.ends_with("_TOKEN")
+        || key.ends_with("_PASSWORD")
+}
+
+fn enclavia_endpoint_from_status(
+    status: &serde_json::Value,
+    fallback_enclave_id: &str,
+) -> EnclaviaEndpoint {
+    let enclave_id = status
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_enclave_id)
+        .to_string();
+    enclavia_endpoint(&enclave_id)
+}
+
+fn enclavia_endpoint(enclave_id: &str) -> EnclaviaEndpoint {
+    let enclave_id = enclave_id.trim().to_string();
+    let hostname = format!("{enclave_id}.enclaves.beta.enclavia.io");
+    let public_base_url = format!("https://{hostname}/proxy");
+    EnclaviaEndpoint {
+        enclave_id,
+        hostname,
+        health_url: format!("{public_base_url}/healthz"),
+        contact_url: format!("{public_base_url}/contact"),
+        public_base_url,
+    }
+}
+
+fn active_enclavia_enclave_count(config: &EnclaviaConfig) -> Option<u32> {
+    let output = Command::new(&config.enclavia_bin)
+        .args(["--json", "enclave", "status", config.enclave_id.trim()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    match status
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "waiting_for_image" => Some(0),
+        _ => Some(1),
+    }
+}
+
+fn ensure_runtime_belongs_to_source(
+    runtime_source_host_id: &str,
+    expected_source_host_id: &str,
+) -> Result<(), RunnerError> {
+    if runtime_source_host_id != expected_source_host_id {
+        return Err(RunnerError::RuntimeLaunch(format!(
+            "runtime belongs to source host {runtime_source_host_id}, not {expected_source_host_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_runtime_control_source_matches(
+    runtime_source_machine_id: &str,
+    request_source_machine_id: &str,
+    operation: &str,
+) -> Result<(), RunnerError> {
+    if runtime_source_machine_id != request_source_machine_id {
+        return Err(RunnerError::RuntimeLaunch(format!(
+            "runtime source machine {runtime_source_machine_id} did not match {operation} request {request_source_machine_id}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhalaLaunchPlan {
     pub cvm_name: String,
@@ -2230,7 +3168,7 @@ struct PhalaAppEndpoint {
     hostname: String,
     public_base_url: String,
     health_url: String,
-    invite_status_url: String,
+    contact_url: String,
 }
 
 fn phala_launch_plan(config: &PhalaConfig, lease: &AgentCreationLease) -> PhalaLaunchPlan {
@@ -2448,7 +3386,7 @@ fn phala_endpoint_from_endpoints(
         app_id: app_id.to_string(),
         teepod_name,
         health_url: format!("{public_base_url}/healthz"),
-        invite_status_url: format!("{public_base_url}/invite"),
+        contact_url: format!("{public_base_url}/contact"),
         hostname,
         public_base_url,
     })
@@ -2498,7 +3436,7 @@ fn phala_app_endpoint(app_id: &str, teepod_name: &str, port: u16) -> PhalaAppEnd
         teepod_name: teepod_name.to_string(),
         hostname,
         health_url: format!("{public_base_url}/healthz"),
-        invite_status_url: format!("{public_base_url}/invite"),
+        contact_url: format!("{public_base_url}/contact"),
         public_base_url,
     }
 }
@@ -2773,6 +3711,11 @@ mod tests {
             "runner-1",
             300,
         )
+        .unwrap()
+        .with_runtime_environment(BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "http://192.168.64.1:18789".to_string(),
+        )]))
         .unwrap();
 
         let outcome = runner.run_once().unwrap();
@@ -2787,6 +3730,13 @@ mod tests {
         assert_eq!(
             runner.launcher.restarted,
             vec!["oslo-agent-001".to_string()]
+        );
+        assert_eq!(
+            runner.launcher.restart_options[0].environment(),
+            &BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "http://192.168.64.1:18789".to_string(),
+            )])
         );
         assert!(runner.queue.leases.is_empty());
         assert_eq!(runner.queue.runtime_control_leases.len(), 1);
@@ -3252,21 +4202,11 @@ mod tests {
     }
 
     #[test]
-    fn local_create_agent_canary_uses_dashboard_core_and_docker_runner() {
-        let runtime = read_repo_file("scripts/local_create_agent_canary.sh");
-
-        assert!(runtime.contains("FC_RUNNER_BACKEND=docker"));
-        assert!(runtime.contains("FC_RUNNER_DOCKER_HOST_PORT"));
-        assert!(runtime.contains("/dashboard/agent-creation-requests"));
-        assert!(runtime.contains("/api/core/v1/runtime-artifacts/$artifact_id"));
-        assert!(runtime.contains("https://chat.finite.computer"));
-    }
-
-    #[test]
     fn runner_binary_defaults_to_docker_backend_for_v2() {
         let main_rs = read_repo_file("crates/finite-saas-runner/src/main.rs");
 
         assert!(main_rs.contains(r#"optional_env("FC_RUNNER_BACKEND", "docker")"#));
+        assert!(main_rs.contains(r#""enclavia" =>"#));
     }
 
     #[test]
@@ -3292,6 +4232,10 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            environment: BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "http://192.168.64.1:18789".to_string(),
+            )]),
         };
 
         assert_eq!(plan.container_name, "finite-agent_abc-123");
@@ -3301,7 +4245,7 @@ mod tests {
         );
         assert_eq!(plan.public_base_url, "http://127.0.0.1:18081");
         assert_eq!(plan.health_url, "http://127.0.0.1:18081/healthz");
-        assert_eq!(plan.invite_status_url, "http://127.0.0.1:18081/invite");
+        assert_eq!(plan.contact_url, "http://127.0.0.1:18081/contact");
 
         let env = docker_runtime_env(&config, &plan, &lease, &options);
         assert_env(&env, "FINITE_SERVER_URL", DEFAULT_FINITECHAT_SERVER_URL);
@@ -3321,6 +4265,7 @@ mod tests {
         );
         assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
         assert_env(&env, "OPENAI_API_KEY", "fpk_live_test");
+        assert_env(&env, "FINITE_SITES_API", "http://192.168.64.1:18789");
         assert!(
             env.iter()
                 .all(|(key, _)| key.as_str() != "OPENROUTER_API_KEY")
@@ -3352,6 +4297,178 @@ mod tests {
     }
 
     #[test]
+    fn opaque_runtime_environment_is_bounded_non_secret_and_cannot_override_contract() {
+        let valid = BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "http://192.168.64.1:18789".to_string(),
+        )]);
+        validate_runtime_environment(&valid).unwrap();
+        let restart_options = RuntimeRestartOptions::new(valid.clone()).unwrap();
+
+        for key in [
+            "FINITECHAT_SERVER_URL",
+            "FINITE_HOME",
+            "OPENAI_API_KEY",
+            "GOOGLE_OAUTH_TOKEN",
+            "lowercase",
+        ] {
+            let invalid = BTreeMap::from([(key.to_string(), "value".to_string())]);
+            assert!(validate_runtime_environment(&invalid).is_err(), "{key}");
+        }
+        assert!(
+            !format!(
+                "{:?}",
+                RuntimeLaunchOptions {
+                    finite_private: None,
+                    environment: valid,
+                }
+            )
+            .contains("192.168.64.1")
+        );
+        assert!(!format!("{restart_options:?}").contains("192.168.64.1"));
+        assert!(
+            RuntimeRestartOptions::new(BTreeMap::from([(
+                "GOOGLE_OAUTH_TOKEN".to_string(),
+                "must-not-cross-this-boundary".to_string(),
+            )]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn docker_runtime_readiness_depends_only_on_generic_health() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET /healthz "));
+
+            let body = r#"{"ready":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let config = DockerConfig {
+            host_port: address.port(),
+            readiness_timeout: Duration::from_secs(1),
+            readiness_interval: Duration::from_millis(10),
+            ..DockerConfig::default()
+        };
+        let launcher = DockerLauncher::new(config.clone());
+        let public_base_url = format!("http://{address}");
+        let plan = DockerLaunchPlan {
+            container_name: "finite-agent-health-only".to_string(),
+            state_root: config.work_root.join("docker/finite-agent-health-only"),
+            health_url: format!("{public_base_url}/healthz"),
+            contact_url: format!("{public_base_url}/contact"),
+            public_base_url,
+            host_port: address.port(),
+            container_port: config.container_port,
+        };
+
+        launcher.wait_for_runtime_http(&plan).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn apple_container_plan_is_native_durable_and_keeps_secrets_out_of_argv() {
+        let config = AppleContainerConfig {
+            container_bin: PathBuf::from("/usr/local/bin/container"),
+            source_host_id: "devfinity-apple".to_string(),
+            image: "finite-agent-runtime:devfinity".to_string(),
+            runtime_artifact_id: Some("devfinity-runtime".to_string()),
+            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
+            runtime_state_schema_version: Some("runtime-state-v1".to_string()),
+            work_root: PathBuf::from("/tmp/devfinity/runner"),
+            finitechat_server_url: "http://192.168.64.1:18787".to_string(),
+            name_prefix: "finite-devfinity".to_string(),
+            host_port: 18080,
+            ..AppleContainerConfig::default()
+        };
+        config.validate().unwrap();
+        let lease = sample_lease("agent_request_ABC.123");
+        let options = RuntimeLaunchOptions {
+            finite_private: Some(FinitePrivateLaunchKey {
+                api_key_id: "fp_key_local".to_string(),
+                raw_api_key: "fpk_super_secret_local_value".to_string(),
+                base_url: "http://192.168.64.1:18002/v1".to_string(),
+                model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
+                revoke_on_launch_failure: true,
+            }),
+            environment: BTreeMap::new(),
+        };
+
+        let plan = apple_container::apple_container_launch_plan(&config, &lease);
+        assert_eq!(plan.container_name, "finite-devfinity-abc-123");
+        assert_eq!(
+            plan.state_root,
+            PathBuf::from("/tmp/devfinity/runner/apple-container/finite-devfinity-abc-123")
+        );
+        assert_eq!(plan.health_url, "http://127.0.0.1:18080/healthz");
+        assert_eq!(plan.contact_url, "http://127.0.0.1:18080/contact");
+
+        let command =
+            apple_container::apple_container_run_command(&config, &plan, &lease, &options);
+        let args = apple_container::apple_command_args(&command);
+        let env_keys = apple_container::apple_command_env_keys(&command);
+        let debug = format!("{command:?}");
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--publish", "127.0.0.1:18080:8080/tcp"])
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--volume",
+                "/tmp/devfinity/runner/apple-container/finite-devfinity-abc-123:/data",
+            ]
+        }));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--platform", "linux/arm64"])
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "computer.finite.v2.runtime_artifact_id=devfinity-runtime",
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "computer.finite.v2.state_schema_version=runtime-state-v1",
+            ]
+        }));
+        assert!(!args.iter().any(|arg| arg == "--restart" || arg == "--pull"));
+        assert!(env_keys.iter().any(|key| key == "FINITE_PRIVATE_API_KEY"));
+        assert!(env_keys.iter().any(|key| key == "OPENAI_API_KEY"));
+        assert!(args.iter().all(|arg| !arg.contains("fpk_super_secret")));
+        assert!(!debug.contains("fpk_super_secret"));
+        assert_eq!(args.last().map(String::as_str), Some(config.image.as_str()));
+    }
+
+    #[test]
+    fn apple_container_rosetta_requires_amd64() {
+        let config = AppleContainerConfig {
+            source_host_id: "local".to_string(),
+            image: "runtime:local".to_string(),
+            work_root: PathBuf::from("/tmp/runner"),
+            rosetta: true,
+            platform: Some("linux/arm64".to_string()),
+            ..AppleContainerConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn phala_plan_renders_docker_equivalent_compose_without_raw_secrets() {
         let config = PhalaConfig {
             phala_bin: PathBuf::from("/usr/local/bin/phala"),
@@ -3375,6 +4492,7 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            environment: BTreeMap::new(),
         };
 
         assert_eq!(plan.cvm_name, "finite-agent-abc-123");
@@ -3408,6 +4526,69 @@ mod tests {
         let env_file = phala_env_file(&options).unwrap();
         assert!(env_file.contains("FINITE_PRIVATE_API_KEY=\"fpk_live_test\""));
         assert!(!env_file.contains("phala_test_api_key"));
+    }
+
+    #[test]
+    fn enclavia_plan_targets_precreated_enclave_and_proxy_urls() {
+        let config = EnclaviaConfig {
+            enclavia_bin: PathBuf::from("/usr/local/bin/enclavia"),
+            source_host_id: "enclavia-test".to_string(),
+            image: "ghcr.io/finitecomputer/finite-agent-runtime:canary@sha256:abc123".to_string(),
+            runtime_artifact_id: Some("artifact-v1".to_string()),
+            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
+            runtime_state_schema_version: Some("state-v1".to_string()),
+            enclave_id: "1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d".to_string(),
+            ..EnclaviaConfig::default()
+        };
+        config.validate().unwrap();
+
+        let lease = sample_lease("agent_request_ABC.123");
+        let plan = enclavia_launch_plan(&config);
+        let endpoint = enclavia_endpoint(&plan.enclave_id);
+        let options = RuntimeLaunchOptions {
+            finite_private: Some(FinitePrivateLaunchKey {
+                api_key_id: "fp_key_123".to_string(),
+                raw_api_key: "fpk_live_test".to_string(),
+                base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
+                model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
+                revoke_on_launch_failure: true,
+            }),
+            environment: BTreeMap::new(),
+        };
+        let env = enclavia_runtime_env(&config, &plan, &lease, &options);
+
+        assert_eq!(plan.enclave_id, "1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d");
+        assert_eq!(
+            endpoint.public_base_url,
+            "https://1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d.enclaves.beta.enclavia.io/proxy"
+        );
+        assert_eq!(
+            endpoint.health_url,
+            "https://1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d.enclaves.beta.enclavia.io/proxy/healthz"
+        );
+        assert_eq!(
+            endpoint.contact_url,
+            "https://1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d.enclaves.beta.enclavia.io/proxy/contact"
+        );
+        assert_env(&env, "FINITECHAT_HOME", "/data/agent");
+        assert_env(&env, "FINITE_HOME", "/data/agent");
+        assert_env(&env, "HERMES_HOME", "/data/agent/hermes-home");
+        assert_env(&env, "FINITECHAT_WORKSPACE", "/data/workspace");
+        assert_env(
+            &env,
+            "FINITECHAT_HERMES_AGENT_DEVICE_ID",
+            "1d2c3b4a-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+        );
+        assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
+        assert!(env.len() <= 32, "Enclavia secret cap is 32 rows");
+    }
+
+    #[test]
+    fn enclavia_secret_argv_policy_keeps_raw_keys_on_stdin() {
+        assert!(enclavia_env_value_uses_stdin("FINITE_PRIVATE_API_KEY"));
+        assert!(enclavia_env_value_uses_stdin("OPENAI_API_KEY"));
+        assert!(!enclavia_env_value_uses_stdin("FINITECHAT_SERVER_URL"));
+        assert!(!enclavia_env_value_uses_stdin("FINITE_AGENT_NAME"));
     }
 
     #[test]
@@ -3471,8 +4652,8 @@ mod tests {
             "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network"
         );
         assert_eq!(
-            endpoint.invite_status_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/invite"
+            endpoint.contact_url,
+            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/contact"
         );
         assert_eq!(endpoint.teepod_name, "prod5");
     }
@@ -3509,8 +4690,8 @@ mod tests {
             "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network"
         );
         assert_eq!(
-            endpoint.invite_status_url,
-            "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network/invite"
+            endpoint.contact_url,
+            "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network/contact"
         );
         assert_eq!(
             endpoint.health_url,
@@ -3553,8 +4734,8 @@ mod tests {
             "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network"
         );
         assert_eq!(
-            endpoint.invite_status_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/invite"
+            endpoint.contact_url,
+            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/contact"
         );
     }
 
@@ -3810,6 +4991,7 @@ mod tests {
         restart_result: Result<(), String>,
         launch_count: usize,
         launch_options: Vec<RuntimeLaunchOptions>,
+        restart_options: Vec<RuntimeRestartOptions>,
         restarted: Vec<String>,
         recovered: Vec<String>,
         stopped: Vec<String>,
@@ -3826,6 +5008,7 @@ mod tests {
                 restart_result: Ok(()),
                 launch_count: 0,
                 launch_options: Vec::new(),
+                restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
                 stopped: Vec::new(),
@@ -3842,6 +5025,7 @@ mod tests {
                 restart_result: Ok(()),
                 launch_count: 0,
                 launch_options: Vec::new(),
+                restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
                 stopped: Vec::new(),
@@ -3858,6 +5042,7 @@ mod tests {
                 restart_result: Ok(()),
                 launch_count: 0,
                 launch_options: Vec::new(),
+                restart_options: Vec::new(),
                 restarted: Vec::new(),
                 recovered: Vec::new(),
                 stopped: Vec::new(),
@@ -3905,8 +5090,13 @@ mod tests {
             })
         }
 
-        fn restart_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        fn restart_runtime(
+            &mut self,
+            lease: &RuntimeControlLease,
+            options: &RuntimeRestartOptions,
+        ) -> Result<(), RunnerError> {
             self.restarted.push(lease.runtime.source_machine_id.clone());
+            self.restart_options.push(options.clone());
             self.restart_result
                 .clone()
                 .map_err(RunnerError::RuntimeLaunch)
@@ -3915,8 +5105,10 @@ mod tests {
         fn recover_known_good_chat_runtime(
             &mut self,
             lease: &RuntimeControlLease,
+            options: &RuntimeRestartOptions,
         ) -> Result<(), RunnerError> {
             self.recovered.push(lease.runtime.source_machine_id.clone());
+            self.restart_options.push(options.clone());
             self.restart_result
                 .clone()
                 .map_err(RunnerError::RuntimeLaunch)

@@ -62,6 +62,7 @@ function startDashboard(port: number, coreUrl: string) {
         FC_DASHBOARD_DEV_EMAIL: "admin@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_admin",
         FC_WORKOS_AUTH_ENABLED: "0",
+        NEXT_DIST_DIR: ".next-browser-test",
       },
       stdio: "pipe",
     }

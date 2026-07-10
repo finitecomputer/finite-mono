@@ -2,6 +2,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -21,19 +23,33 @@ enum ManagedProcess {
     Postgres,
     Core,
     FiniteChat,
+    HostedWebDevice,
     FiniteSites,
+    FiniteBrain,
+    RuntimeImage,
+    FinitePrivateLimiter,
+    AppleNetworkProbe,
+    RuntimeArtifact,
+    Runner,
     DashboardDeps,
     Dashboard,
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 15] = [
         Self::ProcessCompose,
         Self::RustBuild,
         Self::Postgres,
         Self::Core,
         Self::FiniteChat,
+        Self::HostedWebDevice,
         Self::FiniteSites,
+        Self::FiniteBrain,
+        Self::RuntimeImage,
+        Self::FinitePrivateLimiter,
+        Self::AppleNetworkProbe,
+        Self::RuntimeArtifact,
+        Self::Runner,
         Self::DashboardDeps,
         Self::Dashboard,
     ];
@@ -45,12 +61,80 @@ impl ManagedProcess {
             Self::Postgres => "postgres",
             Self::Core => "core",
             Self::FiniteChat => "finitechat",
+            Self::HostedWebDevice => "hosted-web-device",
             Self::FiniteSites => "finitesites",
+            Self::FiniteBrain => "finite-brain",
+            Self::RuntimeImage => "runtime-image",
+            Self::FinitePrivateLimiter => "finite-private-limiter",
+            Self::AppleNetworkProbe => "apple-network-probe",
+            Self::RuntimeArtifact => "runtime-artifact",
+            Self::Runner => "runner",
             Self::DashboardDeps => "dashboard-deps",
             Self::Dashboard => "dashboard",
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackProfile {
+    AppleSaas,
+    ServicesOnly,
+}
+
+impl StackProfile {
+    fn includes_runtime(self) -> bool {
+        matches!(self, Self::AppleSaas)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AppleSaas => "apple-saas",
+            Self::ServicesOnly => "services-only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceMode {
+    ChainedLimiter,
+    DirectKeyOverride,
+    Missing,
+}
+
+impl InferenceMode {
+    fn from_environment() -> Self {
+        if nonempty_env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY") {
+            Self::ChainedLimiter
+        } else if nonempty_env("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE") {
+            Self::DirectKeyOverride
+        } else {
+            Self::Missing
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppleHostAccess {
+    runtime_host: String,
+    bind_host: String,
+    source: &'static str,
+}
+
+impl Default for AppleHostAccess {
+    fn default() -> Self {
+        Self {
+            runtime_host: "host.container.internal".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            source: "unverified default",
+        }
+    }
+}
+
+const DEV_LAUNCH_CODE: &str = "off2026";
+const RUNTIME_ARTIFACT_ID: &str = "devfinity-runtime";
+const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
+const RUNNER_ID: &str = "devfinity-apple-runner";
+const RUNNER_SOURCE_HOST_ID: &str = "devfinity-apple";
 
 impl std::fmt::Display for ManagedProcess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,6 +153,11 @@ pub struct Stack {
     process_compose_socket: PathBuf,
     ports: Ports,
     core_token: String,
+    hosted_web_device_token: String,
+    profile: StackProfile,
+    fresh_services_state: bool,
+    inference_mode: InferenceMode,
+    apple_host_access: AppleHostAccess,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +166,11 @@ struct Ports {
     dashboard: u16,
     postgres: u16,
     finitechat: u16,
+    hosted_web_device: u16,
     finitesites: u16,
+    finite_brain: u16,
+    finite_private_limiter: u16,
+    runtime_agent: u16,
 }
 
 impl Stack {
@@ -100,10 +193,88 @@ impl Stack {
                 dashboard: 13002,
                 postgres: 15432,
                 finitechat: 18787,
+                hosted_web_device: 38918,
                 finitesites: 18789,
+                finite_brain: 18790,
+                finite_private_limiter: 18002,
+                runtime_agent: 18080,
             },
             core_token: "devfinity-core-token".to_string(),
+            hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
+            profile: StackProfile::AppleSaas,
+            fresh_services_state: false,
+            inference_mode: InferenceMode::from_environment(),
+            apple_host_access: AppleHostAccess::default(),
         })
+    }
+
+    pub fn with_profile(mut self, profile: StackProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub fn with_fresh_services_state(mut self, fresh: bool) -> Self {
+        self.fresh_services_state = fresh;
+        self
+    }
+
+    /// Prepare the host-only prerequisites needed to generate an accurate
+    /// Apple Container stack. This never installs software and never invokes
+    /// sudo. The official host DNS bridge remains an explicit developer choice;
+    /// when it is absent we derive the vmnet gateway that Apple assigned.
+    pub fn prepare_host_environment(&mut self, dry_run: bool) -> Result<()> {
+        if !self.profile.includes_runtime() {
+            if self.fresh_services_state {
+                return Ok(());
+            }
+            return Ok(());
+        }
+        if self.fresh_services_state {
+            bail!("--fresh is limited to the isolated services-only smoke profile");
+        }
+        if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
+            bail!(
+                "the default devfinity SaaS profile requires Apple silicon and macOS 26; use --services-only for the portable service profile"
+            );
+        }
+        ensure_apple_container_cli()?;
+
+        if dry_run {
+            if !apple_container_system_running()? {
+                bail!(
+                    "Apple Container services are stopped; run `container system start` before --dry-run (devfinity starts them automatically for a real run)"
+                );
+            }
+        } else {
+            run_required(
+                Command::new("container").args(["system", "start"]),
+                "start Apple Container services",
+            )?;
+            if !apple_container_system_running()? {
+                bail!(
+                    "Apple Container services did not report running after `container system start`"
+                );
+            }
+        }
+
+        self.apple_host_access = detect_apple_host_access()?;
+
+        if !dry_run {
+            if self.inference_mode == InferenceMode::Missing {
+                bail!(
+                    "chat-capable local SaaS requires inference credentials. Set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred: real local admission and per-runtime keys), or explicitly set FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE. Secrets are inherited by the relevant process and are never written to devfinity config or logs"
+                );
+            }
+            // Apple Container 1.1 reports `builder is not running` with exit 0,
+            // while `builder start` itself is idempotent. Invoke the operation
+            // directly instead of inferring state from the exit code.
+            run_required(
+                Command::new("container")
+                    .args(["builder", "start", "--cpus", "8", "--memory", "8G"]),
+                "start the Apple Container image builder",
+            )?;
+        }
+        Ok(())
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -116,8 +287,12 @@ impl Stack {
             &self.core_dir(),
             &self.dashboard_dir(),
             &self.finitechat_dir(),
+            &self.hosted_web_device_dir(),
             &self.finitesites_dir(),
+            &self.finite_brain_dir(),
             &self.finite_home_dir(),
+            &self.runtime_image_dir(),
+            &self.runner_dir(),
         ] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -127,6 +302,7 @@ impl Stack {
 
     pub fn write_files(&self) -> Result<()> {
         self.ensure_dirs()?;
+        self.write_secret_files()?;
         self.write_env_file()?;
         self.write_postgres_script()?;
         fs::write(&self.process_compose_file, self.process_compose_yaml())
@@ -140,6 +316,59 @@ impl Stack {
         Ok(())
     }
 
+    fn write_secret_files(&self) -> Result<()> {
+        self.remove_secret_files();
+        if !self.profile.includes_runtime() {
+            return Ok(());
+        }
+
+        fs::create_dir_all(self.secrets_dir())
+            .with_context(|| format!("failed to create {}", self.secrets_dir().display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(self.secrets_dir(), fs::Permissions::from_mode(0o700))?;
+
+        match self.inference_mode {
+            InferenceMode::ChainedLimiter => {
+                let value = required_secret_env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY")?;
+                write_mode_600(
+                    &self.limiter_secret_file(),
+                    format!(
+                        "export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY={}\n",
+                        shell_quote(&value)
+                    )
+                    .as_bytes(),
+                )?;
+            }
+            InferenceMode::DirectKeyOverride => {
+                let value = required_secret_env("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE")?;
+                write_mode_600(
+                    &self.runner_secret_file(),
+                    format!(
+                        "export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE={}\n",
+                        shell_quote(&value)
+                    )
+                    .as_bytes(),
+                )?;
+            }
+            InferenceMode::Missing => {}
+        }
+        Ok(())
+    }
+
+    fn remove_secret_files(&self) {
+        for path in [self.limiter_secret_file(), self.runner_secret_file()] {
+            remove_file_best_effort(&path);
+        }
+        if self.secrets_dir().exists()
+            && let Err(error) = fs::remove_dir(self.secrets_dir())
+        {
+            eprintln!(
+                "failed to remove empty devfinity secret directory {}: {error}",
+                self.secrets_dir().display()
+            );
+        }
+    }
+
     pub fn write_env_file(&self) -> Result<()> {
         fs::write(self.run_dir.join("env"), self.env_exports())
             .with_context(|| format!("failed to write {}", self.run_dir.join("env").display()))
@@ -147,6 +376,7 @@ impl Stack {
 
     pub fn print_summary(&self) {
         println!("devfinity local stack");
+        println!("  profile:    {}", self.profile.as_str());
         println!("  state:      {}", self.run_dir.display());
         println!("  logs:       {}", self.logs_dir.display());
         println!("  config:     {}", self.process_compose_file.display());
@@ -154,11 +384,24 @@ impl Stack {
         println!("  dashboard:  {}", self.dashboard_url());
         println!("  core:       {}", self.core_url());
         println!("  chat:       {}", self.finitechat_url());
+        println!("  web device: {}", self.hosted_web_device_url());
         println!("  sites api:  {}", self.finitesites_api_url());
+        println!("  brain:      {}", self.finite_brain_url());
         println!(
             "  sites base: http://*.sites.localhost:{}",
             self.ports.finitesites
         );
+        if self.profile.includes_runtime() {
+            println!(
+                "  runtime:    http://127.0.0.1:{}",
+                self.ports.runtime_agent
+            );
+            println!(
+                "  host route: {} ({})",
+                self.apple_host_access.runtime_host, self.apple_host_access.source
+            );
+            println!("  image:      {RUNTIME_IMAGE_REF}");
+        }
         println!();
         println!("  env file:   {}", self.run_dir.join("env").display());
         println!("  urls file:  {}", self.run_dir.join("urls.txt").display());
@@ -192,7 +435,10 @@ impl Stack {
             command.arg("--dry-run");
         }
         command.arg("up");
-        run_status_with_pid_file(command, &self.pid_file(ManagedProcess::ProcessCompose))
+        let result =
+            run_status_with_pid_file(command, &self.pid_file(ManagedProcess::ProcessCompose));
+        self.remove_secret_files();
+        result
     }
 
     pub fn run_wrapped_command(&self, command: &[String]) -> Result<ExitCode> {
@@ -208,7 +454,15 @@ impl Stack {
         let ready_timeout = std::env::var("DEVFINITY_READY_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(180);
+            .unwrap_or_else(|| {
+                if self.profile.includes_runtime() {
+                    // A cold canonical image build compiles the Rust CLIs and
+                    // installs Hermes inside Apple Container's builder VM.
+                    1_800
+                } else {
+                    180
+                }
+            });
         let outcome =
             match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
                 Ok(()) => self.run_stack_command(command),
@@ -218,16 +472,31 @@ impl Stack {
         if let Err(error) = guard.shutdown() {
             eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
         }
+        self.remove_secret_files();
 
         outcome
     }
 
     pub fn prepare_for_start(&self) -> Result<()> {
         self.ensure_postgres_not_running()?;
-        let data_dir = self.postgres_data_dir();
-        if data_dir.exists() {
-            fs::remove_dir_all(&data_dir)
-                .with_context(|| format!("failed to remove {}", data_dir.display()))?;
+        if self.fresh_services_state {
+            if self.profile != StackProfile::ServicesOnly {
+                bail!("fresh state is only supported by the services-only smoke profile");
+            }
+            for dir in [
+                self.postgres_dir(),
+                self.core_dir(),
+                self.finitechat_dir(),
+                self.hosted_web_device_dir(),
+                self.finitesites_dir(),
+                self.finite_home_dir(),
+            ] {
+                if dir.exists() {
+                    fs::remove_dir_all(&dir)
+                        .with_context(|| format!("failed to remove {}", dir.display()))?;
+                }
+            }
+            self.ensure_dirs()?;
         }
         Ok(())
     }
@@ -258,6 +527,7 @@ impl Stack {
         }
 
         self.cleanup_managed_processes();
+        self.remove_secret_files();
 
         let process_compose_pid_file = self.pid_file(ManagedProcess::ProcessCompose);
         for path in [&self.process_compose_socket, &process_compose_pid_file] {
@@ -336,7 +606,18 @@ impl Stack {
         self.write_postgres(&mut yaml);
         self.write_core(&mut yaml);
         self.write_finitechat(&mut yaml);
+        self.write_hosted_web_device(&mut yaml);
         self.write_finitesites(&mut yaml);
+        self.write_finite_brain(&mut yaml);
+        if self.profile.includes_runtime() {
+            self.write_runtime_image(&mut yaml);
+            if self.inference_mode == InferenceMode::ChainedLimiter {
+                self.write_finite_private_limiter(&mut yaml);
+            }
+            self.write_apple_network_probe(&mut yaml);
+            self.write_runtime_artifact(&mut yaml);
+            self.write_runner(&mut yaml);
+        }
         self.write_dashboard_deps(&mut yaml);
         self.write_dashboard(&mut yaml);
         yaml
@@ -351,6 +632,11 @@ impl Stack {
             &self.repo_root,
             process,
         );
+        let build_command = if self.profile.includes_runtime() {
+            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-brain-app && cargo build -p finite-saas-local && cargo build -p finite-saas-runner"
+        } else {
+            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-brain-app"
+        };
         self.write_managed_command(
             yaml,
             process,
@@ -359,9 +645,7 @@ impl Stack {
             // across the packages (resolver 2), producing artifacts the
             // per-package runs don't reuse — on a cold cache every service
             // then recompiles its whole dep stack inside the readiness window.
-            &[String::from(
-                "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitesitesd",
-            )],
+            &[String::from(build_command)],
             &[],
         );
         let _ = writeln!(yaml, "    availability:");
@@ -480,7 +764,8 @@ wait "$postgres_pid"
         let process = ManagedProcess::FiniteChat;
         let sqlite = self.finitechat_dir().join("server.sqlite3");
         let command = format!(
-            "cargo run -p finitechat-server -- serve 127.0.0.1:{} --sqlite {}",
+            "cargo run -p finitechat-server -- serve {}:{} --sqlite {}",
+            self.service_bind_host(),
             self.ports.finitechat,
             shell_quote(&sqlite.display().to_string())
         );
@@ -495,7 +780,57 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        self.write_http_probe(yaml, "/health", self.ports.finitechat, 1, 2, 3, 45);
+        self.write_http_probe_host(
+            yaml,
+            &self.service_bind_host(),
+            "/health",
+            self.ports.finitechat,
+            1,
+            2,
+            3,
+            45,
+        );
+    }
+
+    fn write_hosted_web_device(&self, yaml: &mut String) {
+        let process = ManagedProcess::HostedWebDevice;
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Local Finite Chat Hosted Web Device",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[String::from("exec cargo run -p finitechat-hosted-device")],
+            &[],
+        );
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        self.write_environment(
+            yaml,
+            &[
+                (
+                    "FINITECHAT_HOSTED_BIND",
+                    format!("127.0.0.1:{}", self.ports.hosted_web_device),
+                ),
+                (
+                    "FINITECHAT_HOSTED_DATA_ROOT",
+                    self.hosted_web_device_dir().display().to_string(),
+                ),
+                (
+                    "FINITECHAT_HOSTED_API_TOKEN",
+                    self.hosted_web_device_token.clone(),
+                ),
+                ("FINITECHAT_SERVER_URL", self.finitechat_url()),
+            ],
+        );
+        self.write_http_probe(yaml, "/healthz", self.ports.hosted_web_device, 1, 2, 3, 45);
     }
 
     fn write_finitesites(&self, yaml: &mut String) {
@@ -505,18 +840,23 @@ wait "$postgres_pid"
             concat!(
                 "cargo run -p finitesitesd -- serve ",
                 "--data {} ",
-                "--listen 127.0.0.1:{} ",
-                "--api-url http://127.0.0.1:{} ",
+                "--listen {}:{} ",
+                "--api-url {} ",
                 "--base-domain sites.localhost ",
                 "--document-base-domain docs.sites.localhost ",
-                "--git-url http://git.sites.localhost:{} ",
+                "--git-url {} ",
                 "--site-port {} ",
                 "--app-runner none"
             ),
             shell_quote(&data.display().to_string()),
+            if self.profile.includes_runtime() {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             self.ports.finitesites,
-            self.ports.finitesites,
-            self.ports.finitesites,
+            shell_quote(&self.finitesites_api_url()),
+            shell_quote(&self.finitesites_api_url()),
             self.ports.finitesites
         );
         let _ = writeln!(yaml, "  {process}:");
@@ -526,6 +866,301 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe(yaml, "/api/v1/healthz", self.ports.finitesites, 1, 2, 3, 45);
+    }
+
+    fn write_finite_brain(&self, yaml: &mut String) {
+        let process = ManagedProcess::FiniteBrain;
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Local FiniteBrain API and first-party Product Client",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[String::from("exec cargo run -p finite-brain-app")],
+            &[],
+        );
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        self.write_environment(
+            yaml,
+            &[
+                (
+                    "FINITE_BRAIN_ADDR",
+                    format!("127.0.0.1:{}", self.ports.finite_brain),
+                ),
+                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.finite_brain_url()),
+                (
+                    "FINITE_BRAIN_DB",
+                    self.finite_brain_dir()
+                        .join("finite-brain.sqlite3")
+                        .display()
+                        .to_string(),
+                ),
+            ],
+        );
+        self.write_http_probe(yaml, "/health", self.ports.finite_brain, 1, 2, 3, 45);
+    }
+
+    fn write_runtime_image(&self, yaml: &mut String) {
+        let process = ManagedProcess::RuntimeImage;
+        let report = self.runtime_image_dir().join("build-report.json");
+        let context = self.runtime_image_dir().join("context");
+        let command = format!(
+            concat!(
+                "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
+                "--engine apple-container ",
+                "--image-ref {} ",
+                "--context-dir {} ",
+                "--report {}"
+            ),
+            shell_quote(RUNTIME_IMAGE_REF),
+            shell_quote(&context.display().to_string()),
+            shell_quote(&report.display().to_string()),
+        );
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Build the canonical Agent Runtime with Apple Container",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &[command], &[]);
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn write_finite_private_limiter(&self, yaml: &mut String) {
+        let process = ManagedProcess::FinitePrivateLimiter;
+        let source_secret = format!(
+            ". {}",
+            shell_quote(&self.limiter_secret_file().display().to_string())
+        );
+        let command = format!(
+            concat!(
+                "exec cargo run -p finite-saas-local -- finite-private-limiter-up ",
+                "--listen-addr {} ",
+                "--core-url {} ",
+                "--core-api-token {} ",
+                "--dashboard-url {} ",
+                "--agent-host {}"
+            ),
+            shell_quote(&format!(
+                "{}:{}",
+                self.service_bind_host(),
+                self.ports.finite_private_limiter
+            )),
+            shell_quote(&self.core_url()),
+            shell_quote(&self.core_token),
+            shell_quote(&self.dashboard_url()),
+            shell_quote(&self.apple_host_access.runtime_host),
+        );
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Local Finite Private admission and inference chain",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &[source_secret, command], &[]);
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        self.write_http_probe_host(
+            yaml,
+            &self.service_bind_host(),
+            "/health",
+            self.ports.finite_private_limiter,
+            1,
+            2,
+            3,
+            60,
+        );
+    }
+
+    fn write_apple_network_probe(&self, yaml: &mut String) {
+        let process = ManagedProcess::AppleNetworkProbe;
+        let mut urls = vec![
+            format!("{}/health", self.runtime_finitechat_url()),
+            format!("{}/api/v1/healthz", self.finitesites_api_url()),
+        ];
+        if self.inference_mode == InferenceMode::ChainedLimiter {
+            urls.push(format!("{}/health", self.runtime_limiter_root_url()));
+        }
+        let probe_script = urls
+            .iter()
+            .map(|url| format!("curl -fsS --max-time 5 {} >/dev/null", shell_quote(url)))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let command = format!(
+            "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
+            shell_quote(RUNTIME_IMAGE_REF),
+            shell_quote(&probe_script),
+        );
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Prove the Agent Runtime can reach local host services",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[
+                String::from(
+                    "container delete --force devfinity-host-network-probe >/dev/null 2>&1 || true",
+                ),
+                command,
+            ],
+            &[],
+        );
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeImage);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteSites);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        if self.inference_mode == InferenceMode::ChainedLimiter {
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::FinitePrivateLimiter);
+            let _ = writeln!(yaml, "        condition: process_healthy");
+        }
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn write_runtime_artifact(&self, yaml: &mut String) {
+        let process = ManagedProcess::RuntimeArtifact;
+        let command = format!(
+            concat!(
+                "exec cargo run -p finite-saas-core -- runtime-artifact-upsert ",
+                "--artifact-id {} ",
+                "--kind oci_image ",
+                "--reference {} ",
+                "--version-label devfinity-worktree ",
+                "--state-schema-version runtime-state-v1 ",
+                "--hermes-source-ref hermes-agent==0.18.2 ",
+                "--promoted"
+            ),
+            shell_quote(RUNTIME_ARTIFACT_ID),
+            shell_quote(RUNTIME_IMAGE_REF),
+        );
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Register the locally built Runtime as a promoted Core artifact",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &[command], &[]);
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::AppleNetworkProbe);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        self.write_environment(yaml, &[("FC_CORE_DATABASE_URL", self.database_url())]);
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: exit_on_failure");
+    }
+
+    fn write_runner(&self, yaml: &mut String) {
+        let process = ManagedProcess::Runner;
+        let mut command = Vec::new();
+        if self.inference_mode == InferenceMode::DirectKeyOverride {
+            command.push(format!(
+                ". {}",
+                shell_quote(&self.runner_secret_file().display().to_string())
+            ));
+        }
+        command.push("exec cargo run -p finite-saas-runner -- serve".to_string());
+
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Real local Runner backed by Apple Container",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &command, &[]);
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeArtifact);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        self.write_environment(
+            yaml,
+            &[
+                ("FC_RUNNER_BACKEND", "apple-container".to_string()),
+                ("FC_CORE_URL", self.core_url()),
+                ("FC_CORE_API_TOKEN", self.core_token.clone()),
+                (
+                    "FC_RUNNER_RUNTIME_ARTIFACT_ID",
+                    RUNTIME_ARTIFACT_ID.to_string(),
+                ),
+                ("FC_RUNNER_ID", RUNNER_ID.to_string()),
+                (
+                    "FC_RUNNER_SOURCE_HOST_ID",
+                    RUNNER_SOURCE_HOST_ID.to_string(),
+                ),
+                (
+                    "FC_RUNNER_WORK_ROOT",
+                    self.runner_dir().display().to_string(),
+                ),
+                (
+                    "FC_RUNNER_FINITECHAT_SERVER_URL",
+                    self.runtime_finitechat_url(),
+                ),
+                (
+                    "FC_RUNNER_RUNTIME_ENV_JSON",
+                    serde_json::json!({
+                        "FINITE_SITES_API": self.finitesites_api_url(),
+                    })
+                    .to_string(),
+                ),
+                (
+                    "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",
+                    "finite-devfinity".to_string(),
+                ),
+                (
+                    "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
+                    self.ports.runtime_agent.to_string(),
+                ),
+                (
+                    "FC_RUNNER_APPLE_CONTAINER_CONTAINER_PORT",
+                    "8080".to_string(),
+                ),
+                ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
+                ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
+                (
+                    "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+                    if self.inference_mode == InferenceMode::ChainedLimiter {
+                        format!("{}/v1", self.runtime_limiter_root_url())
+                    } else {
+                        std::env::var("FC_RUNNER_FINITE_PRIVATE_BASE_URL")
+                            .ok()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                "https://kimi-k2-6.finite.containers.tinfoil.dev/v1".to_string()
+                            })
+                    },
+                ),
+            ],
+        );
+        // Runner performs a synchronous provider/artifact preflight before it
+        // enters its retrying serve loop. Surface a static wiring failure as a
+        // failed local stack instead of leaving a launch form backed by no
+        // worker.
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: exit_on_failure");
     }
 
     fn write_dashboard(&self, yaml: &mut String) {
@@ -547,6 +1182,16 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::HostedWebDevice);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteBrain);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        if self.profile.includes_runtime() {
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeArtifact);
+            let _ = writeln!(yaml, "        condition: process_completed_successfully");
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::Runner);
+            let _ = writeln!(yaml, "        condition: process_started");
+        }
         self.write_environment(
             yaml,
             &[
@@ -560,8 +1205,19 @@ wait "$postgres_pid"
                     "FC_DASHBOARD_DEV_WORKOS_USER_ID",
                     "user_devfinity".to_string(),
                 ),
+                ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
                 ("FC_CORE_BASE_URL", self.core_url()),
                 ("FC_CORE_API_TOKEN", self.core_token.clone()),
+                ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
+                ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
+                // Keep the long-lived local dev server isolated from production
+                // and browser-test build artifacts. Next can otherwise combine
+                // incompatible manifests and serve every App Router path as 404.
+                ("NEXT_DIST_DIR", ".next-devfinity".to_string()),
+                (
+                    "FINITECHAT_HOSTED_API_TOKEN",
+                    self.hosted_web_device_token.clone(),
+                ),
                 (
                     "NEXT_PUBLIC_WORKOS_REDIRECT_URI",
                     format!("http://127.0.0.1:{}/callback", self.ports.dashboard),
@@ -710,9 +1366,33 @@ wait "$postgres_pid"
         timeout: u64,
         failures: u64,
     ) {
+        self.write_http_probe_host(
+            yaml,
+            "127.0.0.1",
+            path,
+            port,
+            initial_delay,
+            period,
+            timeout,
+            failures,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_http_probe_host(
+        &self,
+        yaml: &mut String,
+        host: &str,
+        path: &str,
+        port: u16,
+        initial_delay: u64,
+        period: u64,
+        timeout: u64,
+        failures: u64,
+    ) {
         let _ = writeln!(yaml, "    readiness_probe:");
         let _ = writeln!(yaml, "      http_get:");
-        let _ = writeln!(yaml, "        host: \"127.0.0.1\"");
+        let _ = writeln!(yaml, "        host: {}", yaml_string(host));
         let _ = writeln!(yaml, "        scheme: http");
         let _ = writeln!(yaml, "        path: {}", yaml_string(path));
         let _ = writeln!(yaml, "        port: {port}");
@@ -736,15 +1416,18 @@ wait "$postgres_pid"
     fn process_compose_up_command(&self) -> Command {
         let mut command = Command::new("process-compose");
         command
+            .arg("--disable-dotenv")
             .arg("--config")
             .arg(&self.process_compose_file)
             .args(self.process_compose_control_args());
+        scrub_inference_secrets(&mut command);
         command
     }
 
     fn process_compose_control_command(&self) -> Command {
         let mut command = Command::new("process-compose");
         command.args(self.process_compose_control_args());
+        scrub_inference_secrets(&mut command);
         command
     }
 
@@ -870,14 +1553,15 @@ wait "$postgres_pid"
         let program = &command[0];
         let args = &command[1..];
         println!("running devfinity command: {}", shell_words(command));
-        let status = Command::new(program)
+        let mut child_command = Command::new(program);
+        child_command
             .args(args)
             .current_dir(&self.repo_root)
-            .envs(self.env_values())
-            .status()
-            .with_context(|| {
-                format!("failed to run devfinity command `{}`", shell_words(command))
-            })?;
+            .envs(self.env_values());
+        scrub_inference_secrets(&mut child_command);
+        let status = child_command.status().with_context(|| {
+            format!("failed to run devfinity command `{}`", shell_words(command))
+        })?;
         Ok(status_to_exit_code(status))
     }
 
@@ -890,7 +1574,11 @@ wait "$postgres_pid"
             }
         };
 
-        for spec in self.managed_process_specs() {
+        // Cleanup must not depend on the credential/profile selected by the
+        // current shell. A developer may unset the chained-limiter key before
+        // recovering an orphaned stack, but its protected pid file still gives
+        // us an exact and safely verifiable process identity.
+        for spec in self.process_specs(ManagedProcess::ALL) {
             self.cleanup_pid_file(&spec, &table);
         }
     }
@@ -989,7 +1677,14 @@ wait "$postgres_pid"
     }
 
     fn managed_process_specs(&self) -> Vec<ManagedProcessSpec> {
-        ManagedProcess::ALL
+        self.process_specs(self.enabled_processes())
+    }
+
+    fn process_specs(
+        &self,
+        processes: impl IntoIterator<Item = ManagedProcess>,
+    ) -> Vec<ManagedProcessSpec> {
+        processes
             .into_iter()
             .map(|process| {
                 let expected_fragments = match process {
@@ -1009,10 +1704,34 @@ wait "$postgres_pid"
                         String::from("finitechat-server"),
                         self.finitechat_dir().display().to_string(),
                     ],
+                    ManagedProcess::HostedWebDevice => {
+                        vec![String::from("finitechat-hosted-device")]
+                    }
                     ManagedProcess::FiniteSites => vec![
                         String::from("finitesitesd"),
                         self.finitesites_dir().display().to_string(),
                     ],
+                    ManagedProcess::FiniteBrain => vec![String::from("finite-brain")],
+                    ManagedProcess::RuntimeImage => vec![
+                        String::from("python3"),
+                        String::from("build_runtime_image.py"),
+                        String::from("apple-container"),
+                    ],
+                    ManagedProcess::FinitePrivateLimiter => vec![
+                        String::from("finite-saas-local"),
+                        String::from("finite-private-limiter-up"),
+                    ],
+                    ManagedProcess::AppleNetworkProbe => vec![
+                        String::from("container"),
+                        String::from("devfinity-host-network-probe"),
+                    ],
+                    ManagedProcess::RuntimeArtifact => vec![
+                        String::from("finite-saas-core"),
+                        String::from("runtime-artifact-upsert"),
+                    ],
+                    ManagedProcess::Runner => {
+                        vec![String::from("finite-saas-runner"), String::from("serve")]
+                    }
                     ManagedProcess::DashboardDeps => vec![String::from("npm"), String::from("ci")],
                     ManagedProcess::Dashboard => vec![
                         String::from("npm"),
@@ -1026,8 +1745,30 @@ wait "$postgres_pid"
             .collect()
     }
 
+    fn enabled_processes(&self) -> Vec<ManagedProcess> {
+        ManagedProcess::ALL
+            .into_iter()
+            .filter(|process| {
+                if matches!(
+                    process,
+                    ManagedProcess::RuntimeImage
+                        | ManagedProcess::AppleNetworkProbe
+                        | ManagedProcess::RuntimeArtifact
+                        | ManagedProcess::Runner
+                ) {
+                    return self.profile.includes_runtime();
+                }
+                if *process == ManagedProcess::FinitePrivateLimiter {
+                    return self.profile.includes_runtime()
+                        && self.inference_mode == InferenceMode::ChainedLimiter;
+                }
+                true
+            })
+            .collect()
+    }
+
     fn service_checks(&self) -> Vec<ServiceCheck> {
-        vec![
+        let mut checks = vec![
             check_tcp_service(ManagedProcess::Postgres, "127.0.0.1", self.ports.postgres),
             check_http_service(
                 ManagedProcess::Core,
@@ -1037,9 +1778,15 @@ wait "$postgres_pid"
             ),
             check_http_service(
                 ManagedProcess::FiniteChat,
-                "127.0.0.1",
+                &self.service_bind_host(),
                 self.ports.finitechat,
                 "/health",
+            ),
+            check_http_service(
+                ManagedProcess::HostedWebDevice,
+                "127.0.0.1",
+                self.ports.hosted_web_device,
+                "/healthz",
             ),
             check_http_service(
                 ManagedProcess::FiniteSites,
@@ -1048,29 +1795,60 @@ wait "$postgres_pid"
                 "/api/v1/healthz",
             ),
             check_http_service(
+                ManagedProcess::FiniteBrain,
+                "127.0.0.1",
+                self.ports.finite_brain,
+                "/health",
+            ),
+            check_http_service(
                 ManagedProcess::Dashboard,
                 "127.0.0.1",
                 self.ports.dashboard,
                 "/dashboard",
             ),
-        ]
+        ];
+        if self.profile.includes_runtime() && self.inference_mode == InferenceMode::ChainedLimiter {
+            checks.push(check_http_service(
+                ManagedProcess::FinitePrivateLimiter,
+                &self.service_bind_host(),
+                self.ports.finite_private_limiter,
+                "/health",
+            ));
+        }
+        checks
     }
 
     fn urls_text(&self) -> String {
-        format!(
+        let mut urls = format!(
             concat!(
+                "profile={}\n",
                 "dashboard={}\n",
                 "core={}\n",
                 "finitechat={}\n",
+                "hosted_web_device={}\n",
                 "finitesites_api={}\n",
-                "finitesites_base=http://*.sites.localhost:{}\n"
+                "finitesites_base=http://*.sites.localhost:{}\n",
+                "finite_brain={}\n"
             ),
+            self.profile.as_str(),
             self.dashboard_url(),
             self.core_url(),
             self.finitechat_url(),
+            self.hosted_web_device_url(),
             self.finitesites_api_url(),
-            self.ports.finitesites
-        )
+            self.ports.finitesites,
+            self.finite_brain_url()
+        );
+        if self.profile.includes_runtime() {
+            let _ = writeln!(
+                urls,
+                "runtime=http://127.0.0.1:{}",
+                self.ports.runtime_agent
+            );
+            let _ = writeln!(urls, "runtime_image={RUNTIME_IMAGE_REF}");
+            let _ = writeln!(urls, "runtime_artifact={RUNTIME_ARTIFACT_ID}");
+        }
+        urls
     }
 
     fn core_url(&self) -> String {
@@ -1082,11 +1860,50 @@ wait "$postgres_pid"
     }
 
     fn finitechat_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.ports.finitechat)
+        format!(
+            "http://{}:{}",
+            self.service_bind_host(),
+            self.ports.finitechat
+        )
+    }
+
+    fn runtime_finitechat_url(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.apple_host_access.runtime_host, self.ports.finitechat
+        )
+    }
+
+    fn runtime_limiter_root_url(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.apple_host_access.runtime_host, self.ports.finite_private_limiter
+        )
+    }
+
+    fn service_bind_host(&self) -> String {
+        if self.profile.includes_runtime() {
+            self.apple_host_access.bind_host.clone()
+        } else {
+            "127.0.0.1".to_string()
+        }
+    }
+
+    fn hosted_web_device_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.hosted_web_device)
+    }
+
+    fn finite_brain_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.finite_brain)
     }
 
     fn finitesites_api_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.ports.finitesites)
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.finitesites)
     }
 
     fn database_url(&self) -> String {
@@ -1120,12 +1937,40 @@ wait "$postgres_pid"
         self.process_state_dir(ManagedProcess::FiniteChat)
     }
 
+    fn hosted_web_device_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::HostedWebDevice)
+    }
+
     fn finitesites_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::FiniteSites)
     }
 
+    fn finite_brain_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::FiniteBrain)
+    }
+
     fn finite_home_dir(&self) -> PathBuf {
         self.run_dir.join("finite-home")
+    }
+
+    fn runtime_image_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::RuntimeImage)
+    }
+
+    fn runner_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::Runner)
+    }
+
+    fn secrets_dir(&self) -> PathBuf {
+        self.run_dir.join("secrets")
+    }
+
+    fn limiter_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("finite-private-limiter.sh")
+    }
+
+    fn runner_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("runner.sh")
     }
 
     fn process_state_dir(&self, process: ManagedProcess) -> PathBuf {
@@ -1137,7 +1982,7 @@ wait "$postgres_pid"
     }
 
     fn env_values(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut values = vec![
             ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
             (
                 "DEVFINITY_PROCESS_COMPOSE_FILE",
@@ -1160,16 +2005,46 @@ wait "$postgres_pid"
                 "FC_DASHBOARD_DEV_WORKOS_USER_ID",
                 "user_devfinity".to_string(),
             ),
+            ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
             ("FC_CORE_URL", self.core_url()),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_CORE_API_TOKEN", self.core_token.clone()),
             ("FC_CORE_DATABASE_URL", self.database_url()),
             ("FC_DASHBOARD_URL", self.dashboard_url()),
             ("FINITECHAT_SERVER_URL", self.finitechat_url()),
-            ("FC_RUNNER_FINITECHAT_SERVER_URL", self.finitechat_url()),
+            (
+                "FC_RUNNER_FINITECHAT_SERVER_URL",
+                if self.profile.includes_runtime() {
+                    self.runtime_finitechat_url()
+                } else {
+                    self.finitechat_url()
+                },
+            ),
+            ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
+            (
+                "FINITECHAT_HOSTED_BIND",
+                format!("127.0.0.1:{}", self.ports.hosted_web_device),
+            ),
+            (
+                "FINITECHAT_HOSTED_DATA_ROOT",
+                self.hosted_web_device_dir().display().to_string(),
+            ),
+            (
+                "FINITECHAT_HOSTED_API_TOKEN",
+                self.hosted_web_device_token.clone(),
+            ),
             ("FINITE_SITES_API", self.finitesites_api_url()),
+            ("FINITE_BRAIN_URL", self.finite_brain_url()),
             ("FINITE_HOME", self.finite_home_dir().display().to_string()),
-        ]
+            ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
+        ];
+        if self.profile.includes_runtime() {
+            values.push((
+                "DEVFINITY_RUNTIME_URL",
+                format!("http://127.0.0.1:{}", self.ports.runtime_agent),
+            ));
+        }
+        values
     }
 }
 
@@ -1198,6 +2073,7 @@ impl ProcessComposeGuard<'_> {
             let _ = self.child.wait();
         }
         self.stack.cleanup_managed_processes();
+        self.stack.remove_secret_files();
         remove_file_best_effort(&self.stack.process_compose_socket);
         remove_file_best_effort(&self.pid_file);
         Ok(())
@@ -1512,6 +2388,125 @@ fn run_best_effort(command: &mut Command, label: &str) {
     }
 }
 
+fn run_required(command: &mut Command, label: &str) -> Result<()> {
+    let status = command
+        .status()
+        .with_context(|| format!("failed to {label}"))?;
+    if !status.success() {
+        bail!("failed to {label}: command exited with {status}");
+    }
+    Ok(())
+}
+
+fn command_stdout(command: &mut Command, label: &str) -> Result<String> {
+    let output = command
+        .output()
+        .with_context(|| format!("failed to {label}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to {label}: {}", stderr.trim());
+    }
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("invalid UTF-8 while trying to {label}"))
+}
+
+fn ensure_apple_container_cli() -> Result<()> {
+    let version = command_stdout(
+        Command::new("container").arg("--version"),
+        "run `container --version`",
+    )
+    .context(
+        "Apple Container is required. Install the signed Apple `container` package, then run `container system start`",
+    )?;
+    let supported = version
+        .split_whitespace()
+        .find_map(|word| {
+            let mut parts = word.split('.');
+            let major = parts.next()?.parse::<u64>().ok()?;
+            let minor = parts.next()?.parse::<u64>().ok()?;
+            Some(major > 1 || (major == 1 && minor >= 1))
+        })
+        .unwrap_or(false);
+    if !supported {
+        bail!(
+            "Apple Container 1.1 or newer is required; found {}",
+            version.trim()
+        );
+    }
+
+    let macos = command_stdout(
+        Command::new("sw_vers").arg("-productVersion"),
+        "read the macOS version",
+    )?;
+    let major = macos
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if major < 26 {
+        bail!("Apple Container local SaaS requires macOS 26 or newer; found {macos:?}");
+    }
+    Ok(())
+}
+
+fn apple_container_system_running() -> Result<bool> {
+    let status = command_stdout(
+        Command::new("container").args(["system", "status", "--format", "json"]),
+        "read Apple Container service status",
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&status)
+        .context("Apple Container returned invalid service-status JSON")?;
+    Ok(value.get("status").and_then(serde_json::Value::as_str) == Some("running"))
+}
+
+fn detect_apple_host_access() -> Result<AppleHostAccess> {
+    let domains = command_stdout(
+        Command::new("container").args(["system", "dns", "list", "--quiet"]),
+        "list Apple Container host DNS domains",
+    )?;
+    if domains.lines().any(|line| {
+        line.trim_end_matches('.')
+            .eq_ignore_ascii_case("host.container.internal")
+    }) {
+        return Ok(AppleHostAccess {
+            runtime_host: "host.container.internal".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            source: "official Apple host DNS bridge",
+        });
+    }
+
+    let network = command_stdout(
+        Command::new("container").args(["network", "inspect", "default"]),
+        "inspect the Apple Container default network",
+    )?;
+    let parsed: serde_json::Value = serde_json::from_str(&network)
+        .context("Apple Container returned invalid default-network JSON")?;
+    let gateway = parsed
+        .get(0)
+        .and_then(|network| network.get("status"))
+        .and_then(|status| status.get("ipv4Gateway"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Apple Container did not report a default vmnet gateway. Configure the official bridge explicitly with `sudo container system dns create host.container.internal --localhost 203.0.113.113`, then rerun devfinity. Apple notes that this disables Private Relay and the packet-filter rule must be recreated after a reboot"
+            )
+        })?;
+    let address = gateway
+        .parse::<std::net::IpAddr>()
+        .with_context(|| format!("Apple Container reported invalid gateway address {gateway:?}"))?;
+    if !address.is_ipv4() || address.is_loopback() || address.is_unspecified() {
+        bail!("Apple Container reported unusable vmnet gateway {gateway:?}");
+    }
+    Ok(AppleHostAccess {
+        runtime_host: gateway.to_string(),
+        bind_host: gateway.to_string(),
+        source: "Apple default-network gateway; runtime probe pending",
+    })
+}
+
 fn shell_words(words: &[String]) -> String {
     words
         .iter()
@@ -1525,6 +2520,60 @@ fn shell_quote(value: &str) -> String {
         return "''".to_string();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn nonempty_env(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn required_secret_env(name: &str) -> Result<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("{name} is required for the selected inference mode"))
+}
+
+fn scrub_inference_secrets(command: &mut Command) {
+    command.env_remove("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY");
+    command.env_remove("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
+}
+
+fn write_mode_600(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    remove_file_best_effort(&temporary);
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary).with_context(|| {
+        format!(
+            "failed to create protected runtime file {}",
+            temporary.display()
+        )
+    })?;
+    file.write_all(bytes).with_context(|| {
+        format!(
+            "failed to write protected runtime file {}",
+            temporary.display()
+        )
+    })?;
+    file.sync_all().with_context(|| {
+        format!(
+            "failed to sync protected runtime file {}",
+            temporary.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "failed to activate protected runtime file {}",
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn yaml_string(value: &str) -> String {
@@ -1568,9 +2617,29 @@ mod tests {
         assert!(yaml.contains("postgres:"));
         assert!(yaml.contains("core:"));
         assert!(yaml.contains("finitechat:"));
+        assert!(yaml.contains("hosted-web-device:"));
         assert!(yaml.contains("finitesites:"));
+        assert!(yaml.contains("finite-brain:"));
+        assert!(yaml.contains("cargo run -p finite-brain-app"));
+        assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("NEXT_DIST_DIR=.next-devfinity"));
+        assert!(yaml.contains("--listen 0.0.0.0:18789"));
+        assert!(yaml.contains("--api-url 'http://host.container.internal:18789'"));
+        assert!(yaml.contains("--git-url 'http://host.container.internal:18789'"));
         assert!(yaml.contains("dashboard-deps:"));
         assert!(yaml.contains("dashboard:"));
+        assert!(yaml.contains("runtime-image:"));
+        assert!(yaml.contains("--engine apple-container"));
+        assert!(yaml.contains("apple-network-probe:"));
+        assert!(yaml.contains("runtime-artifact:"));
+        assert!(yaml.contains("runtime-artifact-upsert"));
+        assert!(yaml.contains("--promoted"));
+        assert!(yaml.contains("runner:"));
+        assert!(yaml.contains("finite-saas-runner -- serve"));
+        assert!(yaml.contains("FC_RUNNER_BACKEND=apple-container"));
+        assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
+        assert!(yaml.contains("FINITE_SITES_API"));
+        assert!(yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE=off2026"));
         assert!(yaml.contains("npm ci"));
         assert!(
             yaml.contains("dashboard-deps:\n        condition: process_completed_successfully")
@@ -1581,11 +2650,18 @@ mod tests {
         assert!(yaml.contains("pids/core.pid"));
         assert!(yaml.contains("run-postgres.sh"));
         assert!(yaml.contains("psql -h 127.0.0.1"));
+        assert!(yaml.contains("cargo run -p finitechat-hosted-device"));
+        assert!(yaml.contains("FINITECHAT_HOSTED_DATA_ROOT="));
+        assert!(yaml.contains("FC_HOSTED_WEB_DEVICE_URL="));
+        assert!(yaml.contains("FINITECHAT_HOSTED_API_TOKEN="));
+        assert!(yaml.contains("hosted-web-device:\n        condition: process_healthy"));
+        assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
+        assert!(!yaml.contains("fpk_"));
     }
 
     #[test]
-    fn prepare_for_start_removes_previous_postgres_data() {
+    fn ordinary_start_preserves_previous_postgres_data() {
         let state_dir =
             std::env::temp_dir().join(format!("devfinity-test-prepare-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state_dir);
@@ -1598,8 +2674,126 @@ mod tests {
 
         stack.prepare_for_start().unwrap();
 
-        assert!(!data_dir.exists());
+        assert_eq!(
+            fs::read_to_string(data_dir.join("sentinel")).unwrap(),
+            "stale"
+        );
         let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn explicit_fresh_services_profile_resets_service_state_only() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-fresh-services-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+
+        let mut stack = Stack::new(state_dir.clone())
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly)
+            .with_fresh_services_state(true);
+        stack.ports.postgres = 0;
+        stack.ensure_dirs().unwrap();
+        fs::create_dir_all(stack.postgres_data_dir()).unwrap();
+        fs::write(stack.postgres_data_dir().join("sentinel"), "stale").unwrap();
+        fs::write(stack.runtime_image_dir().join("sentinel"), "preserve").unwrap();
+        fs::write(stack.runner_dir().join("sentinel"), "preserve").unwrap();
+
+        stack.prepare_for_start().unwrap();
+
+        assert!(!stack.postgres_data_dir().join("sentinel").exists());
+        assert_eq!(
+            fs::read_to_string(stack.runtime_image_dir().join("sentinel")).unwrap(),
+            "preserve"
+        );
+        assert_eq!(
+            fs::read_to_string(stack.runner_dir().join("sentinel")).unwrap(),
+            "preserve"
+        );
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn services_only_yaml_has_no_runtime_provider_processes() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity"))
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        let yaml = stack.process_compose_yaml();
+
+        assert!(!yaml.contains("runtime-image:"));
+        assert!(!yaml.contains("runtime-artifact:"));
+        assert!(!yaml.contains("apple-network-probe:"));
+        assert!(!yaml.contains("finite-saas-runner -- serve"));
+        assert!(yaml.contains("dashboard:"));
+    }
+
+    #[test]
+    fn recovery_specs_include_optional_limiter_after_key_is_unset() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.inference_mode = InferenceMode::Missing;
+
+        assert!(
+            !stack
+                .managed_process_specs()
+                .iter()
+                .any(|spec| spec.process == ManagedProcess::FinitePrivateLimiter)
+        );
+        assert!(
+            stack
+                .process_specs(ManagedProcess::ALL)
+                .iter()
+                .any(|spec| spec.process == ManagedProcess::FinitePrivateLimiter)
+        );
+    }
+
+    #[test]
+    fn inference_secrets_are_referenced_only_by_protected_owner_file() {
+        let mut chained = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        chained.inference_mode = InferenceMode::ChainedLimiter;
+        let chained_yaml = chained.process_compose_yaml();
+        assert!(chained_yaml.contains("finite-private-limiter:"));
+        assert!(chained_yaml.contains("secrets/finite-private-limiter.sh"));
+        assert!(!chained_yaml.contains("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY"));
+
+        let mut direct = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        direct.inference_mode = InferenceMode::DirectKeyOverride;
+        let direct_yaml = direct.process_compose_yaml();
+        assert!(direct_yaml.contains("secrets/runner.sh"));
+        assert!(!direct_yaml.contains("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"));
+        assert!(!direct.env_exports().contains("API_KEY_OVERRIDE"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_runtime_files_are_mode_600() {
+        let path = std::env::temp_dir().join(format!("devfinity-mode-600-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        write_mode_600(&path, b"export TEST='<redacted>'\n").unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_environment_scrubs_inference_secrets() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "test -z \"${FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE:-}\"",
+            ])
+            .env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY", "must-not-leak")
+            .env(
+                "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE",
+                "must-not-leak",
+            );
+        scrub_inference_secrets(&mut command);
+        assert!(command.status().unwrap().success());
     }
 
     #[test]
@@ -1683,5 +2877,13 @@ mod tests {
         assert!(args.contains(&"--use-uds".to_string()));
         assert!(args.contains(&"--unix-socket".to_string()));
         assert!(!args.contains(&"--config".to_string()));
+        assert!(!args.contains(&"--disable-dotenv".to_string()));
+
+        let up_args = stack
+            .process_compose_up_command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(up_args.contains(&"--disable-dotenv".to_string()));
     }
 }

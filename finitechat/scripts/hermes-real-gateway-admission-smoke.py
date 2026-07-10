@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hermes-package",
-        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", "hermes-agent==0.18.0"),
+        default=os.environ.get("FINITECHAT_HERMES_PACKAGE", "hermes-agent==0.18.2"),
     )
     parser.add_argument(
         "--skip-build", action="store_true", help="Use existing target/debug binaries."

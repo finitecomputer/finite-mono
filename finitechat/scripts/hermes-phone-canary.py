@@ -28,7 +28,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
-DEFAULT_HERMES_PACKAGE = "hermes-agent==0.17.0"
+DEFAULT_HERMES_PACKAGE = "hermes-agent==0.18.2"
 DEFAULT_BUNDLE_ID = "computer.finite.finitechat"
 DEFAULT_TEAM = ""
 MODEL_ENV_NAMES = (

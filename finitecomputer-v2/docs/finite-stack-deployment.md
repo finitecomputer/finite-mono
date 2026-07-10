@@ -12,10 +12,10 @@ when a product release needs lockstep.
 Finite needs these user-facing surfaces to iterate independently:
 
 - the finite.computer Core/dashboard product in this repo;
-- the Finite Chat room server from `../finite-chat-darkmatter` / GitHub
-  `finitecomputer/finitechat`;
-- Agent Runtime images and launchers, including local Docker and Phala;
-- the Finite Sites server from `../finite-sites`;
+- the Finite Chat room server from `finitechat/`;
+- Agent Runtime images and launchers, including local Docker, Kata, and Phala;
+- the Finite Sites server from `finite-sites/`;
+- immutable Managed Skills Baseline revisions from `finite-skills/`;
 - marketing/static surfaces.
 
 A fix to one surface must not require rolling all of them. A coordinated
@@ -28,7 +28,8 @@ more than one service.
 | --- | --- | --- | --- | --- |
 | Core/dashboard | `finite.computer` / future app host | `finitecomputer-v2` | Core host | Account/control plane, WorkOS auth, dashboard, Projects, Finite Private grants, runtime launch records. |
 | Chat room server | `chat.finite.computer` | `finitechat` | Core host now; v2 deploy lane | Native clients and Hermes runtimes use this by default. |
-| Agent Runtime | Phala CVM by default; Docker for preflight | `finitecomputer-v2` plus `finitechat` plugin and external tools | local Docker, remote Docker, Phala | Runtime image should differ by destination only in provider config and durable volume binding. |
+| Agent Runtime | Kata first; Phala confidential fast follow; Docker for preflight | `finitecomputer-v2` plus `finitechat` plugin and external tools | local Docker, Kata, Phala | Runtime image differs only in provider config and Provider Durable Volume binding. Kata trusts the privileged host operator; Phala earns stronger claims through evidence. |
+| Managed Skills Baseline | `git.finite.chat` distribution mirror | `finite-skills` | baked Runtime revision plus event-driven activation | `finite-mono/finite-skills` is the only editable source. Core selects a promoted immutable digest; Runtime verifies/activates it; Runner has no skills role. |
 | Finite Sites API | `api.finite.chat` | `finite-sites` | finite-lat-2/Sites host | Existing Sites API route; do not reuse it for chat. |
 | Finite Sites serving | `*.finite.chat` | `finite-sites` | finite-lat-2/Sites host | User-published content stays isolated from Core/chat. |
 
@@ -40,17 +41,27 @@ wildcard/API routing and keeps chat with the SaaS account plane.
 
 The desired self-serve user flow is:
 
-1. The user logs in to finite.computer with WorkOS.
+1. The user logs in through Account Auth, names their agent, selects an icon,
+   and chooses an offered Runner class.
 2. Core creates a Project, Finite Private grant, and Agent Runtime launch
-   request.
-3. The runner launches a real Hermes Agent Runtime, defaulting to Phala for
-   confidential durable runtime hosting.
-4. The dashboard shows a Finite Chat invite with no PIN.
-5. The user scans or opens that invite with the native Finite Chat client.
-6. The native client chats directly through `chat.finite.computer`.
+   request without leaking provider-specific handles into the product model.
+3. The selected Runner launches the same compatibility-pinned Hermes Agent
+   Runtime image; Kata is the first launch lane and Phala follows through the
+   same contract. The image exposes its Product Release's baked Finite Skills
+   Revision before the first user turn.
+4. Core waits for real Runtime/application health before reporting first-slice
+   readiness. Full Recovery Snapshot, key-backup, and empty-target restore
+   support remains a disclosed post-MVP TODO/open question.
+5. The dashboard provisions or opens the user's Finite Chat Hosted Web Device
+   and enters the canonical agent Room.
+6. The user chats in the proven dashboard UI, connects Telegram and Google,
+   publishes/previews/lists Finite Sites, and uses Finite Brain.
+7. Electron or a native app may enroll as another Device and sync the same
+   Room without depending on the Hosted Web Device's availability.
 
-Dashboard chat is intentionally cut for this release. The dashboard may later
-add a trusted web bridge, but native-device Finite Chat is the product target.
+Hosted web chat is intentionally trusted-server chat, not browser E2EE. It is
+the launch surface; Electron and native clients are additive local-custody
+Devices, not replacement UX projects.
 
 ## Release Model
 
@@ -64,11 +75,19 @@ Single-service deploys:
 - chat server changes use the v2 chat server deploy lane below;
 - runtime image changes climb the Hermes runtime matrix before promotion;
 - Sites changes deploy from `finite-sites` to the Sites host.
+- compatible skills-only changes publish a tested baseline for the future
+  explicit `finite skills sync` command. Existing agents choose when to sync;
+  Core, RMP, and Runner do not roll it out automatically.
+
+Every new Runtime seeds the baseline bundled from this monorepo before its
+first turn. Neither Runtime nor dashboard consumes a second editable copy.
+Later updates are runtime-local and explicit; no feature-specific management
+message or Runner operation is involved.
 
 Runtime image artifacts are published to GHCR as:
 
 ```text
-ghcr.io/finitecomputer/finite-agent-runtime:<tag>
+ghcr.io/finitecomputer/agent-runtime:<tag>
 ```
 
 Before a runtime image can be promoted to Phala or any SaaS runner that pulls
@@ -77,14 +96,22 @@ the provider/runner must have a `read:packages` pull secret. CI's `GITHUB_TOKEN`
 can push the package, but it does not make private GHCR packages anonymously
 pullable.
 
-## Phala Runner Lane
+## Runner Lanes
 
-Phala is the default confidential runner for the first SaaS cut. The runner uses
+Kata is the first production runner under the provider-neutral Runner Contract.
+It is isolated compute on finite-lat-1, not an operator-blind environment. The
+first trusted cohort may launch on provider-durable state before the off-host
+Recovery Snapshot design is complete, with honest product/support disclosure.
+
+Phala is the confidential fast-follow lane. The runner uses
 the official `phala` CLI as the provider management pipe because it already
 handles authenticated deploys, client-side env sealing, `--wait`, and restart.
 The v2 Rust runner still owns the product contract: lease from Core, render a
 Docker-equivalent compose file, provide a runtime-scoped Finite Private key,
-wait for `/healthz` and `/invite`, then complete the Core request.
+wait for the provider-neutral `/healthz` readiness contract, publish optional
+agent contact metadata separately, then complete the Core request. Runner
+readiness never depends on chat contact, room admission, or a particular chat
+product flow.
 
 Host prerequisites:
 
@@ -122,11 +149,15 @@ That directory contains a rendered `docker-compose.yml` and sealed-env input
 file. The compose file mounts Phala named volume `agent_state` at `/data`, the
 same durable state path used by the Docker runner. It points the runtime at
 `https://chat.finite.computer`, exposes port `8080`, and records the public
-invite/status endpoint as:
+agent contact endpoint as:
 
 ```text
-https://<app-id>-8080.dstack-pha-<teepod>.phala.network/invite
+https://<app-id>-8080.dstack-pha-<teepod>.phala.network/contact
 ```
+
+`/contact` is a product-facing discovery fact, not a Runner health gate. The
+Runtime may keep compatibility routes internally, but Core and new clients do
+not publish or canonize them.
 
 Do not pass OpenRouter or user-owned model keys through this lane. Core issues
 a runtime-scoped Finite Private key and the runner gives that key only to the
@@ -134,17 +165,81 @@ new runtime through the Phala env sealing path.
 
 Acceptance for enabling the runner is not "Phala accepted the deploy." A SaaS
 launch is accepted only after Core records the runtime, the Phala endpoint
-returns `ready=true` from `/healthz`, `/invite` returns a no-PIN Finite Chat
-invite, the native client joins, Hermes answers multiple real turns through
-Finite Private, and a Phala restart preserves the same agent identity, room,
-memory, and workspace state.
+returns `ready=true` from `/healthz`, the Hosted Web Device creates or resumes
+the canonical room using the agent identity from `/contact`, Hermes answers
+multiple real turns through Finite Private, and a Phala restart preserves the
+same agent identity, room, memory, and workspace state. Native and Electron
+Devices may join that room later without changing the Runner contract.
+
+## Enclavia Evaluation Lane
+
+Enclavia is available as a runner target for testing the same Agent Runtime
+image inside a pre-created Enclavia enclave. This lane is deliberately not the
+default SaaS backend yet: the current runner points at one configured enclave
+ID, pushes one local Docker image into that enclave, injects runtime env through
+Enclavia per-enclave secrets, and records the hosted proxy endpoint in Core.
+
+Host prerequisites:
+
+```sh
+cargo install enclavia-cli
+enclavia auth login
+docker info
+```
+
+The Enclavia enclave must already exist and should be created with:
+
+- container port `8080`;
+- persistent encrypted storage mounted at `/data`;
+- outbound egress for the model/chat dependencies the runtime needs;
+- upgradable mode only if the operator is ready to handle staged upgrades
+  manually.
+
+Runner env:
+
+```text
+FC_RUNNER_BACKEND=enclavia
+FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>
+FC_RUNNER_ENCLAVIA_BIN=/usr/local/bin/enclavia
+FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<pre-created enclave UUID>
+FC_RUNNER_ENCLAVIA_PULL_POLICY=missing
+FC_RUNNER_MAX_SANDBOXES=1
+```
+
+For each leased Project, the runner:
+
+1. ensures the promoted OCI image exists in the local Docker daemon, pulling it
+   when `FC_RUNNER_ENCLAVIA_PULL_POLICY=missing` or `always`;
+2. writes Docker-equivalent runtime env into Enclavia secrets, sending raw
+   API-key values through stdin rather than CLI argv;
+3. runs `enclavia push <local-image> <enclave-id> --json`;
+4. polls `enclavia enclave status <enclave-id> --json` until `running`;
+5. waits for `ready=true` from the generic Runtime health endpoint:
+
+```text
+https://<enclave-id>.enclaves.beta.enclavia.io/proxy/healthz
+```
+
+After readiness, Core may publish the independent agent contact fact at
+`https://<enclave-id>.enclaves.beta.enclavia.io/proxy/contact`; contact
+availability is not part of compute lifecycle admission.
+
+Do not point more than one active Core runner at the same Enclavia enclave. A
+non-upgradable enclave rejects a second push; an upgradable enclave stages the
+second push, which this runner intentionally does not auto-confirm yet.
 
 Lockstep deploys:
 
 1. add or update a release manifest under a future `ops/releases/`;
-2. run service-local validation for every pinned repo/commit;
-3. deploy services in dependency order;
-4. record deployed release metadata on each host/provider.
+2. pin the Runtime OCI digest, Hermes and Finite binary/service versions, baked
+   and desired Finite Skills Revision digests, and allowed compatibility
+   envelope;
+3. attach the Recoverability Contract, Recovery Set manifest, current
+   Operator-Privacy Level, active-skills evidence, and last empty-target restore
+   evidence;
+4. run service-local validation for every pinned component and revision;
+5. deploy services in dependency order;
+6. record deployed release metadata on each host/provider.
 
 ## Deployment Order For Coordinated Releases
 
@@ -152,10 +247,13 @@ Use this default order unless a release manifest says otherwise:
 
 1. Chat server, when protocol/API is backward compatible.
 2. Core/dashboard, when it consumes the new chat/API behavior.
-3. Agent Runtime image, after local Docker and remote Docker prove the same
-   Hermes behavior.
-4. Phala runtime canary, after Docker proves the image.
-5. Finite Sites, when publish entitlement or public serving behavior changes.
+3. Agent Runtime image, after local Docker proves the same Hermes behavior.
+4. Kata runtime canary, including provider-volume restart preservation. Off-host
+   Recovery Snapshot and empty-target restore remain a post-MVP TODO.
+5. Phala runtime canary, after Kata proves the common contract.
+6. Finite Sites, when publish entitlement or public serving behavior changes.
+7. Finite Skills Revision after every declared binary/service dependency is
+   live, then canary activation and stable promotion without a Runtime restart.
 
 If a database migration is not backward compatible, split the release into an
 expand phase and a contract phase instead of doing a single all-at-once push.
@@ -170,6 +268,13 @@ expand phase and a contract phase instead of doing a single all-at-once push.
 - The chat room server owns room-ordering durability and exposes opaque
   encrypted delivery state only.
 - Agent Runtime state belongs on the runtime provider's durable mount.
+- Finite Skills source belongs only in the monorepo; immutable revision
+  artifacts and manifests are release state, while active/last-good caches are
+  reproducible Runtime state and user-local skill overrides are recoverable
+  user data.
+- A Provider Durable Volume is primary state, not a backup. Agent Runtime state
+  also needs a provider-independent off-host Recovery Snapshot covering the
+  complete `/data` Recovery Set.
 - Sites owns the Sites registry, blobs, app state, and public serving state.
 - Marketing/static surfaces are stateless.
 
@@ -193,7 +298,12 @@ Per-service gates:
 - Dashboard/Core: lint, build, auth/dashboard smoke, route health.
 - Chat server: `finitechat-server` route/conformance/persistence tests, HTTP
   health, restart persistence, SSE/pull repair, production `/health` provenance.
-- Runtime image: local real-Hermes proof, remote Docker proof, Phala proof.
+- Runtime image: local real-Hermes proof, full-product Docker proof, Kata proof,
+  then Phala proof.
+- Managed skills: manifest/provenance validation, representative Finite
+  workflow tests, offline baked discovery, between-turn activation, crash
+  atomicity, in-process reload, rollback, and user-override preservation on the
+  same Docker/Kata/Phala image.
 - Sites: health, claim/publish smoke, grant check, wildcard route smoke, app
   wake smoke.
 
@@ -204,6 +314,14 @@ Cross-service gates:
 - Agent Runtime can receive a Finite Chat turn and reply through Hermes;
 - Agent Runtime can use Finite Private;
 - Agent Runtime can publish a site with `fsite`;
+- first-turn Hermes guidance selects current Finite-specific workflows, and
+  dashboard/release/Runtime evidence agree on the active skills digest;
+- a compatible canary skills revision activates and rolls back without changing
+  the Runtime boot id or Hermes PID;
+- every stateful service and Agent Runtime restores its declared Recovery Set
+  from a service-consistent off-host snapshot onto an empty replacement target;
+- Runtime Retirement preserves recovery material and normal product/billing
+  paths cannot invoke Purge User Data;
 - `finite.computer`, `chat.finite.computer`, `api.finite.chat`, and a wildcard
   site all route to their intended service.
 

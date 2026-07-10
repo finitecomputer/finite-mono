@@ -58,7 +58,11 @@ import {
   resolveBillingReturnStateNow,
 } from "@/lib/billing-return";
 import { coreProjectOverviewHref } from "@/lib/dashboard-machine-access";
-import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
+import {
+  dashboardDevLaunchCode,
+  getAccountAuthContext,
+  loadOptionalViewerContext,
+} from "@/lib/dashboard-auth";
 import { stripeBillingStatus } from "@/lib/stripe-billing";
 
 function shortValue(value: string | null | undefined, length = 12) {
@@ -93,7 +97,10 @@ export default async function DashboardPage({
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
     firstSearchParam(query.billingSyncStartedAt)
   );
-  const viewer = await loadOptionalViewerContext();
+  const [viewer, account] = await Promise.all([
+    loadOptionalViewerContext(),
+    getAccountAuthContext(),
+  ]);
 
   if (!viewer.isAdmin) {
     const core = await loadCoreMe();
@@ -135,11 +142,12 @@ export default async function DashboardPage({
     }
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
+    const localDevelopmentLaunchCode = dashboardDevLaunchCode(account);
 
     const showCreateAgent =
       core.configured &&
       Boolean(core.account.email) &&
-      Boolean(billing.billing?.can_create_agent) &&
+      (Boolean(billing.billing?.can_create_agent) || Boolean(localDevelopmentLaunchCode)) &&
       coreProjects.length === 0 &&
       pendingAgentCreationRequests.length === 0 &&
       failedAgentCreationRequests.length === 0;
@@ -549,7 +557,8 @@ function CoreProjectsPanel({
         <div>
           <h1 className="ocean-utility-card__title">Agent</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your hosted agent and open the Finite Chat invite from the native app.
+            Manage your agent and open its Hosted Web Device, with Electron and native Devices
+            joining the same Finite Chat room later.
           </p>
         </div>
       </div>

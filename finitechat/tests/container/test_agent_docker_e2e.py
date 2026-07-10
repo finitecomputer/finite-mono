@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -34,7 +35,7 @@ SKIP_IMAGE_BUILD = os.environ.get("FINITE_DOCKER_SKIP_IMAGE_BUILD", "").lower() 
 CONTAINER = os.environ.get("FINITE_DOCKER_CONTAINER", "finite-agent-docker-e2e-run")
 SERVER_PORT = int(os.environ.get("FINITE_DOCKER_SERVER_PORT", "18789"))
 DOCKER_HOST = os.environ.get("FINITE_DOCKER_HOST", "host.docker.internal")
-HERMES_AGENT_VERSION = os.environ.get("FINITE_HERMES_AGENT_VERSION", "0.17.0")
+HERMES_AGENT_VERSION = os.environ.get("FINITE_HERMES_AGENT_VERSION", "0.18.2")
 RESTIC_BACKEND = os.environ.get("FINITE_DOCKER_RESTIC_BACKEND", "local").strip().lower()
 RESTIC_REPOSITORY = os.environ.get("FINITE_DOCKER_RESTIC_REPOSITORY", "").strip()
 RESTIC_SNAPSHOT_TAG = os.environ.get("FINITE_DOCKER_RESTIC_SNAPSHOT_TAG", "finite-agent-state")
@@ -133,7 +134,7 @@ class SmokeReport:
                     "steps": self.steps,
                     "proof_layers": [
                         "docker image build",
-                        "hermes-agent 0.17 runtime",
+                        "hermes-agent 0.18.2 runtime",
                         "finitechat binary in image",
                         "finitechat plugin in image",
                         "finitechat-server on host",
@@ -192,21 +193,218 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
     def test_gateway_launcher_does_not_persist_raw_finite_private_key(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
-        self.assertIn("api_key: ${FINITE_PRIVATE_API_KEY}", script)
-        self.assertIn("api_key: ${FINITECHAT_HERMES_API_KEY}", script)
-        self.assertNotIn("api_key: ${api_key}", script)
+        self.assertIn("api_key_reference='${FINITE_PRIVATE_API_KEY}'", script)
+        self.assertIn("api_key_reference='${FINITECHAT_HERMES_API_KEY}'", script)
+        self.assertNotIn('FINITE_CONFIG_API_KEY_REFERENCE="$api_key"', script)
 
-    def test_gateway_launcher_defaults_startup_invite_room_to_home_channel(self) -> None:
+    def test_gateway_launcher_waits_for_welcome_instead_of_inventing_a_room(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
-        self.assertIn("home-channel show", script)
-        self.assertIn("home-channel set", script)
-        self.assertIn("invite_room_id", script)
-        self.assertIn("export FINITECHAT_HOME_CHANNEL", script)
-        self.assertIn("gateway_home_channel_yaml", script)
-        self.assertIn("home_channel:", script)
-        self.assertIn("chat_id: ${FINITECHAT_HOME_CHANNEL}", script)
-        self.assertIn("FINITE_AGENT_HOME_CHANNEL_WARN", script)
+        self.assertIn("Room admission is Welcome-first", script)
+        self.assertNotIn('hermes --home "$agent_home" invite', script)
+        self.assertNotIn("home-channel show", script)
+        self.assertNotIn("home-channel set", script)
+        self.assertNotIn("invite_room_id", script)
+        self.assertIn('FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}"', script)
+        self.assertNotIn("gateway_home_channel_yaml", script)
+
+    def test_gateway_launcher_seeds_managed_skills_only_for_fresh_agents(self) -> None:
+        script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
+
+        fresh_agent_branch = script.index('if [[ ! -f "${agent_home}/config.json" ]]')
+        seed = script.index('cp -a "${bundled_skills_dir}/."', fresh_agent_branch)
+        init = script.index('"$finitechat_bin" hermes --home "$agent_home" init', seed)
+        branch_end = script.index("\nfi\n", init)
+        self.assertLess(fresh_agent_branch, seed)
+        self.assertLess(seed, init)
+        self.assertLess(init, branch_end)
+        self.assertIn("managed-skills/finite/current", script)
+        self.assertIn('FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir"', script)
+        self.assertNotIn("HERMES_BUNDLED_SKILLS", script)
+
+    def test_gateway_launcher_seed_is_durable_and_does_not_touch_existing_agents(self) -> None:
+        launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            finitechat = fake_bin / "finitechat"
+            finitechat.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${FAKE_CALL_LOG}"
+case " $* " in
+  *" init "*) printf '{}\\n' >"${FINITECHAT_HOME}/config.json" ;;
+  *" invite "*) printf '{"room_id":"room-1","url":"finite://join?test=1"}\\n' ;;
+  *" home-channel show "*) printf '{"home_channel":{"room_id":"room-1"}}\\n' ;;
+  *) printf '{}\\n' ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            finitechat.chmod(0o755)
+            hermes = fake_bin / "hermes"
+            hermes.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            hermes.chmod(0o755)
+            python = fake_bin / "python"
+            python.write_text(
+                f"""#!/usr/bin/env bash
+if [[ "${{1:-}}" == "/opt/health_server.py" ]]; then
+  exit 0
+fi
+exec {sys.executable!s} "$@"
+""",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+
+            bundle = tmp / "bundle"
+            bundled_skill = bundle / "software-development/finitebrain/SKILL.md"
+            bundled_skill.parent.mkdir(parents=True)
+            bundled_skill.write_text("baseline-v1\n", encoding="utf-8")
+            agent_home = tmp / "fresh-agent"
+            user_skill = agent_home / "hermes-home/skills/user-skill/SKILL.md"
+            user_skill.parent.mkdir(parents=True)
+            user_skill.write_text("user-owned\n", encoding="utf-8")
+            call_log = tmp / "calls.log"
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_CALL_LOG": str(call_log),
+                "FINITECHAT_BIN": str(finitechat),
+                "FINITECHAT_HOME": str(agent_home),
+                "HERMES_HOME": str(agent_home / "hermes-home"),
+                "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
+                "FINITE_SERVER_URL": "http://127.0.0.1:9",
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
+                "FINITE_BUNDLED_SKILLS_DIR": str(bundle),
+                "FINITE_REQUIRE_BUNDLED_SKILLS": "1",
+                "FINITE_HERMES_CONFIG_RECONCILER": str(
+                    REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
+                ),
+            }
+
+            first = subprocess.run(
+                ["bash", str(launcher)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            installed_skill = (
+                agent_home
+                / "managed-skills/finite/current/software-development/finitebrain/SKILL.md"
+            )
+            self.assertEqual(installed_skill.read_text(encoding="utf-8"), "baseline-v1\n")
+            config_path = agent_home / "hermes-home/config.yaml"
+            config = config_path.read_text(encoding="utf-8")
+            self.assertIn(str(agent_home / "managed-skills/finite/current"), config)
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(user_skill.read_text(encoding="utf-8"), "user-owned\n")
+
+            # Simulate Hermes/user-owned edits before the container restarts.
+            # JSON is valid YAML and keeps this focused test independent of
+            # whether the host Python has the runtime's PyYAML dependency.
+            try:
+                config_data = json.loads(config)
+            except json.JSONDecodeError:
+                import yaml
+
+                config_data = yaml.safe_load(config)
+            expected_model = {
+                "default": "openai/gpt-5",
+                "provider": "openrouter",
+                "api_key": "${OPENROUTER_API_KEY}",
+            }
+            expected_platforms = {
+                "telegram": {
+                    "enabled": True,
+                    "bot_token": "${TELEGRAM_BOT_TOKEN}",
+                    "allowed_user_ids": [1234],
+                }
+            }
+            config_data["model"] = expected_model
+            config_data["platforms"] = expected_platforms
+            config_data["plugins"]["enabled"].append("user-plugin")
+            config_data["skills"]["external_dirs"].append("/data/user-skills")
+            config_path.write_text(json.dumps(config_data, indent=2) + "\n", encoding="utf-8")
+
+            bundled_skill.write_text("baseline-v2\n", encoding="utf-8")
+            env["FINITECHAT_HERMES_MODEL"] = "environment-must-not-overwrite-durable-config"
+            second = subprocess.run(
+                ["bash", str(launcher)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(installed_skill.read_text(encoding="utf-8"), "baseline-v1\n")
+            self.assertEqual(call_log.read_text(encoding="utf-8").count(" init "), 1)
+            restarted_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(restarted_config["model"], expected_model)
+            self.assertEqual(restarted_config["platforms"], expected_platforms)
+            self.assertIn("user-plugin", restarted_config["plugins"]["enabled"])
+            self.assertIn("/data/user-skills", restarted_config["skills"]["external_dirs"])
+
+            existing_home = tmp / "existing-agent"
+            existing_home.mkdir()
+            (existing_home / "config.json").write_text("{}\n", encoding="utf-8")
+            existing_hermes_home = existing_home / "hermes-home"
+            existing_hermes_home.mkdir()
+            (existing_hermes_home / "config.yaml").write_text(
+                json.dumps({"model": expected_model}) + "\n",
+                encoding="utf-8",
+            )
+            existing_env = {
+                **env,
+                "FINITECHAT_HOME": str(existing_home),
+                "HERMES_HOME": str(existing_hermes_home),
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "finite-private",
+            }
+            existing_env.pop("FINITE_PRIVATE_API_KEY", None)
+            existing_env.pop("FINITECHAT_HERMES_API_KEY", None)
+            existing = subprocess.run(
+                ["bash", str(launcher)],
+                env=existing_env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(existing.returncode, 0, existing.stderr)
+            self.assertFalse((existing_home / "managed-skills").exists())
+            existing_config = (existing_hermes_home / "config.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("external_dirs", existing_config)
+            self.assertEqual(json.loads(existing_config)["model"], expected_model)
+
+    def test_gateway_launcher_fails_closed_without_replacing_invalid_config(self) -> None:
+        reconciler = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            config_path = Path(raw_tmp) / "config.yaml"
+            invalid = "model: [unterminated\n"
+            config_path.write_text(invalid, encoding="utf-8")
+            env = {
+                **os.environ,
+                "FINITE_CONFIG_PLUGIN_NAME": "finitechat",
+            }
+
+            result = subprocess.run(
+                [sys.executable, str(reconciler), "--config", str(config_path)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 64)
+            self.assertIn("unsafe Hermes config", result.stderr)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), invalid)
 
 
 @unittest.skipUnless(

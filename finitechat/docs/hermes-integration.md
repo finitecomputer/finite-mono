@@ -115,8 +115,13 @@ adapter metadata such as `_finitechat_kind`, `_finitechat_status`, and
 
 Attachments are typed as `HermesAttachmentV1`. They may contain a local path,
 a URL, or a Finite Chat encrypted blob reference. The Python adapter only
-passes the reference through; Finite Chat owns blob verification and
-materialization.
+passes the reference through. On outbound sends, the resident Rust bridge
+validates and reads every local path within the Finite Chat per-file and batch
+limits, encrypts/uploads the bytes through the room's pinned blob service, and
+replaces the path with the durable blob reference before appending the MLS
+message. Invalid paths fail before a message is appended. On inbound delivery,
+Finite Chat verifies and materializes encrypted blob references for Hermes.
+Neither direction requires attachment polling.
 
 Typing, thinking, and working indicators are not durable chat messages. The
 plugin uses room-scoped `activity` so these states do not create unread counts

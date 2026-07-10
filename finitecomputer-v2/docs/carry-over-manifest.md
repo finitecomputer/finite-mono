@@ -10,7 +10,7 @@ Date: 2026-07-02
 | --- | --- | --- | --- |
 | `apps/dashboard` | `finitecomputer-worktrees/saas-workos-microsandbox` | WorkOS/SaaS dashboard work lives here. | Dashboard chat, dashboard-managed Published Apps, dashboard-managed Connections, OpenRouter fallback, and machine publish/repo API routes were removed. Next cleanup: reduce remaining legacy local-machine model assumptions. |
 | `crates/finite-saas-core` | same | Core state/API for SaaS Projects, runtime launches, Finite Private grants. | Remove imports that depend on legacy `finite-core` chat/control-plane models. |
-| `crates/finite-saas-runner` | same | Runner worker for launching real Agent Runtimes. | Make Phala the default runner implementation path; remove Docker-only assumptions where wrong. |
+| `crates/finite-saas-runner` | same | Runner worker for launching real Agent Runtimes. | Implement the provider-neutral contract with Kata first and Phala fast follow; remove Docker-only and process-global backend assumptions. |
 | `crates/finite-private-limiter` | same | Private inference limiter currently lives inside finitecomputer. | TODO: extract to its own repo/deploy boundary later. Preserve issued limiter token/grant state; do not preserve old Core deploy lanes around it. |
 | `crates/finite-core` | same | Required today by `finite-saas-core`; copied only to keep the initial source slice coherent. | Split/replace with v2-owned DTOs and delete legacy chat/control-plane code. |
 | `deploy/finite-computer` | same | Current finite-lat-1/2 deploy/runtime image files for Core, dashboard, runner, limiter. | Rename to v2, add Phala deployment artifacts, and keep legacy finitec runtime-template fallbacks out. |
@@ -34,7 +34,7 @@ Date: 2026-07-02
 | --- | --- |
 | `finite-sites` | Deployed/integrated service; owns Project Repositories and publishing through `fsite`. |
 | `finitechat` | Deployed/integrated service; owns Finite Chat server, protocol, CLI/core, native client, and Hermes plugin. |
-| `finite-skills` | Canonical Finite-specific skill source. Should move to a Finite Sites Project Repository when ready. |
+| `finite-skills` | Only editable Finite-specific skill source. CI publishes immutable revisions to a read-only Finite Sites Distribution Mirror; the mirror never becomes a second authoring source. |
 | `finite-brain` | Future deployed/integrated service for knowledgebase sharing. |
 
 ## First Acceptance Gate
@@ -46,10 +46,13 @@ Before this repo is treated as authoritative:
   legacy dashboard surfaces are cut.
 - v2 docs no longer refer to box1/TRF as the normal deploy target.
 - Core can create a Project and runtime launch request.
-- Runner can launch the real runtime image in local/remote Docker, then Phala.
+- Runner can launch the real runtime image in local Docker, then Kata, then
+  Phala through the same contract.
 - Dashboard can display a Finite Chat invite with no PIN.
-- Runtime can chat through Finite Chat Hermes plugin, use Finite Private, sync
-  skills, and publish through `fsite`.
+- Runtime can chat through the Finite Chat Hermes plugin, use Finite Private,
+  expose its baked skills revision on the first turn, activate/rollback a
+  compatible promoted revision without restart, preserve User Skills, and
+  publish through `fsite`.
 
 ## Data Carry-Forward
 

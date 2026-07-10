@@ -27,15 +27,15 @@ detail. It should stay short enough to scan before making a change.
 | --- | --- | --- |
 | Understand the end-to-end user flow, front ends, security boundaries, encryption boundaries, and key custody | `system-flow-and-trust-boundaries.md` | Conversation-level map of dashboard, native chat, runtime, Core, runner, Finite Chat, FiniteBrain, Sites, Finite Private, search, TEEs, and encrypted storage |
 | Choose a local development setup | `local-dev-matrix.md` | Monorepo component map of prerequisites, first commands, checks, friction, and unification direction |
-| Understand the self-serve hosted-agent product | `../finitecomputer-v2/README.md`, `../finitecomputer-v2/CONTEXT.md`, and `../finitecomputer-v2/docs/finite-stack-deployment.md` | v2 is the hard-cut SaaS product: WorkOS, Projects, Core, Runner, Finite Private, native Finite Chat invite, and runtime launch |
-| Change v2 dashboard/Core UI | `../finitecomputer-v2/apps/dashboard/README.md` and `../finitecomputer-v2/docs/carry-over-manifest.md` | The v2 dashboard lives in `finitecomputer-v2`; dashboard chat and dashboard-managed publishing are out of scope |
-| Prove v2 Agent Runtime behavior | `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md` | Runtime proof climbs local real-Hermes, local Docker, remote Docker, Phala, then dashboard-controlled SaaS launch |
+| Understand the self-serve hosted-agent product | `../finitecomputer-v2/README.md`, `../finitecomputer-v2/CONTEXT.md`, and `../finitecomputer-v2/docs/finite-stack-deployment.md` | v2 is the hard-cut SaaS product: WorkOS, Projects, Core, generic Runner contract, Hosted Web Device chat, narrow runtime management, and durable runtime launch |
+| Change v2 dashboard/Core UI | `../finitecomputer-v2/apps/dashboard/README.md` and `../finitecomputer-v2/docs/carry-over-manifest.md` | The v2 dashboard owns signup/launch, the canonical BoxOne-derived web chat, typed connections, Site/Brain views, and lifecycle UX; product data paths stay in their owning services |
+| Prove v2 Agent Runtime behavior | `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md` | Runtime proof climbs the resident streaming Hermes sidecar, local full-product Docker, Kata, Phala, then full SaaS product acceptance |
 | Change v2 deploy boundaries or hosted Finite Chat deploy mechanics | `../finitecomputer-v2/docs/finite-stack-deployment.md` and `../finitecomputer-v2/docs/service-dependencies.md` | v2 owns SaaS deploy coordination while service source remains in the owning repos |
 | Work on legacy dashboard relay/chat or box1/TRF operations | `../../finitecomputer/docs/README.md` and `../../finitecomputer/docs/chat-local-dev.md` | Legacy `finitecomputer` remains the shipped whiteglove product until users migrate |
 | Work on encrypted chat protocol or native clients | `../finitechat/docs/architecture.md` and `../finitechat/README.md` | `finitechat` owns protocol, server, iOS, and Rust client state |
 | Work on Hermes chat bridge behavior | `../finitechat/integrations/hermes/README.md` | Bridge code lives with `finitechat`; SaaS deployment handoff crosses into `finitecomputer-v2` |
 | Work on encrypted knowledge, Vault Working Trees, or the Product Client | `../../finite-brain/README.md`, `../../finite-brain/development.md`, and `../../finite-brain/docs/specs/finitebrain-portability-spec.md` | `finite-brain` owns Vaults, Folders, `fbrain`, Product Client policy, access, sync, and asset/source-note behavior |
-| Add or change shared Hermes skills | `../../finite-skills/README.md` and `../../finite-skills/skills/AGENTS.md` | Shared managed skill source of truth |
+| Add or change shared Hermes skills | `../finite-skills/README.md`, `../finite-skills/skills/AGENTS.md`, and `../finite-skills/docs/runtime-delivery-contract.md` | One editable source, a fresh-agent bundled baseline, and the explicit `finite skills sync` compatibility contract |
 | Work on web search/extract tools | `../../finite-search/README.md` | Search/extract ops and smokes live there |
 | Use reusable Nostr primitives | `../../finite-nostr/README.md` | Product-neutral Nostr helpers only |
 | Generate or inspect platform reports | `../../reporting/README.md` | Reporting outputs and notes live there |
@@ -45,8 +45,8 @@ detail. It should stay short enough to scan before making a change.
 
 | Environment | Use for | Avoid using for |
 | --- | --- | --- |
-| `finitecomputer-v2` dashboard/Core dev | WorkOS/SaaS dashboard surfaces, Project/Core data UI, Finite Private admin/status pages | Dashboard chat, legacy machine operations, proof that a real hosted runtime works |
-| `finitecomputer-v2` Hermes runtime matrix | Real runtime image proof, local/remote Docker promotion, Phala canary, dashboard-controlled SaaS launch readiness | Fast UI-only iteration |
+| `finitecomputer-v2` dashboard/Core dev | WorkOS/SaaS dashboard surfaces, canonical web chat UI, Project/Core data UI, typed Connections, and Finite Private status | Legacy machine operations or proof that a real hosted runtime works |
+| `finitecomputer-v2` Hermes runtime matrix | Real runtime image proof, local Docker, Kata promotion, Phala canary, destructive recovery, and dashboard-controlled SaaS launch readiness | Fast UI-only iteration |
 | `finitecomputer` chat-local harness | Legacy dashboard chat iteration, relay behavior, runtime connector checks, local Hermes/plugin smoke | v2 product acceptance, full production host behavior, Google OAuth, k3s/TLS/DNS assumptions |
 | `finitechat` local server/simulator | Protocol, server, iOS, Rust client, native chat behavior | Hosted dashboard runtime provisioning |
 | `finitechat` phone/Docker canaries | Promotion evidence for real Hermes chat behavior | Fast inner-loop UI development |

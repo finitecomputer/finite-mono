@@ -1,15 +1,15 @@
 # Hermes ⇄ Finite Chat
 
 The `finitechat` plugin connects a [Hermes agent](https://github.com/NousResearch/hermes-agent)
-to end-to-end-encrypted Finite Chat rooms. The dream flow (ADR 0006):
+to end-to-end-encrypted Finite Chat rooms. The current flow is Welcome-first:
 
-1. The agent prints a QR code, a `finite://join?...` URL, and a rotating
-   6-digit PIN when the gateway starts.
-2. You scan or paste it into the Finite Chat app and type the PIN.
-3. The agent verifies the PIN proof *before* admitting you to the MLS group
-   — then you're chatting, end-to-end encrypted, with MLS-authenticated
-   sender identities. No public relay, no account registration: the agent's
-   npub lives only on its home server.
+1. The runtime publishes the Agent Principal `npub` through its contact
+   document; gateway startup does not invent a room.
+2. A user Device publishes a KeyPackage and starts a profile chat with that
+   principal.
+3. Finite Chat commits the MLS Add, the agent claims the Welcome through its
+   generic Device inbox stream, and Hermes receives only MLS-authenticated
+   messages.
 
 ## Install
 
@@ -52,8 +52,8 @@ gateway:
       enabled: true
 ```
 
-Then `hermes gateway start` prints the invite QR/URL/PIN and the agent is
-reachable from the Finite Chat app.
+Then `hermes gateway start` makes the Agent Principal reachable. The dashboard
+Hosted Web Device, Electron, or a native client starts the room independently.
 
 `finitechat hermes install` writes the embedded `finitechat` plugin into
 `$HERMES_PLUGINS_DIR/finitechat`, `$HERMES_HOME/plugins/finitechat`, or
@@ -65,18 +65,56 @@ supervisor-managed `finitechat hermes serve` process.
 
 For the supervised Rust bridge work, `finitechat hermes serve` starts the
 loopback service boundary and exposes `GET /healthz` plus `GET /readyz`. The
-current plugin still starts that service itself when no
-`FINITECHAT_HERMES_SERVICE_URL` is set, and falls back to the CLI-per-call
-bridge when the service is unreachable.
-Set `FINITECHAT_HERMES_INBOUND_STREAM=1` to make the adapter consume the
-sidecar's experimental `GET /v1/hermes/inbound` NDJSON long-poll endpoint
-instead of POSTing `poll`; transport failures fall back to the existing poll
-path.
+plugin starts that service itself when no `FINITECHAT_HERMES_SERVICE_URL` is
+set. Compatibility mode can fall back to the CLI-per-call bridge when the
+service is unreachable.
+The Finite Computer production runtime sets `FINITECHAT_HERMES_INBOUND_STREAM=1`
+and treats the resident `GET /v1/hermes/inbound` NDJSON path as mandatory.
+In that strict mode, stream failures reconnect with bounded backoff and resume
+from the Rust service's durable cursor. They never fall into Python timer
+polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
+remain available only when inbound streaming is disabled.
 See [HARDENING.md](./HARDENING.md) for the adapter reliability plan and
 acceptance matrix.
-See [../../docs/hermes-phone-canary-loop.md](../../docs/hermes-phone-canary-loop.md)
-for the physical-phone quality loop that promotes local Hermes, remote Docker,
-and Tinfoil only after lower-layer evidence is green.
+See
+[../../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md](../../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md)
+for the current local Apple Container → Kata → Phala proof ladder.
+
+## Agent → user attachment contract
+
+Hermes sends a newly created local file as a typed attachment. The Python
+adapter does not read, encode, or upload it:
+
+```json
+{
+  "kind": "media",
+  "status": "complete",
+  "attachments": [{
+    "kind": "image",
+    "name": "site-preview.png",
+    "mime_type": "image/png",
+    "path": "/data/workspace/site-preview.png",
+    "url": null,
+    "blob": null
+  }]
+}
+```
+
+Before appending any MLS message, the Rust sidecar validates every local path,
+reads regular non-empty files within the 32 MiB per-file and 64 MiB per-send
+limits, encrypts/uploads each file through the room's pinned Finite Chat blob
+service, and replaces `path` with the returned durable `blob` plus its canonical
+`url`. Name, MIME type, and media kind are preserved. A request may contain at
+most 16 attachments under the Hermes v1 DTO limit. A bad/unreadable/oversized
+path or upload failure returns an error without appending a chat message.
+
+An attachment already carrying a valid `blob` is not re-uploaded. This is the
+normal echo/forward case for an inbound blob that Rust materialized for Hermes:
+the local `path` is stripped and the blob's canonical URL is retained before
+append. A URL-only attachment remains a pass-through external reference; agents
+should use `path` for new local output and `blob` for already durable Finite
+Chat media. The promotion happens synchronously on `send`; it does not poll,
+and agent-local filesystem paths never enter the encrypted room log.
 
 For a local human smoke with JSON evidence:
 
@@ -84,7 +122,6 @@ For a local human smoke with JSON evidence:
 scripts/hermes-adapter-regression-report.py
 scripts/hermes-sidecar-smoke.sh
 scripts/hermes-agent-media-e2e.sh
-scripts/hermes-real-gateway-admission-smoke.py
 scripts/ios-hermes-agent-media-e2e.sh
 ```
 
@@ -95,18 +132,20 @@ sidecar startup/fallback/serialization, media, edits, typing activity, room
 filters, group sender identity, receipt/control stream filtering, and stream
 fallback.
 The script writes `target/hermes-sidecar-smoke/report.json` with timings for
-server startup, invite/join, sidecar readiness, inbound delivery, ack/drain,
-agent reply, and user decrypt.
+server startup, Welcome-first room admission, sidecar readiness, inbound
+delivery, ack/drain, agent reply, and user decrypt.
 The media E2E writes `target/hermes-agent-media-e2e/report.json` and runs the
 real `hermes-agent` package against the Finite plugin with the sidecar inbound
 stream enabled. It proves an image sent by a Finite Chat user reaches Hermes as
 media and that the user decrypts both text and image replies from the agent.
+Agent-local reply paths are never written into the room log: the Rust sidecar
+uses the contract above and appends only the durable encrypted blob reference.
 It installs an echo callback, so it is adapter transport coverage, not a real
 Hermes model or gateway acceptance gate.
-The real gateway admission smoke writes
-`target/hermes-real-gateway-admission-smoke/report.json` and proves Hermes 0.17
-`gateway run --replace` loads the installed `finitechat` plugin and admits
-a normal invite/PIN join without a test callback.
+The canonical real-gateway acceptance is the monorepo
+`just dev saas-smoke` path. It packages Hermes 0.18.2 and this plugin in the
+one Runtime image and requires model-backed replies across independent
+chat-server, Hosted Web Device, and Runtime restarts.
 The iOS Simulator E2E writes
 `target/ios-hermes-agent-media-e2e/report.json`, drives the native app through
 the product harness, and proves that the app's encrypted local store contains
@@ -116,32 +155,27 @@ The physical-device variant is `scripts/ios-device-hermes-agent-media-e2e.sh`;
 it writes `target/ios-device-hermes-agent-media-e2e/report.json` after pulling
 the app's store from an installed, unlocked phone.
 
-Validate the restic backup environment before the longer Docker smoke:
+For the canonical durable Docker packaging smoke used by the manual workflow:
 
 ```bash
-scripts/hermes-restic-preflight.py --report target/hermes-docker-smoke/restic-preflight.json
+scripts/hermes-durable-home-docker-smoke.py \
+  --image finite-agent-runtime:<built-tag>
 ```
 
-The preflight writes JSON, fails before any expensive image build when required
-S3 env is missing, and redacts URL userinfo from the repository field.
+It starts the canonical Hermes gateway, creates the room through
+KeyPackage/Add/Welcome, requires a real model reply, restarts compute around
+the same durable `/home/node`, verifies the same npub and Room, and requires a
+second reply. The older restic/remote-Docker scripts are historical recovery
+experiments, not current promotion gates; Recovery Snapshot design remains an
+explicit TODO.
 
-For the Docker runtime smoke:
+### Parked Recovery Experiments
 
-```bash
-scripts/hermes-sidecar-docker-smoke.sh
-scripts/hermes-sidecar-docker-s3-emulator-smoke.sh
-```
-
-That builds `containers/agent/Dockerfile` with `hermes-agent==0.17.0`, starts
-the real Hermes gateway in Docker, drives `finitechat` CLI users through
-invite/PIN admission before and after restore, and writes
-`target/hermes-docker-smoke/report.json`. It also stops the first agent
-container cleanly so the runtime entrypoint snapshots agent state to an
-encrypted restic repository, checks the repository, wipes the local agent
-volume, starts a fresh container whose entrypoint restores the latest tagged
-snapshot before the gateway starts, verifies the same npub, verifies the
-runtime `/healthz` endpoint, and admits a second user through the restored
-gateway. Echo replies are not accepted as Docker runtime proof.
+Everything below this heading is retained for recovery/Tinfoil archaeology.
+The commands use the retired invite/PIN flow and no longer match the current
+workflow inputs or release path. Do not use them as a product canary or publish
+gate until they are rewritten for Agent Principal + Welcome-first admission
+and the Recovery Snapshot design is explicitly resumed.
 
 For the remote Docker human-handoff canary on `finite-lat-2`:
 
@@ -382,8 +416,9 @@ canary result are all expected to be present.
 
 ## How the pieces divide (ADR 0002)
 
-The Python adapter stays thin: it shells to `finitechat hermes
-<action> --json` and translates JSON to Hermes `MessageEvent`s. The Rust
-binary owns identity, MLS encryption, invite verification, durable cursors,
-and storage. The bridge actions are `init`, `invite`, `pin`, `poll`,
-`send`, `edit`, and `activity`.
+The Python adapter stays thin and talks to the resident loopback Finite Chat
+service. The Rust binary owns identity, MLS encryption, Welcome processing,
+durable cursors, and storage. The service surface covers inbound stream,
+acknowledge, send/edit, activity, recovery, and explicit home-channel state;
+strict hosted mode never falls back to Python polling or per-message CLI
+subprocesses.

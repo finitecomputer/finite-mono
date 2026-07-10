@@ -98,7 +98,7 @@ Slop level: 4.
 - Deployment boundaries are now documented: Core/dashboard, hosted Finite Chat,
   Agent Runtime, Finite Sites API/serving, and coordinated release order.
 - The Hermes runtime proof ladder is product-shaped: real Hermes, native Finite
-  Chat, no PIN, local Docker, remote Docker, Phala, then dashboard-controlled
+  Chat, no PIN, local Docker, Kata, Phala, then dashboard-controlled
   SaaS launch.
 - The carry-over and legacy cleanup manifests make copied code and delete
   conditions visible instead of pretending the split is already clean.
@@ -140,7 +140,7 @@ Slop level: 4.
   Pairing, and Finite Chat Invite language.
 - Remove or cordon off copied `finite-core` relay/control-plane models behind
   v2-owned DTOs.
-- Prove the runtime image through the documented Docker, remote Docker, Phala,
+- Prove the runtime image through the documented Docker, Kata, Phala,
   and dashboard-controlled launch rungs with real Hermes and native Finite Chat.
 - Ensure dashboard/Core checks are a single named command or root facade before
   external contributor onboarding depends on them.

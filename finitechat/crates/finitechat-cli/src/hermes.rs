@@ -1,7 +1,8 @@
 //! The `finitechat hermes` subcommand family: the JSON bridge
 //! the Hermes platform plugin shells to (ADR 0002), plus agent onboarding
-//! (`init` publishes the agent identity and KeyPackages; rooms admit members
-//! through MLS add/welcome).
+//! (`init` publishes the Agent Principal profile; the resident service starts
+//! the Device runtime and publishes KeyPackages; rooms admit members through
+//! MLS Add + Welcome).
 //!
 //! The agent's account key is the shared Finite identity at
 //! `$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/`),
@@ -37,8 +38,8 @@ use finitechat_client::{
     SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppRoomState, AppSentMessage, AppState, FiniteChatCoreError,
-    FiniteChatRuntime, OpenOptions,
+    AppAction, AppBridgeActivityInput, AppRoomState, AppSentMessage, AppState, ChatMediaKind,
+    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
@@ -48,7 +49,7 @@ use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
     AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
-    EphemeralActivityActionV1, npub_encode,
+    EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -83,6 +84,13 @@ const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 const HERMES_SERVICE_HEARTBEAT_MILLIS: u64 = 250;
+/// Match the hosted-device batch ceiling so one Hermes send cannot make the
+/// resident bridge buffer the protocol's per-file maximum sixteen times over.
+const MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+const _: () = {
+    assert!(MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES >= MAX_ATTACHMENT_PLAINTEXT_BYTES as usize);
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentConfig {
@@ -397,6 +405,14 @@ async fn prepare_hermes_service(
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
     let runtime = open_agent_runtime(home)?;
+    // Service readiness means this Device is actually reachable for the
+    // Welcome-first product flow, not merely that its local SQLite file opens.
+    // StartRuntime publishes/replenishes KeyPackages and activates pending
+    // Welcomes on every resident-service start, which also makes restart the
+    // natural healing path after Chat/server interruption.
+    runtime
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .map_err(map_core_hermes_error)?;
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
@@ -638,6 +654,7 @@ fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, Cl
             segment_id: message.segment_id.clone(),
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
+            kind: message.kind,
             status: HermesMessageStatusV1::Complete,
             finalize: true,
             metadata: BTreeMap::new(),
@@ -657,22 +674,10 @@ fn handle_hermes_service_activity(
 ) -> Result<Value, CliError> {
     let request: HermesActivityRequestV1 =
         serde_json::from_value(payload).map_err(CliError::Json)?;
-    let activity_payload = if matches!(request.action, EphemeralActivityActionV1::Set) {
-        serde_json::to_vec(&request.payload).map_err(CliError::Serialize)?
-    } else {
-        Vec::new()
-    };
+    let input = app_bridge_activity_input(request)?;
     let accepted = state
         .runtime
-        .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
-            room_id: request.room_id,
-            conversation_id: request.conversation_id,
-            activity_kind: request.activity_kind,
-            activity_id: request.activity_id,
-            action: request.action,
-            payload: activity_payload,
-            expires_in_millis: request.expires_in_millis,
-        })
+        .append_ephemeral_activity_and_wait(input)
         .map_err(map_core_hermes_error)?;
     Ok(json!({ "accepted": true, "result": accepted }))
 }
@@ -1967,6 +1972,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
             segment_id: message.segment_id.clone(),
             message_id: message.message_id.clone(),
             text: "Hermes gateway restarted before this turn completed.".to_owned(),
+            kind: message.kind,
             status: HermesMessageStatusV1::Complete,
             finalize: true,
             metadata: BTreeMap::new(),
@@ -2003,7 +2009,8 @@ fn send_hermes_request_with_runtime(
     runtime: &FiniteChatRuntime,
     request: &HermesSendRequestV1,
 ) -> Result<AppSentMessage, CliError> {
-    let hermes_payload = HermesMessagePayloadV1::from_send(request)
+    let request = prepare_hermes_send_attachments(runtime, request)?;
+    let hermes_payload = HermesMessagePayloadV1::from_send(&request)
         .encode()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let app_payload = encode_application_event(
@@ -2018,6 +2025,152 @@ fn send_hermes_request_with_runtime(
         app_payload,
         request.text.clone(),
     )
+}
+
+struct LoadedHermesAttachment {
+    index: usize,
+    outbound: OutboundAttachment,
+}
+
+/// Resolve every raw local path before uploading anything. A missing,
+/// unreadable, empty, or oversized file therefore cannot append a broken
+/// media message (and cannot leave earlier files from the same request
+/// partially uploaded just because a later path was invalid).
+fn prepare_hermes_send_attachments(
+    runtime: &FiniteChatRuntime,
+    request: &HermesSendRequestV1,
+) -> Result<HermesSendRequestV1, CliError> {
+    request
+        .validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+
+    let mut prepared = request.clone();
+    let mut loaded = Vec::new();
+    let mut total_bytes = 0usize;
+    for (index, attachment) in request.attachments.iter().enumerate() {
+        if let Some(blob) = &attachment.blob {
+            // Inbound bridge events materialize verified blobs for Hermes and
+            // therefore carry both `path` and `blob`. If Hermes sends that
+            // attachment back, retain only the durable reference; never leak
+            // an agent-local cache path into the E2EE room log.
+            prepared.attachments[index].path = None;
+            prepared.attachments[index].url = Some(blob.url.clone());
+            continue;
+        }
+        let Some(path) = attachment.path.as_deref() else {
+            continue;
+        };
+        let bytes = read_bounded_hermes_attachment(path, total_bytes)?;
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| CliError::Hermes("local attachment byte total overflowed".to_owned()))?;
+        loaded.push(LoadedHermesAttachment {
+            index,
+            outbound: OutboundAttachment {
+                filename: attachment.name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                kind: match attachment.kind {
+                    finitechat_hermes::HermesAttachmentKindV1::Image => ChatMediaKind::Image,
+                    finitechat_hermes::HermesAttachmentKindV1::Video => ChatMediaKind::Video,
+                    finitechat_hermes::HermesAttachmentKindV1::Audio => ChatMediaKind::VoiceNote,
+                    finitechat_hermes::HermesAttachmentKindV1::File => ChatMediaKind::File,
+                },
+                bytes,
+            },
+        });
+    }
+
+    for attachment in loaded {
+        prepared.attachments[attachment.index] = runtime
+            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)
+            .map_err(map_core_hermes_error)?;
+    }
+    prepared
+        .validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    Ok(prepared)
+}
+
+fn read_bounded_hermes_attachment(path: &str, prior_bytes: usize) -> Result<Vec<u8>, CliError> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() {
+        return Err(CliError::Hermes(
+            "local attachment path must not be empty".to_owned(),
+        ));
+    }
+    let mut file = fs::File::open(path).map_err(|error| {
+        CliError::Hermes(format!(
+            "could not open local attachment {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        CliError::Hermes(format!(
+            "could not inspect local attachment {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(CliError::Hermes(format!(
+            "local attachment {} is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() == 0 {
+        return Err(CliError::Hermes(format!(
+            "local attachment {} is empty",
+            path.display()
+        )));
+    }
+    if metadata.len() > u64::from(MAX_ATTACHMENT_PLAINTEXT_BYTES) {
+        return Err(CliError::Hermes(format!(
+            "local attachment {} exceeds the {} byte limit",
+            path.display(),
+            MAX_ATTACHMENT_PLAINTEXT_BYTES
+        )));
+    }
+    let remaining_total = MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES
+        .checked_sub(prior_bytes)
+        .ok_or_else(|| CliError::Hermes("local attachment batch is too large".to_owned()))?;
+    if metadata.len() > remaining_total as u64 {
+        return Err(CliError::Hermes(format!(
+            "local attachments exceed the {} byte batch limit",
+            MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES
+        )));
+    }
+
+    let expected_len = usize::try_from(metadata.len())
+        .map_err(|_| CliError::Hermes("local attachment is too large for this host".to_owned()))?;
+    let allowed = remaining_total.min(MAX_ATTACHMENT_PLAINTEXT_BYTES as usize);
+    let mut bytes = Vec::with_capacity(expected_len.min(allowed));
+    Read::take(&mut file, (allowed as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CliError::Hermes(format!(
+                "could not read local attachment {}: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() > MAX_ATTACHMENT_PLAINTEXT_BYTES as usize {
+        return Err(CliError::Hermes(format!(
+            "local attachment {} exceeds the {} byte limit",
+            path.display(),
+            MAX_ATTACHMENT_PLAINTEXT_BYTES
+        )));
+    }
+    if bytes.len() > remaining_total {
+        return Err(CliError::Hermes(format!(
+            "local attachments exceed the {} byte batch limit",
+            MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES
+        )));
+    }
+    if bytes.is_empty() {
+        return Err(CliError::Hermes(format!(
+            "local attachment {} is empty",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn edit_hermes_request_with_runtime(
@@ -2072,6 +2225,8 @@ struct HermesRunningMessage {
     conversation_id: Option<String>,
     #[serde(default)]
     segment_id: Option<String>,
+    #[serde(default)]
+    kind: finitechat_hermes::HermesSendKindV1,
     message_id: String,
 }
 
@@ -2106,6 +2261,7 @@ fn update_running_after_send(
             room_id: request.room_id.clone(),
             conversation_id: request.conversation_id.clone(),
             segment_id: request.segment_id.clone(),
+            kind: request.kind,
             message_id: message_id.to_owned(),
         },
     )
@@ -2124,6 +2280,7 @@ fn update_running_after_edit(
             room_id: request.room_id.clone(),
             conversation_id: request.conversation_id.clone(),
             segment_id: request.segment_id.clone(),
+            kind: request.kind,
             message_id: request.message_id.clone(),
         },
     )
@@ -2161,27 +2318,35 @@ fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Re
     let request: HermesActivityRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let payload = if matches!(request.action, EphemeralActivityActionV1::Set) {
-        serde_json::to_vec(&request.payload).map_err(CliError::Serialize)?
-    } else {
-        Vec::new()
-    };
+    let input = app_bridge_activity_input(request)?;
     let runtime = open_agent_runtime(&home)?;
     runtime
         .dispatch_and_wait(AppAction::StartRuntime)
         .map_err(map_core_hermes_error)?;
     let accepted = runtime
-        .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
-            room_id: request.room_id,
-            conversation_id: request.conversation_id,
-            activity_kind: request.activity_kind,
-            activity_id: request.activity_id,
-            action: request.action,
-            payload,
-            expires_in_millis: request.expires_in_millis,
-        })
+        .append_ephemeral_activity_and_wait(input)
         .map_err(map_core_hermes_error)?;
     crate::write_pretty_json(output, &json!({ "accepted": true, "result": accepted }))
+}
+
+fn app_bridge_activity_input(
+    request: HermesActivityRequestV1,
+) -> Result<AppBridgeActivityInput, CliError> {
+    let payload = if matches!(request.action, EphemeralActivityActionV1::Set) {
+        serde_json::to_vec(&request.payload).map_err(CliError::Serialize)?
+    } else {
+        Vec::new()
+    };
+    Ok(AppBridgeActivityInput {
+        room_id: request.room_id,
+        conversation_id: request.conversation_id,
+        segment_id: request.segment_id,
+        activity_kind: request.activity_kind,
+        activity_id: request.activity_id,
+        action: request.action,
+        payload,
+        expires_in_millis: request.expires_in_millis,
+    })
 }
 
 // --- agent home plumbing ---
@@ -3017,6 +3182,25 @@ mod tests {
     }
 
     #[test]
+    fn hermes_activity_bridge_preserves_topic_and_segment_scope() {
+        let input = app_bridge_activity_input(HermesActivityRequestV1 {
+            room_id: "room-main".to_owned(),
+            conversation_id: Some("topic-build".to_owned()),
+            segment_id: Some("segment-7".to_owned()),
+            activity_kind: finitechat_proto::FINITECHAT_ACTIVITY_KIND_WORKING.to_owned(),
+            activity_id: None,
+            action: EphemeralActivityActionV1::Set,
+            payload: json!({"phase": "tool"}),
+            expires_in_millis: 15_000,
+        })
+        .unwrap();
+
+        assert_eq!(input.conversation_id.as_deref(), Some("topic-build"));
+        assert_eq!(input.segment_id.as_deref(), Some("segment-7"));
+        assert_eq!(input.payload, br#"{"phase":"tool"}"#);
+    }
+
+    #[test]
     fn wrapped_chat_event_conversation_id_reaches_poll_event() {
         let home = tempfile::tempdir().unwrap();
         let hermes_payload = HermesMessagePayloadV1 {
@@ -3244,5 +3428,50 @@ mod tests {
         assert_eq!(rooms.len(), 1);
         assert_eq!(rooms[0].room_id, "room-remote");
         assert_eq!(rooms[0].after_seq, 7);
+    }
+
+    #[test]
+    fn local_attachment_reader_is_bounded_and_rejects_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid.png");
+        fs::write(&valid, b"small image bytes").unwrap();
+        assert_eq!(
+            read_bounded_hermes_attachment(valid.to_str().unwrap(), 0).unwrap(),
+            b"small image bytes"
+        );
+
+        let missing = dir.path().join("missing.png");
+        let missing_error =
+            read_bounded_hermes_attachment(missing.to_str().unwrap(), 0).unwrap_err();
+        assert!(missing_error.to_string().contains("could not open"));
+
+        let empty = dir.path().join("empty.png");
+        fs::write(&empty, []).unwrap();
+        let empty_error = read_bounded_hermes_attachment(empty.to_str().unwrap(), 0).unwrap_err();
+        assert!(empty_error.to_string().contains("is empty"));
+
+        let directory_error =
+            read_bounded_hermes_attachment(dir.path().to_str().unwrap(), 0).unwrap_err();
+        assert!(
+            directory_error
+                .to_string()
+                .contains("is not a regular file")
+        );
+
+        let oversized = dir.path().join("oversized.bin");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(u64::from(MAX_ATTACHMENT_PLAINTEXT_BYTES) + 1)
+            .unwrap();
+        let oversized_error =
+            read_bounded_hermes_attachment(oversized.to_str().unwrap(), 0).unwrap_err();
+        assert!(oversized_error.to_string().contains("exceeds the"));
+
+        let batch_error = read_bounded_hermes_attachment(
+            valid.to_str().unwrap(),
+            MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES - 1,
+        )
+        .unwrap_err();
+        assert!(batch_error.to_string().contains("batch limit"));
     }
 }

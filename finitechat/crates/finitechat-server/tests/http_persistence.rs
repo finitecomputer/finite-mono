@@ -29,7 +29,7 @@ use finitechat_http::{
     ReleaseLinkClaimResponse, RemovePushTokenRequest, RemovePushTokenResponse,
     ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
     SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest,
-    SyncWaitRequest, SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest,
+    SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest,
     UpdateRoomAdminsResponse, UploadLinkPayloadRequest,
 };
 use finitechat_proto::{
@@ -8042,6 +8042,7 @@ async fn sqlite_sync_stream_emits_coalesced_high_watermark_hints() {
                 room_id: room_id.clone(),
                 after_seq: 0,
             }],
+            inbox: None,
             heartbeat_ms: Some(60_000),
         },
     )
@@ -8106,5 +8107,74 @@ async fn sqlite_sync_stream_emits_coalesced_high_watermark_hints() {
             room_id: room_id.clone(),
             seq: 3,
         }
+    );
+}
+
+#[tokio::test]
+async fn sqlite_sync_stream_wakes_zero_room_device_for_persisted_welcome() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-agent");
+    let bob = DeviceRef::new("bob", "bob-new-device");
+    let room_id = "room-inbox-sync-stream".to_owned();
+    let mls_group_id = "mls-inbox-sync-stream".to_owned();
+    let app = persistent_app(&db_path);
+
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = post_json(
+        app.clone(),
+        "/sync/stream",
+        &SyncStreamRequest {
+            rooms: Vec::new(),
+            inbox: Some(SyncWaitInbox::new(delivery_member_id_for_device(&bob), 0)),
+            heartbeat_ms: Some(60_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut armed_stream = response.into_body().into_data_stream();
+
+    let add_bob = submit_add_device_request_at_epoch(&room_id, &mls_group_id, &alice, &bob, 0);
+    publish_and_claim_key_package_for_add(&app, &add_bob).await;
+    let response = post_json(app.clone(), "/commits", &add_bob).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        read_next_sync_hint(&mut armed_stream).await,
+        SyncHintEvent::InboxAdvanced { seq: 1 }
+    );
+
+    // Hints carry no authority and the durable inbox survives a server
+    // restart. A Device that was offline for the release gets the same wake
+    // from its persisted cursor and can repair through the normal sync path.
+    drop(armed_stream);
+    drop(app);
+    let restarted = persistent_app(&db_path);
+    let response = post_json(
+        restarted,
+        "/sync/stream",
+        &SyncStreamRequest {
+            rooms: Vec::new(),
+            inbox: Some(SyncWaitInbox::new(delivery_member_id_for_device(&bob), 0)),
+            heartbeat_ms: Some(60_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut restarted_stream = response.into_body().into_data_stream();
+    assert_eq!(
+        read_next_sync_hint(&mut restarted_stream).await,
+        SyncHintEvent::InboxAdvanced { seq: 1 }
     );
 }

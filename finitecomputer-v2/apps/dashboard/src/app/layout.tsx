@@ -1,8 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
+import { AuthKitProvider } from "@workos-inc/authkit-nextjs/components";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import { PWA_THEME_COLOR, PWA_THEME_COLOR_LIGHT } from "@/lib/pwa-manifest";
+import { workosAuthStatus } from "@/lib/workos-auth";
 import "./globals.css";
 
 const funnelSans = localFont({
@@ -100,6 +102,12 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const content = (
+    <ThemeProvider>
+      <TooltipProvider>{children}</TooltipProvider>
+    </ThemeProvider>
+  );
+
   return (
     <html
       lang="en"
@@ -107,9 +115,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
-        <ThemeProvider>
-          <TooltipProvider>{children}</TooltipProvider>
-        </ThemeProvider>
+        {workosAuthStatus().ready ? <AuthKitProvider>{content}</AuthKitProvider> : content}
       </body>
     </html>
   );

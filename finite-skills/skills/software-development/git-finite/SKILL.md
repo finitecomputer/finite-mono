@@ -1,94 +1,88 @@
 ---
 name: git-finite
-description: Use when the user wants to create, clone, inspect, share, or push private repos on Finite's built-in Git host, or hand an outside developer an HTTPS clone URL plus token-based access.
+description: Use Finite Sites Project Repositories for source-only or published Git projects on Finite. Use when creating, listing, cloning, editing, granting access to, or pushing a Finite-hosted repository with fsite and ordinary Git.
 ---
 
-# Git on Finite
+# Git On Finite
 
-Use this skill for the Finite Git host and shared Git collaboration. Prefer `finitec repo ...` over ad hoc token scraping or hand-built authenticated Git commands.
+The supported Finite-hosted Git surface is a Finite Sites Project Repository.
+Use `fsite` for Project and credential operations, then ordinary Git for the
+working tree. Do not scrape credentials or call a retired repository wrapper.
 
-## First principles
+Read `finite-sites-publishing-finite` when the Project serves a site, document,
+or stateful app. A source-only repository uses the same model with no declared
+Project Output.
 
-- Repos are private by default.
-- The machine-local Git identity and token are already injected into `~/.hermes/.env` when the machine has Git access.
-- `finitec repo` is the supported wrapper for machine-owned repo operations.
-- Raw Git over HTTPS is still the underlying transport. `finitec repo git` injects the machine's HTTPS auth header for you.
-- Shared/team skills use the `shared-skills-finite` skill. This skill covers the lower-level Git host commands.
+## Create A Source-Only Project
 
-## Core workflow
+Create `finite.toml`:
 
-### List repos
-
-```bash
-finitec repo list
+```toml
+[project]
+slug = "notes-project"
 ```
 
-Repo listings include the current access mode plus any pending collaborator emails that have not logged into the Git web UI yet.
+Validate, create, and inspect it:
 
-### Create a repo
-
-```bash
-finitec repo create --name notes-app
+```sh
+fsite auth register --output json
+fsite project init --config finite.toml --dry-run --output json
+fsite project init --config finite.toml --output json
+fsite project status notes-project --output json
 ```
 
-Repos are empty by default so the first clone and push stay predictable.
+Add a Project Output later by adding an `[outputs.<id>]` section and replaying
+`project init` with the same Project Slug.
 
-### Clone a repo
+## List And Clone
 
-```bash
-finitec repo clone --name notes-app
+```sh
+fsite project list --output json
+fsite auth git notes-project --store --output json
+git clone https://git.finite.chat/notes-project.git
 ```
 
-Default destination: `~/dev/REPO_NAME`
+Prefer `--store`; do not print Git Credential passwords into chat or logs.
 
-### Work with normal Git commands
+## Work With Git
 
-```bash
-finitec repo git -- -C ~/dev/notes-app status --short --branch
-finitec repo git -- -C ~/dev/notes-app add .
-finitec repo git -- -C ~/dev/notes-app commit -m "Add draft"
-finitec repo git -- -C ~/dev/notes-app push -u origin HEAD:main
+```sh
+git -C notes-project status --short --branch
+git -C notes-project add .
+git -C notes-project commit -m "Add notes"
+git -C notes-project push -u origin HEAD:main
 ```
 
-Before the first commit in a new checkout, set a local identity if Git asks for one:
+Use a repository-local Git author identity when Git requires one. Never infer
+or expose a credential as author metadata.
 
-```bash
-git -C ~/dev/notes-app config user.name "$FC_GITEA_USERNAME"
-git -C ~/dev/notes-app config user.email "${FC_GITEA_USERNAME}@gitea.local.invalid"
+## Collaborators
+
+Use the Project owner identity to grant or revoke edit access:
+
+```sh
+fsite project grant notes-project --email editor@example.com --send-invite --output json
+fsite project revoke notes-project --email editor@example.com --output json
 ```
 
-## Shared Skills
+An email-only collaborator verifies the email, mints a scoped credential, and
+then uses ordinary Git:
 
-If the human is trying to publish, update, pull, or install a team-shared Hermes
-skill, use `shared-skills-finite` instead of this lower-level Git workflow. The
-old `finitec repo bootstrap-shared-skills` and `~/shared-skills` flow is retired.
-
-## Repo permissions
-
-Use `finitec repo permissions` instead of sending people into Gitea settings:
-
-```bash
-finitec repo permissions --name notes-app view
-finitec repo permissions --name notes-app emails --email austin@finite.vip
-finitec repo permissions --name notes-app org --org-domain finite.vip
-finitec repo permissions --name notes-app self
-finitec repo permissions --name notes-app public --confirm-public "MAKE PUBLIC"
+```sh
+fsite auth login editor@example.com
+fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --output json
+fsite auth git notes-project --email editor@example.com --store --output json
 ```
 
-- `self` keeps the repo private to the machine owner.
-- `emails` grants write access to explicit collaborator emails after those users have logged into the Git web UI once.
-- `org` grants write access to everyone whose Gitea account email matches the org domain.
-- `public` makes the repo anonymously cloneable. Pushes still require normal auth.
-
-## Outside developers
-
-- Outside developers should use the repo's HTTPS clone URL plus a Gitea personal access token.
-- If a collaborator email is still pending, ask them to sign into the Git web UI once so Finite can map that email to a Gitea account.
-- After that, give them the HTTPS clone URL and tell them to authenticate with a Gitea PAT.
+Project Repository edit access is separate from viewer access to a served
+Project Output. Do not make a repository or output public merely to collaborate
+or preview. Public-read repository policy for selected Finite-owned baselines
+is an operator concern, not a general user command.
 
 ## Guardrails
 
-- Do not expose Git credentials directly when `finitec repo ...` can do the job.
-- Do not make repos public unless the human explicitly asks for that.
-- Prefer `finitec repo git -- -C PATH ...` over inventing manual `Authorization` headers.
-- If a shared skill is only an experiment, use a new skill name rather than shadowing a managed `-finite` skill immediately.
+- Use Project-scoped credentials and ordinary Git.
+- Keep `.env*`, `.finite/`, private keys, tokens, and build caches out of Git.
+- Never reconstruct source from a served website; clone its Project Repository.
+- Do not claim team skill installation from a Project Repository. Skill
+  distribution has a separate product contract.

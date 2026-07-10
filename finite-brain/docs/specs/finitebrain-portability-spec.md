@@ -66,6 +66,11 @@ FiniteBrain server:
 - MUST NOT require Page plaintext for authorization or sync.
 - Cannot recover a User's Folder Keys after Nostr key loss.
 
+That server limitation is not a complete product recovery posture. A durable
+Finite Product Release MUST establish and test an independent user-held or
+Finite-assisted Recovery Principal/backup path for every Folder before relying
+on that Folder as the sole copy of user data.
+
 ## 3. Identity And Auth
 
 ### 3.1 User Identity
@@ -77,6 +82,13 @@ as separate users or members.
 Changing Nostr identity creates a new User from the access-control perspective.
 Nostr key loss means existing Folder Key Grants cannot be decrypted by the new
 identity.
+
+A product-scoped Email Access Delegation may authorize a distinct Agent
+Principal to exercise one verified email Principal's FiniteBrain grants, but it
+does not change either identity and never substitutes for cryptographic access.
+Every readable Folder still requires a current Folder Key Grant addressed to
+the agent npub. Sites delegations have no effect in FiniteBrain, and revocation
+must be independently enforceable here.
 
 ### 3.2 Browser Signing Interface
 
@@ -2018,6 +2030,12 @@ Key loss and recovery:
   an explicit recovery/rotation process for content that can still be read.
 - Finish Setup repairs missing grants for empty/setup-incomplete Folders; it
   does not decrypt or recover existing encrypted content.
+- A first-slice durable Folder MUST have an independently recoverable current
+  Folder Key Grant or encrypted user-held key backup before accepting content.
+  Restoring server ciphertext alone does not satisfy recovery.
+- The recovery test MUST delete the primary signer/key state and prove that the
+  Recovery Principal can reopen the Folder on an empty replacement client;
+  otherwise the Folder is a non-durable preview.
 
 ### 16.2 Search And Index Privacy
 

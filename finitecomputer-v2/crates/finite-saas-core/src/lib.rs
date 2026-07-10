@@ -5298,7 +5298,7 @@ mod tests {
             .get_mut(&runtime_id)
             .unwrap()
             .host_facts
-            .published_app_urls = vec!["https://oslo-agent.example.com/invite".to_string()];
+            .published_app_urls = vec!["https://oslo-agent.example.com/contact".to_string()];
 
         let stop = state
             .request_runtime_stop(RequestRuntimeStopInput {
@@ -5335,7 +5335,7 @@ mod tests {
         );
         assert_eq!(
             stopped_runtime.host_facts.published_app_urls,
-            vec!["https://oslo-agent.example.com/invite".to_string()]
+            vec!["https://oslo-agent.example.com/contact".to_string()]
         );
 
         let destroy = state
@@ -5864,7 +5864,7 @@ mod tests {
                 runtime_status: Some(RuntimeSummaryStatus::Online),
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
-                published_app_urls: vec!["https://paid-agent.example.com/invite".to_string()],
+                published_app_urls: vec!["https://paid-agent.example.com/contact".to_string()],
                 now: Some("2026-05-25T13:03:00Z".to_string()),
             })
             .unwrap();

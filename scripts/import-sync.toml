@@ -37,11 +37,6 @@ mono_dir = "finite-nostr"
 source_url = "https://github.com/finitecomputer/finite-nostr"
 last_import_sha = "fefd22b3f3c39481225a28000bba0b2b9354d1ce"
 
-[finite-auth]
-mono_dir = "finite-auth"
-source_url = "https://github.com/finitecomputer/finite-auth"
-last_import_sha = "13347c93650b55be819d37ec77fbc3b50664a432"
-
 [finite-search]
 mono_dir = "finite-search"
 source_url = "https://github.com/finitecomputer/finite-search"

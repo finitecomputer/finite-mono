@@ -21,6 +21,31 @@ export type AccountAuthContext = {
   source: "workos" | "header" | "dev" | "none";
 };
 
+/**
+ * Return the launch code used by the explicit local-development account.
+ *
+ * The code is never accepted from a browser field.  It is available only when
+ * the request resolved to the configured dev account and the same opt-in that
+ * permits dev-account Core authentication is enabled.  WorkOS sessions always
+ * take the normal billing path, even if a developer accidentally leaves the
+ * dev launch-code environment variable set.
+ */
+export function dashboardDevLaunchCode(
+  account: AccountAuthContext,
+  env: Record<string, string | undefined> = process.env
+) {
+  if (
+    account.source !== "dev" ||
+    !account.email ||
+    !account.workosUserId ||
+    !account.emailVerified ||
+    env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH !== "1"
+  ) {
+    return "";
+  }
+  return env.FC_DASHBOARD_DEV_LAUNCH_CODE?.trim() ?? "";
+}
+
 type WorkosSessionCookie = {
   accessToken?: unknown;
   user?: {

@@ -52,8 +52,9 @@ REQUIRED_REGRESSIONS: dict[str, list[str]] = {
     "receipt/control stream filtering": [
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_skips_typed_receipt_records_without_dispatch_or_ack",
     ],
-    "inbound stream fallback": [
-        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_falls_back_to_poll_after_stream_transport_error",
+    "strict inbound stream recovery": [
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_reconnects_and_catches_up_without_poll_fallback",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_strict_stream_service_failure_never_falls_back_to_cli",
     ],
 }
 

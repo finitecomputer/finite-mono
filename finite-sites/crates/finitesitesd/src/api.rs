@@ -12,10 +12,10 @@ use axum::routing::{get, post};
 
 use finitesites_engine::EngineError;
 use finitesites_proto::dto::{
-    ApiErrorBody, AuthRegisterResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
-    ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest,
+    ApiErrorBody, AuthRegisterResponse, ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE,
+    GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
+    ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
+    ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
 };
 use finitesites_proto::limits::MAX_API_BODY_BYTES;
 use finitesites_proto::{ProtoError, nip98};
@@ -185,8 +185,21 @@ fn log_if_internal(error: &EngineError) {
 
 // ---- handlers -------------------------------------------------------------------
 
-async fn healthz() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true }))
+async fn healthz() -> Response {
+    git_health_response(crate::git::preflight_git_dependency()).into_response()
+}
+
+fn git_health_response(preflight: Result<(), String>) -> (StatusCode, Json<serde_json::Value>) {
+    match preflight {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": ERROR_GIT_UNAVAILABLE,
+            })),
+        ),
+    }
 }
 
 async fn api_not_found() -> ApiError {
@@ -287,6 +300,14 @@ async fn init_project(
 ) -> Result<Json<ProjectInitResponse>, ApiError> {
     let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: ProjectInitRequest = parse_json_body(&body)?;
+    if let Err(error) = crate::git::preflight_git_dependency() {
+        eprintln!("finitesitesd Git dependency unavailable before project init: {error}");
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ERROR_GIT_UNAVAILABLE,
+            "Git publishing is temporarily unavailable; no Project Init state changed. Wait for service health to recover, then retry this request once.",
+        ));
+    }
     let git_remote_url = git_remote_url(&state, &request.config.project.slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let response = engine
@@ -305,7 +326,11 @@ async fn init_project(
         )
     {
         eprintln!("finitesitesd project repo setup failed: {error}");
-        return Err(internal_error("git repository setup failure"));
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ERROR_GIT_REPOSITORY_SETUP_FAILED,
+            "Project registry state was saved, but Git repository setup failed. After an operator repairs the Git dependency or repository storage, replay this exact Project Init request once; replay repairs the repository without creating a duplicate Project.",
+        ));
     }
     Ok(Json(response))
 }
@@ -577,4 +602,24 @@ fn send_project_collaborator_invite(
 
 fn git_remote_url_for_base(base: &str, slug: &str) -> String {
     format!("{base}/{slug}.git")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_is_unavailable_when_git_preflight_fails() {
+        let (status, Json(body)) = git_health_response(Err("missing git".to_string()));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], ERROR_GIT_UNAVAILABLE);
+    }
+
+    #[test]
+    fn healthy_response_keeps_the_stable_success_body() {
+        let (status, Json(body)) = git_health_response(Ok(()));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({ "ok": true }));
+    }
 }

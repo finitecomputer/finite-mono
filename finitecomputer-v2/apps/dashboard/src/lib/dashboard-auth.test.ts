@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { accountFromWorkosSessionCookie, getAccountAuthContext } from "./dashboard-auth";
+import {
+  accountFromWorkosSessionCookie,
+  dashboardDevLaunchCode,
+  getAccountAuthContext,
+  type AccountAuthContext,
+} from "./dashboard-auth";
 
 function unsignedJwt(payload: object) {
   return [
@@ -105,4 +110,35 @@ test("dev identity override provides a verified dev account for browser tests", 
       process.env.FC_WORKOS_AUTH_ENABLED = previousWorkosEnabled;
     }
   }
+});
+
+test("dev launch code requires the explicit verified dev-account boundary", () => {
+  const devAccount: AccountAuthContext = {
+    email: "developer@finite.computer",
+    workosUserId: "user_developer",
+    emailVerified: true,
+    source: "dev",
+  };
+  const enabled = {
+    FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
+    FC_DASHBOARD_DEV_LAUNCH_CODE: "  local-launch  ",
+  };
+
+  assert.equal(dashboardDevLaunchCode(devAccount, enabled), "local-launch");
+  assert.equal(
+    dashboardDevLaunchCode(devAccount, {
+      ...enabled,
+      FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "0",
+    }),
+    ""
+  );
+  assert.equal(
+    dashboardDevLaunchCode({ ...devAccount, emailVerified: false }, enabled),
+    ""
+  );
+  assert.equal(
+    dashboardDevLaunchCode({ ...devAccount, source: "workos" }, enabled),
+    "",
+    "a WorkOS user must never inherit the local launch entitlement"
+  );
 });

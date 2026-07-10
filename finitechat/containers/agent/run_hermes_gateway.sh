@@ -20,19 +20,24 @@ else
 fi
 api_mode="${FINITECHAT_HERMES_API_MODE:-chat_completions}"
 api_key=""
-api_key_yaml=""
+api_key_reference=""
 if [[ -n "${FINITECHAT_HERMES_API_KEY:-}" ]]; then
     api_key="${FINITECHAT_HERMES_API_KEY}"
-    api_key_yaml='  api_key: ${FINITECHAT_HERMES_API_KEY}'
+    # shellcheck disable=SC2016 # Hermes expands this reference, not the shell.
+    api_key_reference='${FINITECHAT_HERMES_API_KEY}'
 elif [[ -n "${FINITE_PRIVATE_API_KEY:-}" ]]; then
     api_key="${FINITE_PRIVATE_API_KEY}"
-    api_key_yaml='  api_key: ${FINITE_PRIVATE_API_KEY}'
+    # shellcheck disable=SC2016 # Hermes expands this reference, not the shell.
+    api_key_reference='${FINITE_PRIVATE_API_KEY}'
 fi
 service_addr="${FINITECHAT_HERMES_SERVICE_ADDR:-127.0.0.1:0}"
 poll_timeout_secs="${FINITECHAT_HERMES_POLL_TIMEOUT_SECS:-1}"
 poll_limit="${FINITECHAT_HERMES_POLL_LIMIT:-10}"
 title_generation_timeout_secs="${FINITECHAT_HERMES_TITLE_TIMEOUT_SECS:-2}"
 workspace="${FINITECHAT_WORKSPACE:-/workspace}"
+managed_skills_dir="${agent_home}/managed-skills/finite/current"
+bundled_skills_dir="${FINITE_BUNDLED_SKILLS_DIR:-/runtime/finite-skills}"
+config_reconciler="${FINITE_HERMES_CONFIG_RECONCILER:-/opt/reconcile_hermes_config.py}"
 
 export FINITECHAT_HOME="$agent_home"
 # Shared Finite identity on the durable mount (identity/identity.json).
@@ -49,7 +54,9 @@ export FINITE_AGENT_NAME="$agent_name"
 
 mkdir -p "$agent_home" "$hermes_home/plugins" "$workspace"
 
-if [[ "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" && -z "$api_key" ]]; then
+if [[ ! -f "${hermes_home}/config.yaml" \
+    && "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" \
+    && -z "$api_key" ]]; then
     echo "FINITE_DEFAULT_INFERENCE_PROFILE=finite-private requires FINITE_PRIVATE_API_KEY; refusing OpenRouter fallback." >&2
     exit 64
 fi
@@ -57,6 +64,24 @@ fi
 if [[ ! -f "${agent_home}/config.json" ]]; then
     if [[ -z "$server_url" ]]; then
         echo "FINITE_AGENT_START_ERROR missing FINITE_SERVER_URL for first initialization" >&2
+        exit 64
+    fi
+    # New agents receive the image's Finite Skills baseline exactly once.
+    # The durable directory belongs to the agent after this seed: image
+    # upgrades and restarts never rewrite it. Existing agents update only via
+    # the explicit `finite skills sync` path once that command is available.
+    if [[ ! -d "$managed_skills_dir" && -d "$bundled_skills_dir" ]]; then
+        mkdir -p "$(dirname "$managed_skills_dir")"
+        managed_skills_staging="$(mktemp -d "${managed_skills_dir}.seed.XXXXXX")"
+        if ! cp -a "${bundled_skills_dir}/." "$managed_skills_staging/" \
+            || [[ ! -f "${managed_skills_staging}/software-development/finitebrain/SKILL.md" ]]; then
+            rm -rf "$managed_skills_staging"
+            echo "FINITE_AGENT_START_ERROR could not seed bundled Finite Skills" >&2
+            exit 64
+        fi
+        mv "$managed_skills_staging" "$managed_skills_dir"
+    elif [[ ! -d "$managed_skills_dir" && "${FINITE_REQUIRE_BUNDLED_SKILLS:-0}" == "1" ]]; then
+        echo "FINITE_AGENT_START_ERROR missing bundled Finite Skills at $bundled_skills_dir" >&2
         exit 64
     fi
     "$finitechat_bin" hermes --home "$agent_home" init \
@@ -75,92 +100,37 @@ fi
     --json \
     >/dev/null
 
-invite_file="${agent_home}/current-invite.json"
-# Hosted pairing is no-PIN, so the startup invite must be single-use and
-# short-lived. Keep this policy in sync with health_server.py, which owns
-# refresh/paired state for the same cache file.
-invite_ttl_ms="${FINITE_AGENT_INVITE_TTL_MS:-3600000}"
-if [[ -f "$invite_file" ]]; then
-    cp "$invite_file" /tmp/finitechat-invite.json
-else
-    "$finitechat_bin" hermes --home "$agent_home" invite \
-        --room-name "$agent_name" \
-        --max-joins 1 \
-        --ttl-ms "$invite_ttl_ms" \
-        --json \
-        >"$invite_file"
-    cp "$invite_file" /tmp/finitechat-invite.json
+# Room admission is Welcome-first: the Hosted Web Device publishes its
+# KeyPackage and starts a profile chat with the Agent Principal. The runtime
+# must not recreate the deleted invite-session protocol or invent a room before
+# a real Device asks to chat. Once a room exists, normal inbound routing and an
+# explicit local home-channel choice remain owned by Finite Chat/Hermes state.
+
+managed_skills_config_dir=""
+if [[ -d "$managed_skills_dir" ]]; then
+    managed_skills_config_dir="$managed_skills_dir"
 fi
 
-# The hosted runtime starts with one user-facing room. Make that room the
-# default Hermes home channel unless the agent already has one. Without this,
-# first contact can get stuck behind a repeated "type /sethome" onboarding
-# prompt even though the gateway is otherwise healthy.
-invite_room_id="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("room_id") or "")' "$invite_file")"
-if "$finitechat_bin" hermes --home "$agent_home" home-channel show \
-    | python -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("home_channel") else 1)' \
-    >/dev/null 2>&1; then
-    :
-else
-    if [[ -n "$invite_room_id" ]]; then
-        "$finitechat_bin" hermes --home "$agent_home" home-channel set \
-            --room-id "$invite_room_id" \
-            >/dev/null \
-            || echo "FINITE_AGENT_HOME_CHANNEL_WARN failed_to_set room_id=$invite_room_id" >&2
-    fi
-fi
-if [[ -n "$invite_room_id" ]]; then
-    # Hermes core uses this env var for first-contact onboarding notices, while
-    # cron/handoff delivery reads the gateway platform home_channel below. Keep
-    # both pointed at the same hosted invite room.
-    export FINITECHAT_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-$invite_room_id}"
-fi
-
-gateway_home_channel_yaml=""
-if [[ -n "${FINITECHAT_HOME_CHANNEL:-}" ]]; then
-    gateway_home_channel_yaml="      home_channel:
-        platform: finitechat
-        chat_id: ${FINITECHAT_HOME_CHANNEL}
-        name: Finite Chat Home"
-fi
-
-cat >"${hermes_home}/config.yaml" <<EOF
-model:
-  default: ${model}
-  provider: ${provider}
-  base_url: ${base_url}
-  api_mode: ${api_mode}
-${api_key_yaml}
-plugins:
-  enabled:
-    - ${plugin_name}
-auxiliary:
-  title_generation:
-    timeout: ${title_generation_timeout_secs}
-gateway:
-  platforms:
-    finitechat:
-      enabled: true
-      extra:
-        home: ${agent_home}
-        finitechat_bin: ${finitechat_bin}
-        inbound_stream: true
-        service_addr: ${service_addr}
-        poll_timeout_secs: ${poll_timeout_secs}
-        poll_limit: ${poll_limit}
-${gateway_home_channel_yaml}
-terminal:
-  backend: local
-  cwd: ${workspace}
-  persistent_shell: true
-approvals:
-  mode: off
-display:
-  streaming: false
-security:
-  redact_secrets: true
-_config_version: 10
-EOF
+# Seed product defaults only when config.yaml is absent. Thereafter the image
+# repairs only the Finite Chat transport and managed-skills registration. In
+# particular, model/provider settings and Telegram/other Hermes platforms are
+# Hermes/user-owned and must survive every runtime restart and image upgrade.
+FINITE_CONFIG_MODEL="$model" \
+FINITE_CONFIG_PROVIDER="$provider" \
+FINITE_CONFIG_BASE_URL="$base_url" \
+FINITE_CONFIG_API_MODE="$api_mode" \
+FINITE_CONFIG_API_KEY_REFERENCE="$api_key_reference" \
+FINITE_CONFIG_PLUGIN_NAME="$plugin_name" \
+FINITE_CONFIG_TITLE_TIMEOUT_SECS="$title_generation_timeout_secs" \
+FINITE_CONFIG_AGENT_HOME="$agent_home" \
+FINITE_CONFIG_FINITECHAT_BIN="$finitechat_bin" \
+FINITE_CONFIG_SERVICE_ADDR="$service_addr" \
+FINITE_CONFIG_POLL_TIMEOUT_SECS="$poll_timeout_secs" \
+FINITE_CONFIG_POLL_LIMIT="$poll_limit" \
+FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}" \
+FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir" \
+FINITE_CONFIG_WORKSPACE="$workspace" \
+python "$config_reconciler" --config "${hermes_home}/config.yaml"
 
 python /opt/health_server.py &
 health_pid="$!"

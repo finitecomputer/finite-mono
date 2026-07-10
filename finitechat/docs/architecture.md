@@ -62,12 +62,14 @@ client), `finitechat-transport` (shared transport value types), and
   self-update commit — ADR 0003 §7). Clients verify these credentials at
   every KeyPackage parse, commit merge, and Welcome activation; **the server
   is never an identity authority** (ADR 0001).
-- The account key is the **shared Finite identity** (Finite Identity
-  Contract v1, the `finite-identity` crate): one key per user/agent at
+- The account key is the **Local Identity Key** for that account's Finite Home
+  (Finite Identity Contract v1, the `finite-identity` crate): one key per
+  human or agent identity home at
   `$FINITE_HOME/identity/identity.json` (hosted runtimes pin
   `FINITE_HOME=/data/agent`), else `~/.finite/identity/identity.json`,
   minted under an exclusive lock by whichever Finite tool runs first and
-  found by all others (fsite, fbrain, hosted runtimes). CLI/agent flows load
+  found by all others in that same home (fsite, fbrain, hosted runtimes). A
+  human chat account and Agent Runtime never share this key. CLI/agent flows load
   it once into memory at open (`FiniteChatRuntime::open` with no explicit
   secret; `finitechat auth status`/`auth import` are the CLI surface); the
   secret is never copied into finitechat's own stores — the legacy
@@ -294,3 +296,9 @@ blob-reference design, calls, and the home-server/room-server split
 the degenerate case of one server playing both roles). Each room keeps a
 single ordering authority by design at every phase; what eventually shards
 is *which* server holds that authority, per room.
+
+Also not built yet: guided User Key backup, Hosted Web Device store recovery,
+and encrypted pre-membership History Recovery for a replacement Device.
+Restoring an nsec and linking a Device recovers account authority, not old MLS
+history. These are first-slice Recoverability Contract blockers wherever the
+SaaS promises retained chat history.

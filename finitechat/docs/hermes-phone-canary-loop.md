@@ -1,8 +1,12 @@
 # Fresh Hermes Phone Canary Loop
 
-Status: Finite Chat local-phone and remote-Docker canary runbook. The hosted
-runtime provider ladder now lives in
-`../finitecomputer-v2/docs/hermes-runtime-test-matrix.md`.
+Status: historical runbook, retained as failure-analysis context. Its
+invite/PIN admission commands are not a current product or promotion path.
+The canonical proof ladder is
+[`finitecomputer-v2/docs/hermes-runtime-test-matrix.md`](../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md):
+Agent Principal discovery, Welcome-first admission, Hosted Web Device, local
+Apple Container, Kata, then Phala. Physical-phone coverage must be rewritten
+on that same Device contract before this runbook can become active again.
 
 ## Problem Statement
 
@@ -92,7 +96,7 @@ are null for that layer:
   },
   "runtime": {
     "finitechat_version": "...",
-    "hermes_agent_version": "0.17.0",
+    "hermes_agent_version": "0.18.2",
     "plugin_name": "finitechat",
     "plugin_hash": "...",
     "image_ref": null,
@@ -142,7 +146,7 @@ deployment variables.
 Recommended defaults:
 
 - Finite Chat server: `https://chat.finite.computer`.
-- Hermes: `hermes-agent==0.17.0` unless this doc is updated with a newer
+- Hermes: `hermes-agent==0.18.2` unless this doc is updated with a newer
   supported version.
 - Agent state: fresh timestamped root under
   `target/hermes-phone-canary/local/<run-id>`.
@@ -265,7 +269,7 @@ must be rerun.
 
 Provider-specific runtime promotion belongs to
 `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md`. That v2 matrix owns
-the local Docker, remote Docker, and Phala acceptance rules for the real hosted
+the local Docker, Kata, and Phala acceptance rules for the real hosted
 agent image. Finite Chat should feed that matrix a proven app/protocol/plugin
 commit, not maintain a separate provider ladder here.
 

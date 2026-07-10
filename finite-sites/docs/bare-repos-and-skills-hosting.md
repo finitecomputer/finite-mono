@@ -11,8 +11,8 @@ self-serve runtime shape. Finite Sites should cover both useful behaviors:
 
 - Project Repositories replace machine-owned `finitec repo` workflows.
 - Project Outputs replace `finitec publish` website workflows.
-- A Finite-managed skills repository can live in Finite Sites instead of
-  depending on GitHub as the canonical runtime sync source.
+- A Finite-managed skills Distribution Mirror can live in Finite Sites instead
+  of making GitHub a production runtime dependency.
 
 The product vocabulary supports this direction: a Project Repository is the
 source primitive and may exist before a public-facing output exists.
@@ -76,15 +76,18 @@ Hard constraints:
 - Existing output config changes remain rejected until an explicit update
   design exists.
 
-### Skills Repository With Browsable Output
+### Skills Distribution Mirror With Browsable Output
 
-The canonical `finite-skills` source can be a Project Repository. Runtime sync
-should clone or fetch the repo through Finite Sites, while humans and agents can
-browse a Project Output generated from the same source tree.
+The canonical editable source is `finite-mono/finite-skills`. Release automation
+can publish immutable Finite Skills Revisions into a `finite-skills` Project
+Repository Distribution Mirror. Runtimes fetch an exact promoted revision
+through Finite Sites, while humans and agents can browse a Project Output
+generated from that same revision.
 
 Runtime read policy decision:
 
-- Finite-owned baseline skills use public read-only Project Visibility.
+- The Finite-owned baseline Distribution Mirror uses public read-only Project
+  Visibility.
 - Public read-only means unauthenticated `git clone` and `git fetch` are
   allowed for that selected Project Repository.
 - The initial mutation surface is the operator command
@@ -96,6 +99,8 @@ Runtime read policy decision:
   Core-granted read credentials for hosted Agent Runtimes.
 - Output visibility remains separate. A browsable docs output can be public,
   shared, or private without changing whether runtime Git fetches are public.
+- Mirror writes come only from release automation publishing a promoted
+  monorepo revision. Runtime activation never follows `main`.
 
 The clean final shape:
 
@@ -111,8 +116,8 @@ path = "skills"
 ```
 
 Document Output is the preferred browsable shape for Markdown-backed skills
-and docs. The source of truth remains the Project Repository, not generated
-HTML.
+and docs. The monorepo remains the editable source of truth; the Project
+Repository and generated HTML are distribution and browsing views.
 
 ## Requirements
 
@@ -135,11 +140,14 @@ HTML.
 - Bare Git Remotes set `HEAD` to `refs/heads/main` so empty clones do not
   warn about a nonexistent default ref.
 
-### Managed Skills Source Requirements
+### Managed Skills Distribution Requirements
 
-- Finite Sites can represent `finite-skills` as a Project Repository.
-- Runtime agents can clone or fetch Finite-owned baseline skills from Finite
+- Finite Sites can represent promoted `finite-skills` revisions as a Project
+  Repository Distribution Mirror.
+- Runtime agents can fetch an exact Finite-owned baseline revision from Finite
   Sites without a GitHub dependency or per-agent credential.
+- A runtime never consumes a mutable branch head, and a fetched revision is not
+  active until its Product Release manifest and artifact digest verify.
 - Maintainer write access stays restricted to approved Principals or Agent
   Keys.
 - Public read-only Project Visibility is opt-in for selected Finite-owned
@@ -151,10 +159,8 @@ HTML.
 - The repository can expose a browsable output for humans and agents.
 - The browsable output must not become the install source. Runtime sync reads
   Git; the website is documentation.
-- GitHub remains a bridge URL for finitecomputer until Finite Sites implements
-  public read-only Git upload-pack for selected Project Repositories. After
-  that, the default runtime URL can move to
-  `https://git.finite.chat/finite-skills.git`.
+- Release automation is the only writer to the distribution mirror; normal
+  authoring lands in `finite-mono/finite-skills` first.
 
 ### Document Output Requirements
 
@@ -185,6 +191,9 @@ Coverage required before product code depends on this:
 - Project Status and Project List include empty-output repositories cleanly.
 - Managed-skills fixture with public Project Visibility can be cloned and
   fetched without credentials.
+- A promoted revision can be fetched by exact immutable id and matches the
+  release manifest digest; a moved or mutable branch head is never accepted as
+  activation authority.
 - Managed-skills fixture with private Project Visibility rejects anonymous
   clone and fetch.
 - Anonymous push to a public-read Managed Skills Repository is rejected.
@@ -201,8 +210,10 @@ Coverage required before product code depends on this:
 - Do not add a second `repo` product beside Project Repositories.
 - Do not infer Project Outputs from arbitrary pushed files.
 - Do not make generated website bytes the source of truth for skills.
+- Do not edit the Finite Sites mirror directly or reconcile it back into the
+  monorepo.
 - Do not make all Project Repositories public-read just because Finite-owned
   baseline skills are public-read.
 - Do not reintroduce `finitec repo` or `finitec publish` compatibility paths.
-- Do not require GitHub for runtime managed-skill sync once Finite Sites can
-  serve the canonical repository.
+- Do not require GitHub for runtime managed-skill distribution once Finite
+  Sites can serve the mirror.

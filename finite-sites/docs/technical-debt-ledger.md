@@ -60,12 +60,16 @@ local default.
 - **Source**: disable/delete are now operator commands; name release and key
   rotation remain out of the v1 user contract.
 - **Risk**: names cannot be intentionally returned to the pool without
-  operator SQL, and compromised owner keys need manual intervention.
+  operator SQL, and compromised or lost owner keys can permanently block user
+  access even though Sites still holds the repository and outputs. This is a
+  first-slice Recoverability Contract blocker, not post-launch polish.
 - **Proof**: `finitesitesd disable-site` and `finitesitesd delete-site`
   mutate site status with audit events; there is no release-name or key
   rotation command.
-- **Delete condition**: operator commands for name release and owner/key
-  rotation, before non-VIP users receive publishing grants.
+- **Delete condition**: an audited Publishing Ownership Recovery flow gated by
+  verified Account Auth/email or another independent authorized Principal,
+  plus key rotation and destructive recovery tests, before durable first-slice
+  publishing. Direct operator SQL is not the product recovery flow.
 
 ## 7. RESOLVED — NIP-98 URL matching verified through the live proxy
 

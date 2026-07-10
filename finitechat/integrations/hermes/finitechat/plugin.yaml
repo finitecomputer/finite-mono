@@ -3,17 +3,17 @@ kind: platform
 version: 0.2.0
 description: >
   Finite Chat platform adapter for Hermes. Connects Hermes to E2EE Finite
-  Chat rooms through the finitechat hermes JSON bridge: the agent prints an
-  invite QR + rotating PIN at startup, verified joiners are admitted before
-  they ever enter the MLS group, and all message senders are
-  MLS-authenticated.
+  Chat rooms through the resident finitechat service. A user Device starts a
+  chat with the Agent Principal using KeyPackage/Add/Welcome admission; the
+  agent does not create an invite session or choose a room at startup. All
+  message senders are MLS-authenticated.
 author: finitecomputer
 requires_env:
   - name: FINITECHAT_HOME
     description: >
       Agent home directory created by `finitechat hermes init
-      --server URL` (holds the encrypted client store and stored invites;
-      the account key is the shared Finite identity, see FINITE_HOME).
+      --server URL` (holds the durable encrypted client store; the account key
+      is the shared Finite identity, see FINITE_HOME).
 optional_env:
   - name: FINITE_HOME
     description: >
@@ -23,4 +23,4 @@ optional_env:
   - name: FINITECHAT_BIN
     description: "Path to the finitechat binary (default: found on PATH)."
   - name: FINITECHAT_ROOM_ID
-    description: "Optional room filter; by default all invited rooms are served."
+    description: "Optional room filter; by default every joined room is served."

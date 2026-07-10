@@ -24,6 +24,11 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   workflows — this repo is the ONLY release host (doctrine §4).
 - **Deploys are defined in `infra/`** — per-host trees, CI-built digest-pinned
   images, runbooks. Nothing is built on a prod box.
+- **User data availability is the first security invariant.** Follow
+  `docs/adr/0001-recoverability-precedes-operator-blindness.md`: do not remove a
+  Recovery Authority, couple compute teardown to data purge, or claim stronger
+  operator-blindness until the same Recovery Set has restored onto an empty
+  target. A TEE and a Provider Durable Volume are not backups.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates

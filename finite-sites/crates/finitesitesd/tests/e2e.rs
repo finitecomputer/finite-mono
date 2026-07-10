@@ -82,27 +82,38 @@ impl TestServer {
     }
 
     async fn start_without_publish_grant(git_auto_reconcile: bool) -> TestServer {
-        Self::start_inner(None, git_auto_reconcile, None).await
+        Self::start_inner(None, git_auto_reconcile, None, false).await
     }
 
     async fn start_with_identity_authority(
         allowed_pubkey: &str,
         identity_authority_url: String,
     ) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), true, Some(identity_authority_url)).await
+        Self::start_inner(
+            Some(allowed_pubkey),
+            true,
+            Some(identity_authority_url),
+            false,
+        )
+        .await
     }
 
     async fn start_with_git_auto_reconcile(
         allowed_pubkey: &str,
         git_auto_reconcile: bool,
     ) -> TestServer {
-        Self::start_inner(Some(allowed_pubkey), git_auto_reconcile, None).await
+        Self::start_inner(Some(allowed_pubkey), git_auto_reconcile, None, false).await
+    }
+
+    async fn start_single_origin(allowed_pubkey: &str) -> TestServer {
+        Self::start_inner(Some(allowed_pubkey), true, None, true).await
     }
 
     async fn start_inner(
         allowed_pubkey: Option<&str>,
         git_auto_reconcile: bool,
         identity_authority_url: Option<String>,
+        single_origin_git: bool,
     ) -> TestServer {
         let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
@@ -128,13 +139,19 @@ impl TestServer {
                 site_url_port: Some(addr.port()),
             },
         );
+        let api_url = format!("http://127.0.0.1:{}", addr.port());
+        let git_base_url = if single_origin_git {
+            api_url.clone()
+        } else {
+            format!("http://git.{BASE_DOMAIN}:{}", addr.port())
+        };
         let options = ServeOptions {
             data_dir: data_dir.path().to_path_buf(),
             listen: addr,
             base_domain: BASE_DOMAIN.to_string(),
             document_base_domain: document_base_domain(),
-            api_url: format!("http://127.0.0.1:{}", addr.port()),
-            git_base_url: format!("http://git.{BASE_DOMAIN}:{}", addr.port()),
+            api_url,
+            git_base_url,
             identity_authority_url,
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
@@ -1471,6 +1488,59 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn project_init_repository_failure_is_repaired_by_one_replay() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let git_parent = server.data_dir().join("git");
+        std::fs::write(&git_parent, "blocks the project repository directory").unwrap();
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+
+        let failed = server
+            .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+            .unwrap_err();
+        let ureq::Error::Status(503, response) = failed else {
+            panic!("expected repository setup to return 503");
+        };
+        let error: finitesites_proto::dto::ApiErrorBody = json_body(response);
+        assert_eq!(
+            error.error,
+            finitesites_proto::dto::ERROR_GIT_REPOSITORY_SETUP_FAILED
+        );
+        assert!(error.message.contains("registry state was saved"));
+        assert!(
+            error
+                .message
+                .contains("replay this exact Project Init request once")
+        );
+
+        let store = Store::open(&server.data_dir().join("registry.db")).unwrap();
+        let partial = store
+            .project_by_slug("finitechat-native")
+            .unwrap()
+            .expect("registry transaction remains durable");
+        assert_eq!(store.project_outputs(&partial.id).unwrap().len(), 1);
+        drop(store);
+
+        std::fs::remove_file(&git_parent).unwrap();
+        let repaired: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        assert!(!repaired.created);
+        assert!(!repaired.outputs[0].created);
+        assert_eq!(repaired.project_id.as_deref(), Some(partial.id.as_str()));
+        let repo =
+            finitesitesd::git::project_root(server.data_dir()).join(format!("{}.git", partial.id));
+        assert!(repo.join("HEAD").is_file());
+        assert!(repo.join("hooks/post-receive").is_file());
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn project_init_and_git_auth_flow() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
@@ -1863,6 +1933,74 @@ async fn project_collaborator_remove_revokes_git_credentials() {
         );
         assert!(!replay.removed);
         assert_eq!(replay.revoked_git_credentials, 0);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_api_and_git_origin_supports_clone_push_and_publish() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start_single_origin(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let project: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        assert_eq!(
+            project.git_remote_url,
+            format!("{}/finitechat-native.git", server.api_url)
+        );
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest { email: None }).unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+        let authenticated_remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let checkout = tempfile::tempdir().unwrap();
+        let repo = checkout.path().join("finitechat-native");
+        run_git(
+            &[
+                "clone",
+                &authenticated_remote,
+                repo.to_str().expect("temp path is UTF-8"),
+            ],
+            Some(checkout.path()),
+        );
+        run_git(&["checkout", "-b", "main"], Some(&repo));
+        std::fs::write(repo.join("finite.toml"), project.finite_toml).unwrap();
+        std::fs::write(repo.join("index.html"), "<h1>single origin publish</h1>").unwrap();
+        run_git(&["add", "finite.toml", "index.html"], Some(&repo));
+        run_git(
+            &[
+                "-c",
+                "user.email=agent@example.com",
+                "-c",
+                "user.name=Agent",
+                "commit",
+                "-m",
+                "Publish through one origin",
+            ],
+            Some(&repo),
+        );
+        run_git(&["push", "origin", "main"], Some(&repo));
+
+        let output = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        assert_eq!(output.active_version, Some(1));
     });
     task.await.unwrap();
 }

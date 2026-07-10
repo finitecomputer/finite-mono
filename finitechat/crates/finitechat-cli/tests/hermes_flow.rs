@@ -1,5 +1,7 @@
-use finitechat_core::{AppAction, AppRoomState, FiniteChatRuntime, OpenOptions};
+use finitechat_core::{AppAction, AppRoomState, ChatMediaKind, FiniteChatRuntime, OpenOptions};
+use finitechat_hermes::HermesMessagePayloadV1;
 use finitechat_mls::NOSTR_SECRET_KEY_BYTES;
+use finitechat_proto::DecryptedApplicationEventV1;
 use finitechat_server::{HttpServerState, http_router};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -199,6 +201,134 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
             .messages
             .iter()
             .any(|message| message.text == "hello back from hermes")
+    );
+
+    let image_path = dir.path().join("agent-reply.png");
+    let image_bytes = b"\x89PNG\r\n\x1a\nfinitechat hermes image";
+    std::fs::write(&image_path, image_bytes).unwrap();
+    cli_json(&[
+        "hermes",
+        "--home",
+        &agent_home,
+        "send",
+        "--request-json",
+        &json!({
+            "room_id": room_id,
+            "conversation_id": null,
+            "text": "image back from hermes",
+            "kind": "media",
+            "status": "complete",
+            "attachments": [{
+                "kind": "image",
+                "name": "agent-reply.png",
+                "mime_type": "image/png",
+                "path": image_path,
+                "url": null,
+                "blob": null
+            }],
+            "reply_to_message_id": null,
+            "metadata": {},
+        })
+        .to_string(),
+    ]);
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user syncs Hermes image reply");
+    let with_image = user
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: room_id.clone(),
+        })
+        .expect("user opens room with image reply");
+    let image_message = with_image
+        .messages
+        .iter()
+        .find(|message| message.text == "image back from hermes")
+        .expect("Hermes image message projects");
+    assert_eq!(image_message.media.len(), 1);
+    let media = &image_message.media[0];
+    assert_eq!(media.kind, ChatMediaKind::Image);
+    assert_eq!(media.filename, "agent-reply.png");
+    assert_eq!(media.mime_type, "image/png");
+    assert_ne!(media.attachment_id, image_path.display().to_string());
+    assert!(
+        media
+            .url
+            .as_deref()
+            .is_some_and(|url| url.contains("/blobs/"))
+    );
+    assert_eq!(media.local_path, None);
+    assert_eq!(media.upload_progress_per_mille, None);
+
+    let event: DecryptedApplicationEventV1 =
+        serde_json::from_slice(&image_message.payload).expect("typed app event decodes");
+    let payload = HermesMessagePayloadV1::decode(&event.payload)
+        .expect("Hermes media payload decodes")
+        .expect("message is a Hermes payload");
+    assert_eq!(payload.attachments.len(), 1);
+    assert_eq!(payload.attachments[0].path, None);
+    assert!(payload.attachments[0].blob.is_some());
+
+    let downloaded = user
+        .dispatch_and_wait(AppAction::DownloadAttachment {
+            room_id: room_id.clone(),
+            message_id: image_message.message_id.clone(),
+            attachment_id: media.attachment_id.clone(),
+        })
+        .expect("user downloads and verifies Hermes image reply");
+    let downloaded_image = downloaded
+        .messages
+        .iter()
+        .find(|message| message.message_id == image_message.message_id)
+        .expect("downloaded image remains projected");
+    let local_path = downloaded_image.media[0]
+        .local_path
+        .as_ref()
+        .expect("verified plaintext cache path projects");
+    assert_eq!(std::fs::read(local_path).unwrap(), image_bytes);
+
+    let mut invalid_output = Vec::new();
+    let missing_path = dir.path().join("does-not-exist.png");
+    let invalid_error = finitechat_cli::run(
+        [
+            "hermes".to_owned(),
+            "--home".to_owned(),
+            agent_home.clone(),
+            "send".to_owned(),
+            "--request-json".to_owned(),
+            json!({
+                "room_id": room_id,
+                "conversation_id": null,
+                "text": "must not append",
+                "kind": "media",
+                "status": "complete",
+                "attachments": [{
+                    "kind": "image",
+                    "name": "missing.png",
+                    "mime_type": "image/png",
+                    "path": missing_path,
+                    "url": null,
+                    "blob": null
+                }],
+                "reply_to_message_id": null,
+                "metadata": {},
+            })
+            .to_string(),
+        ],
+        &mut invalid_output,
+    )
+    .expect_err("missing local attachment must fail before send");
+    assert!(invalid_error.to_string().contains("could not open"));
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user syncs after rejected media send");
+    let after_rejection = user
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: room_id.clone(),
+        })
+        .expect("user reopens room after rejected media send");
+    assert!(
+        after_rejection
+            .messages
+            .iter()
+            .all(|message| message.text != "must not append")
     );
 
     let status = cli_json(&[

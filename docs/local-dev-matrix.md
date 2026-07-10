@@ -19,7 +19,7 @@ verification note says otherwise.
 | Goal | Start in | Primary loop | Notes |
 | --- | --- | --- | --- |
 | Self-serve SaaS dashboard/Core UI | `finitecomputer-v2/apps/dashboard` | `npm ci`, `npm run dev` | Current v2 product surface. Good for WorkOS/dashboard/Project/Finite Private UI. Does not prove real runtime launch. |
-| v2 Agent Runtime proof or SaaS launch readiness | `finitecomputer-v2` plus `finitechat` | `cargo test --workspace`, dashboard checks, then follow `docs/hermes-runtime-test-matrix.md` | Product proof is native Finite Chat plus real Hermes, `fsite`, `fbrain`, local Docker, remote Docker, Phala, then dashboard-controlled launch. |
+| v2 Agent Runtime proof or SaaS launch readiness | `finitecomputer-v2` plus `finitechat` | `cargo test --workspace`, dashboard checks, then follow `docs/hermes-runtime-test-matrix.md` | Product proof is Hosted Web plus an independent local Device, real streaming Hermes, `fsite`, `fbrain`, local Docker, Kata, Phala, recovery from empty targets, then dashboard-controlled launch. |
 | Legacy dashboard chat UI or designer pass | `finitecomputer` | `nix develop`, `just chat-local-bootstrap smoke-finite`, add provider key, `just chat-local-up smoke-finite skyler@finite.vip 3100` | Best current legacy dashboard-to-agent loop. Uses local relay plus MicroSandbox runtime. Not the v2 product chat path. |
 | Legacy hosted platform/runtime/control plane | `finitecomputer` | `nix develop`, Cargo commands, root `just` recipes | box1/TRF/smoke and migration bridge lane. Most operator and deployment paths require host secrets or SSH. |
 | Native encrypted chat protocol/server | `finitechat` | `cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3` | Local server and simulator are explicit dev overrides. Production default is `https://chat.finite.computer`. |
@@ -27,7 +27,7 @@ verification note says otherwise.
 | Hermes chat bridge canary | `finitechat` | `cp .env.example .env`, set provider key, run `scripts/hermes-phone-canary.py ...` | Real-Hermes proof is stricter than echo/adapter smokes. |
 | FiniteBrain vault, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Vault/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
 | Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat2`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
-| Managed skill edits | `finite-skills` | Edit Markdown skill tree, follow `skills/AGENTS.md` | No top-level linter or smoke command exists yet. v2 runtime proof should happen through the `finitecomputer-v2` runtime matrix once that lane is stable; legacy proof still happens through `finitecomputer`. |
+| Managed skill edits | `finite-skills` | `just skills check`, then follow `finite-skills/docs/runtime-delivery-contract.md` for promotion proof | A basic static checker exists. It does not yet prove artifact integrity, compatibility, activation, rollback, or real Hermes behavior; those climb the v2 runtime matrix. |
 | Reusable Nostr primitives | `finite-nostr` | `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` | Small Rust crate. No repo-local toolchain pin. |
 | Reporting snapshots/site data | `reporting` plus legacy `finitecomputer` | `python3 ../finitecomputer/scripts/bootstrap_ai_training_stats.py`, then `python3 ai-training-stats/build_site_data.py` | Generator ownership is currently split; live probes depend on local env/SSH availability. |
 
@@ -51,7 +51,8 @@ Documented tools:
 - Hosted Finite Chat deploy script under
   `infra/hosts/lat1/scripts/deploy-finitechat-server.sh`.
 - Runtime image build path for the Agent Runtime, currently packaging
-  `finitechat`, the Hermes `finitechat` plugin, `fsite`, and `fbrain`.
+  `finitechat`, the Hermes `finitechat` plugin, `fsite`, and `fbrain`; the baked
+  Finite Skills Revision remains a launch-blocking gap.
 
 Primary dashboard loop:
 
@@ -82,7 +83,7 @@ Product/runtime proof:
 
 - Follow `docs/hermes-runtime-test-matrix.md`.
 - Rung order is local real-Hermes adapter, runtime image in local Docker,
-  runtime image in remote Docker, Phala CVM, then dashboard-controlled SaaS
+  runtime image in Kata, then a Phala CVM, then dashboard-controlled SaaS
   launch.
 - Acceptance is native Finite Chat talking to real Hermes, plus `fsite`,
   `fbrain`, Finite Private, durable state, and restart evidence.
@@ -363,7 +364,9 @@ Documented tools:
 
 - Markdown skill contracts under `skills/`.
 - Python helper scripts inside some skills.
-- Runtime sync through managed Hermes runtimes.
+- Root `just skills check` backed by `scripts/check-static.sh`.
+- A bundled-baseline and explicit-sync contract under
+  `docs/runtime-delivery-contract.md`.
 
 Rules:
 
@@ -374,12 +377,12 @@ Rules:
 
 Friction:
 
-- No top-level `just check`, package manifest, linter, or CI workflow is visible.
-- Broken references, naming mistakes, missing metadata, and script syntax issues
-  are not caught by a repo-level command.
-- External contributors cannot easily prove that a skill edit will load in the
-  managed runtime without involving a v2 runtime-matrix proof or the legacy
-  `finitecomputer` harness.
+- The static check catches missing frontmatter and duplicate names, but not
+  broken references, naming policy, helper syntax, stale legacy commands,
+  runtime dependencies, artifact provenance, or product compatibility.
+- The canonical Runtime now seeds the bundled baseline for fresh agents, but
+  the end-to-end first-turn canary and explicit `finite skills sync` command
+  remain open.
 
 ### `finite-nostr`
 
@@ -568,9 +571,9 @@ It can start with SearXNG-only and add Firecrawl when the upstream checkout
 wrapper is stable enough. Keep SSH tunnel smokes as operator validation, not the
 first external contributor path.
 
-### 7. Add A Skill Linter
+### 7. Strengthen The Skill Linter And Delivery Gate
 
-Give `finite-skills` a lightweight repo-level check:
+Extend the existing lightweight `just skills check`:
 
 - validate `SKILL.md` presence and required metadata;
 - enforce `-finite` suffix except documented exceptions;
@@ -579,7 +582,8 @@ Give `finite-skills` a lightweight repo-level check:
 - report unmanaged or colliding skill names;
 - optionally check forbidden placeholder patterns outside examples/templates.
 
-That unlocks a real `just check` and CI workflow for skill contributors.
+Then add deterministic artifact/provenance checks and the real-Hermes
+activation/rollback matrix. Static validity alone is not release readiness.
 
 ### 8. Align Local Checks With CI
 
@@ -597,7 +601,8 @@ Suggested first-pass targets:
 - `finite-brain`: Cargo fmt/test/clippy/build plus Product Client and Smoke UI
   JavaScript syntax checks.
 - `finite-search`: existing `just check`.
-- `finite-skills`: new linter.
+- `finite-skills`: existing static check plus bundled first-turn and explicit
+  sync gates.
 - `finite-nostr`: Cargo fmt/test/clippy/build.
 - `reporting`: build site data against latest run plus unittest.
 
@@ -612,8 +617,8 @@ Suggested first-pass targets:
    first implementation is thin.
 3. Add local toolchain pins for Rust, Node/npm, and Python where docs or CI
    already assume versions.
-4. Add the `finite-skills` linter and CI. It is the largest gap in basic
-   external contribution safety.
+4. Strengthen the `finite-skills` linter and add bundled first-turn plus
+   explicit-sync CI without introducing an automatic updater.
 5. Add a no-SSH `finite-search` local smoke profile.
 6. Build the workspace facade after the per-repo commands are stable enough to
    wrap cleanly.

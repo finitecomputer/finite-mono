@@ -41,6 +41,7 @@ SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
 MAX_OUTBOUND_MESSAGE_ROUTES = 256
 STREAM_RECONNECT_BACKOFF_SECS = 2.0
+STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
@@ -86,7 +87,7 @@ def is_connected(config: PlatformConfig) -> bool:
 
 
 class FiniteChatAdapter(BasePlatformAdapter):
-    """Poll Finite Chat for inbound messages and deliver Hermes replies."""
+    """Bridge Finite Chat messages to Hermes through the resident service."""
 
     MAX_MESSAGE_LENGTH = 12000
     SUPPORTS_MESSAGE_EDITING = False
@@ -96,7 +97,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", {}) or {}
         self.home = str(extra.get("home") or os.getenv("FINITECHAT_HOME") or "").strip()
         # Optional room filter; by default the adapter serves every room the
-        # agent's invites admit people into.
+        # Agent Principal has joined through MLS Add + Welcome.
         self.room_id = str(extra.get("room_id") or os.getenv("FINITECHAT_ROOM_ID") or "").strip()
         self.poll_timeout_secs = _bounded_int(
             extra.get("poll_timeout_secs") or os.getenv("FINITECHAT_HERMES_POLL_TIMEOUT_SECS"),
@@ -146,6 +147,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._activity_segments: dict[str, str | None] = {}
         self._outbound_message_conversations: dict[str, str | None] = {}
         self._outbound_message_segments: dict[str, str | None] = {}
+        self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_topics: dict[tuple[str, str], str | None] = {}
 
@@ -159,10 +161,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
         await self._ensure_service()
         await self._recover_interrupted_turns()
-        await self._surface_invite()
         self._mark_connected()
         self._write_bridge_status("connected")
-        if self.inbound_stream and self.service_url:
+        if self.inbound_stream:
             self._poll_task = asyncio.create_task(self._stream_loop())
         else:
             self._poll_task = asyncio.create_task(self._poll_loop())
@@ -170,50 +171,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
             "[finitechat] connected (home=%s%s%s%s)",
             self.home,
             f", room filter={self.room_id}" if self.room_id else "",
-            ", inbound stream=on" if self.inbound_stream and self.service_url else "",
+            ", inbound stream=on" if self.inbound_stream else "",
             ", reconnect" if is_reconnect else "",
         )
         return True
-
-    async def _surface_invite(self) -> None:
-        """Print the stored join URL for headless boxes, creating one only on first run."""
-        url = self._latest_stored_invite_url()
-        qr = ""
-        if not url:
-            result = await self._finitechat_json("invite", {}, timeout=60)
-            if not result.ok:
-                logger.warning("[finitechat] could not prepare an invite: %s", result.error)
-                return
-            qr = result.data.get("qr") or ""
-            url = result.data.get("url") or ""
-        if qr:
-            print(qr, flush=True)
-        if url:
-            print(f"Scan or open in Finite Chat:\n  {url}", flush=True)
-
-    def _latest_stored_invite_url(self) -> str:
-        invites_path = Path(self.home) / "invites.json"
-        try:
-            raw = invites_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return ""
-        except OSError as exc:
-            logger.warning(
-                "[finitechat] could not read stored invites from %s: %s", invites_path, exc
-            )
-            return ""
-        try:
-            values = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            logger.warning("[finitechat] stored invites file is not valid JSON: %s", exc)
-            return ""
-        if not isinstance(values, list):
-            logger.warning("[finitechat] stored invites file is not a JSON array")
-            return ""
-        for value in reversed(values):
-            if isinstance(value, str) and value.startswith("finite://join?"):
-                return value
-        return ""
 
     async def _recover_interrupted_turns(self) -> None:
         result = await self._finitechat_json("recover", {}, timeout=60)
@@ -253,6 +214,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 message_id,
                 payload["conversation_id"],
                 payload.get("segment_id"),
+                str(payload["kind"]),
             )
         return SendResult(
             success=True,
@@ -270,12 +232,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         conversation_id = self._outbound_message_conversations.get(str(message_id))
         segment_id = self._outbound_message_segments.get(str(message_id))
+        kind = self._outbound_message_kinds.get(str(message_id), "message")
         payload = {
             "room_id": self._room_id(chat_id),
             "conversation_id": conversation_id,
             "segment_id": segment_id,
             "message_id": str(message_id),
             "text": str(content),
+            "kind": kind,
             "status": "complete" if finalize else "running",
             "finalize": bool(finalize),
             "metadata": {},
@@ -284,9 +248,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
         edited_message_id = str(result.data.get("message_id") or message_id)
-        self._remember_outbound_message_route(str(message_id), conversation_id, segment_id)
+        self._remember_outbound_message_route(
+            str(message_id), conversation_id, segment_id, kind
+        )
         if edited_message_id:
-            self._remember_outbound_message_route(edited_message_id, conversation_id, segment_id)
+            self._remember_outbound_message_route(
+                edited_message_id, conversation_id, segment_id, kind
+            )
         return SendResult(
             success=True,
             message_id=edited_message_id,
@@ -452,10 +420,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return True
 
     async def _stream_loop(self) -> None:
+        reconnect_attempt = 0
         while self.is_connected:
             if not self.service_url and not await self._ensure_service():
-                if not await self._poll_once():
-                    await asyncio.sleep(STREAM_RECONNECT_BACKOFF_SECS)
+                error = "resident Hermes service is unavailable"
+                logger.warning("[finitechat] %s; waiting to reconnect stream", error)
+                self._write_bridge_status("stream_error", error)
+                await asyncio.sleep(_stream_reconnect_delay(reconnect_attempt))
+                reconnect_attempt += 1
                 continue
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[_FiniteChatResult] = asyncio.Queue()
@@ -478,18 +450,25 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 while self.is_connected and self.service_url == service_url:
                     result = await queue.get()
                     if result.ok:
+                        reconnect_attempt = 0
                         await self._process_inbound_records(result.data.get("records") or [])
                         self._write_bridge_status("connected")
                         continue
                     logger.warning("[finitechat] inbound stream failed: %s", result.error)
                     self._write_bridge_status("stream_error", result.error)
-                    if result.transport_error:
+                    # A service process supervised by this adapter may need to
+                    # be rediscovered or restarted. An externally supervised
+                    # service keeps its stable URL and is retried in place.
+                    if result.transport_error and self._service_proc is not None:
                         self.service_url = ""
                     break
             finally:
                 stop_event.set()
                 await asyncio.to_thread(worker.join, 0.5)
-            await asyncio.sleep(STREAM_RECONNECT_BACKOFF_SECS)
+            if not self.is_connected:
+                break
+            await asyncio.sleep(_stream_reconnect_delay(reconnect_attempt))
+            reconnect_attempt += 1
 
     def _inbound_request_payload(self) -> dict[str, Any]:
         timeout_millis = self.poll_timeout_secs * 1000
@@ -680,18 +659,24 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id: str,
         conversation_id: str | None,
         segment_id: str | None,
+        kind: str | None = None,
     ) -> None:
         if message_id in self._outbound_message_conversations:
             self._outbound_message_conversations[message_id] = conversation_id
             self._outbound_message_segments[message_id] = segment_id
+            if kind:
+                self._outbound_message_kinds[message_id] = kind
             return
         self._outbound_message_conversations[message_id] = conversation_id
         self._outbound_message_segments[message_id] = segment_id
+        if kind:
+            self._outbound_message_kinds[message_id] = kind
         self._outbound_message_order.append(message_id)
         while len(self._outbound_message_order) > MAX_OUTBOUND_MESSAGE_ROUTES:
             evicted = self._outbound_message_order.pop(0)
             self._outbound_message_conversations.pop(evicted, None)
             self._outbound_message_segments.pop(evicted, None)
+            self._outbound_message_kinds.pop(evicted, None)
 
     async def _send_media(
         self,
@@ -813,6 +798,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if self._service_proc is not None and self._service_proc.returncode is not None:
             self.service_url = ""
             await self._ensure_service()
+        if self.inbound_stream and not self.service_url:
+            await self._ensure_service()
         if self.service_url:
             result = await asyncio.to_thread(
                 _finitechat_service_json,
@@ -838,11 +825,23 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if action == "activity" and isinstance(payload.get("action"), str):
                 action_detail = f"/{payload['action']}"
             logger.warning(
-                "[finitechat] Hermes service unavailable during %s%s (%s); "
-                "falling back to finitechat CLI",
+                "[finitechat] Hermes service unavailable during %s%s (%s)%s",
                 action,
                 action_detail,
                 result.error,
+                "; strict stream mode will retry the resident service"
+                if self.inbound_stream
+                else "; falling back to finitechat CLI",
+            )
+            if self.inbound_stream:
+                return result
+        if self.inbound_stream:
+            return _FiniteChatResult(
+                False,
+                {},
+                "resident Hermes service is unavailable in strict stream mode",
+                True,
+                True,
             )
         if not self._finitechat_cmd:
             return _FiniteChatResult(False, {}, "finitechat CLI is not configured", False)
@@ -960,7 +959,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     return True
             await asyncio.sleep(0.05)
 
-        logger.warning("[finitechat] Hermes service did not become ready; using CLI bridge")
+        if self.inbound_stream:
+            logger.warning("[finitechat] Hermes service did not become ready; will retry")
+        else:
+            logger.warning("[finitechat] Hermes service did not become ready; using CLI bridge")
         return False
 
     async def _stop_service(self) -> None:
@@ -1089,6 +1091,21 @@ def _finitechat_service_stream_worker(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            # Opening the streaming response is itself the liveness proof. An
+            # idle room may produce only blank heartbeat lines for hours, so
+            # waiting for a chat record before clearing a prior stream error
+            # leaves the runtime falsely unhealthy after the server recovers.
+            _put_stream_result(
+                loop,
+                queue,
+                _FiniteChatResult(
+                    True,
+                    {"records": [{"type": "connected"}]},
+                    None,
+                    False,
+                    False,
+                ),
+            )
             while not stop_event.is_set():
                 raw_line = response.readline()
                 if not raw_line:
@@ -1311,6 +1328,14 @@ def _bounded_bool(value: Any, *, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _stream_reconnect_delay(attempt: int) -> float:
+    exponent = max(0, min(int(attempt), 4))
+    return min(
+        STREAM_RECONNECT_BACKOFF_SECS * (2**exponent),
+        STREAM_RECONNECT_MAX_BACKOFF_SECS,
+    )
 
 
 def _is_retryable_cli_error(message: str) -> bool:

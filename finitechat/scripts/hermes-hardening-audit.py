@@ -122,7 +122,7 @@ REQUIRED_GITHUB_PUBLISH_ARTIFACTS = {
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
 }
 REQUIRED_HANDOFF_RUNTIME = {
-    "hermes_agent_version": "0.17.0",
+    "hermes_agent_version": "0.18.2",
     "finitechat_hermes_inbound_stream": "1",
     "finite_agent_restore_on_start": "1",
     "finite_agent_restore_latest": "1",
@@ -141,7 +141,7 @@ REQUIRED_HANDOFF_CONTAINER_ENV = {
 }
 REQUIRED_PUBLISH_PROOF = {
     "smoke_status": "passed",
-    "hermes_agent_version_actual": "0.17.0",
+    "hermes_agent_version_actual": "0.18.2",
     "restic_backend": "s3",
     "real_gateway_runtime": True,
     "gateway_admission_before_restore": True,
@@ -806,7 +806,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and docker.get("status") == "passed"
         and not docker_missing
         and not docker_backup_errors
-        and docker_facts.get("hermes_agent_version_actual") == "0.17.0"
+        and docker_facts.get("hermes_agent_version_actual") == "0.18.2"
         and docker_facts.get("agent_npub") == docker_facts.get("agent_npub_after_restore")
         and docker_facts.get("real_gateway_runtime") is True
         and docker_facts.get("gateway_admission_before_restore") is True
@@ -841,7 +841,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and not s3_emulator_backup_errors
         and s3_emulator_facts.get("restic_backend") == "s3"
         and s3_emulator_facts.get("s3_endpoint_kind") == "local_emulator"
-        and s3_emulator_facts.get("hermes_agent_version_actual") == "0.17.0"
+        and s3_emulator_facts.get("hermes_agent_version_actual") == "0.18.2"
         and s3_emulator_facts.get("agent_npub") == s3_emulator_facts.get("agent_npub_after_restore")
         and s3_emulator_facts.get("real_gateway_runtime") is True
         and s3_emulator_facts.get("gateway_admission_before_restore") is True

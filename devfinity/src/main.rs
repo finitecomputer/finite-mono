@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use devfinity::{ProcessComposeMode, Stack};
+use devfinity::{ProcessComposeMode, Stack, StackProfile};
 
 #[derive(Debug, Parser)]
 #[command(name = "devfinity")]
@@ -40,6 +40,16 @@ struct UpArgs {
     #[arg(long)]
     dry_run: bool,
 
+    /// Start only the portable host services, without building or launching an
+    /// Agent Runtime. This is intended for focused service work and Linux CI.
+    #[arg(long)]
+    services_only: bool,
+
+    /// Reset persistent state before starting. Allowed only with
+    /// --services-only and intended for an isolated smoke-test state root.
+    #[arg(long, requires = "services_only")]
+    fresh: bool,
+
     /// Command to run after the headless stack is ready. Pass after `--`.
     #[arg(last = true)]
     command: Vec<String>,
@@ -57,10 +67,18 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
-    let stack = Stack::new(cli.state_dir)?;
 
     match cli.command {
         Command::Up(args) => {
+            let profile = if args.services_only {
+                StackProfile::ServicesOnly
+            } else {
+                StackProfile::AppleSaas
+            };
+            let mut stack = Stack::new(cli.state_dir)?
+                .with_profile(profile)
+                .with_fresh_services_state(args.fresh);
+            stack.prepare_host_environment(args.dry_run)?;
             stack.write_files()?;
             stack.print_summary();
             if !args.command.is_empty() {
@@ -76,7 +94,11 @@ fn run() -> anyhow::Result<ExitCode> {
             };
             stack.run_process_compose_up(mode, args.dry_run)
         }
-        Command::Status => stack.status(),
-        Command::Cleanup => stack.cleanup(),
+        Command::Status => {
+            let mut stack = Stack::new(cli.state_dir)?;
+            let _ = stack.prepare_host_environment(true);
+            stack.status()
+        }
+        Command::Cleanup => Stack::new(cli.state_dir)?.cleanup(),
     }
 }

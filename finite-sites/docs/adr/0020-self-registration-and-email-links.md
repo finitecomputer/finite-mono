@@ -7,13 +7,13 @@ Project Repository for a paying Finite user.
 Decision:
 
 - `fsite auth register [--output json]` is the explicit bootstrap command.
-  It signs with the local User Key and creates or replays a self-registered
+  It signs with the local Publishing Key and creates or replays a self-registered
   publish grant up to the v0 Publishing Limit.
 - Email is optional. Npub-primary users can create Projects without ever
   sharing an email address.
 - `fsite auth link-email EMAIL` sends a normal email token and stores a local
   pending-link marker containing only the target native pubkey.
-- `fsite auth redeem EMAIL TOKEN` uses the native User Key when a matching
+- `fsite auth redeem EMAIL TOKEN` uses the native Publishing Key when a matching
   pending-link marker exists; otherwise it preserves the email-only External
   Principal fallback.
 - `fsite auth redeem EMAIL TOKEN --link-native` lets an email invite token be
@@ -21,8 +21,14 @@ Decision:
   token.
 - When `FINITE_IDENTITY_AUTHORITY` is configured, email challenge and redeem
   requests go to finite-identity. Finite VIP email redemption binds the email
-  to the local shared User Key there; external email redemption remains
+  to the local Publishing Key there; external email redemption remains
   email-only.
+- An Email Link asserts that the email and Publishing Key identify the same
+  Principal. It must not be used to silently equate a human with an agent that
+  merely has delegated access to the human's email account.
+- Cross-identity access uses a revocable Finite Sites Email Access Delegation,
+  not an Email Link. It is scoped to Sites, the agent signs as itself, and it
+  grants no Finite Brain authority.
 - A verified Email Link maps one email address to one Native Principal. Future
   Project Grants to that email resolve to the linked native Principal.
 - Linking migrates existing active Project Collaborator grants from the

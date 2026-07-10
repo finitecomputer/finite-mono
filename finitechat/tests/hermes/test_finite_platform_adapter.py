@@ -183,10 +183,56 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         adapter._ensure_service = noop
         adapter._recover_interrupted_turns = noop
-        adapter._surface_invite = noop
         adapter._poll_loop = idle_loop
 
         self.assertTrue(asyncio.run(adapter.connect(is_reconnect=True)))
+
+    def test_stream_env_uses_strict_loop_even_before_service_is_ready(self):
+        old_stream = os.environ.get("FINITECHAT_HERMES_INBOUND_STREAM")
+        os.environ["FINITECHAT_HERMES_INBOUND_STREAM"] = "1"
+        try:
+            adapter = self.module.FiniteChatAdapter(
+                PlatformConfig(
+                    extra={
+                        "home": "/tmp/finite-agent-home",
+                        "finitechat_bin": "/bin/false",
+                    }
+                )
+            )
+        finally:
+            if old_stream is None:
+                os.environ.pop("FINITECHAT_HERMES_INBOUND_STREAM", None)
+            else:
+                os.environ["FINITECHAT_HERMES_INBOUND_STREAM"] = old_stream
+        calls = []
+
+        async def service_not_ready():
+            calls.append("ensure")
+            return False
+
+        async def noop():
+            return None
+
+        async def stream_loop():
+            calls.append("stream")
+            adapter._mark_disconnected()
+
+        async def poll_loop():
+            calls.append("poll")
+            adapter._mark_disconnected()
+
+        adapter._ensure_service = service_not_ready
+        adapter._recover_interrupted_turns = noop
+        adapter._stream_loop = stream_loop
+        adapter._poll_loop = poll_loop
+
+        async def run_connect():
+            connected = await adapter.connect()
+            await adapter._poll_task
+            return connected
+
+        self.assertTrue(asyncio.run(run_connect()))
+        self.assertEqual(calls, ["ensure", "stream"])
 
     def test_local_env_file_supplies_defaults_without_overriding_process_env(self):
         old_home = os.environ.pop("FINITECHAT_HOME", None)
@@ -273,7 +319,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             adapter.send(
                 "room-agent-1",
                 "running draft",
-                metadata={"conversation_id": "topic-build", "thread_id": "chat-build-1"},
+                metadata={
+                    "conversation_id": "topic-build",
+                    "thread_id": "chat-build-1",
+                    "_finitechat_kind": "tool",
+                },
             )
         )
         edit_result = asyncio.run(
@@ -292,12 +342,15 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["conversation_id"], "topic-build")
         self.assertEqual(calls[1][1]["segment_id"], "chat-build-1")
         self.assertEqual(calls[1][1]["message_id"], "out-1")
+        self.assertEqual(calls[1][1]["kind"], "tool")
         self.assertEqual(calls[1][1]["status"], "complete")
         self.assertTrue(calls[1][1]["finalize"])
         self.assertEqual(adapter._outbound_message_conversations["out-1"], "topic-build")
         self.assertEqual(adapter._outbound_message_conversations["edit-1"], "topic-build")
         self.assertEqual(adapter._outbound_message_segments["out-1"], "chat-build-1")
         self.assertEqual(adapter._outbound_message_segments["edit-1"], "chat-build-1")
+        self.assertEqual(adapter._outbound_message_kinds["out-1"], "tool")
+        self.assertEqual(adapter._outbound_message_kinds["edit-1"], "tool")
 
     def test_media_send_uses_typed_attachment_payload(self):
         adapter = self.adapter()
@@ -587,29 +640,8 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             if old_home is not None:
                 os.environ["FINITECHAT_HOME"] = old_home
 
-    def test_connect_surfaces_invite_qr_url(self):
-        adapter = self.adapter(room_id=None)
-        calls = []
-
-        async def fake_json(action, payload, *, timeout):
-            calls.append(action)
-            if action == "invite":
-                return self.module._FiniteChatResult(
-                    True,
-                    {
-                        "qr": "█▀▀▀█ qr █▀▀▀█",
-                        "url": "finite://join?v=1&s=http%3A%2F%2Fx&r=r&i=i&t=00&a=npub1q",
-                        "pin": "123456",
-                        "pin_window_seconds": 30,
-                    },
-                    None,
-                    False,
-                )
-            return self.module._FiniteChatResult(True, {}, None, False)
-
-        adapter._finitechat_json = fake_json
-        asyncio.run(adapter._surface_invite())
-        self.assertEqual(calls, ["invite"])
+    def test_adapter_does_not_recreate_deleted_invite_sessions(self):
+        self.assertFalse(hasattr(self.module.FiniteChatAdapter, "_surface_invite"))
 
     def _record_json(self, calls):
         async def fake_json(action, payload, *, timeout):
@@ -900,6 +932,51 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
         self.assertEqual(calls[0][-2:], ("recover", "--json"))
 
+    def test_strict_stream_service_failure_never_falls_back_to_cli(self):
+        adapter = self.module.FiniteChatAdapter(
+            PlatformConfig(
+                extra={
+                    "home": "/tmp/finite-agent-home",
+                    "service_url": "http://127.0.0.1:9999",
+                    "finitechat_bin": "/bin/finitechat",
+                    "inbound_stream": True,
+                }
+            )
+        )
+        module = cast(Any, self.module)
+        original_service_json = module._finitechat_service_json
+        original_create_subprocess_exec = self.module.asyncio.create_subprocess_exec
+        service_calls = []
+        subprocess_calls = []
+
+        def fake_service_json(service_url, action, payload, timeout):
+            service_calls.append((service_url, action, payload, timeout))
+            return self.module._FiniteChatResult(
+                False,
+                {},
+                "connection reset",
+                True,
+                transport_error=True,
+            )
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            subprocess_calls.append((args, kwargs))
+            raise AssertionError("strict stream mode must not execute a per-action CLI")
+
+        try:
+            module._finitechat_service_json = fake_service_json
+            self.module.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            result = asyncio.run(adapter._finitechat_json("send", {"text": "hello"}, timeout=7))
+        finally:
+            module._finitechat_service_json = original_service_json
+            self.module.asyncio.create_subprocess_exec = original_create_subprocess_exec
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.retryable)
+        self.assertTrue(result.transport_error)
+        self.assertEqual(len(service_calls), 2)
+        self.assertEqual(subprocess_calls, [])
+
     def test_finitechat_service_stream_worker_parses_ndjson_records(self):
         original_urlopen = self.module.urllib.request.urlopen
         captured = {}
@@ -954,14 +1031,16 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         self.assertTrue(results[0].ok)
         self.assertTrue(results[1].ok)
+        self.assertTrue(results[2].ok)
         self.assertEqual(
             captured["url"],
             "http://127.0.0.1:9999/v1/hermes/inbound?"
             "room_id=room+agent&limit=10&timeout_millis=1000",
         )
         self.assertEqual(captured["timeout"], 7)
-        self.assertEqual(results[0].data["records"][0]["type"], "joined")
-        self.assertEqual(results[1].data["records"][0]["event"]["message_id"], "msg-12")
+        self.assertEqual(results[0].data["records"][0]["type"], "connected")
+        self.assertEqual(results[1].data["records"][0]["type"], "joined")
+        self.assertEqual(results[2].data["records"][0]["event"]["message_id"], "msg-12")
 
     def test_stream_loop_consumes_inbound_records_and_acks_events(self):
         adapter = self.module.FiniteChatAdapter(
@@ -1093,7 +1172,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(ack_calls), 1)
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-14")
 
-    def test_stream_loop_falls_back_to_poll_after_stream_transport_error(self):
+    def test_stream_loop_reconnects_and_catches_up_without_poll_fallback(self):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
@@ -1113,15 +1192,39 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         def fake_worker(service_url, payload, timeout, loop, queue, stop_event):
             calls.append(("stream", payload))
+            if len([call for call in calls if call[0] == "stream"]) == 1:
+                self.module._put_stream_result(
+                    loop,
+                    queue,
+                    self.module._FiniteChatResult(
+                        False,
+                        {},
+                        "connection reset",
+                        True,
+                        transport_error=True,
+                    ),
+                )
+                return
             self.module._put_stream_result(
                 loop,
                 queue,
                 self.module._FiniteChatResult(
-                    False,
-                    {},
-                    "connection reset",
                     True,
-                    transport_error=True,
+                    {
+                        "records": [
+                            {
+                                "type": "event",
+                                "event": {
+                                    "room_id": "room-agent-1",
+                                    "seq": 15,
+                                    "message_id": "msg-15",
+                                    "text": "caught up after reconnect",
+                                },
+                            }
+                        ]
+                    },
+                    None,
+                    False,
                 ),
             )
 
@@ -1129,10 +1232,14 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             calls.append(("ensure", {}))
             return False
 
+        async def fail_poll():
+            raise AssertionError("strict stream mode must not poll")
+
         async def fake_json(action, payload, *, timeout):
             calls.append((action, payload))
-            adapter._mark_disconnected()
-            return self.module._FiniteChatResult(True, {"events": []}, None, False)
+            if action == "ack":
+                adapter._mark_disconnected()
+            return self.module._FiniteChatResult(True, {"acked": True}, None, False)
 
         async def fake_sleep(delay):
             calls.append(("sleep", {"delay": delay}))
@@ -1141,14 +1248,27 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             module._finitechat_service_stream_worker = fake_worker
             self.module.asyncio.sleep = fake_sleep
             adapter._ensure_service = fake_ensure_service
+            adapter._poll_once = fail_poll
             adapter._finitechat_json = fake_json
             asyncio.run(adapter._stream_loop())
         finally:
             module._finitechat_service_stream_worker = original_worker
             self.module.asyncio.sleep = original_sleep
 
-        self.assertEqual([call[0] for call in calls], ["stream", "sleep", "ensure", "poll"])
-        self.assertEqual(adapter.service_url, "")
+        self.assertEqual(
+            [call[0] for call in calls],
+            ["stream", "sleep", "stream", "activity", "ack"],
+        )
+        self.assertEqual(calls[1][1]["delay"], self.module.STREAM_RECONNECT_BACKOFF_SECS)
+        self.assertEqual(adapter.service_url, "http://127.0.0.1:9999")
+        self.assertEqual(len(adapter.handled_messages), 1)
+        self.assertEqual(adapter.handled_messages[0].text, "caught up after reconnect")
+
+    def test_stream_reconnect_backoff_is_bounded(self):
+        self.assertEqual(
+            [self.module._stream_reconnect_delay(attempt) for attempt in range(7)],
+            [2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0],
+        )
 
     def test_ensure_service_can_discover_late_ready_file_after_startup_timeout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

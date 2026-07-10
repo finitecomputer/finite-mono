@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Docker smoke for the Phala-style durable /home/node runtime contract."""
+"""Docker smoke for the canonical Agent Runtime's durable /home/node contract."""
 
 from __future__ import annotations
 
@@ -20,10 +20,17 @@ MODEL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "FINITECHAT_HERMES_API_KEY",
     "FINITECHAT_HERMES_MODEL",
     "FINITECHAT_HERMES_PROVIDER",
     "FINITECHAT_HERMES_BASE_URL",
     "FINITECHAT_HERMES_API_MODE",
+)
+INFERENCE_CREDENTIAL_ENV_NAMES = (
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "FINITECHAT_HERMES_API_KEY",
 )
 
 
@@ -150,7 +157,8 @@ def ensure_container_running(container: str) -> None:
     if not state.get("Running"):
         logs = run(["docker", "logs", container], check=False, timeout=30)
         raise SmokeFailure(
-            f"container {container} is not running; state={state}; logs:\n{(logs.stdout or '')[-4000:]}"
+            f"container {container} is not running; state={state}; "
+            f"logs:\n{(logs.stdout or '')[-4000:]}"
         )
 
 
@@ -180,25 +188,6 @@ def wait_container_http_json(
         ensure_container_running(container)
         time.sleep(1)
     raise SmokeFailure(f"{name} did not become ready: {last_error}")
-
-
-def wait_fresh_invite(container: str, *, timeout: float = 45) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    last: dict[str, Any] | None = None
-    while time.monotonic() < deadline:
-        invite = wait_container_http_json(container, "/invite", timeout=10, name="container invite")
-        last = invite
-        if (
-            invite.get("url")
-            and invite.get("room_id")
-            and invite.get("invite_id")
-            and not invite.get("pin")
-        ):
-            return invite
-        if int(invite.get("seconds_remaining") or 0) >= 10:
-            return invite
-        time.sleep(1)
-    raise SmokeFailure(f"container invite endpoint did not return a fresh invite: {last!r}")
 
 
 def start_agent_container(
@@ -235,46 +224,68 @@ def start_agent_container(
         "--env",
         "FINITECHAT_HERMES_PLUGIN_NAME=finitechat",
         "--env",
-        "FINITECHAT_HERMES_ROOM_NAME=Phala Durable Docker Smoke",
+        "FINITECHAT_HERMES_ROOM_NAME=Finite Durable Docker Smoke",
         "--env",
         "FINITECHAT_HERMES_AGENT_DEVICE_ID=durable-docker",
+        "--env",
+        # The canonical image defaults to Finite Private inference. This
+        # dispatch rung deliberately exercises the operator-supplied
+        # OpenRouter credential instead, so select that profile explicitly.
+        "FINITE_DEFAULT_INFERENCE_PROFILE=openrouter",
         *container_env_args(env, MODEL_ENV_NAMES),
         image,
     ]
     return run(command, env=env, timeout=300).stdout.strip()
 
 
-def docker_user_hermes(
+def docker_agent_hermes(
     *,
-    image: str,
-    volume: str,
+    container: str,
     args: list[str],
-    env: dict[str, str],
     timeout: float = 180,
 ) -> dict[str, Any]:
     return run_json(
         [
             "docker",
-            "run",
-            "--rm",
-            "--mount",
-            f"type=volume,src={volume},dst=/data/user",
-            image,
+            "exec",
+            container,
             "finitechat",
             "hermes",
             "--home",
-            "/data/user",
+            "/home/node/.finitechat/agent",
             *args,
         ],
-        env=env,
         timeout=timeout,
+    )
+
+
+def docker_agent_app_state(*, container: str, server_url: str) -> dict[str, Any]:
+    # This is deliberately `app state` without `--start-runtime`: waiting for
+    # the resident sidecar to persist the room must not itself claim the
+    # Welcome and accidentally turn the canary into a polling loop.
+    return run_json(
+        [
+            "docker",
+            "exec",
+            container,
+            "finitechat",
+            "app",
+            "--data-dir",
+            "/home/node/.finitechat/agent",
+            "--server",
+            server_url,
+            "--device-id",
+            "durable-docker",
+            "state",
+        ],
+        timeout=30,
     )
 
 
 def docker_user_app(
     *,
     image: str,
-    volume: str,
+    user_volume: str,
     server_url: str,
     args: list[str],
     env: dict[str, str],
@@ -286,7 +297,14 @@ def docker_user_app(
             "run",
             "--rm",
             "--mount",
-            f"type=volume,src={volume},dst=/data/user",
+            f"type=volume,src={user_volume},dst=/data/user",
+            "--env",
+            # App account keys come from the shared Finite Identity root, not
+            # the app data-dir. Keep both on the durable probe volume so every
+            # one-shot CLI invocation is the same user Device.
+            "FINITE_HOME=/data/user",
+            "--env",
+            "FINITE_AGENT_SUPERVISE=0",
             image,
             "finitechat",
             "app",
@@ -303,33 +321,102 @@ def docker_user_app(
     )
 
 
-def admit_user(
+def create_welcome_room(
     *,
     image: str,
     user_volume: str,
     server_url: str,
-    invite: dict[str, Any],
+    agent_account_id: str,
     env: dict[str, str],
 ) -> dict[str, Any]:
-    docker_user_hermes(
+    # StartRuntime publishes the user's KeyPackages and performs an initial
+    # sync. The user then creates the room and commits an MLS Add for the
+    # already-running Agent Principal. The agent receives a Welcome; there is
+    # no invite session, join URL, PIN, or second admission protocol.
+    docker_user_app(
         image=image,
-        volume=user_volume,
-        args=["init", "--server", server_url, "--device-id", "probe", "--skip-agent-profile"],
+        user_volume=user_volume,
+        server_url=server_url,
+        args=["state", "--start-runtime"],
         env=env,
         timeout=120,
     )
-    started = time.monotonic()
-    joined = docker_user_hermes(
+    created = docker_user_app(
         image=image,
-        volume=user_volume,
-        args=["join", "--url", str(invite["url"]), "--timeout-ms", "120000"],
+        user_volume=user_volume,
+        server_url=server_url,
+        args=["create-room", "--display-name", "Finite Durable Docker Smoke"],
         env=env,
-        timeout=180,
+        timeout=120,
     )
-    if joined.get("state") != "joined":
-        raise SmokeFailure(f"admission did not join: {joined!r}")
-    joined["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-    return joined
+    room_id = created.get("selected_room_id")
+    if not isinstance(room_id, str) or not room_id:
+        raise SmokeFailure(f"room creation did not select a room: {created!r}")
+    added = docker_user_app(
+        image=image,
+        user_volume=user_volume,
+        server_url=server_url,
+        args=[
+            "add-member",
+            "--room-id",
+            room_id,
+            "--account-id",
+            agent_account_id,
+            "--display-name",
+            "Finite Agent",
+        ],
+        env=env,
+        timeout=120,
+    )
+    if added.get("status") != "people added":
+        raise SmokeFailure(f"MLS Add did not complete: {added!r}")
+    return {"room_id": room_id, "add_status": added.get("status")}
+
+
+def wait_agent_room_connected(
+    container: str, room_id: str, server_url: str, *, timeout: float = 120
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            state = docker_agent_app_state(container=container, server_url=server_url)
+            room = next(
+                (
+                    candidate
+                    for candidate in state.get("rooms") or []
+                    if candidate.get("room_id") == room_id
+                ),
+                None,
+            )
+            last = room
+            if room and room.get("state") == "Connected":
+                # The non-mutating state read above is the actual wait gate.
+                # Once connected, collect the richer member/paired evidence.
+                status = docker_agent_hermes(
+                    container=container,
+                    args=["room-status", "--room-id", room_id, "--json"],
+                    timeout=30,
+                )
+                last = status
+                if (
+                    status.get("room_id") == room_id
+                    and status.get("connected") is True
+                    and status.get("paired") is True
+                ):
+                    return status
+                last_error = json.dumps(status, sort_keys=True)
+                time.sleep(1)
+                continue
+            last_error = json.dumps(room or state, sort_keys=True)
+        except Exception as exc:
+            last_error = str(exc)
+        ensure_container_running(container)
+        time.sleep(1)
+    raise SmokeFailure(
+        f"agent did not claim the MLS Welcome for room {room_id!r}: {last_error or repr(last)}"
+    )
 
 
 def first_matching_mine_message_id(state: dict[str, Any], prompt: str) -> str | None:
@@ -353,7 +440,7 @@ def run_model_smoke(
     started = time.monotonic()
     sent = docker_user_app(
         image=image,
-        volume=user_volume,
+        user_volume=user_volume,
         server_url=server_url,
         args=["send", "--room-id", room_id, "--text", prompt],
         env=env,
@@ -364,7 +451,7 @@ def run_model_smoke(
     while time.monotonic() < deadline:
         state = docker_user_app(
             image=image,
-            volume=user_volume,
+            user_volume=user_volume,
             server_url=server_url,
             args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
             env=env,
@@ -419,7 +506,7 @@ def main() -> int:
     started = time.monotonic()
     report: dict[str, Any] = {
         "status": "running",
-        "name": "docker_durable_home_gateway_restart",
+        "name": "docker_durable_home_welcome_restart",
         "layer": "durable-home-docker",
         "run_id": run_id,
         "server": {"url": args.server_url, "phone_reachable": True},
@@ -434,11 +521,14 @@ def main() -> int:
             "workspace": "/home/node/workspace",
             "restic_backend": None,
             "real_gateway_runtime": False,
-            "gateway_admission_before_restart": False,
-            "gateway_admission_after_restart": False,
+            "welcome_admission_before_restart": False,
+            "welcome_admission_after_restart": False,
             "same_agent_npub_after_restart": False,
             "same_room_id_after_restart": False,
             "model_env_present": {name: bool(env.get(name)) for name in MODEL_ENV_NAMES},
+            "inference_credential_present": any(
+                env.get(name) for name in INFERENCE_CREDENTIAL_ENV_NAMES
+            ),
         },
         "steps": [],
     }
@@ -458,6 +548,11 @@ def main() -> int:
     cleanup_volumes = [home_volume, user_volume]
     keep_running = False
     try:
+        if not report["facts"]["inference_credential_present"]:
+            raise SmokeFailure(
+                "durable-home chat smoke requires a real inference credential; "
+                f"set one of {INFERENCE_CREDENTIAL_ENV_NAMES!r}"
+            )
         image_meta = docker_image_metadata(args.image)
         report["facts"]["image_id"] = image_meta["id"]
         report["facts"]["image_metadata"] = image_meta
@@ -481,27 +576,31 @@ def main() -> int:
         wait_container_log(name, "FINITE_AGENT_RUNTIME real_hermes_gateway=true", timeout=180)
         report["facts"]["real_gateway_runtime"] = True
         health = wait_container_http_json(name, "/healthz", timeout=120, name="container health")
-        invite = wait_fresh_invite(name)
+        agent_account_id = health.get("account_id")
+        if not isinstance(agent_account_id, str) or not agent_account_id:
+            raise SmokeFailure(f"runtime health omitted the Agent Principal: {health!r}")
         report["facts"]["agent_npub"] = health.get("npub")
-        report["facts"]["agent_account_id"] = health.get("account_id")
-        report["facts"]["room_id"] = invite.get("room_id")
-        report["facts"]["invite_id"] = invite.get("invite_id")
-        step("agent.ready", npub=health.get("npub"), room_id=invite.get("room_id"))
+        report["facts"]["agent_account_id"] = agent_account_id
+        step("agent.ready", npub=health.get("npub"))
 
-        joined = admit_user(
+        welcome = create_welcome_room(
             image=args.image,
             user_volume=user_volume,
             server_url=args.server_url,
-            invite=invite,
+            agent_account_id=agent_account_id,
             env=env,
         )
-        report["facts"]["gateway_admission_before_restart"] = True
-        step("admission.before_restart", room_id=joined.get("room_id"))
+        room_id = str(welcome["room_id"])
+        report["facts"]["room_id"] = room_id
+        room_status = wait_agent_room_connected(name, room_id, args.server_url)
+        report["facts"]["welcome_admission_before_restart"] = True
+        report["facts"]["room_status_before_restart"] = room_status
+        step("welcome.before_restart", room_id=room_id)
         before_model = run_model_smoke(
             image=args.image,
             user_volume=user_volume,
             server_url=args.server_url,
-            room_id=str(joined["room_id"]),
+            room_id=room_id,
             expected="durable docker before restart ok",
             env=env,
         )
@@ -513,30 +612,31 @@ def main() -> int:
         restarted_health = wait_container_http_json(
             name, "/healthz", timeout=120, name="restarted health"
         )
-        restarted_invite = wait_fresh_invite(name)
+        restarted_room_status = wait_agent_room_connected(name, room_id, args.server_url)
         report["facts"]["agent_npub_after_restart"] = restarted_health.get("npub")
         report["facts"]["same_agent_npub_after_restart"] = restarted_health.get("npub") == report[
             "facts"
         ].get("agent_npub")
-        report["facts"]["same_room_id_after_restart"] = restarted_invite.get("room_id") == report[
-            "facts"
-        ].get("room_id")
+        report["facts"]["same_room_id_after_restart"] = (
+            restarted_room_status.get("room_id") == room_id
+        )
+        report["facts"]["room_status_after_restart"] = restarted_room_status
         if not report["facts"]["same_agent_npub_after_restart"]:
             raise SmokeFailure("agent npub changed after Docker restart")
         if not report["facts"]["same_room_id_after_restart"]:
-            raise SmokeFailure("invite room changed after Docker restart")
+            raise SmokeFailure("MLS room changed after Docker restart")
         step("agent.ready_after_restart", npub=restarted_health.get("npub"))
 
         after_model = run_model_smoke(
             image=args.image,
             user_volume=user_volume,
             server_url=args.server_url,
-            room_id=str(joined["room_id"]),
+            room_id=room_id,
             expected="durable docker after restart ok",
             env=env,
         )
         report["facts"]["model_smoke_after_restart"] = after_model
-        report["facts"]["gateway_admission_after_restart"] = True
+        report["facts"]["welcome_admission_after_restart"] = True
         step("model.after_restart", reply_message_id=after_model.get("reply_message_id"))
 
         report["status"] = "passed"

@@ -193,6 +193,12 @@ have the machinery; it has just never been named as the recovery path.
 
 **DECIDED: 90-day credentials, renewal nudges from 30 days out.**
 
+The wire format may remain out of scope for this protocol decision, but the
+user-held or Finite-assisted account-secret backup is now a SaaS launch gate.
+Restoring the secret and linking a Device also does not restore pre-membership
+MLS history; that requires the separate encrypted backup/history-share path in
+`protocol-v1.md`.
+
 ---
 
 ## Review checklist

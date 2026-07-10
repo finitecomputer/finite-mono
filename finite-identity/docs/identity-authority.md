@@ -175,6 +175,14 @@ authorization time. Supported v1 grantees are:
 Third-party email-shaped identifiers are treated as Invited Emails only.
 Finite Identity does not perform or trust Third-Party NIP-05 resolution in v1.
 
+This endpoint is a pure resolution query: `actor_pubkey` is a claimed input and
+the endpoint does not prove control of that key. Before calling it, the product
+must authenticate the actor with NIP-98 or obtain the pubkey from another
+trusted, server-validated assertion. The Identity Authority must be reachable
+only by trusted product services until the contract itself authenticates
+callers. A successful resolution answer never substitutes for actor
+authentication.
+
 Products may keep short-lived Resolution Caches for latency, but the cache is
 never the source of truth. Missing, expired, or uncertain answers must fail
 closed.
@@ -238,8 +246,10 @@ SQLite-safe backup procedures. A backup must preserve:
 
 Restoring identity-owned storage restores the Authority's public state. It
 does not restore user Local Identity Keys because those are never stored by the
-Authority. Users who lose their Local Identity Key need a future Recovery
-design; v1 does not reassign Finite VIP Emails to replacement keys.
+Authority. V1 does not reassign Finite VIP Emails to replacement keys. It is
+therefore insufficient by itself for the SaaS Recoverability Contract: launch
+must add tested same-key recovery material or an explicit Identity Recovery
+flow that moves product grants and encrypted key access to a replacement key.
 
 ## Product Integration Rules
 
@@ -254,6 +264,9 @@ Products should:
 - fail closed when identity resolution is missing, stale, or rejected
 - keep only short-lived Resolution Caches
 - own product permissions, product data, and product-specific audit trails
+- own, scope, audit, and revoke Email Access Delegations; pass only the
+  authenticated agent pubkey and relevant email-shaped Product Grant through
+  product authorization
 
 Products should not:
 
@@ -262,12 +275,14 @@ Products should not:
 - hash, store, or redeem Email Challenge tokens outside Finite Identity
 - mutate identity-owned SQLite storage
 - treat third-party email-shaped grants as trusted Third-Party NIP-05 Names
+- represent a product Email Access Delegation as a Principal Link, NIP-05
+  binding, or globally reusable Principal Resolution result
 
 ## Explicit V1 Limits
 
 The following are intentionally out of scope:
 
-- key-loss Recovery
+- key-loss Identity Recovery
 - rebinding a Finite VIP Email or NIP-05 Name to a different pubkey
 - product data migration from an old key to a replacement key
 - server-side custody of user secret keys
@@ -275,6 +290,10 @@ The following are intentionally out of scope:
 - NIP-05 relay metadata
 - arbitrary alternate handles, display names, or non-`finite.vip` Finite VIP
   Domains
+
+These are v1 protocol limits, not permission to strand first-slice user data.
+Any product depending on a listed capability must remain non-durable preview or
+add a separately versioned and tested recovery contract before launch.
 - required product permission rewrites after linking
 
 These limits are product-facing behavior. Do not work around them in Sites or

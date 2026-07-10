@@ -1,7 +1,7 @@
 # Core-Synced Publish Grants
 
 Finite Sites publishing authorization is a local **publish grant cache** keyed
-by User Key pubkey. Self-registration is the v0 default source, the existing
+by Publishing Key pubkey. Self-registration is the v0 default source, the existing
 operator allowlist is a manual override source, and Core becomes the future
 paid-entitlement source. `finitesitesd` checks this local cache for Project
 creation and Project Output allocation and never calls Core in the hot path for
@@ -9,7 +9,7 @@ serving site traffic.
 
 The grant cache records:
 
-- User Key pubkey;
+- Publishing Key pubkey;
 - source (`self`, `operator`, or `core`);
 - optional note;
 - optional expiry;

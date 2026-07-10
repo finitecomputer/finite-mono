@@ -1,201 +1,167 @@
-# Vertical Slice v1 PRD: Login → Pay → Agent → Invite
+# SaaS v1 PRD: Sign Up → Launch → Web Chat
 
-Status: active. Pairing decision resolved 2026-07-03: no PIN (see Phase 3).
-Phases 1-2 implemented (worktree `vertical-slice-p1-money-path`), awaiting
-review.
+Status: active first-pass product plan.
 
-Date: 2026-07-03.
+Date: 2026-07-09.
 
-## Problem Statement
+## Outcome
 
-finitecomputer-v2 has every subsystem of the self-serve product working in
-isolation: WorkOS login, Stripe Billing v0 (hardened, test-clock E2E'd), Core
-entitlements, runner launch on Docker and Phala, and a runtime that publishes
-a Finite Chat `/invite` status endpoint. What does not exist is the continuous
-product experience: a new user should be able to sign up, pay, watch their
-agent launch, and pair their iOS Finite Chat app with it — without reading
-docs, hitting a raw JSON endpoint, or waiting on an operator.
+Ship the shortest credible Box1-parity SaaS path: a person signs up, pays,
+names an agent, launches it, and chats with it in the dashboard. Restarting any
+one component must not strand the user or silently create a different identity.
+This slice is intentionally small enough to ship and iterate; the existing
+Finite Chat experience remains the product northstar.
 
-The deliverable is that golden path, demoable end-to-end on a real provider
-with a real phone, with machine-readable evidence at each hop. This slice is
-the vantage point for all future iteration.
+Finite is one product assembled from independently replaceable services and
+binaries. A feature request must not turn the Agent Runtime image, Runtime
+Management, or Runner into a product control plane.
 
-## What Already Exists (verified 2026-07-03)
+## Golden Path
 
-- WorkOS login/signup/callback routes, env-gated; billing setup panel;
-  Stripe Checkout + Billing Portal server actions; hardened webhook sync
-  (re-fetch on subscription events, double-subscribe guard, price check) and
-  a Stripe test-clock E2E (`384bc08`, `40a9240`).
-- Core: billing-gated agent creation (`BillingRequired`), count-based
-  entitlements, full lifecycle (create/restart/recover/stop/destroy with
-  offboarding), runtime facts including `published_app_urls` = the runtime's
-  `/invite` status URL.
-- Runner: Docker + Phala launchers; both wait for `/invite` readiness before
-  registering the runtime.
-- Runtime image: Hermes + finitechat CLI + finite-platform plugin;
-  `health_server.py` serves `GET /invite` → `{ready, room_id, invite_id, url}`
-  where `url` is a `finite://join?...` invite code (finitechat invite v1).
-- Dashboard: billing panel, create-agent form, creation-progress states
-  (queued / launching / failed-retry), a project card that links out to the
-  raw invite URL. `scripts/local_create_agent_canary.sh` drives a wonky but
-  real local demo.
-- iOS Finite Chat: QR scanner + `finite://join` handling + PIN entry exist in
-  the app (finitechat ADR 0006 flow).
+1. Sign up or log in through WorkOS and land in the personal dashboard.
+2. Complete billing, or see the already-active entitlement.
+3. Choose an agent name, icon, and Runner class. Kata is the first production
+   choice; Phala follows through the same provider-neutral contract.
+4. Launch one lockstep Finite Product Release. The dashboard shows bounded,
+   understandable launch progress and a retryable failure state.
+5. Open **Chat** in the dashboard. Account Auth opens the user's durable Hosted
+   Web Device; the browser never receives its chat secret.
+6. The Hosted Web Device contacts the agent through its Nostr profile and
+   published KeyPackage, then creates or opens the canonical Room. Core,
+   Runner, and Runtime Management do not broker chat. A temporary invite-based
+   bootstrap may remain behind the product service while direct contact lands,
+   but it is not a platform contract.
+7. Exchange real messages through Finite Chat. Browser updates arrive through
+   the resident event stream, not polling.
+8. Restart the Finite Chat server, agent, or Hosted Web Device and resume the
+   same identity, Room, and durable state.
 
-## The Gap
+Electron is a later **new Device**, not a second account or second chat product.
+It uses the same login/account-linking flow and canonical chat UI, but keeps its
+Device key and store locally, so it does not need the Hosted Web Device to run.
+The launch dashboard must not depend on Electron's best-effort UX.
 
-1. The dashboard never renders the invite. The user's payoff moment — "scan
-   this with your phone" — is a link to a JSON page.
-2. The flow has seams: after Stripe Checkout returns, billing state depends
-   on webhook arrival; after creation, invite readiness lags runtime
-   registration. Neither seam has a designed waiting state.
-3. Pairing security is undecided and currently contradictory (below).
-4. No end-to-end evidence artifact covers signup → paid → launched → paired.
+## Product And Identity Boundaries
 
-## Pairing security (resolved 2026-07-03: no PIN)
+- WorkOS gates the dashboard, billing, and Hosted Web Device. It is not a
+  Nostr signer and may be replaced later without changing agent or chat
+  identities.
+- Each agent owns one Agent Principal npub/nsec in its durable Finite Home.
+  `finite-identity` makes `finitechat`, `fsite`, and `fbrain` use that identity;
+  Core, Runner, and dashboard never receive its nsec.
+- The human's Finite Chat identity is separate and may eventually be imported
+  by nsec. Each Hosted, Electron, or native Device has independent revocable
+  Device state under that account.
+- The Hosted Web Device is an honest trusted-server web-chat device, not a
+  claim of browser E2EE or operator blindness.
+- Runtime restart, replace, and stop preserve `/data`. Compute retirement never
+  implies data purge. The first slice keeps an explicit Finite-assisted escape
+  route while stronger recovery and operator-blind custody are proven.
 
-Decision: no PIN, per custody brief Decision 6. finitechat main has already
-hard-cut the agent invite flow to the no-PIN hosted shape (`e81683e`,
-`7ed872d`, `3482ea4`): invite code v1 carries no PIN; admission is an HMAC
-join proof binding the invite token (in the URL, never seen by the
-rendezvous server) to the joiner's exact identity and KeyPackage. The earlier
-Option A/B framing in this doc cited ADR 0006 and the invite execution plan,
-which describe the pre-cut PIN flow — those finitechat docs are stale
-relative to code.
+## The Thin-Coupling Wall
 
-With no PIN, possession of the invite URL is admission. Three gaps make that
-unacceptable as-is, and define Phase 3:
+Every feature proposal must pass this placement test before implementation:
 
-1. **Invites are not single-use in the hosted lane.** The `hermes invite`
-   default is `max_joins = 8`, TTL 24h (`finitechat-cli/src/hermes.rs:74`).
-   Protocol supports `--max-joins 1`; the runtime just doesn't pass it.
-2. **The runtime caches the invite forever.** `health_server.py` writes
-   `current-invite.json` once and serves it even after the invite is
-   consumed or expired — a paired agent keeps advertising a dead (or worse,
-   still-live multi-use) invite on a public endpoint.
-3. **The invite is served on the public runtime URL.** Anyone who discovers
-   the hostname can fetch the one live invite and win the pairing race.
-   Single-use narrows this to a race; credential-gating closes it without
-   any user-visible UX (server-to-server only — the user still just scans).
+1. Can it live in the dashboard, its owning product service, a stable CLI, or a
+   Finite Skill? That is the default.
+2. Does it behave the same when the unchanged release moves between local
+   Docker, Kata, and Phala?
+3. Does Runtime Management expose only generic release/readiness/health
+   telemetry, with no feature-specific verbs, secrets, payloads, or commands?
+4. Does Runner do only provider lifecycle: launch, inspect/adopt, restart,
+   replace, stop/retire, and separately authorized purge?
+5. Can a future Electron/native Device consume the same chat state and actions
+   without depending on the Hosted Web Device?
 
-Also requested: the invite URI is too long/ugly for the copy-paste surface
-(`finite://join?v=1&s=<pct-encoded-server>&r=…&i=…&t=<64-hex>&a=<npub>&n=…`).
-Compaction (default-server elision and/or a packed v2 encoding) is
-finitechat protocol-surface work — tracked as a finitechat work item, not a
-v2 blocker; the dashboard truncates for display meanwhile.
+If any answer is no, the feature is rejected or redesigned. In particular,
+Google, Telegram, Sites, Brain, and skills do not earn special Runner operations
+or Runtime Management messages. This wall supersedes earlier plans that put
+product-feature commands or payloads on Runtime Management:
 
-## Acceptance Criteria
+- Google and Telegram setup belongs to product UI plus a stable agent-facing
+  CLI/skill and the owning service's explicit, revocable grants.
+- Sites publish remains an agent `fsite` operation; list and preview, including
+  chat result previews, belong to the Sites service and dashboard.
+- Brain belongs to its authenticated dashboard client and product-scoped
+  grants; encrypted Folder Key grants remain a separate Brain concern.
+- New agents ship with a pinned `finite-skills` baseline. Agents update at
+  their own pace with the simple `finite skills sync` workflow; no automatic
+  skills control plane, Runner hook, or image rebuild is introduced.
+- Runtime images change only to promote a tested lockstep product release, not
+  to encode dashboard workflows.
 
-A fresh user with only an email address and a credit card, on the production
-dashboard, can:
+## First-Slice Acceptance Criteria
 
-1. Sign up via WorkOS and land on the dashboard signed in.
-2. See a billing setup panel; complete Stripe Checkout (promo codes work);
-   return to a dashboard that resolves to "paid" without a manual refresh,
-   even if the webhook is still in flight (bounded polling, not a blank
-   state).
-3. Create their agent with one action; watch queued → launching → ready
-   states update without manual refresh.
-4. On the ready agent card, see a QR code + copyable `finite://join?...`
-   invite (no PIN), rendered in the dashboard, with "open in Finite Chat"
-   for on-device Safari. The invite is single-use; after pairing the card
-   shows paired state, not a live invite.
-5. Scan with the iOS app, complete pairing, exchange a real Hermes message
-   round trip.
-6. Restart the runtime from the dashboard; pairing and chat history survive;
-   the invite surface still works.
+A fresh email user can complete WorkOS auth, billing, name/icon/Runner choice,
+launch, and a real dashboard chat turn without docs, raw JSON, Electron, or an
+operator. The user sees useful waiting and retry states at billing, launch, and
+chat connection boundaries.
 
-Non-goals for v1: push notifications (iOS polling/foreground is fine), team
-seats, multiple agents per org, no-PIN pairing UX, agent web chat in the
-dashboard, migration of legacy users.
+The same release boots with one resident Hermes sidecar and event-driven
+inbound delivery. No Hermes polling or silent CLI fallback is allowed. Agent,
+Hosted Device, and server state are durable enough that supported restarts
+heal automatically and preserve the conversation. Secrets do not appear in
+browser state, argv, logs, runtime facts, or release evidence.
 
-## Constraints
+The release manifest pins all first-party hosted services and binaries plus the
+Hermes version. Promotion rejects unversioned or drifting components.
 
-Musts:
-- Core stores no PIN, invite URL contents, or pairing secrets beyond
-  credential hashes (custody brief rules).
-- Billing gates stay in Core; the dashboard remains an adapter.
-- QR rendering is self-contained in the dashboard (bundled QR lib, no
-  external image service).
-- Every phase lands with tests in the existing CI jobs; the runtime-image
-  contract change (if Option A) lands in finitechat's repo with its own
-  tests, versioned in the image contract doc.
-- Read `apps/dashboard/AGENTS.md` before dashboard work: this Next.js
-  version diverges from convention — consult `node_modules/next/dist/docs/`.
+## Current Status
 
-Must-nots:
-- No new cross-repo source coupling: v2 consumes the invite contract via the
-  health server JSON shape only; changes to that shape happen in finitechat.
-- No polling loops without caps/backoff (billing sync wait, invite
-  readiness).
-- Don't regress the failed-launch retry path or billing v0 test coverage.
+Implemented in the current first-pass slice:
 
-Preferences:
-- Reuse the creation-progress panel patterns for the two new waiting states.
-- Extend `local_create_agent_canary.sh` into the evidence harness rather
-  than writing a parallel script.
+- [x] Standalone, per-account Hosted Web Device service with durable isolated
+  state and internal authentication.
+- [x] WorkOS-gated dashboard Chat surface backed by Finite Chat
+  `AppState`/`AppAction`, with a server-side proxy and SSE update path.
+- [x] Devfinity wiring and production Nix service/package definitions for the
+  Hosted Web Device.
+- [x] Runtime image lockstep checks, Hermes `0.18.2`, and strict resident-stream
+  inbound behavior with reconnect instead of polling or CLI fallback.
+- [x] A real server + agent + Hosted Web Device restart integration test for
+  chat continuity at the service boundary.
 
-Escalations (stop and ask):
-- Pairing decision A/B needs explicit sign-off (custody sync).
-- Any change to what Phala exposes publicly (health port surface).
-- If webhook-race polling reveals a deeper Core consistency issue, surface
-  it rather than papering over it in the UI.
+Remaining launch gates:
 
-## Decomposition
+- [ ] Add icon selection and persist a Project-scoped Runner class from the
+  creation form through the provider-neutral RuntimeSpec (the current form
+  captures only the agent name).
+- [ ] Run one actual full-stack browser canary through auth/billing, agent
+  creation, Runner launch, Hosted Web chat, send/receive, and restart.
+- [ ] Implement and prove the generic Kata adapter on finite-lat-1; run Phala
+  unchanged as the fast-follow conformance target.
+- [ ] Configure production secret references, build/promote the pinned images,
+  deploy, and capture release evidence.
+- [ ] Finish first-login human account-key bootstrap, bring-your-own-nsec
+  import, Device linking, key backup, and an understandable recovery flow.
+- [ ] Pass the outage matrix for Finite Chat server, Hosted Web Device, and,
+  when reintroduced, Electron stopping and restarting independently.
+- [x] Use direct agent profile/KeyPackage contact for Hosted Web chat rather
+  than coupling the dashboard to the legacy invite action.
+- [ ] Add Google, Telegram, Sites dashboard preview/list/publish, and Brain as
+  product-owned follow-on slices without widening Runtime Management or Runner.
 
-Phase 0 — Decide pairing. DONE: no PIN (above).
+## Recovery TODO (Not A Slice Design Gate)
 
-Phase 1 — Seamless money path (dashboard only). Checkout-return state
-machine: `billing=success` → bounded server-side poll of Core billing until
-active or timeout → auto-advance to create-agent. Tests: webhook-slow,
-webhook-first, checkout-cancelled paths.
+Recovery Snapshot format, off-host storage, Restic suitability, and long-term
+key custody remain an explicit open question. Do not delay the working SaaS
+loop to choose the final mechanism. For this slice, preserve state, retain the
+Finite-assisted Recovery Authority, never couple teardown to purge, provide an
+escape/export path where possible, and make no stronger privacy or recovery
+claim than the evidence supports.
 
-Phase 2 — Invite surface (dashboard only, works under either pairing
-option). Agent-ready card gains: QR of the invite URL, copy button, "open in
-Finite Chat" link, invite-not-ready waiting state (bounded refresh), error
-state when `/invite` reports not-ready with error. Server action fetches
-invite JSON (today: public URL; Phase 3 swaps in credential). Tests: render
-states from fixture JSON; no client-side fetch of runtime origin (CORS +
-credential hygiene).
+## Evaluation
 
-Phase 3 — Pairing hardening (no user-visible UX change). Split by repo:
-- finitechat repo: health server mints `--max-joins 1` with a short TTL;
-  invite cache invalidated on consumption/expiry; `/invite` reports
-  `{paired: true}` after first join instead of a dead invite; re-invite is
-  an explicit action, not an automatic re-mint on GET. Its own tests.
-- v2 repo: per-runtime pairing credential (relay-credential pattern) minted
-  by the runner, hash in Core, owner-scoped Core endpoint for the dashboard;
-  `src/lib/agent-invite.ts` fetch presents it; public hits get `{ready}`
-  only. Dashboard gains paired-state and re-invite affordances.
-- finitechat work item (not slice-blocking): compact invite URI encoding.
-
-Phase 4 — Local harness + end-to-end evidence, as real code (product rule:
-no product logic in .sh). Replace `scripts/local_create_agent_canary.sh`
-with a workspace crate (e.g. `crates/finite-saas-local`): subcommands `up`
-(postgres + Core + dashboard + optional runner/agent with dev auth — the
-manual-testing server), `demo` (drive signup → test-clock subscription →
-launch → invite-ready → CLI join → Hermes round trip), emitting a JSON
-evidence file per run; unit-tested orchestration logic, `--json` output.
-Promote the Docker lane into CI; document the manual Phala + real-iPhone
-checklist as the release gate (finitechat phone-canary pattern).
-
-Phase 5 — Durability of the payoff. Restart-from-dashboard keeps pairing
-(state on `/data` durable mount); invite surface behavior across restart;
-destroy hides the invite surface and invalidates the pairing credential.
-
-Phases 1 and 2 are independent and can run in parallel; 3 depends on 0;
-4 depends on 2 (full value after 3); 5 depends on 3.
-
-## Evaluation Design
-
-- Unit/CI: state-machine tests for both waiting seams; invite-render fixture
-  tests; credential round-trip tests in Core + runner; health-server auth
-  tests in finitechat.
-- Integration: the extended canary run in CI (Docker lane) producing a
-  machine-readable evidence JSON: timestamps for signup, checkout, webhook
-  sync, entitlement grant, launch, invite-ready, join, first message.
-- Release gate: one scripted Phala run + one human iPhone pairing per the
-  finitechat phone-canary loop, evidence archived. "It demos" is not done;
-  the evidence file is done.
-- Regression guard: billing v0 acceptance tests and test-clock E2E stay
-  green throughout.
+- Unit/contract: Account Auth scoping, per-user Hosted Device isolation,
+  browser action allowlist, SSE reconnect, stream-only Hermes behavior, and
+  version-lock checks.
+- Integration: real Finite Chat server, agent, and Hosted Device exchange
+  messages before and after independent restarts with the same identities and
+  Room.
+- Product canary: one machine-readable run records auth, billing, launch,
+  first chat turn, restart, recovery, component versions, and Runner evidence.
+- Architecture review: every new feature records its answers to the five-part
+  thin-coupling test. A feature-specific Runtime Management or Runner change is
+  a failed review, even if its demo works.
+- Release gate: local full-stack first, then Kata, then unchanged Phala. A
+  provider accepting a deployment is not evidence that the product works.

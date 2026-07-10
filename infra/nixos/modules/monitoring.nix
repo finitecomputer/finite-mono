@@ -36,6 +36,7 @@
       check finite-saas-core    http://127.0.0.1:4200/healthz
       check dashboard           http://127.0.0.1:3000/healthz
       check finitechat-server   http://127.0.0.1:8788/health
+      check hosted-web-device   http://127.0.0.1:38918/healthz
       check finite-brain        http://127.0.0.1:3015/health
       check finitesitesd        -H "Host: api.finite.chat" http://127.0.0.1:8787/api/v1/healthz
       check searxng             http://127.0.0.1:8080/healthz

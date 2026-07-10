@@ -1,9 +1,10 @@
 # finite-identity
 
-Shared on-disk Nostr identity for Finite tools. Every Finite tool
-(`finitechat`, `fsite`, `fbrain`, hosted agent runtimes) needs the user's
-Nostr key; this crate makes identity install-order symmetric: whichever tool
-runs first mints the key, and every other tool finds it. See
+Shared on-disk Nostr identity contract per Finite Home. Every Finite tool
+(`finitechat`, `fsite`, `fbrain`) acting for the same human or agent identity
+uses that identity owner's Nostr key; this crate makes install-order symmetric
+within the home. A hosted Agent Runtime has its own key and never adopts the
+human user's Finite Chat key. See
 [SPEC.md](./SPEC.md) for the full contract (v1) and
 [CLI-CONVENTIONS.md](./CLI-CONVENTIONS.md) for the `auth status` /
 `auth import` verbs every Finite CLI exposes on top of this crate.
@@ -28,6 +29,11 @@ non-Unix, creation fails closed unless `FINITE_IDENTITY_ALLOW_INSECURE=1`.
 | `$HOME/.finite/identity/` | Identity root otherwise |
 | `<root>/identity.json` | The identity file (version-gated JSON) |
 | `<root>/.lock` | Advisory lock taken around mint-if-absent |
+
+V1 does not back up or rotate this secret. A copied Authority database restores
+public bindings, not the Local Identity Key or the product data it unlocks.
+Durable SaaS use therefore requires separately tested same-key recovery or an
+explicit Identity Recovery plus product-grant/key migration path.
 
 ## Install
 

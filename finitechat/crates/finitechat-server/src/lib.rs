@@ -15,7 +15,7 @@ use finitechat_delivery::{
     HTTP_SERVER_SOURCE, HttpClaimedKeyPackage, HttpCommitAdmission, HttpDeliveryLimits,
     HttpDeliveryService, HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishCheck,
     HttpPublishReceipt, HttpPublishTarget, HttpSequence, HttpServerError, HttpSyncPage,
-    MAX_HTTP_SYNC_PAGE_ENTRIES,
+    MAX_HTTP_ID_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 pub use finitechat_http::{
     AckLinkPayloadRequest, AckLinkPayloadResponse, AckPushWakeRequest, AckPushWakeResponse,
@@ -139,6 +139,7 @@ struct BlobObject {
 #[derive(Clone)]
 struct SyncStreamCursors {
     rooms: Vec<SyncStreamRoomCursor>,
+    inbox: Option<SyncStreamInboxCursor>,
 }
 
 #[derive(Clone)]
@@ -146,6 +147,12 @@ struct SyncStreamRoomCursor {
     room_id: String,
     after_seq: u64,
     seen_activity_received_at_ms: u64,
+}
+
+#[derive(Clone)]
+struct SyncStreamInboxCursor {
+    recipient: MemberId,
+    after_seq: u64,
 }
 
 struct SyncStreamLoop {
@@ -1101,6 +1108,20 @@ impl HttpServerState {
                     room_id: watch.room_id.clone(),
                     received_at_ms: highwater,
                 });
+            }
+        }
+
+        if let Some(watch) = &mut cursors.inbox {
+            let next_seq = {
+                let service = self.service.lock().expect("HTTP delivery service mutex");
+                service
+                    .sync_inbox(&watch.recipient, watch.after_seq, 1)
+                    .ok()
+                    .and_then(|page| page.entries.first().map(|entry| entry.seq))
+            };
+            if let Some(seq) = next_seq {
+                watch.after_seq = seq;
+                events.push(SyncHintEvent::InboxAdvanced { seq });
             }
         }
 
@@ -2944,6 +2965,10 @@ async fn sync_stream(
                 seen_activity_received_at_ms: 0,
             })
             .collect(),
+        inbox: request.inbox.map(|inbox| SyncStreamInboxCursor {
+            recipient: inbox.recipient,
+            after_seq: inbox.after_seq,
+        }),
     };
     let stream = futures_util::stream::unfold(
         SyncStreamLoop {
@@ -2984,6 +3009,7 @@ fn sync_sse_event(event: SyncHintEvent) -> Event {
     let name = match &event {
         SyncHintEvent::RoomAdvanced { .. } => "room_advanced",
         SyncHintEvent::ActivityChanged { .. } => "activity_changed",
+        SyncHintEvent::InboxAdvanced { .. } => "inbox_advanced",
         SyncHintEvent::Heartbeat => "heartbeat",
     };
     Event::default()
@@ -5994,7 +6020,18 @@ fn validate_sync_wait_request(request: &SyncWaitRequest) -> Result<(), ServerHtt
 }
 
 fn validate_sync_stream_request(request: &SyncStreamRequest) -> Result<(), ServerHttpError> {
-    validate_sync_watch_bounds(&request.rooms, "sync_stream")
+    validate_sync_watch_bounds(&request.rooms, "sync_stream")?;
+    if let Some(inbox) = &request.inbox {
+        let recipient_len = inbox.recipient.as_slice().len();
+        if recipient_len == 0 || recipient_len > MAX_HTTP_ID_BYTES {
+            return Err(ServerHttpError::InvalidSyncRequest {
+                reason: format!(
+                    "sync_stream inbox recipient must contain 1..={MAX_HTTP_ID_BYTES} bytes"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_sync_watch_bounds(

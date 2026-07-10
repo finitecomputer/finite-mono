@@ -75,10 +75,10 @@ implementation stay focused.
 
 - Pre-User Reset wipes product data so examples can be redeployed without
   compatibility adapters.
-- Registry has final-shaped Principals, Agent Keys, Projects, Project
+- Registry has final-shaped Principals, Agent Principal Keys, Projects, Project
   Collaborators, Project Outputs, and Git Credentials.
 - `fsite auth register --output json` creates or replays a self-registered
-  Publishing Principal for the local User Key.
+  Publishing Principal for the local Publishing Key.
 - `fsite project init --config finite.toml --dry-run --output json` creates a
   Project with zero or more outputs. `[project]`-only configs create Bare
   Project Repositories.
@@ -117,13 +117,16 @@ implementation stay focused.
 ### Milestone 2: Native Principals and Agent Delegations
 
 - Native Finite users are shared to by npub/Principal, not email.
-- Agents use distinct Agent Keys; humans approve project-scoped Agent
-  Delegations from FiniteChat.
-- Audit records both Principal and Agent Key.
+- Agents use distinct Agent Principal Keys and act as their own Native
+  Principals by default. Humans approve project-scoped Agent Delegations from
+  Finite Chat only when an agent needs to exercise the human Principal's
+  rights.
+- Audit records the actor Principal and any Agent Delegation used.
 - Email remains the External Principal bootstrap path for non-Finite users.
-- Email Links let an agent prove an email belongs to a Native Principal so
-  future email-based Project Grants can resolve to that npub without repeated
-  email-only git auth.
+- Email Links let an identity owner prove that an email and Native Principal
+  are the same Principal. They never equate a human and agent; access from a
+  human email grant to an Agent Principal uses an explicit, revocable Finite
+  Sites Email Access Delegation that grants no Brain authority.
 
 ### Milestone 3: Multi-output Projects
 

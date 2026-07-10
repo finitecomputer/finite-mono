@@ -65,11 +65,12 @@ Prefer `--output json` for commands whose output you need to parse.
 
 ## Your Finite Identity
 
-`fsite` uses the shared Finite identity: one Nostr key per user, stored at
+`fsite` uses the current Finite Home's identity-owner key, stored at
 `~/.finite/identity/identity.json` (or `$FINITE_HOME/identity/identity.json`
 when `FINITE_HOME` is set, e.g. in hosted runtimes). Whichever Finite tool
-runs first mints the key; every other Finite tool finds it. `fsite` never
-copies the secret anywhere else.
+runs first in that home mints the key; every other Finite tool in the same home
+finds it. A hosted agent therefore publishes as its Agent Principal, not as the
+human who owns its SaaS Project. `fsite` never copies the secret elsewhere.
 
 ```sh
 fsite auth status --output json
@@ -83,9 +84,11 @@ authority for email proof and Nostr key ownership instead of Sites-local email
 keys.
 
 For `@finite.vip` addresses, redeeming after `fsite auth link-email EMAIL` or
-redeeming with `--link-native` binds the email to the shared User Key in
-finite-identity. That is the path that lets finite-identity own the user's
-Nostr keypair and NIP-05 identity. For non-`@finite.vip` addresses, redeeming
+redeeming with `--link-native` binds the email to the current Local Identity
+Key in finite-identity. Do not run that flow from an agent merely to inherit
+the human's email permissions; human-to-agent email access requires an
+explicit, revocable Finite Sites Email Access Delegation. For non-`@finite.vip`
+addresses, redeeming
 preserves the email-only collaborator flow: the email can satisfy an email
 grant, but it does not become a native Finite VIP identity.
 
@@ -111,9 +114,14 @@ tool may already be using it). If you do nothing, a fresh identity is minted
 on first run and previously created Projects will not be reachable from the
 new key.
 
+Recovery warning: Sites retains repositories and outputs, but loss of the sole
+Publishing Key can still strand private owner access. A durable SaaS Project
+must have an independent collaborator or a tested, audited Publishing Ownership
+Recovery flow; operator SQL is not the product recovery path.
+
 ## Publish A New Static Site
 
-1. Register this machine's User Key for publishing:
+1. Register this Finite Home's Publishing Key for publishing:
 
 ```sh
 fsite whoami
@@ -144,6 +152,16 @@ spa = false
 fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
 ```
+
+Project Init is replay-safe, including its Git repository setup boundary. If
+the server returns `git_unavailable`, no Project Init state changed: wait for
+service health to recover and retry the exact command once. If it returns
+`git_repository_setup_failed`, the Project registry state may already be
+durable even though the repository is not ready. Keep the same slug and local
+source; after the operator repairs Git or repository storage, replay the exact
+`fsite project init --config finite.toml --output json` command once. That
+replay repairs the repository without creating a duplicate Project. Do not
+blindly loop either failure.
 
 5. Store a scoped Git Credential, commit source plus deploy bytes, and push
 the Deploy Branch:
@@ -308,11 +326,18 @@ fsite auth link-email editor@example.com --output json
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --output json
 ```
 
-If an invite email already gave you a token, link it directly:
+If an invite email already gave the current identity owner a token and the
+email and local npub are the same Principal, link it directly:
 
 ```sh
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --link-native --output json
 ```
+
+Never run that command from an Agent Principal merely to inherit a human's
+email grants. That case requires an explicit, revocable Finite Sites Email
+Access Delegation. It grants no Brain access, and until the installed Sites
+API/CLI exposes the delegation flow the agent must stop rather than impersonate
+the human through an email session.
 
 ## Share And Collaborate
 

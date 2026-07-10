@@ -18,11 +18,6 @@ on:
         description: "Image version tag, for example 2026-07-08.1"
         required: true
         type: string
-      hermes_agent_version:
-        description: "hermes-agent package version"
-        required: true
-        default: "0.18.0"
-        type: string
       runs_on_json:
         description: "GitHub runner labels JSON"
         required: true
@@ -31,6 +26,9 @@ on:
 
 concurrency:
   group: agent-runtime-image-${{ inputs.version }}
+
+env:
+  HERMES_AGENT_VERSION: "0.18.2"
 
 jobs:
   publish:
@@ -48,35 +46,86 @@ jobs:
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build and push runtime image
+      - name: Build, validate, and push runtime image
         id: build
-        working-directory: finitecomputer-v2
         env:
           # mono-owned package (legacy finite-agent-runtime is write-locked to
           # finitecomputer-v2 and stays frozen; live CVMs keep pulling their
           # pinned digests from it).
           IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runtime
           VERSION: ${{ inputs.version }}
-          HERMES_AGENT_VERSION: ${{ inputs.hermes_agent_version }}
         run: |
-          scripts/build_runtime_image.py \
-            --image-ref "$IMAGE:$VERSION" \
+          VERSION_REF="$IMAGE:$VERSION"
+          SHA_REF="$IMAGE:sha-$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          finitecomputer-v2/scripts/build_runtime_image.py \
+            --image-ref "$VERSION_REF" \
             --hermes-agent-version "$HERMES_AGENT_VERSION" \
-            --finitechat-repo ../finitechat \
-            --finite-sites-repo ../finite-sites \
-            --finite-brain-repo ../finite-brain \
             --platform linux/amd64 \
-            --push \
-            --report runtime-image-report.json
-          DIGEST="$(docker image inspect "$IMAGE:$VERSION" --format '{{index .RepoDigests 0}}' | sed "s#^$IMAGE@##")"
-          if [ -z "$DIGEST" ]; then
-            echo "::error::docker did not report a pushed digest"
-            cat runtime-image-report.json
+            --report finitecomputer-v2/runtime-image-report.json
+
+          test "$(docker image inspect "$VERSION_REF" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
+          docker run --rm --entrypoint /bin/sh "$VERSION_REF" -ec '
+            test "$(/runtime/hermes-venv/bin/python -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.18.2"
+            /runtime/bin/finitechat --help >/dev/null
+            /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
+            /runtime/bin/fbrain --help >/dev/null
+            /runtime/hermes-venv/bin/python -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
+            /runtime/hermes-venv/bin/python -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
+            test -f /runtime/hermes-plugin/finitechat/plugin.yaml
+            find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
+            test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
+            test "$FINITECHAT_HERMES_INBOUND_STREAM" = "1"
+          '
+          (
+            cd finitechat
+            python3 -m unittest \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_connect_accepts_hermes_018_reconnect_keyword \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_env_uses_strict_loop_even_before_service_is_ready \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_strict_stream_service_failure_never_falls_back_to_cli \
+              tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_reconnects_and_catches_up_without_poll_fallback
+          )
+
+          docker tag "$VERSION_REF" "$SHA_REF"
+          docker push "$SHA_REF"
+          SHA_DIGEST="$(docker buildx imagetools inspect "$SHA_REF" --format '{{.Manifest.Digest}}')"
+          test -n "$SHA_DIGEST"
+          docker push "$VERSION_REF"
+          VERSION_DIGEST="$(docker buildx imagetools inspect "$VERSION_REF" --format '{{.Manifest.Digest}}')"
+          if [ -z "$VERSION_DIGEST" ] || [ "$VERSION_DIGEST" != "$SHA_DIGEST" ]; then
+            echo "::error::version and source-SHA tags did not resolve to one digest"
+            cat finitecomputer-v2/runtime-image-report.json
             exit 1
           fi
+
+          python3 - finitecomputer-v2/runtime-image-report.json "$VERSION_REF" "$SHA_REF" "$VERSION_DIGEST" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report_path = Path(sys.argv[1])
+          version_ref, sha_ref, digest = sys.argv[2:]
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          report["status"] = "published"
+          report["pushed"] = True
+          report["publication"] = {
+              "digest": digest,
+              "refs": [f"{version_ref}@{digest}", f"{sha_ref}@{digest}"],
+          }
+          image_metadata = report.setdefault("image_metadata", {})
+          repository = version_ref.rsplit(":", 1)[0]
+          image_metadata["repo_digests"] = [f"{repository}@{digest}"]
+          image_metadata["repo_tags"] = sorted(
+              set(image_metadata.get("repo_tags", [])) | {version_ref, sha_ref}
+          )
+          report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          PY
+
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "pinned=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "digest=$VERSION_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "pinned=$VERSION_REF@$VERSION_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "source_tag=$SHA_REF@$SHA_DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Upload build report
         uses: actions/upload-artifact@v4
@@ -87,7 +136,10 @@ jobs:
       - name: Summarize
         env:
           PINNED: ${{ steps.build.outputs.pinned }}
+          SOURCE_TAG: ${{ steps.build.outputs.source_tag }}
         run: |
           echo "Pinned runtime image (source commit ${GITHUB_SHA}):" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$SOURCE_TAG\`" >> "$GITHUB_STEP_SUMMARY"

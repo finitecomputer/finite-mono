@@ -9,9 +9,9 @@ and infrastructure definition in one tree.
 | `finitecomputer-v2/` | finite.computer SaaS: Core control plane, dashboard, Phala runner, Finite Private limiter |
 | `finite-sites/` | fsite CLI + finitesitesd (`*.finite.chat` hosting) |
 | `finite-brain/` | fbrain CLI + FiniteBrain server |
-| `finite-identity/`, `finite-nostr/`, `finite-auth/` | shared identity/protocol crates |
+| `finite-identity/`, `finite-nostr/` | active shared identity/protocol crates |
 | `finite-search/` | SearXNG/Firecrawl search stack + Tinfoil bundle |
-| `finite-skills/` | shared agent skills tree |
+| `finite-skills/` | sole authored managed-skills baseline; immutable revisions hot-activate in compatible runtimes |
 | `finite-specialization/` | Hermes capability vocabulary and safe specialization config examples |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
@@ -26,8 +26,9 @@ stack in ~15 minutes.
 
 - `just` — list all root commands and modules
 - `just check` / `just fmt` / `just test` — Rust workspace gates
-- `just dev up` — boot the full local stack (devfinity + process-compose TUI)
-- `just dev smoke` — headless stack + integration smoke + teardown (CI gate)
+- `just dev up` — boot the real local SaaS, including an Apple Container Agent Runtime
+- `just dev saas-smoke` — prove real launch, Hosted Web chat, and restart healing on macOS
+- `just dev smoke` — portable services-only smoke + teardown (Linux CI gate)
 - `just sites …`, `just search …`, `just skills …` — component modules
 
 ## Releases
@@ -37,6 +38,9 @@ Component-scoped tags on this repo: `finitechat/vX.Y.Z`, `fsite/vX.Y.Z`,
 (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
 `finite-private-limiter`) build via workflow dispatch, digest-pinned to GHCR.
 Legacy per-repo release URLs keep working via mirror releases until retired.
+Compatible Finite Skills Revisions are separately promotable product artifacts:
+each skills-only promotion records a new Finite Product Release manifest while
+reusing unchanged service, binary, and Runtime image digests.
 
 ## More
 

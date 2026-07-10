@@ -1,13 +1,19 @@
 # Runtime Recovery And Observability Plan
 
-Status: planning contract for the hosted-agent recovery ladder.
+Status: deferred post-MVP design TODO and open question. This is not a first
+slice launch gate. Restic suitability and the Recovery Snapshot/key-backup
+shape remain unresolved.
+
+System authority:
+[Recoverability precedes operator-blindness](../../docs/adr/0001-recoverability-precedes-operator-blindness.md).
 
 ## Problem Statement
 
-finitecomputer-v2 hosts agents inside confidential runtimes, with Phala CVMs as
-the intended production provider. The normal path should maximize privacy: user
-chat, runtime state, Finite Private credentials, and workspace data stay inside
-the TEE-backed runtime and durable mount.
+finitecomputer-v2 hosts agents inside isolated runtimes, with Kata as the first
+runner and Phala confidential CVMs as a fast follow. The normal path should
+minimize operator access: user chat, runtime state, Finite Private credentials,
+and workspace data stay inside the runtime and durable mount, with stronger
+claims only where a runner has evidence for them.
 
 That privacy goal must not turn Finite Chat into the only lifeline for user
 data. If chat, invite admission, Hermes configuration, plugin loading, or client
@@ -19,16 +25,29 @@ confidentiality when the alternative is a bricked user workspace.
 ## Product Principles
 
 - **Privacy by default, recovery by explicit consent.** Normal operation keeps
-  logs minimal and secrets/data inside the confidential runtime. Break-glass
-  operations may weaken privacy, but they must be explicit, audited, and
-  understandable.
+  logs minimal and secrets/data inside the isolated runtime, with stronger
+  guarantees only on a proven Confidential Runner. Break-glass operations may
+  weaken privacy, but they must be explicit, audited, and understandable.
+- **User data must not become cryptographic collateral.** A key, Device,
+  runtime, provider, or release failure covered by the Recoverability Contract
+  must not permanently strand the user's workspace or product data.
+- **Claims follow evidence.** "Access-controlled," "operator-minimized," and
+  "cryptographically operator-blind" are different Operator-Privacy Levels.
+  Product copy and support promises must name the level actually tested.
+- **TEE is a privacy control, not a backup.** Attestation and sealing can reduce
+  normal operator access, but they do not replace export, offsite backup,
+  restore drills, key recovery, or provider migration.
+- **Remove recovery authority last.** Finite may retire a Break-Glass Recovery
+  path only after an equivalent user-controlled path has restored the same
+  Recovery Set from a realistic failure.
 - **Runtime image owns mounted-state repair.** Core and the dashboard request
   lifecycle operations; they do not directly edit `/data`, Hermes config, chat
   stores, plugin directories, or workspace files.
 - **Recover does not replace identity.** Chat recovery can regenerate generated
   config and restart services, but it must preserve agent cryptographic
   identity, room/topic membership, message state, Hermes memory, workspace
-  files, user-installed tools, and skills.
+  files, user-installed tools, User Skills, and the active/last-known-good
+  Finite Skills Revision metadata.
 - **A new topic is not a new pairing.** Multiple Finite Chat rooms should be
   understood as multiple topics with the same hosted agent. The first shipped
   UI may display them as multiple groups, but creating a new topic should not
@@ -37,7 +56,110 @@ confidentiality when the alternative is a bricked user workspace.
   versions should stop before consuming a single-use invite, admitting a join,
   or touching MLS state.
 
-## Phala Constraints And Opportunities
+## Operator-Privacy Levels
+
+- **O0 — operator-readable:** Finite can routinely access plaintext during
+  normal operation.
+- **O1 — operator-minimized with Finite-assisted recovery:** normal product
+  paths do not expose plaintext, but an authorized and audited Finite-Assisted
+  Recovery Authority can unlock the Recovery Set. This is the honest first-slice
+  target for the trusted cohort.
+- **O2 — user-gated recovery:** Finite cannot unlock the Recovery Set without an
+  explicit user/device authorization for that recovery event.
+- **O3 — cryptographically operator-blind:** no Finite- or provider-controlled
+  path can decrypt the Recovery Set, including recovery paths, and that claim is
+  independently evidenced.
+
+A TEE can contribute evidence toward O1, O2, or O3 but never selects the level
+by itself. The level follows the complete key-release, backup, logs, provider,
+and Break-Glass Recovery behavior.
+
+## Future Phase 0: Recoverability Contract And Recovery Material
+
+Goal: define and prove disaster recovery after the working SaaS slice is
+shipped. Until then the trusted cohort gets provider-durable state plus an
+honest disclosure that empty-target disaster recovery is not yet proven.
+
+Every Finite Product Release must enumerate its Recovery Set across:
+
+- runtime workspace, Hermes memory, User Skills, tool state, and
+  Google/Telegram connection state;
+- Agent Principal Key, Finite Chat client store, and room membership state;
+- Finite Chat ordered room log plus encrypted attachment/blob state needed to
+  reconstruct retained history;
+- Hosted Web Device state and the human Finite Chat account material required
+  to enroll a replacement Device;
+- Finite Brain Folder Keys and encrypted objects;
+- Finite Sites repositories, blobs, registry, and stateful app data;
+- Core account, Project, lifecycle, entitlement, and audit state;
+- Finite Identity Authority bindings, Principal Links, challenge audit state,
+  and the recovery path for Local Identity Keys that the Authority does not
+  store.
+
+Finite-managed revision contents are reproducible release artifacts rather than
+irreplaceable user data. The baked, active, and last-known-good ids/digests and
+enough cached material for offline restart must still restore or rehydrate
+deterministically. A User Skill Override is user data and remains in the
+Recovery Set; activation or rollback must never erase it.
+
+For each state class the Recoverability Contract records the authoritative
+copy, independent Recovery Snapshot, Recovery Authority, recovery point
+objective, recovery time objective, normal restore path, Break-Glass Recovery
+path, user export path, and honest Operator-Privacy Level. A Provider Durable
+Volume is primary storage, not a backup. A path that restores ciphertext without
+the keys needed to open it is not a successful recovery.
+
+The first slice may retain a Finite-controlled recovery capability for the
+trusted cohort. If it does, the capability must be narrowly scoped, access
+controlled, explicit in user-facing copy, and audited whenever exercised. The
+snapshot format must permit that Finite-Assisted Recovery Authority to be removed later
+without replacing or abandoning the user's data.
+
+Acceptance criteria:
+
+- A restore drill begins from an empty replacement runtime or service, not the
+  still-working source, and recovers the declared data plus required keys.
+- Restart, bad release rollback, total runtime/provider loss, one Device loss,
+  and the declared key-loss scenarios each have a tested result.
+- A user can obtain a usable export without chat being the only working control
+  path.
+- Dashboard copy exposes backup health, last successful restore evidence, the
+  current Operator-Privacy Level, and whether Break-Glass Recovery exists.
+- Any uncovered state or failure is named as a launch blocker or explicit
+  non-durable preview; it is never hidden behind "encrypted" or "TEE" language.
+
+Deferred Recovery Snapshot questions:
+
+- v2 injects no `FINITE_AGENT_RESTIC_*` configuration, so independent Agent
+  Runtime backup is disabled.
+- the existing optional Restic path covers `/data/agent` but omits
+  `/data/workspace`, so even enabling it would not recover the full Recovery
+  Set;
+- no User Recovery Key or Finite-Assisted Recovery Authority is implemented;
+- Hosted Web Device store loss, total user-Device loss, Finite Chat retained
+  history reconstruction, and Finite Brain Folder Key loss do not have proven
+  recovery paths;
+- lat1's offsite Borg target is still a placeholder, and the proposed live
+  SQLite directory copies are not service-consistent Recovery Snapshots;
+- lifecycle `destroy` still conflates compute removal with volume deletion.
+- the current Runtime does not embed or activate a Finite Skills Revision, so
+  neither offline baseline recovery nor separation from User Skills is proven.
+
+These are Recovery Snapshot TODOs and open questions, not first-slice launch
+blockers. They become release gates before Finite promises disaster recovery,
+automated destructive retirement/purge, or a stronger Operator-Privacy Level.
+
+## Runner-Specific Constraints
+
+### Kata
+
+Kata is the first production runner. For the first slice, its Provider Durable
+Volume must preserve both `/data/agent` and `/data/workspace` through ordinary
+restart and upgrade. A provider-independent, off-host Recovery Snapshot is a
+post-MVP open question. The privileged host operator is part of the first-slice
+trust boundary, so Kata cannot claim cryptographic operator-blindness.
+
+### Phala
 
 Phala changes the operating model in ways this plan must account for:
 
@@ -66,6 +188,8 @@ through health/status endpoints. The report should include:
 - runtime image digest and source manifest;
 - finitecomputer-v2, finitechat, Hermes, `fsite`, and `fbrain` versions or
   source refs;
+- baked, desired, active, and last-known-good Finite Skills Revision ids and
+  digests, plus activation phase and a redacted error code;
 - mounted state roots present and writable: `/data`, `/data/agent`,
   `/data/agent/hermes-home`, `/data/workspace`;
 - identity presence and public identifiers only, never private keys;
@@ -102,6 +226,9 @@ At boot and during recover-chat, the runtime should audit:
   ambiguous `finite` are absent or inactive;
 - Finite Chat CLI, embedded plugin, and runtime image source refs match the
   release manifest.
+- Hermes' observed managed-skill catalog matches the active revision digest,
+  the platform router is present, and user-local overrides remain a separate
+  writable tree.
 
 The audit should be fail-closed for release incompatibility and warning-level
 for harmless stale files that are not active. Hosted startup must not suppress
@@ -148,7 +275,7 @@ Forbidden mutations:
 Acceptance criteria:
 
 - Recover-chat preserves the same public agent identity and workspace checksum
-  across local Docker, remote Docker, and Phala.
+  across local Docker, Kata, and Phala.
 - Recover-chat fixes intentionally broken generated Hermes config/plugin names.
 - Recover-chat emits a startup report proving what it changed and what it
   refused to change.
@@ -206,14 +333,16 @@ Rollback must be gated by a compatibility manifest:
 - Hermes version;
 - state schema version;
 - required env names;
-- supported provider paths: local Docker, remote Docker, Phala;
+- supported provider paths: local Docker, Kata, and Phala;
 - migration and rollback safety notes.
 
 Acceptance criteria:
 
 - Local Docker canary proves rollback from a deliberately bad image to a
   known-good image while preserving identity, workspace, and chat state.
-- Phala canary proves image update/restart with the same durable volume.
+- Kata and Phala canaries each prove image update/restart with the same durable
+  volume. Empty-target restore from a provider-independent Recovery Snapshot is
+  deferred to this post-MVP recovery phase.
 - Core refuses rollback to an artifact whose compatibility manifest says it
   cannot read the mounted state schema.
 
@@ -222,16 +351,19 @@ Acceptance criteria:
 Goal: make data rescue possible even when it weakens confidentiality.
 
 Break-glass operations are for cases where normal chat, recover-chat, and
-rollback do not restore access. They require explicit user or admin consent,
-clear privacy warnings, and audit events.
+rollback do not restore access. They require a verified user request whenever
+the user is reachable, clear privacy warnings, and audit events. An emergency
+operator-only action requires a separately accepted policy and must never be
+described as user consent.
 
 Rescue modes to design:
 
 1. **Read-only rescue image.** Boot a minimal image against the same `/data`,
    keep Hermes/chat stopped, and expose/download selected data such as
    `/data/workspace` and redacted diagnostics.
-2. **Operator-assisted Phala rescue.** Use Phala SSH/copy/log facilities only
-   after consent, with an audit trail and a visible privacy downgrade warning.
+2. **Finite-assisted provider rescue.** Use Kata host access or Phala
+   SSH/copy/log facilities only through the accepted Break-Glass Recovery
+   policy, with an audit trail and a visible privacy downgrade warning.
 3. **User-owned export bundle.** Package workspace and selected agent metadata
    encrypted to a user recovery key or downloaded directly by the user.
 
@@ -276,36 +408,12 @@ Forbidden log facts:
 
 Acceptance criteria:
 
-- Phala deployment docs explicitly choose public, private, or startup-only logs
-  for each environment.
-- Startup logs and startup report are checked in the same local/Phala canary.
+- Kata and Phala deployment docs explicitly choose public, private, or
+  startup-only logs for each environment.
+- Startup logs and startup report are checked in the same local/Kata/Phala
+  canary.
 - A redaction test fails if a raw invite URL/token or Finite Private key appears
   in startup logs.
-
-## Phase 8: User Recovery Material
-
-Goal: handle identity/client-store corruption without silently replacing the
-agent or losing the user's work.
-
-Recover-chat must stop before identity replacement. A separate recovery-material
-story should cover:
-
-- what user-owned key or platform-secure storage protects recovery material;
-- whether iCloud Keychain or manual export is acceptable for native devices;
-- how additional devices receive recovery access;
-- what can be restored into a new runtime if the old agent identity is lost;
-- how to attach an old workspace to a new agent identity with clear loss of old
-  encrypted chat continuity;
-- how to revoke or retire a compromised agent identity server-side where
-  possible.
-
-Acceptance criteria:
-
-- Product copy distinguishes recover chat, new topic, rollback, export, and new
-  identity.
-- There is a tested path to preserve workspace data even when chat identity is
-  unrecoverable.
-- There is no silent identity reset in normal restart or recover-chat.
 
 ## Evaluation Ladder
 
@@ -314,11 +422,15 @@ promise:
 
 1. unit tests for contracts and redaction;
 2. local Docker runtime image canary;
-3. remote Docker or equivalent non-laptop canary;
-4. Phala CVM with durable volume and real lifecycle operation;
-5. dashboard/Core operation wired to the proven runtime behavior;
-6. docs and support runbooks updated with the exact evidence users/operators
+3. local full-product Docker recovery from an empty replacement target;
+4. Kata runner with durable volume, off-host backup, and real lifecycle operation;
+5. Phala CVM using the same recovery contract as the fast-follow runner;
+6. dashboard/Core operation wired to the proven runtime behavior;
+7. docs and support runbooks updated with the exact evidence users/operators
    should collect.
 
-Do not claim a recovery level in dashboard copy until that level has passed the
-Phala rung with the same runtime image and state-root contract.
+Do not claim a recovery or Operator-Privacy Level for a runner until that runner
+has passed its rung with the same runtime image, state-root contract, backup
+format, and key-release path. These rungs gate future recovery claims, not the
+first working SaaS slice. First-slice readiness separately requires ordinary
+restart and upgrade to preserve the mounted state contract.

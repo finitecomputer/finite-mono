@@ -1,0 +1,3 @@
+# User and agent Nostr identities are separate
+
+Finite Identity is a shared key-storage, signing, email-proof, and Principal Resolution contract, not a shared human-agent secret: every Agent Runtime owns a distinct Nostr key under its Finite Home and uses that key across `finitechat`, `fsite`, and `fbrain`, while the human's Finite Chat identity is separately generated or imported and Account Auth independently gates SaaS access. The earlier `finite-auth` shared-user-agent signer experiment is superseded; agents authenticate agentic operations as their own Principal unless an explicit, separately modeled grant authorizes more.

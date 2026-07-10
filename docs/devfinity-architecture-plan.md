@@ -194,15 +194,17 @@ Goal: make identity and auth explicit harness components instead of implicit
 environment conventions.
 
 - [ ] Add typed identity fixture helpers using `finite-identity`.
-- [ ] Add Auth component or fixture support using `finite-auth-core` and
-      related crates as needed.
+- [ ] Add Account Auth fixtures for WorkOS and Nostr/email identity fixtures
+      through `finite-identity`; do not reintroduce the removed `finite-auth`
+      crates.
 - [ ] Replace hard-coded development identities with typed fixture identities
       where practical.
-- [ ] Add tests that prove Core and Chat can share the same generated identity
-      fixture.
+- [ ] Add tests that prove Finite Chat, Finite Sites, and Finite Brain inside
+      one agent fixture share that agent's generated identity, while Core,
+      Account Auth, human chat identities, and other agents do not.
 
-Exit criterion: identity state is owned by devfinity fixtures and can be shared
-across Core, Chat, and later components.
+Exit criterion: devfinity owns distinct Account Auth, human chat identity, and
+per-agent identity fixtures; it never shares one secret across those roles.
 
 ## Phase 7: Add Brain, Search, And Remaining Runtime Pieces
 

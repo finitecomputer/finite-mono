@@ -2,7 +2,7 @@ import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 
 import { requestCoreAgentCreation } from "@/lib/core-client";
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { dashboardDevLaunchCode, getAccountAuthContext } from "@/lib/dashboard-auth";
 import { workosBaseUrl } from "@/lib/workos-auth";
 
 function dashboardRedirect(request: Request, error?: unknown) {
@@ -29,7 +29,9 @@ export async function POST(request: Request) {
   try {
     await requestCoreAgentCreation({
       displayName: String(formData.get("displayName") ?? ""),
-      launchCode: String(formData.get("launchCode") ?? ""),
+      // Billing and launch entitlement are server decisions. Never accept a
+      // launch code from an untrusted form field.
+      launchCode: dashboardDevLaunchCode(account),
       idempotencyKey: String(formData.get("idempotencyKey") ?? ""),
     });
     revalidatePath("/");

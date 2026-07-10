@@ -24,21 +24,24 @@ import base64
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
+
+from _storage import atomic_private_write_text
 
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 
+
 def load_scopes():
     """Load the platform-owned Google Workspace scope contract."""
-    candidates = []
+    script_path = Path(__file__).resolve()
+    candidates = [script_path.parent.parent / "references" / "google-workspace-scopes.json"]
     profile_assets_root = os.getenv("FC_PROFILE_ASSETS_ROOT")
     if profile_assets_root:
         candidates.append(Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json")
 
-    script_path = Path(__file__).resolve()
     for parent in script_path.parents:
         if parent.name == "managed-skills":
             candidates.append(parent.parent / "contracts" / "google-workspace-scopes.json")
@@ -47,12 +50,12 @@ def load_scopes():
     for candidate in candidates:
         if not candidate.exists():
             continue
-        data = json.loads(candidate.read_text())
+        data = json.loads(candidate.read_text(encoding="utf-8"))
         if isinstance(data, list) and all(isinstance(item, str) for item in data):
             return data
         raise RuntimeError(f"Invalid Google Workspace scope contract at {candidate}")
 
-    raise RuntimeError("Missing Google Workspace scope contract in profile assets.")
+    raise RuntimeError("Missing Google Workspace scope contract in the installed skill.")
 
 
 SCOPES = load_scopes()
@@ -81,13 +84,13 @@ def get_credentials():
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
         sys.exit(1)
 
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), granted_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(creds.to_json())
+        atomic_private_write_text(TOKEN_PATH, creds.to_json())
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
         sys.exit(1)
@@ -96,6 +99,7 @@ def get_credentials():
 
 def build_service(api, version):
     from googleapiclient.discovery import build
+
     return build(api, version, credentials=get_credentials())
 
 
@@ -103,11 +107,12 @@ def build_service(api, version):
 # Gmail
 # =========================================================================
 
+
 def gmail_search(args):
     service = build_service("gmail", "v1")
-    results = service.users().messages().list(
-        userId="me", q=args.query, maxResults=args.max
-    ).execute()
+    results = (
+        service.users().messages().list(userId="me", q=args.query, maxResults=args.max).execute()
+    )
     messages = results.get("messages", [])
     if not messages:
         print("No messages found.")
@@ -115,29 +120,36 @@ def gmail_search(args):
 
     output = []
     for msg_meta in messages:
-        msg = service.users().messages().get(
-            userId="me", id=msg_meta["id"], format="metadata",
-            metadataHeaders=["From", "To", "Subject", "Date"],
-        ).execute()
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=msg_meta["id"],
+                format="metadata",
+                metadataHeaders=["From", "To", "Subject", "Date"],
+            )
+            .execute()
+        )
         headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        output.append({
-            "id": msg["id"],
-            "threadId": msg["threadId"],
-            "from": headers.get("From", ""),
-            "to": headers.get("To", ""),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
-            "snippet": msg.get("snippet", ""),
-            "labels": msg.get("labelIds", []),
-        })
+        output.append(
+            {
+                "id": msg["id"],
+                "threadId": msg["threadId"],
+                "from": headers.get("From", ""),
+                "to": headers.get("To", ""),
+                "subject": headers.get("Subject", ""),
+                "date": headers.get("Date", ""),
+                "snippet": msg.get("snippet", ""),
+                "labels": msg.get("labelIds", []),
+            }
+        )
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
 
 def gmail_get(args):
     service = build_service("gmail", "v1")
-    msg = service.users().messages().get(
-        userId="me", id=args.message_id, format="full"
-    ).execute()
+    msg = service.users().messages().get(userId="me", id=args.message_id, format="full").execute()
 
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
@@ -149,12 +161,16 @@ def gmail_get(args):
     elif payload.get("parts"):
         for part in payload["parts"]:
             if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
-                body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+                body = base64.urlsafe_b64decode(part["body"]["data"]).decode(
+                    "utf-8", errors="replace"
+                )
                 break
         if not body:
             for part in payload["parts"]:
                 if part.get("mimeType") == "text/html" and part.get("body", {}).get("data"):
-                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode(
+                        "utf-8", errors="replace"
+                    )
                     break
 
     result = {
@@ -185,16 +201,27 @@ def gmail_send(args):
         body["threadId"] = args.thread_id
 
     result = service.users().messages().send(userId="me", body=body).execute()
-    print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
+    print(
+        json.dumps(
+            {"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2
+        )
+    )
 
 
 def gmail_reply(args):
     service = build_service("gmail", "v1")
     # Fetch original to get thread ID and headers
-    original = service.users().messages().get(
-        userId="me", id=args.message_id, format="metadata",
-        metadataHeaders=["From", "Subject", "Message-ID"],
-    ).execute()
+    original = (
+        service.users()
+        .messages()
+        .get(
+            userId="me",
+            id=args.message_id,
+            format="metadata",
+            metadataHeaders=["From", "Subject", "Message-ID"],
+        )
+        .execute()
+    )
     headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
 
     subject = headers.get("Subject", "")
@@ -212,13 +239,20 @@ def gmail_reply(args):
     body = {"raw": raw, "threadId": original["threadId"]}
 
     result = service.users().messages().send(userId="me", body=body).execute()
-    print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
+    print(
+        json.dumps(
+            {"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2
+        )
+    )
 
 
 def gmail_labels(args):
     service = build_service("gmail", "v1")
     results = service.users().labels().list(userId="me").execute()
-    labels = [{"id": l["id"], "name": l["name"], "type": l.get("type", "")} for l in results.get("labels", [])]
+    labels = [
+        {"id": label["id"], "name": label["name"], "type": label.get("type", "")}
+        for label in results.get("labels", [])
+    ]
     print(json.dumps(labels, indent=2))
 
 
@@ -237,9 +271,10 @@ def gmail_modify(args):
 # Calendar
 # =========================================================================
 
+
 def calendar_list(args):
     service = build_service("calendar", "v3")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     time_min = args.start or now.isoformat()
     time_max = args.end or (now + timedelta(days=7)).isoformat()
 
@@ -248,23 +283,33 @@ def calendar_list(args):
         if "T" in val and "Z" not in val and "+" not in val and "-" not in val[11:]:
             val += "Z"
 
-    results = service.events().list(
-        calendarId=args.calendar, timeMin=time_min, timeMax=time_max,
-        maxResults=args.max, singleEvents=True, orderBy="startTime",
-    ).execute()
+    results = (
+        service.events()
+        .list(
+            calendarId=args.calendar,
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=args.max,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
 
     events = []
     for e in results.get("items", []):
-        events.append({
-            "id": e["id"],
-            "summary": e.get("summary", "(no title)"),
-            "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
-            "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
-            "location": e.get("location", ""),
-            "description": e.get("description", ""),
-            "status": e.get("status", ""),
-            "htmlLink": e.get("htmlLink", ""),
-        })
+        events.append(
+            {
+                "id": e["id"],
+                "summary": e.get("summary", "(no title)"),
+                "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+                "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                "location": e.get("location", ""),
+                "description": e.get("description", ""),
+                "status": e.get("status", ""),
+                "htmlLink": e.get("htmlLink", ""),
+            }
+        )
     print(json.dumps(events, indent=2, ensure_ascii=False))
 
 
@@ -283,12 +328,17 @@ def calendar_create(args):
         event["attendees"] = [{"email": e.strip()} for e in args.attendees.split(",")]
 
     result = service.events().insert(calendarId=args.calendar, body=event).execute()
-    print(json.dumps({
-        "status": "created",
-        "id": result["id"],
-        "summary": result.get("summary", ""),
-        "htmlLink": result.get("htmlLink", ""),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": "created",
+                "id": result["id"],
+                "summary": result.get("summary", ""),
+                "htmlLink": result.get("htmlLink", ""),
+            },
+            indent=2,
+        )
+    )
 
 
 def calendar_delete(args):
@@ -301,12 +351,19 @@ def calendar_delete(args):
 # Drive
 # =========================================================================
 
+
 def drive_search(args):
     service = build_service("drive", "v3")
     query = f"fullText contains '{args.query}'" if not args.raw_query else args.query
-    results = service.files().list(
-        q=query, pageSize=args.max, fields="files(id, name, mimeType, modifiedTime, webViewLink)",
-    ).execute()
+    results = (
+        service.files()
+        .list(
+            q=query,
+            pageSize=args.max,
+            fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+        )
+        .execute()
+    )
     files = results.get("files", [])
     print(json.dumps(files, indent=2, ensure_ascii=False))
 
@@ -315,23 +372,31 @@ def drive_search(args):
 # Contacts
 # =========================================================================
 
+
 def contacts_list(args):
     service = build_service("people", "v1")
-    results = service.people().connections().list(
-        resourceName="people/me",
-        pageSize=args.max,
-        personFields="names,emailAddresses,phoneNumbers",
-    ).execute()
+    results = (
+        service.people()
+        .connections()
+        .list(
+            resourceName="people/me",
+            pageSize=args.max,
+            personFields="names,emailAddresses,phoneNumbers",
+        )
+        .execute()
+    )
     contacts = []
     for person in results.get("connections", []):
         names = person.get("names", [{}])
         emails = person.get("emailAddresses", [])
         phones = person.get("phoneNumbers", [])
-        contacts.append({
-            "name": names[0].get("displayName", "") if names else "",
-            "emails": [e.get("value", "") for e in emails],
-            "phones": [p.get("value", "") for p in phones],
-        })
+        contacts.append(
+            {
+                "name": names[0].get("displayName", "") if names else "",
+                "emails": [e.get("value", "") for e in emails],
+                "phones": [p.get("value", "") for p in phones],
+            }
+        )
     print(json.dumps(contacts, indent=2, ensure_ascii=False))
 
 
@@ -339,11 +404,18 @@ def contacts_list(args):
 # Sheets
 # =========================================================================
 
+
 def sheets_get(args):
     service = build_service("sheets", "v4")
-    result = service.spreadsheets().values().get(
-        spreadsheetId=args.sheet_id, range=args.range,
-    ).execute()
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+        )
+        .execute()
+    )
     print(json.dumps(result.get("values", []), indent=2, ensure_ascii=False))
 
 
@@ -351,27 +423,51 @@ def sheets_update(args):
     service = build_service("sheets", "v4")
     values = json.loads(args.values)
     body = {"values": values}
-    result = service.spreadsheets().values().update(
-        spreadsheetId=args.sheet_id, range=args.range,
-        valueInputOption="USER_ENTERED", body=body,
-    ).execute()
-    print(json.dumps({"updatedCells": result.get("updatedCells", 0), "updatedRange": result.get("updatedRange", "")}, indent=2))
+    result = (
+        service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+            valueInputOption="USER_ENTERED",
+            body=body,
+        )
+        .execute()
+    )
+    print(
+        json.dumps(
+            {
+                "updatedCells": result.get("updatedCells", 0),
+                "updatedRange": result.get("updatedRange", ""),
+            },
+            indent=2,
+        )
+    )
 
 
 def sheets_append(args):
     service = build_service("sheets", "v4")
     values = json.loads(args.values)
     body = {"values": values}
-    result = service.spreadsheets().values().append(
-        spreadsheetId=args.sheet_id, range=args.range,
-        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body=body,
-    ).execute()
+    result = (
+        service.spreadsheets()
+        .values()
+        .append(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        )
+        .execute()
+    )
     print(json.dumps({"updatedCells": result.get("updates", {}).get("updatedCells", 0)}, indent=2))
 
 
 # =========================================================================
 # Docs
 # =========================================================================
+
 
 def docs_get(args):
     service = build_service("docs", "v1")
@@ -395,6 +491,7 @@ def docs_get(args):
 # =========================================================================
 # CLI parser
 # =========================================================================
+
 
 def main():
     parser = argparse.ArgumentParser(description="Google Workspace API for Hermes Agent")

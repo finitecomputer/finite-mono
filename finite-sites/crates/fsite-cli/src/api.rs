@@ -158,6 +158,7 @@ fn identity_response_json<T: serde::de::DeserializeOwned>(
                 method: method.to_string(),
                 path: path.to_string(),
                 status,
+                code: None,
                 message,
             })
         }
@@ -199,10 +200,11 @@ impl Client {
         let response = match result {
             Ok(response) => response,
             Err(ureq::Error::Status(code, response)) => {
-                let mut message = response
-                    .into_json::<ApiErrorBody>()
+                let body = response.into_json::<ApiErrorBody>().ok();
+                let error_code = body.as_ref().map(|body| body.error.clone());
+                let mut message = body
                     .map(|body| body.message)
-                    .unwrap_or_else(|_| "no error details".to_string());
+                    .unwrap_or_else(|| "no error details".to_string());
                 if code == 403 && message == "pubkey has no active publish grant" {
                     message.push_str(
                         "\n\nRun `fsite auth register --output json`, then retry the same command.",
@@ -212,6 +214,7 @@ impl Client {
                     method: method.to_string(),
                     path: path.to_string(),
                     status: code,
+                    code: error_code,
                     message,
                 });
             }

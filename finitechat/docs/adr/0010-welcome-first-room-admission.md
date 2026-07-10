@@ -76,8 +76,10 @@ room admission.
   add/welcome admission path.
 - The server route table has no `/invites/*` admission endpoints and no durable
   invite-session table.
-- Sync wait/stream hints watch rooms only. Welcomes and ordered room entries
-  remain the repair path.
+- Sync streams may watch both known rooms and the Device's own durable inbox.
+  An inbox high-watermark hint carries no Welcome bytes or admission authority;
+  it only wakes the same bounded claim, activate, ack, and ordered-pull repair
+  path used after reconnect. Invite-session-specific hints remain deleted.
 
 ## Non-Goals
 

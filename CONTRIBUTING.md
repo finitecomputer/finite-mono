@@ -21,8 +21,9 @@ just dev up
 ```
 
 devfinity generates and supervises the whole stack under process-compose:
-local Postgres, finite-saas-core, finitechat server, finitesitesd, and the
-dashboard dev server. URLs land in `.local-state/devfinity/runs/default/urls.txt`.
+local Postgres, finite-saas-core, finitechat server, the Hosted Web Device,
+finitesitesd, and the dashboard dev server. URLs land in
+`.local-state/devfinity/runs/default/urls.txt`.
 Quit the TUI (or Ctrl-C) to shut down; `just dev cleanup` recovers from
 orphaned state.
 
@@ -44,7 +45,8 @@ Pick a product surface:
 just check    # cargo check --workspace --locked
 just fmt      # rustfmt
 just test     # cargo test --workspace --locked
-just dev smoke  # full-stack integration smoke (what CI runs)
+just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing
+just dev smoke       # portable services-only integration smoke (Linux CI)
 ```
 
 CI (`.github/workflows/ci.yml`) runs fmt/clippy/tests against real Postgres,

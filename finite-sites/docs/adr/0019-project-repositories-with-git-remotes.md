@@ -108,8 +108,9 @@ Core decisions:
 - Project Collaborator is the edit permission.
 - Permissions attach to Principals. Email identifies External Principals;
   npubs identify Native Principals.
-- Agents and devices act through distinct Agent Keys, authorized by
-  project-scoped Agent Delegations. Agents do not sign with human keys.
+- Agents act as their own Native Principals through distinct Agent Principal
+  Keys. A project-scoped Agent Delegation is required only when an agent acts
+  under another Principal's rights. Agents do not sign with human keys.
 - Git Remotes use standard git, canonically
   `https://git.finite.chat/{project}.git` in production.
 - Git smart HTTP is served by `git-http-backend` behind Finite Sites
@@ -124,11 +125,13 @@ Core decisions:
 - Git `post-receive` hooks record ref-change events. A Finite Sites
   reconciler interprets those durable events and creates Versions. Deploy work
   must not happen directly inside the git protocol request.
-- Ref-change events and resulting Version audit records include Principal,
-  Agent Key when present, and Git Credential. Email bootstrap still creates or
-  links a concrete key/agent identity; pushes are not audited as email alone.
+- Ref-change events and resulting Version audit records include the actor
+  Principal, Agent Delegation when present, and Git Credential. Email bootstrap
+  establishes an Email-Only Principal or an explicit same-Principal link; it
+  never silently links a human email to an Agent Principal. Pushes are not
+  audited as email alone.
 - `fsite auth git PROJECT` mints scoped HTTPS Git Credentials after email
-  verification for External Principals or User-Key authentication for Native
+  verification for External Principals or Publishing-Key authentication for Native
   Principals. `--store` is the agent-preferred path: it writes the scoped
   credential to Git's credential helper instead of printing the password. The
   server never receives private keys.

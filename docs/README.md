@@ -24,6 +24,12 @@ commands against the owning source folder before relying on them.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
   reference analysis used to calibrate Finite's Rust, Nix, command, docs,
   harness, CI, and quality-gate choices.
+- [Recoverability precedes operator-blindness](adr/0001-recoverability-precedes-operator-blindness.md):
+  system security decision governing recovery, privacy claims, TEEs, and
+  Break-Glass Recovery.
+- [Managed skills are hot-swappable product revisions](adr/0002-managed-skills-are-hot-swappable-product-revisions.md):
+  one editable skills source, immutable promotion, first-turn availability,
+  event-driven activation, and rollback without a Runtime reboot.
 
 ## Imported Orientation Docs
 
@@ -45,10 +51,10 @@ Docs copied with each source repo remain inside their owning folders for now:
 - [`finitechat/docs`](../finitechat/docs)
 - [`finite-sites/docs`](../finite-sites/docs)
 - [`finite-nostr/docs`](../finite-nostr/docs)
-- [`finite-auth/docs`](../finite-auth/docs)
 - [`finite-brain/docs`](../finite-brain/docs)
 - [`finite-search/docs`](../finite-search/docs)
 - [`finite-skills/skills`](../finite-skills/skills)
+- [`finite-skills/docs`](../finite-skills/docs)
 - [`finite-specialization/docs`](../finite-specialization/docs)
 
 Some imported repos also have root-level source repo docs:
@@ -57,7 +63,6 @@ Some imported repos also have root-level source repo docs:
 - [`finite-identity/SPEC.md`](../finite-identity/SPEC.md)
 - [`finite-identity/CLI-CONVENTIONS.md`](../finite-identity/CLI-CONVENTIONS.md)
 - [`finite-nostr/README.md`](../finite-nostr/README.md)
-- [`finite-auth/README.md`](../finite-auth/README.md)
 - [`finite-brain/README.md`](../finite-brain/README.md)
 - [`finite-brain/development.md`](../finite-brain/development.md)
 - [`finite-search/README.md`](../finite-search/README.md)

@@ -32,7 +32,7 @@
 # ##   + the finite-app@.service template + polkit rule from                ##
 # ##   infra/hosts/lat2/systemd/ (process isolation only).                  ##
 # ############################################################################
-{ finitePackages, ... }:
+{ finitePackages, pkgs, ... }:
 {
   users.users.finite-sites = {
     isSystemUser = true;
@@ -45,6 +45,11 @@
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
+
+    # finitesitesd deliberately delegates bare-repository setup and smart
+    # HTTP to the Git executable. Nix systemd units do not inherit an
+    # interactive shell PATH, so this runtime dependency must be explicit.
+    path = [ pkgs.git ];
 
     serviceConfig = {
       User = "finite-sites";

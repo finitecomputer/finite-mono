@@ -1,6 +1,8 @@
-# Offsite borg backups — every stateful path on the box, daily, pruned.
-# The new box is born backed up (single-server-plan.md watch-list item 5;
-# lat2/smoke had NO working backup story at capture).
+# Proposed offsite Borg job — NOT an operational backup until the repo target is
+# real and empty-target restores pass. The listed live SQLite service directories
+# also need service-owned consistent snapshots; copying them directly is not a
+# sufficient restore contract. Agent Runtime `/data` is outside this host job
+# and needs its own provider-independent off-host Recovery Snapshot path.
 #
 # TODO: offsite target decision. The repo URL below is a placeholder.
 # Candidates: lat2's /data (1.8T, empty, becomes the CI box — borg over ssh),
@@ -13,6 +15,7 @@
       "/var/lib/finite-sites" # sites data (static user, real path)
       "/var/lib/private/finite-chat" # chat sqlite (DynamicUser real path;
       # /var/lib/finite-chat is only a symlink borg would store as a symlink)
+      "/var/lib/private/finitechat-hosted-device" # Hosted Device keys + chat stores
       "/var/lib/private/finitebrain" # brain sqlite (DynamicUser real path)
       "/data/backups/postgres" # timestamped pg_dumps (modules/postgres.nix)
       "/etc/finite-saas" # sites.env + Cloudflare Origin CA cert pair

@@ -4,21 +4,45 @@ Hard-cut self-serve SaaS codebase for Finite Computer.
 
 This repo is for the product we are building now:
 
-1. A user signs in with WorkOS.
+1. A user signs in through Account Auth, names their agent, selects an icon,
+   and chooses a Runner class.
 2. Core creates a Project and Finite Private grant state.
-3. A runner launches a real Hermes Agent Runtime.
-4. The dashboard shows a Finite Chat invite with no PIN.
-5. The user chats from the native Finite Chat client.
-6. The agent uses `fsite`, `finite-skills`, Finite Private, and focused Finite
-   tools instead of legacy `finitec` monolith commands.
+3. The selected Runner launches a real Hermes Agent Runtime.
+4. A newly initialized Runtime copies the Product Release's bundled Finite
+   Skills baseline once and exposes it before the first user turn. Existing
+   agents keep that baseline until they explicitly run `finite skills sync`.
+5. Core declares first-slice readiness from real Runtime/application health and
+   preserved provider-durable state. Full Recovery Snapshot, key-backup, and
+   empty-target restore support is an explicit post-MVP TODO, not a launch gate.
+6. A Finite Chat Hosted Web Device gives the dashboard the proven web-chat
+   experience; Electron and native apps can enroll later as additional Devices.
+7. Product features ship through their owning services, UI, stable CLIs, and
+   skills. They do not expand Runtime Management into a feature control plane.
+8. The agent uses Finite Sites, Finite Brain, `finite-skills`, and Finite
+   Private as one compatibility-tested product release.
 
 The original `finitecomputer` repo remains the product already shipped to box1
 and TRF while those users are unmigrated.
 
+## Security And Recovery Posture
+
+User data availability is the first security invariant. The trusted first
+cohort targets O1: normal product paths minimize operator access, while an
+explicit and audited Finite-Assisted Recovery path may expose restored data to
+prevent permanent loss. Kata isolation and later Phala/TEE evidence improve the
+normal privacy boundary; neither substitutes for key recovery, off-host
+snapshots, usable exports, or empty-target restore drills.
+
+See the system
+[recoverability ADR](../docs/adr/0001-recoverability-precedes-operator-blindness.md)
+and the active
+[runtime recovery plan](docs/runtime-recovery-and-observability-plan.md).
+
 ## What This Repo Owns
 
 - `apps/dashboard`: WorkOS/SaaS dashboard code for Project creation, agent
-  overview, runtime lifecycle, plaintext-safe ops, skills, and Finite Private
+  overview, Hosted Web Device chat, external connections, Sites/Brain,
+  runtime lifecycle, plaintext-safe ops, the skills catalog, and Finite Private
   administration.
 - `crates/finite-saas-core`: Core service for Project/runtime/entitlement state.
 - `crates/finite-saas-runner`: runner worker for launching Agent Runtimes.
@@ -41,19 +65,27 @@ These stay separate repos:
 - `finitechat`: Finite Chat server, protocol, native clients, CLI, and Hermes
   plugin.
 - `finite-skills`: Finite-managed agent skills.
-- `finite-brain`: future brain/knowledgebase sharing.
+- `finite-brain`: dashboard and runtime knowledgebase sharing.
 
 v2 deploys and integrates those services. Since the finite-mono cutover they
 are sibling directories in this repo — consume them through the root Cargo
 workspace and `infra/`, never by copying their code into `finitecomputer-v2/`.
+For skills specifically, the monorepo tree is the only editable source;
+the Runtime image bundles a tested revision for one-time installation into new
+agents. Existing agents update only when they explicitly run
+`finite skills sync`. Core, Runner, and the Runtime Management Pipe do
+not select, poll, push, or activate a skills revision.
 
 ## Hard-Cut Rules
 
 Do not add new v2 dependencies on:
 
-- dashboard chat
 - OpenCode
-- dashboard-managed Published Apps
+- a second dashboard-only chat transport outside Finite Chat
+- dashboard-to-runtime shell, filesystem, Kubernetes, or provider APIs
+- product feature commands or feature-specific status on the Runtime Management
+  Pipe
+- legacy dashboard-managed Published Apps in place of Finite Sites
 - `finitec publish`
 - `finitec repo`
 - `finitec gateway`
@@ -75,58 +107,63 @@ See [docs/carry-over-manifest.md](docs/carry-over-manifest.md).
 See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) for the
 current deploy ownership split, and
 [docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
-Hermes local/Docker/Phala proof ladder.
+Hermes local/Docker/Kata/Phala proof ladder.
 
-## Local Create-Agent Canary
+## Local SaaS
 
-Run the v2 product-shaped local proof from the repo root with a valid deployed
-Finite Private API key:
-
-```bash
-export FC_LOCAL_CANARY_FINITE_PRIVATE_API_KEY=<valid deployed fpk_... key>
-./scripts/local_create_agent_canary.sh
-```
-
-The script starts local Postgres, `finite-saas-core`, the dashboard with a dev
-WorkOS identity, submits the dashboard create-agent form, runs the Docker runner
-backend once, and verifies the runtime `/healthz` and `/invite` endpoints. It
-uses the hosted Finite Chat server by default and a mounted Docker `/data`
-runtime state path, matching the shape we climb to remote Docker and Phala.
-Because this is a local throwaway Core pointed at the live Finite Private
-limiter, the script requires `FC_LOCAL_CANARY_FINITE_PRIVATE_API_KEY` by
-default. A key minted by local Core is useful for launch wiring but will fail
-real model calls with `401 invalid_api_key` at the live limiter. Set
-`FC_LOCAL_CANARY_REQUIRE_FINITE_PRIVATE_KEY=0` only for an intentional
-launch-only check that must not be handed to a human as a chat canary.
-By default the script builds the v2-owned runtime image
-`finitecomputer-v2-agent-runtime:local` before launching the canary. Set
-`FC_LOCAL_CANARY_BUILD_RUNTIME_IMAGE=0` to reuse an already-built local image.
-
-Useful overrides:
+The default local product path is the real Apple Container Runner, not a
+dashboard stub or Docker-only canary. From the repository root on Apple
+silicon and macOS 26 or newer:
 
 ```bash
-FC_LOCAL_AGENT_IMAGE=ghcr.io/finitecomputer/finite-agent-runtime:<tag-or-digest> \
-FC_LOCAL_CANARY_BUILD_RUNTIME_IMAGE=0 \
-FC_LOCAL_CANARY_KEEP_SERVICES=1 \
-./scripts/local_create_agent_canary.sh
+container system start
+export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-finite-private-key>
+just dev up
 ```
+
+Open <http://127.0.0.1:13002/dashboard>, name an agent, launch it, and use the
+Hosted Web Device. This creates a real Core Project and lease, builds the
+canonical Hermes 0.18.2 Runtime image, starts it through the generic Apple
+Container provider, and preserves its bind-mounted `/data` across restarts and
+image replacement. The runtime publishes generic `/healthz` readiness and an
+Agent Principal `/contact` document; Finite Chat Devices own
+KeyPackage/Add/Welcome admission.
+
+Run the credential-gated end-to-end acceptance with `just dev saas-smoke`.
+It requires real Hermes replies and proves chat-server, Hosted Web Device, and
+Agent Runtime restart recovery. See
+[`docs/local-integration-harness.md`](../docs/local-integration-harness.md) for
+networking, key handling, services-only CI, and recovery details.
 
 The copied code intentionally started slightly too large so we did not lose work
-from the SaaS branch. Dashboard chat, dashboard-managed Published Apps,
-dashboard-managed Connections, OpenRouter fallback, and machine publish/repo API
-routes have been cut from the v2 product surface. The remaining cleanup is to
-reduce `finite-core`/`fc-dashboard` legacy model dependencies and rename
-deployment paths from `finite-computer` to v2.
+from the SaaS branch. Legacy dashboard chat and Connections implementations were
+cut because they depended on the old relay, Kubernetes, and runtime filesystem;
+their proven UX can return over Finite Chat and product-owned APIs or skills,
+without turning Runtime Management into a feature plane.
+OpenRouter fallback and machine publish/repo APIs remain cut. The remaining
+cleanup is to reduce `finite-core`/`fc-dashboard` legacy model dependencies and
+rename deployment paths from `finite-computer` to v2.
 
 ## SaaS Runner
 
-Docker is the local/remote preflight backend. Phala is the default confidential
-SaaS backend:
+Docker is the local preflight backend. Kata is the first production Runner;
+Phala is the confidential fast-follow candidate. The current process-wide
+backend env is transitional scaffolding while Project-selected placement lands:
 
 ```text
-FC_RUNNER_BACKEND=phala
+RuntimeSpec.runner_class = "kata"
+```
+
+Do not add `FC_RUNNER_BACKEND=kata` as another global branch; Kata must enter
+through the generic Runner Contract and the same conformance suite as Phala.
+
+Enclavia can be selected for a single pre-created enclave evaluation target:
+
+```text
+FC_RUNNER_BACKEND=enclavia
+FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<enclave-uuid>
 ```
 
 See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) and
 [../infra/hosts/lat1/systemd/runner.env.example](../infra/hosts/lat1/systemd/runner.env.example)
-for the live runner env, Phala CLI prerequisite, and acceptance criteria.
+for the live runner env, provider CLI prerequisites, and acceptance criteria.

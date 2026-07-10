@@ -50,6 +50,14 @@ An agent invited or shared with as its own visible Principal, similar to a
 human participant in a Room.
 _Avoid_: delegated personal assistant
 
+**Device**:
+A separately revocable Finite Chat client with its own key and durable local or hosted store.
+_Avoid_: Account, Principal, UI surface
+
+**Hosted Web Device**:
+A Finite-operated Device whose server-held key and store let an account use Finite Chat from the SaaS web UI.
+_Avoid_: Browser-local Device, browser E2EE, Agent Principal Key
+
 **Device List**:
 The user-facing list of a user's active and revoked Finite Chat devices.
 _Avoid_: Profile, account settings
@@ -70,6 +78,14 @@ _Avoid_: Half-joined room, unfinalized room
 **Unavailable on Device**:
 A rare repair state where a known Room cannot be entered because this device lacks usable local membership state.
 _Avoid_: Needs attention, offline room, read-only cached room, hidden room
+
+**Account Recovery**:
+The restoration of a User Key followed by enrollment of a replacement Device under the same Finite Chat account.
+_Avoid_: New account, WorkOS login, Device restart
+
+**History Recovery**:
+The restoration or member-authorized sharing of encrypted Room history that predates a replacement Device's membership.
+_Avoid_: Server replay, account relink, cursor reset
 
 **Room Admission**:
 The Room owner's approval of a Pending Room into a sendable Room.
@@ -140,7 +156,7 @@ Structured current condition published by an agent runtime.
 _Avoid_: Command, message, activity
 
 **Finite Chat Daemon**:
-The local or runtime-resident control surface that owns a Finite Chat device.
+The hosted, local, or runtime-resident control surface that owns one or more Finite Chat Devices.
 _Avoid_: Hermes, agent, inference provider
 
 **Finite Blob**:
@@ -195,6 +211,17 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   **Direct Agent Principal**.
 - A **Direct Agent Principal** is appropriate for bots or shared agents that
   should appear as their own participant or resource principal.
+- A **Hosted Web Device** is one revocable **Device**; Electron enrolls a
+  separate Device whose key and store remain local.
+- A **Hosted Web Device** may decrypt its Rooms by design, so SaaS web chat is
+  not described as browser E2EE even though the room server stores ciphertext.
+- Restart or loss of one **Device** must not make it room authority or prevent
+  another admitted Device from syncing and sending.
+- **Account Recovery** restores signing authority and permits a replacement
+  **Device**; it does not by itself provide **History Recovery**.
+- A release promising retained chat history must cover the Room log, encrypted
+  blobs, account material, Device state, and **History Recovery** in its tested
+  Recovery Set.
 - A **Device List** belongs to an account and is where users revoke devices.
 - **Invite Availability** describes whether an account can be invited to a
   **Room** now; it is not onlineness, presence, or device liveness.
@@ -205,7 +232,8 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 - **Unavailable on Device** is a repair state, not an expected product path; a
   user-visible known **Room** should normally be enterable. If this repair
   state occurs in v1, the known **Room** remains visible as informational
-  repair state instead of being hidden or offering rejoin/rescan actions.
+  repair state instead of being hidden. Shipping without a repair, export, or
+  surviving-Device history path is a Recoverability Contract gap.
 - A **Room** with usable local membership state is enterable and sendable;
   missing or unusable local membership state is **Unavailable on Device**.
 - Send eligibility follows usable local membership state, not current
@@ -307,6 +335,9 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 > **Dev:** "If Hermes is broken, is chat broken?"
 > **Domain expert:** "No. The Finite Chat Daemon still owns sync, Runtime State, and recovery commands while the host is online."
 
+> **Dev:** "Does Electron reuse the Hosted Web Device?"
+> **Domain expert:** "No. The same account enrolls Electron as another Device, and Electron keeps that Device's key and store locally."
+
 > **Dev:** "After scanning an invite and entering the PIN, does the inviter need to tap Accept?"
 > **Domain expert:** "No. The correct PIN is the approval ceremony; valid Room Admission is automatic."
 
@@ -351,3 +382,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 - "Missing delivered attachment bytes" was used like pending attachment
   corruption. Resolved: when the encrypted reference is delivered, missing
   local plaintext is an **Attachment Cache Miss**.
+- "Account recovery" was used as though restoring the nsec also restores old
+  MLS history. Resolved: **Account Recovery** and **History Recovery** are
+  separate requirements.

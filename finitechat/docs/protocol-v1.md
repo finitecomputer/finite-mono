@@ -393,7 +393,8 @@ pre-membership room log entries as ordinary history for that device.
 Pre-membership history recovery is a separate product protocol. It must be
 provided by encrypted backup or an explicit member-to-member history-share
 message, not by making the server authoritative over old plaintext or hidden
-key access.
+key access. A product that promises retained history must implement and test
+one of those paths before treating Device-store loss as recoverable.
 
 ## Message Ids
 

@@ -6,7 +6,8 @@ build once and run `target/debug/fbrain`.
 
 Global flags:
 
-- `--config-dir <path>`: override signer/config state for this invocation.
+- `--config-dir <path>`: override fbrain config state for this invocation. The
+  signing identity is not stored here (see Identity below).
 - `--json`: return machine-readable output where the command supports it.
 - `--server <url>`: command-specific server override. Server resolution is
   explicit `--server`, saved Vault Working Tree server, `FINITE_BRAIN_SERVER_URL`,
@@ -19,7 +20,7 @@ loopback IPs.
 
 ```sh
 fbrain [--config-dir <path>] doctor
-fbrain auth status|login|logout
+fbrain auth status|import [--file <path>]
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
@@ -40,18 +41,32 @@ fbrain share link|accept|revoke|source|folder-invite|folder-accept
 
 ## Identity
 
+`fbrain` signs with the current Finite Home's Local Identity Key, at
+`$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
+`~/.finite/identity/identity.json` otherwise. Whichever Finite tool runs first
+mints the key in that home; `fbrain` finds it. An Agent Runtime uses its own
+key, not the human user's Finite Chat key. The first `fbrain` command that
+needs to sign mints an identity if none exists; `auth status` only reports and
+never creates one.
+
 ```sh
 fbrain auth status --json
-fbrain auth login --nsec <nsec-or-hex-secret>
-fbrain auth logout
+fbrain auth import < secret.txt
+fbrain auth import --file <path>
 fbrain signer public-key
 fbrain signer sign --kind text --content "hello"
 fbrain signer encrypt --to <npub> --text "..."
 fbrain signer decrypt --from <npub> --payload "..."
 ```
 
-Use `auth status --json` to confirm the acting npub and config directory. Do not
-print or request secrets during normal agent work.
+`auth import` adopts an existing secret (`nsec1...` or 64-char hex) as the
+shared identity. The secret is read from stdin or `--file`, never from an argv
+flag, and import refuses to overwrite an existing identity. The legacy
+`auth login --nsec`/`auth logout` verbs and the plaintext `auth.json` config
+file are removed.
+
+Use `auth status --json` to confirm the acting npub, identity file, and config
+directory. Do not print or request secrets during normal agent work.
 
 ## Working Tree And Sync
 

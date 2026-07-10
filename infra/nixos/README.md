@@ -54,6 +54,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_FINITE_PRIVATE_USAGE_API_TOKEN` | k8s Secret `finite-computer-secrets` on old lat1. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover** |
 | `/etc/finite/runner.env` | the 22 `FC_RUNNER_*`/`FC_CORE_*`/`PHALA_CLOUD_API_KEY` names in `infra/hosts/lat1/systemd/runner.env.example` | old lat1 `/etc/finite-computer/runner.env`; **edit**: `FC_CORE_URL=http://127.0.0.1:4200`, `FC_RUNNER_WORK_ROOT=/var/lib/finite-saas-runner`, `FC_RUNNER_PHALA_BIN` → wherever the phala CLI lands (see module TODO) |
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` (+ optional `FC_RELAY_ADMIN_TOKEN`, `FC_RELAY_HOST_ENDPOINTS_JSON`) | k8s Secret `finite-computer-secrets` on old lat1 |
+| `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
 | `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env` |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/oauth2-proxy.env` | `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET` | Google OAuth client from smoke's `fc-auth` k8s Secret; generate a fresh cookie secret |
@@ -80,6 +81,7 @@ per the smoke capture).
 | 8080 | 127.0.0.1 | searxng (podman) | lat2 |
 | 8787 | 127.0.0.1 | finitesitesd | lat2 |
 | **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
+| 38918 | 127.0.0.1 | Finite Chat Hosted Web Device (dashboard-internal) | new |
 | 9100 | 127.0.0.1 | node-exporter | new |
 | 2019 | 127.0.0.1 | caddy admin API | lat1/lat2 |
 

@@ -8,6 +8,12 @@ import { test } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 
 const CORE_TOKEN = "browser-core-token";
+const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
+const AGENT_NPUB = "npub1browseragentprincipal";
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
 
 type AgentCreationRequest = {
   id: string;
@@ -33,14 +39,14 @@ type VisibleProject = {
   runtime: null | {
     id: string;
     project_id: string;
-      source_host_id: string;
-      source_machine_id: string;
-      source_import_key: string;
-      runtime_artifact_id: string | null;
-      state_schema_version: string | null;
-      host_facts: {
-        display_name: string;
-        hostname: string;
+    source_host_id: string;
+    source_machine_id: string;
+    source_import_key: string;
+    runtime_artifact_id: string | null;
+    state_schema_version: string | null;
+    host_facts: {
+      display_name: string;
+      hostname: string;
       runtime_host: string;
       runtime_status: "online" | "offline" | "stale" | "unknown";
       hermes_available: boolean;
@@ -59,10 +65,109 @@ type CoreState = {
   createDelayMs: number;
 };
 
+type FakeHostedChatState = {
+  rev: number;
+  identity: {
+    account_id: string;
+    device_id: string;
+  };
+  rooms: Array<{
+    room_id: string;
+    display_name: string;
+    state: "Connected";
+    status: string;
+    user_status_text: string;
+    last_message_preview: string;
+    unread_count: number;
+    is_agent_chat: boolean;
+  }>;
+  selected_room_id: string | null;
+  topics: Array<{
+    room_id: string;
+    topic_id: string;
+    title: string;
+    active_chat_id: string | null;
+    chats: Array<{
+      chat_id: string;
+      title: string;
+      active: boolean;
+    }>;
+  }>;
+  selected_topic_id: string | null;
+  selected_chat_id: string | null;
+  active_profile_id: string | null;
+  status: string;
+  toast: null;
+  messages: Array<{
+    room_id: string;
+    seq: number;
+    message_id: string;
+    conversation_id: string;
+    chat_id: string;
+    sender_account_id: string;
+    sender_display_name: string;
+    text: string;
+    display_content: string;
+    kind: "message" | "status" | "tool" | "media";
+    status: "running" | "complete";
+    edit_of_message_id: string | null;
+    is_mine: boolean;
+    media: Array<{
+      attachment_id: string;
+      mime_type: string;
+      filename: string;
+      kind: "Image" | "File";
+      width: number | null;
+      height: number | null;
+    }>;
+    timestamp_unix_seconds: number;
+    display_timestamp: string;
+  }>;
+  typing_members: Array<{
+    room_id: string;
+    topic_id: string | null;
+    chat_id: string | null;
+    account_id: string;
+    device_id: string;
+    display_name: string;
+    activity_kind: "typing" | "thinking" | "working";
+  }>;
+  profiles: Array<{
+    account_id: string;
+    npub: string;
+    display_name: string;
+    about: string | null;
+    picture: string | null;
+    stale: boolean;
+    is_agent: boolean;
+  }>;
+  flow: {
+    notice_text: string | null;
+    notice_busy: boolean;
+    scan_in_flight: boolean;
+    scan_result: string;
+  };
+};
+
+type HostedAuthRequest = {
+  method: string;
+  path: string;
+  authorization: string | null;
+  workosUserId: string | null;
+};
+
+type HostedDeviceState = {
+  app: FakeHostedChatState;
+  actions: Array<Record<string, unknown>>;
+  authRequests: HostedAuthRequest[];
+};
+
 test("dashboard agent creation browser states", async () => {
+  const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore();
+  const brain = await startFakeBrain();
   const dashboardPort = await freePort();
-  const dashboard = startDashboard(dashboardPort, core.url);
+  const dashboard = startDashboard(dashboardPort, core.url, hostedDevice.url, brain.url);
   const dashboardOutput = collectOutput(dashboard);
   let browser: Browser | null = null;
 
@@ -76,8 +181,13 @@ test("dashboard agent creation browser states", async () => {
     core.reset();
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await page.getByLabel("Agent name").fill("Oslo Bot");
-      await page.getByLabel("Launch code").fill("off2026");
+      const agentName = page.getByLabel("Agent name");
+      await agentName.waitFor({ state: "visible", timeout: 15_000 }).catch(async (error) => {
+        throw new Error(
+          `Agent creation form did not render: ${String(error)}\n${await pageText(page)}\n${dashboardOutput()}`
+        );
+      });
+      await agentName.fill("Oslo Bot");
       await page.getByRole("button", { name: "Create agent" }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
@@ -95,7 +205,6 @@ test("dashboard agent creation browser states", async () => {
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Double Submit Bot");
-      await page.getByLabel("Launch code").fill("off2026");
       await page.getByRole("button", { name: "Create agent" }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
@@ -142,7 +251,13 @@ test("dashboard agent creation browser states", async () => {
     });
 
     core.reset({
-      projects: [visibleProject("project_running", "Completed Oslo Bot")],
+      projects: [
+        visibleProject(
+          "project_running",
+          "Completed Oslo Bot",
+          hostedDevice.runtimeStatusUrl
+        ),
+      ],
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
@@ -150,19 +265,181 @@ test("dashboard agent creation browser states", async () => {
       await expectVisibleText(page, "Completed Oslo Bot");
       const main = page.getByRole("main");
       await expectVisibleText(page, "Finite Chat");
-      await expectVisibleText(page, "Runtime recovery");
+      await expectVisibleText(page, "Runtime restart");
       await expectVisibleText(page, "Runtime facts");
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
-      await main.getByRole("button", { name: "Recover chat" }).waitFor({ state: "visible" });
+      assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
-      await main.getByRole("button", { name: "Destroy" }).waitFor({ state: "visible" });
+      assert.equal(await main.getByRole("button", { name: "Destroy" }).count(), 0);
+      const openWebChat = main.getByRole("link", { name: "Open web chat" });
+      await openWebChat.waitFor({ state: "visible" });
       assert.equal(await page.getByText("Connections", { exact: true }).count(), 0);
       assert.equal(await page.getByText("OpenRouter", { exact: true }).count(), 0);
+
+      await openWebChat.click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await expectVisibleText(page, "Hello from Completed Oslo Bot.");
+      await expectVisibleText(page, "Topics");
+      await page
+        .getByRole("button", { name: "New chat in General", exact: true })
+        .waitFor({ state: "visible" });
+      await page
+        .getByRole("button", { name: "New chat", exact: true })
+        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "browser@finite.vip");
+      assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
+      await page.getByRole("link", { name: "Connections" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
+      await expectVisibleText(page, "Finite Private or OpenRouter");
+      await expectVisibleText(page, "Google Workspace");
+      await page.getByRole("link", { name: "Configure in chat" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat\?prompt=/u);
+      assert.match(await page.getByLabel("Message your agent").inputValue(), /Finite Private and OpenRouter/u);
+      await page.getByLabel("Message your agent").fill("");
+
+      await page.getByRole("link", { name: "Brain" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/brain$/u);
+      const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
+      await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
+      await page.getByRole("link", { name: "Chat" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+
+      await page.getByRole("button", { name: "Rename chat" }).click();
+      const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
+      await renameDialog.getByRole("textbox", { name: "Name" }).fill("Browser QA");
+      await renameDialog.getByRole("button", { name: "Save" }).click();
+      await waitFor(() =>
+        hostedDevice.state.actions.some(
+          (action) => actionName(action) === "RenameChat"
+        )
+      );
+      await page
+        .getByRole("banner")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+
+      const bootstrapActions = hostedDevice.state.actions.map(actionName);
+      const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
+      const scanTargetIndex = bootstrapActions.indexOf("ScanTarget");
+      const startProfileChatIndex = bootstrapActions.indexOf("StartProfileChat");
+      assert(startRuntimeIndex >= 0);
+      assert(scanTargetIndex > startRuntimeIndex);
+      assert(startProfileChatIndex > scanTargetIndex);
+
+      const message = "Keep the runtime boundary thin.";
+      await page.getByLabel("Message your agent").fill(message);
+      await page.getByRole("button", { name: "Send message" }).click();
+      await waitFor(() =>
+        hostedDevice.state.actions.some(
+          (action) => actionName(action) === "SendChatMessage"
+        )
+      );
+      await expectVisibleText(page, message);
+
+      const sendAction = hostedDevice.state.actions.find(
+        (action) => actionName(action) === "SendChatMessage"
+      );
+      assert.deepEqual(sendAction, {
+        SendChatMessage: {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          chat_id: "chat_browser_agent",
+          text: message,
+        },
+      });
+      assert.equal(
+        hostedDevice.state.app.messages.some(
+          (candidate) => candidate.is_mine && candidate.text === message
+        ),
+        true
+      );
+
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "browser-proof.png",
+        mimeType: "image/png",
+        buffer: PNG_BYTES,
+      });
+      await page.getByLabel("Message your agent").fill("Image from browser.");
+      await page.getByRole("button", { name: "Send message" }).click();
+      await page.getByRole("img", { name: "browser-proof.png" }).waitFor({ state: "visible" });
+
+      hostedDevice.state.app.messages.push(
+        hostedImageMessage("Image returned by agent.", false, 4, "agent-proof.png")
+      );
+      hostedDevice.emit();
+      await page.getByRole("img", { name: "agent-proof.png" }).waitFor({ state: "visible" });
+      await waitFor(() =>
+        hostedDevice.state.authRequests.some((request) =>
+          request.path.startsWith("/v1/app/attachments/")
+        )
+      );
+
+      hostedDevice.state.app.typing_members = [
+        {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          chat_id: "chat_browser_agent",
+          account_id: "agent-account-browser",
+          device_id: "agent",
+          display_name: "Completed Oslo Bot",
+          activity_kind: "working",
+        },
+      ];
+      hostedDevice.emit();
+      await expectVisibleText(page, "Completed Oslo Bot is working");
+
+      hostedDevice.state.app.typing_members = [];
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("💻 Running browser QA", false, 5),
+        kind: "tool",
+        status: "running",
+      });
+      hostedDevice.emit();
+      await expectVisibleText(page, "Working · 1 step");
+
+      hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
+        "complete";
+      hostedDevice.state.app.messages.push(hostedMessage("Browser QA complete.", false, 6));
+      hostedDevice.emit();
+      await expectVisibleText(page, "Worked through 1 step");
+
+      const localSiteUrl = "http://browser-proof.sites.localhost:18789/";
+      hostedDevice.state.app.messages.push(
+        hostedMessage(`Published your site: ${localSiteUrl}`, false, 7)
+      );
+      hostedDevice.emit();
+      await page.getByRole("button", { name: "Preview" }).click();
+      await page.getByLabel("Preview URL").waitFor({ state: "visible" });
+      assert.equal(await page.getByLabel("Preview URL").inputValue(), localSiteUrl);
+      assert.equal(
+        await page.getByLabel("Site preview").locator("iframe").getAttribute("src"),
+        localSiteUrl
+      );
+
+      await waitFor(() =>
+        hostedDevice.state.authRequests.some(
+          (request) => request.path === "/v1/app/updates"
+        )
+      );
+      const hostedPaths = new Set(hostedDevice.state.authRequests.map((request) => request.path));
+      for (const requiredPath of ["/v1/app/state", "/v1/app/actions", "/v1/app/updates", "/v1/app/attachments"]) {
+        assert(hostedPaths.has(requiredPath), requiredPath);
+      }
+      assert(
+        [...hostedPaths].some((path) => path.startsWith("/v1/app/attachments/")),
+        "authenticated image download did not reach the Hosted Device"
+      );
+      for (const request of hostedDevice.state.authRequests) {
+        assert.equal(request.authorization, `Bearer ${HOSTED_DEVICE_TOKEN}`);
+        assert.equal(request.workosUserId, "user_browser");
+      }
     });
   } finally {
     await browser?.close().catch(() => {});
     dashboard.kill("SIGTERM");
     core.server.close();
+    hostedDevice.close();
+    brain.server.close();
     await Promise.race([
       once(dashboard, "exit"),
       new Promise((resolve) => setTimeout(resolve, 2_000)),
@@ -170,7 +447,12 @@ test("dashboard agent creation browser states", async () => {
   }
 });
 
-function startDashboard(port: number, coreUrl: string) {
+function startDashboard(
+  port: number,
+  coreUrl: string,
+  hostedDeviceUrl: string,
+  brainUrl: string
+) {
   return spawn(
     "npm",
     ["run", "dev", "--", "--hostname", "127.0.0.1", "--port", String(port)],
@@ -180,13 +462,327 @@ function startDashboard(port: number, coreUrl: string) {
         ...process.env,
         FC_CORE_API_TOKEN: CORE_TOKEN,
         FC_CORE_BASE_URL: coreUrl,
+        FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
+        FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
+        FC_BRAIN_UPSTREAM_URL: brainUrl,
+        FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
+        FC_DASHBOARD_DEV_LAUNCH_CODE: "off2026",
         FC_WORKOS_AUTH_ENABLED: "0",
+        NEXT_DIST_DIR: ".next-browser-test",
       },
       stdio: "pipe",
     }
   );
+}
+
+async function startFakeBrain() {
+  const server = http.createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/client") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><html><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p></main></body></html>");
+      return;
+    }
+    writeJson(response, 404, { error: "not found" });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
+async function startFakeHostedDevice() {
+  const state: HostedDeviceState = {
+    app: initialHostedChatState(),
+    actions: [],
+    authRequests: [],
+  };
+  const streams = new Set<ServerResponse>();
+  const server = http.createServer(async (request, response) => {
+    try {
+      await handleHostedDeviceRequest(request, response, state, streams);
+    } catch (error) {
+      if (!response.headersSent) {
+        response.writeHead(500, { "content-type": "application/json" });
+      }
+      response.end(JSON.stringify({ error: String(error) }));
+    }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+
+  return {
+    server,
+    state,
+    url,
+    runtimeStatusUrl: `${url}/runtime-status`,
+    emit() {
+      state.app.rev += 1;
+      emitHostedState(streams, state.app);
+    },
+    close() {
+      for (const stream of streams) {
+        stream.end();
+      }
+      server.close();
+    },
+  };
+}
+
+async function handleHostedDeviceRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  state: HostedDeviceState,
+  streams: Set<ServerResponse>
+) {
+  const path = request.url ?? "/";
+  if (request.method === "GET" && path === "/runtime-status") {
+    writeJson(response, 200, {
+      paired: true,
+      agent_npub: AGENT_NPUB,
+      room_id: "room_browser_agent",
+    });
+    return;
+  }
+
+  if (!path.startsWith("/v1/app/")) {
+    writeJson(response, 404, { error: "not found" });
+    return;
+  }
+
+  const authRequest: HostedAuthRequest = {
+    method: request.method ?? "GET",
+    path,
+    authorization: singleHeader(request.headers.authorization),
+    workosUserId: singleHeader(request.headers["x-finite-workos-user-id"]),
+  };
+  state.authRequests.push(authRequest);
+  if (
+    authRequest.authorization !== `Bearer ${HOSTED_DEVICE_TOKEN}`
+    || authRequest.workosUserId !== "user_browser"
+  ) {
+    writeJson(response, 401, { error: "missing hosted-device credentials" });
+    return;
+  }
+
+  if (request.method === "GET" && path.startsWith("/v1/app/attachments/")) {
+    response.writeHead(200, {
+      "cache-control": "private, no-store",
+      "content-disposition": "inline; filename=browser-proof.png",
+      "content-length": String(PNG_BYTES.length),
+      "content-type": "image/png",
+    });
+    response.end(PNG_BYTES);
+    return;
+  }
+
+  if (request.method === "POST" && path === "/v1/app/attachments") {
+    await readBytes(request);
+    state.app.messages.push(
+      hostedImageMessage("Image sent from browser.", true, state.app.messages.length + 1, "browser-proof.png")
+    );
+    state.app.rev += 1;
+    emitHostedState(streams, state.app);
+    writeJson(response, 200, state.app);
+    return;
+  }
+
+  if (request.method === "GET" && path === "/v1/app/state") {
+    writeJson(response, 200, state.app);
+    return;
+  }
+
+  if (request.method === "POST" && path === "/v1/app/actions") {
+    const action = (await readJson(request)) as Record<string, unknown>;
+    state.actions.push(action);
+    applyHostedAction(state.app, action);
+    emitHostedState(streams, state.app);
+    writeJson(response, 200, state.app);
+    return;
+  }
+
+  if (request.method === "GET" && path === "/v1/app/updates") {
+    response.writeHead(200, {
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "content-type": "text/event-stream",
+    });
+    streams.add(response);
+    response.on("close", () => streams.delete(response));
+    writeHostedState(response, state.app);
+    return;
+  }
+
+  writeJson(response, 404, { error: "not found" });
+}
+
+function initialHostedChatState(): FakeHostedChatState {
+  return {
+    rev: 1,
+    identity: {
+      account_id: "browser-user-account",
+      device_id: "hosted-web",
+    },
+    rooms: [],
+    selected_room_id: null,
+    topics: [],
+    selected_topic_id: null,
+    selected_chat_id: null,
+    active_profile_id: null,
+    status: "Stopped",
+    toast: null,
+    messages: [],
+    profiles: [],
+    typing_members: [],
+    flow: {
+      notice_text: null,
+      notice_busy: false,
+      scan_in_flight: false,
+      scan_result: "",
+    },
+  };
+}
+
+function applyHostedAction(
+  state: FakeHostedChatState,
+  action: Record<string, unknown>
+) {
+  const operation = actionName(action);
+  if (operation === "StartRuntime") {
+    state.status = "Runtime running";
+  } else if (operation === "ScanTarget") {
+    state.active_profile_id = "agent-account-browser";
+    state.profiles = [
+      {
+        account_id: "agent-account-browser",
+        npub: AGENT_NPUB,
+        display_name: "Completed Oslo Bot",
+        about: "Browser-test agent",
+        picture: null,
+        stale: false,
+        is_agent: true,
+      },
+    ];
+  } else if (operation === "StartProfileChat") {
+    state.rooms = [
+      {
+        room_id: "room_browser_agent",
+        display_name: "Completed Oslo Bot",
+        state: "Connected",
+        status: "Connected",
+        user_status_text: "Connected",
+        last_message_preview: "Hello from Completed Oslo Bot.",
+        unread_count: 0,
+        is_agent_chat: true,
+      },
+    ];
+    state.selected_room_id = "room_browser_agent";
+    state.topics = [
+      {
+        room_id: "room_browser_agent",
+        topic_id: "topic_browser_agent",
+        title: "General",
+        active_chat_id: "chat_browser_agent",
+        chats: [
+          {
+            chat_id: "chat_browser_agent",
+            title: "General",
+            active: true,
+          },
+        ],
+      },
+    ];
+    state.selected_topic_id = "topic_browser_agent";
+    state.selected_chat_id = "chat_browser_agent";
+    state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
+  } else if (operation === "SendChatMessage") {
+    const payload = action.SendChatMessage as Record<string, unknown> | undefined;
+    assert(payload);
+    const text = String(payload.text ?? "");
+    assert(text);
+    state.messages.push(hostedMessage(text, true, state.messages.length + 1));
+    state.rooms[0]!.last_message_preview = text;
+  } else if (operation === "RenameChat") {
+    const payload = action.RenameChat as Record<string, unknown> | undefined;
+    assert(payload);
+    const title = String(payload.title ?? "");
+    assert(title);
+    state.topics[0]!.chats[0]!.title = title;
+  }
+  state.rev += 1;
+}
+
+function hostedMessage(
+  text: string,
+  isMine: boolean,
+  seq: number
+): FakeHostedChatState["messages"][number] {
+  return {
+    room_id: "room_browser_agent",
+    seq,
+    message_id: `message_${seq}`,
+    conversation_id: "topic_browser_agent",
+    chat_id: "chat_browser_agent",
+    sender_account_id: isMine ? "browser-user-account" : "agent-account-browser",
+    sender_display_name: isMine ? "You" : "Completed Oslo Bot",
+    text,
+    display_content: text,
+    kind: "message",
+    status: "complete",
+    edit_of_message_id: null,
+    is_mine: isMine,
+    media: [],
+    timestamp_unix_seconds: 1_780_000_000 + seq,
+    display_timestamp: "12:00 PM",
+  };
+}
+
+function hostedImageMessage(
+  text: string,
+  isMine: boolean,
+  seq: number,
+  filename: string
+): FakeHostedChatState["messages"][number] {
+  return {
+    ...hostedMessage(text, isMine, seq),
+    kind: "media",
+    media: [
+      {
+        attachment_id: `attachment_${seq}`,
+        mime_type: "image/png",
+        filename,
+        kind: "Image",
+        width: 1,
+        height: 1,
+      },
+    ],
+  };
+}
+
+function emitHostedState(
+  streams: Set<ServerResponse>,
+  state: FakeHostedChatState
+) {
+  for (const stream of streams) {
+    writeHostedState(stream, state);
+  }
+}
+
+function writeHostedState(response: ServerResponse, state: FakeHostedChatState) {
+  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(state)}\n\n`);
+}
+
+function actionName(action: Record<string, unknown>) {
+  return Object.keys(action)[0] ?? "";
+}
+
+function singleHeader(value: string | string[] | undefined) {
+  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
 async function startFakeCore() {
@@ -233,6 +829,31 @@ async function handleCoreRequest(
       claimable_candidates: [],
       projects: state.projects,
       agent_creation_requests: state.requests,
+    });
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
+    writeJson(response, 200, {
+      customer_org: {
+        id: "org_browser",
+        owner_user_id: "user_browser",
+        name: "Browser Test",
+        billing_class: "off2026",
+        created_at: "2026-05-28T12:00:00Z",
+        updated_at: "2026-05-28T12:01:00Z",
+      },
+      billing_account: null,
+      agent_creation_entitlement: {
+        id: "entitlement_browser",
+        customer_org_id: "org_browser",
+        allowed_new_agent_runtimes: 1,
+        launch_code: "off2026",
+        created_at: "2026-05-28T12:00:00Z",
+        updated_at: "2026-05-28T12:01:00Z",
+      },
+      can_create_agent: true,
+      requires_billing: false,
     });
     return;
   }
@@ -343,7 +964,11 @@ function agentCreationRequest({
   };
 }
 
-function visibleProject(projectId: string, displayName: string): VisibleProject {
+function visibleProject(
+  projectId: string,
+  displayName: string,
+  runtimeStatusUrl: string
+): VisibleProject {
   return {
     project: {
       id: projectId,
@@ -368,7 +993,7 @@ function visibleProject(projectId: string, displayName: string): VisibleProject 
         runtime_host: "oslo",
         runtime_status: "online",
         hermes_available: true,
-        published_app_urls: [],
+        published_app_urls: [runtimeStatusUrl],
       },
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
@@ -377,11 +1002,15 @@ function visibleProject(projectId: string, displayName: string): VisibleProject 
 }
 
 async function readJson(request: IncomingMessage) {
+  return JSON.parse((await readBytes(request)).toString("utf8"));
+}
+
+async function readBytes(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return Buffer.concat(chunks);
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown) {

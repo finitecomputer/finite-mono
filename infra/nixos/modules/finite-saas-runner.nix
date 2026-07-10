@@ -1,8 +1,9 @@
-# finite-saas-runner — the Finite agent-creation runner (Phala backend).
+# finite-saas-runner — the Finite agent-creation runner (Phala backend,
+# with optional Enclavia evaluation target).
 # Mirrors old lat1's finite-saas-runner.service/.timer: a oneshot `run-once`
 # re-fired 20s after each completion (OnUnitInactiveSec, not a cron schedule).
 #
-# ## PHALA CLI TODO
+# ## PROVIDER CLI TODO
 # TODO: the runner shells out to the `phala` CLI (npm package `phala`,
 # v1.1.19 on old lat1 at /usr/local/bin/phala). It is NOT packaged here yet:
 # a pinned buildNpmPackage needs an npmDepsHash computed on a builder with
@@ -10,6 +11,8 @@
 # (e.g. `nix profile` a node env or `npm i -g phala@1.1.19`) and points
 # FC_RUNNER_PHALA_BIN (in /etc/finite/runner.env) at the binary. nodejs is on
 # the unit PATH below so a plain npm-installed script works.
+# The optional Enclavia lane similarly expects an operator-installed
+# `enclavia` CLI and a service-user OAuth credentials file.
 { finitePackages, pkgs, ... }:
 {
   systemd.services.finite-saas-runner = {
@@ -25,7 +28,7 @@
       StateDirectory = "finite-saas-runner";
       WorkingDirectory = "/var/lib/finite-saas-runner";
       # Operator-created, root:root 0600. Variable NAMES only, from
-      # infra/hosts/lat1/systemd/runner.env.example (22 live names; values
+      # infra/hosts/lat1/systemd/runner.env.example; values
       # come from /etc/finite-computer/runner.env on old lat1):
       #   FC_CORE_URL                     -> set to http://127.0.0.1:4200 (core is local now;
       #                                      the old value baked in the k3s ClusterIP)
@@ -44,6 +47,10 @@
       #   FC_RUNNER_PHALA_PUBLIC_LOGS
       #   FC_RUNNER_PHALA_PUBLIC_SYSINFO
       #   FC_RUNNER_PHALA_REGION          (optional)
+      #   FC_RUNNER_ENCLAVIA_BIN          (optional Enclavia evaluation lane)
+      #   FC_RUNNER_ENCLAVIA_ENCLAVE_ID   (required when FC_RUNNER_BACKEND=enclavia)
+      #   FC_RUNNER_ENCLAVIA_PULL_POLICY  (optional: always, missing, or never)
+      #   FC_RUNNER_DOCKER_BIN            (optional for Docker/Enclavia pre-pull)
       #   FC_RUNNER_WORK_ROOT             -> set to /var/lib/finite-saas-runner (was
       #                                      /var/lib/finite/saas-runner on old lat1)
       #   FC_RUNNER_DRAIN
