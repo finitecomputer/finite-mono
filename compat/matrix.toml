@@ -27,12 +27,17 @@ notes = "v0.1.2 (2026-07-08) is the first public fbrain release, cut from mono; 
 
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.
-image = "ghcr.io/finitecomputer/finite-agent-runtime"  # frozen legacy package; future builds publish to ghcr.io/finitecomputer/agent-runtime
-deployed = ["2026-07-04.1", "2026-07-06.1"]
-notes = "Runner launches whatever tag its env pins. Old CVMs keep their image until relaunched."
+image = "ghcr.io/finitecomputer/agent-runtime"
+deployed = ["2026-07-10.2"]
+digest = "sha256:3da5476380c21a01bc13cde65cc920ba61b358950a1624c6ac78da935446d37c"
+source_commit = "8e79cff976bc24a5914f1ed0a0b48ea1c4ed5bf7"
+hermes = "0.18.2"
+notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents retain their launch-time image and update at their own pace."
 
 [servers]
-finitechat_server = { host = "clawland (chat.finite.computer)", deployed_from = "pre-mono finitechat", contract = "GET /health reports source_commit + source_dirty" }
-finite_saas_core = { host = "lat1 k3s", deployed_from = "on-host podman build (deprecated; see infra/hosts/lat1/deploy.md)" }
-finitesitesd = { host = "lat2", deployed_from = "on-box cargo build v0.2.16 (deprecated; see infra/hosts/lat2/deploy.md)" }
-finite_brain = { host = "smoke", deployed_from = "legacy fleet nix packaging 0.1.2-6466fcc" }
+finitechat_server = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8788 behind chat.finite.computer" }
+finitechat_hosted_device = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :38918, shared server-only token with dashboard" }
+finite_saas_core = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :4200, native Postgres" }
+finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-10.1@sha256:19401197997705069c3a5dfa9cad8d9f42d17b780cb911f471824c84bc0bc493", contract = "finite.computer, WorkOS + Stripe test mode" }
+finitesitesd = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8787 behind api.finite.chat and site domains" }
+finite_brain = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :3015 through WorkOS-protected dashboard routes plus Nostr authorization" }

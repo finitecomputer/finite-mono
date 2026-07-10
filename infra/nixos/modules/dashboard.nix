@@ -10,8 +10,8 @@
     # ## infra/images/dashboard.Dockerfile). This placeholder digest WILL   ##
     # ## NOT PULL — the deploy fails loudly until it is replaced.           ##
     # ########################################################################
-    # 2026-07-09.1, built by service-images.yml from main.
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:219ec084b42d75950c0899420ed69ef9e15eccc073f45d213300fde511b6b985";
+    # 2026-07-10.1, source 8e79cff976bc24a5914f1ed0a0b48ea1c4ed5bf7.
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:19401197997705069c3a5dfa9cad8d9f42d17b780cb911f471824c84bc0bc493";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
