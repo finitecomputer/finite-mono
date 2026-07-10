@@ -82,6 +82,9 @@ jobs:
       - name: Test dashboard
         run: npm test
 
+      - name: Test dashboard product flows
+        run: npm run test:browser
+
       - name: Build dashboard
         run: npm run build
 
@@ -144,14 +147,12 @@ jobs:
         run: nix develop --command just skills check
       - name: Search check
         run: nix develop --command just search check
+      - name: Evaluate production NixOS configuration
+        run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
   devfinity-smoke:
     name: devfinity services-only smoke
     runs-on: ubuntu-latest
-    # Not yet a required gate: first runs on hosted runners may surface
-    # missing dev-shell deps (e.g. Node for the dashboard). Promote to
-    # blocking once it has a green history.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16

@@ -379,10 +379,10 @@ fn validate_telegram_value(value: &Value) -> Result<(), AgentdError> {
             .as_object()
             .ok_or_else(|| AgentdError::Config("Telegram home channel is invalid".to_owned()))?;
         for key in ["platform", "chat_id", "name"] {
-            if !home
+            if home
                 .get(key)
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
             {
                 return Err(AgentdError::Config(format!(
                     "Telegram home channel {key} is required"

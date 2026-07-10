@@ -10,6 +10,7 @@ import { chromium, type Browser, type Page } from "playwright";
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
+const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
 const PNG_BYTES = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
@@ -19,6 +20,8 @@ type AgentCreationRequest = {
   id: string;
   project_id: string;
   display_name: string;
+  runner_class: "apple_container";
+  profile_picture_url: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id: string | null;
   failure_message: string | null;
@@ -159,7 +162,27 @@ type HostedAuthRequest = {
 type HostedDeviceState = {
   app: FakeHostedChatState;
   actions: Array<Record<string, unknown>>;
+  runtimeCommands: Array<Record<string, unknown>>;
   authRequests: HostedAuthRequest[];
+  connections: AgentConnectionsStatus;
+};
+
+type AgentConnectionsStatus = {
+  inference: {
+    profile: "finite_private" | "openrouter";
+    provider: string;
+    model: string;
+  };
+  telegram: {
+    connected: boolean;
+    home_channel: string | null;
+    pending: Array<{ user_id: string; name: string }>;
+    approved: Array<{ user_id: string; name: string }>;
+  };
+  google: {
+    connected: boolean;
+    email: string | null;
+  };
 };
 
 test("dashboard agent creation browser states", async () => {
@@ -188,7 +211,15 @@ test("dashboard agent creation browser states", async () => {
         );
       });
       await agentName.fill("Oslo Bot");
-      await page.getByRole("button", { name: "Create agent" }).click();
+      await page.locator('#coreAgentPicture').setInputFiles({
+        name: "oslo-bot.png",
+        mimeType: "image/png",
+        buffer: PNG_BYTES,
+      });
+      await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Promo code").fill("off2026");
+      await page.getByRole("button", { name: "Apply" }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
         5_000,
@@ -197,15 +228,23 @@ test("dashboard agent creation browser states", async () => {
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Oslo Bot");
       assert.equal(post.launchCode, "off2026");
+      assert.equal(post.runnerClass, "apple_container");
+      assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
       await expectVisibleText(page, "Creating your agent");
+      assert(
+        hostedDevice.state.authRequests.some((request) => request.path === "/v1/app/images"),
+        "agent picture did not use the authenticated Hosted Device upload"
+      );
     });
 
     core.reset({ createDelayMs: 500 });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Double Submit Bot");
-      await page.getByRole("button", { name: "Create agent" }).dblclick();
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Promo code").fill("off2026");
+      await page.getByRole("button", { name: "Apply" }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(core.state.creationPosts.length, 1);
@@ -264,17 +303,27 @@ test("dashboard agent creation browser states", async () => {
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot$/u);
       await expectVisibleText(page, "Completed Oslo Bot");
       const main = page.getByRole("main");
-      await expectVisibleText(page, "Finite Chat");
-      await expectVisibleText(page, "Runtime restart");
-      await expectVisibleText(page, "Runtime facts");
+      await expectVisibleText(page, "Your agent is online.");
+      const productNav = page.getByRole("navigation", { name: "Dashboard section" });
+      const agentNav = productNav.getByRole("link", { name: "Agent", exact: true });
+      await agentNav.waitFor({ state: "visible" });
+      // The fake Core changes out of band, unlike a product mutation that
+      // invalidates the dashboard's short SWR cache. Let the background read
+      // settle, then verify the hydrated navigation on a real page load.
+      if ((await agentNav.getAttribute("aria-current")) !== "page") {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await page.reload();
+      }
+      await waitFor(async () => (await agentNav.getAttribute("aria-current")) === "page");
+      await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
+      await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
+      await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Destroy" }).count(), 0);
-      const openWebChat = main.getByRole("link", { name: "Open web chat" });
+      const openWebChat = main.getByRole("link", { name: "Open chat" });
       await openWebChat.waitFor({ state: "visible" });
-      assert.equal(await page.getByText("Connections", { exact: true }).count(), 0);
-      assert.equal(await page.getByText("OpenRouter", { exact: true }).count(), 0);
 
       await openWebChat.click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
@@ -290,15 +339,26 @@ test("dashboard agent creation browser states", async () => {
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
       await page.getByRole("link", { name: "Connections" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
-      await expectVisibleText(page, "Finite Private or OpenRouter");
+      await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
       await expectVisibleText(page, "Google Workspace");
-      await page.getByRole("link", { name: "Configure in chat" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat\?prompt=/u);
-      assert.match(await page.getByLabel("Message your agent").inputValue(), /Finite Private and OpenRouter/u);
-      await page.getByLabel("Message your agent").fill("");
+      await page.getByRole("button", { name: "Use OpenRouter" }).click();
+      await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
+      await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
+      await page.getByRole("button", { name: "Save" }).click();
+      await expectVisibleText(page, "OpenRouter · openai/gpt-5-mini");
+      assert(
+        hostedDevice.state.runtimeCommands.some(
+          (command) => command.command === "agent.inference.apply"
+        ),
+        "inference change did not use the runtime command channel"
+      );
 
+      await page.getByRole("main").evaluate((element) => {
+        element.scrollTop = 120;
+      });
       await page.getByRole("link", { name: "Brain" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/brain$/u);
+      await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
       await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
       await page.getByRole("link", { name: "Chat" }).click();
@@ -405,12 +465,16 @@ test("dashboard agent creation browser states", async () => {
 
       const localSiteUrl = "http://browser-proof.sites.localhost:18789/";
       hostedDevice.state.app.messages.push(
-        hostedMessage(`Published your site: ${localSiteUrl}`, false, 7)
+        hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 7)
+      );
+      hostedDevice.state.app.messages.push(
+        hostedMessage(`Published your site: ${localSiteUrl}`, false, 8)
       );
       hostedDevice.emit();
       await page.getByRole("button", { name: "Preview" }).click();
       await page.getByLabel("Preview URL").waitFor({ state: "visible" });
       assert.equal(await page.getByLabel("Preview URL").inputValue(), localSiteUrl);
+      assert.equal(await page.getByLabel("Select site preview").count(), 0);
       assert.equal(
         await page.getByLabel("Site preview").locator("iframe").getAttribute("src"),
         localSiteUrl
@@ -468,7 +532,7 @@ function startDashboard(
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
-        FC_DASHBOARD_DEV_LAUNCH_CODE: "off2026",
+        WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_DIST_DIR: ".next-browser-test",
       },
@@ -497,7 +561,25 @@ async function startFakeHostedDevice() {
   const state: HostedDeviceState = {
     app: initialHostedChatState(),
     actions: [],
+    runtimeCommands: [],
     authRequests: [],
+    connections: {
+      inference: {
+        profile: "finite_private",
+        provider: "finite_private",
+        model: "openai/gpt-oss-120b",
+      },
+      telegram: {
+        connected: false,
+        home_channel: null,
+        pending: [],
+        approved: [],
+      },
+      google: {
+        connected: false,
+        email: null,
+      },
+    },
   };
   const streams = new Set<ServerResponse>();
   const server = http.createServer(async (request, response) => {
@@ -581,6 +663,19 @@ async function handleHostedDeviceRequest(
     return;
   }
 
+  if (request.method === "POST" && path === "/v1/app/images") {
+    await readBytes(request);
+    writeJson(response, 200, { image_url: AGENT_PICTURE_URL });
+    return;
+  }
+
+  if (request.method === "POST" && path === "/v1/app/runtime-commands") {
+    const command = (await readJson(request)) as Record<string, unknown>;
+    state.runtimeCommands.push(command);
+    writeJson(response, 200, applyRuntimeCommand(state, command));
+    return;
+  }
+
   if (request.method === "POST" && path === "/v1/app/attachments") {
     await readBytes(request);
     state.app.messages.push(
@@ -619,6 +714,46 @@ async function handleHostedDeviceRequest(
   }
 
   writeJson(response, 404, { error: "not found" });
+}
+
+function applyRuntimeCommand(
+  state: HostedDeviceState,
+  request: Record<string, unknown>
+) {
+  const command = String(request.command ?? "");
+  const body = request.body && typeof request.body === "object"
+    ? request.body as Record<string, unknown>
+    : {};
+  if (command === "agent.inference.apply") {
+    const profile = String(body.profile ?? "");
+    if (profile === "finite_private") {
+      state.connections.inference = {
+        profile,
+        provider: "finite_private",
+        model: "openai/gpt-oss-120b",
+      };
+    } else if (profile === "openrouter") {
+      state.connections.inference = {
+        profile,
+        provider: "openrouter",
+        model: String(body.model ?? "anthropic/claude-sonnet-4.6"),
+      };
+    }
+  } else if (command === "agent.telegram.connect") {
+    state.connections.telegram.connected = true;
+  } else if (command === "agent.telegram.disconnect") {
+    state.connections.telegram.connected = false;
+    state.connections.telegram.home_channel = null;
+  } else if (command === "agent.google.disconnect") {
+    state.connections.google.connected = false;
+    state.connections.google.email = null;
+  }
+  return {
+    request_id: `browser-command-${state.runtimeCommands.length}`,
+    status: "succeeded",
+    body: command === "agent.connections.status" ? state.connections : {},
+    error: null,
+  };
 }
 
 function initialHostedChatState(): FakeHostedChatState {
@@ -847,13 +982,13 @@ async function handleCoreRequest(
       agent_creation_entitlement: {
         id: "entitlement_browser",
         customer_org_id: "org_browser",
-        allowed_new_agent_runtimes: 1,
+        allowed_new_agent_runtimes: 0,
         launch_code: "off2026",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
-      can_create_agent: true,
-      requires_billing: false,
+      can_create_agent: false,
+      requires_billing: true,
     });
     return;
   }
@@ -891,6 +1026,8 @@ async function handleCoreRequest(
         project_id: requestRecord.project_id,
         idempotency_key: String(body.idempotencyKey ?? ""),
         display_name: requestRecord.display_name,
+        runner_class: String(body.runnerClass ?? "apple_container"),
+        profile_picture_url: body.profilePictureUrl ?? null,
         status: requestRecord.status,
         requested_launch_code: String(body.launchCode ?? ""),
         agent_runtime_id: null,
@@ -956,6 +1093,8 @@ function agentCreationRequest({
     id,
     project_id: projectId,
     display_name: displayName,
+    runner_class: "apple_container",
+    profile_picture_url: null,
     status,
     agent_runtime_id: null,
     failure_message: failureMessage,

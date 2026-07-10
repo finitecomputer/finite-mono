@@ -78,6 +78,38 @@ async fn users_get_isolated_devices_and_restart_reopens_the_same_identity() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_image_upload_returns_a_public_finitechat_blob_url() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("server.sqlite3"), None).await;
+    let device = app(HostedDeviceConfig {
+        data_root: root.path().join("hosted-devices"),
+        server_url: server_url.clone(),
+        api_token: TOKEN.to_owned(),
+    });
+
+    let response = device
+        .oneshot(
+            Request::post("/v1/app/images")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, "user_paul")
+                .header("content-type", "image/png")
+                .body(Body::from(b"\x89PNG\r\n\x1a\nprofile".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let image_url = json["image_url"].as_str().unwrap();
+    assert!(image_url.starts_with(&format!("{server_url}/blobs/")));
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
 #[tokio::test]
 async fn update_stream_flushes_current_state_without_waiting_for_remote_activity() {
     let root = TempDir::new().unwrap();

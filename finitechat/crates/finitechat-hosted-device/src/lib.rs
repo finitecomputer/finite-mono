@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue,
@@ -51,6 +51,7 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_ATTACHMENT_MIME_TYPE_BYTES: usize = 128;
 const MAX_RUNTIME_COMMAND_WAIT_MILLIS: u64 = 60_000;
 const RECENT_RUNTIME_EVENT_LIMIT: u32 = 512;
+pub const MAX_HOSTED_PROFILE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct HostedDeviceConfig {
@@ -174,6 +175,10 @@ pub fn app(config: HostedDeviceConfig) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
         .route("/v1/app/actions", post(dispatch_action))
+        .route(
+            "/v1/app/images",
+            post(upload_profile_image).layer(DefaultBodyLimit::max(MAX_HOSTED_PROFILE_IMAGE_BYTES)),
+        )
         .route("/v1/app/runtime-commands", post(dispatch_runtime_command))
         .route("/v1/app/updates", get(app_updates))
         .route(
@@ -365,6 +370,44 @@ async fn dispatch_action(
         .await
         .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
+}
+
+#[derive(Debug, Serialize)]
+struct HostedProfileImageResponse {
+    image_url: String,
+}
+
+async fn upload_profile_image(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<HostedProfileImageResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if body.is_empty() {
+        return Err(HostedDeviceError::InvalidMultipart(
+            "profile image is empty".to_owned(),
+        ));
+    }
+
+    let runtime = state.runtime_for(&user_id)?;
+    let next = tokio::task::spawn_blocking(move || {
+        runtime.dispatch_and_wait(AppAction::UploadImage {
+            bytes: body.to_vec(),
+            content_type,
+        })
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    let image_url = next.flow.image_upload_url.ok_or_else(|| {
+        HostedDeviceError::Task("profile image upload returned no URL".to_owned())
+    })?;
+    Ok(Json(HostedProfileImageResponse { image_url }))
 }
 
 #[derive(Default)]

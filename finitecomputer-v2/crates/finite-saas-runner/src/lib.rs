@@ -3,9 +3,10 @@ use finite_saas_core::{
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, FinitePrivateApiKey, LeaseRuntimeControlRequestInput,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerLeaseCapacity, RuntimeArtifact,
-    RuntimeArtifactKind, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeSummaryStatus, runtime_relay_token_hash as hash_runtime_relay_token,
+    RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
+    RuntimeArtifact, RuntimeArtifactKind, RuntimeControlKind, RuntimeControlLease,
+    RuntimeControlRequest, RuntimeSummaryStatus,
+    runtime_relay_token_hash as hash_runtime_relay_token,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod apple_container;
+mod kata;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
+pub use kata::{KataConfig, KataLaunchPlan, KataLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
@@ -58,6 +61,10 @@ pub enum RunnerError {
     MissingDockerBinary,
     #[error("Apple Container binary is required")]
     MissingAppleContainerBinary,
+    #[error("nerdctl binary is required")]
+    MissingNerdctlBinary,
+    #[error("Kata runtime binary is required")]
+    MissingKataRuntimeBinary,
     #[error("Phala CLI binary is required")]
     MissingPhalaBinary,
     #[error("Phala API key is required")]
@@ -217,7 +224,12 @@ where
         self.launcher.validate_ready()?;
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
-        let runner_capacity = self.launcher.runner_capacity();
+        let mut runner_capacity = self.launcher.runner_capacity();
+        if runner_capacity.runner_classes.is_empty() {
+            runner_capacity
+                .runner_classes
+                .push(self.launcher.runner_class());
+        }
         if let Some(lease) = self.queue.lease_runtime_control(
             &self.runner_id,
             &lease_token,
@@ -493,6 +505,7 @@ where
         lease_token: &str,
     ) -> Result<RuntimeLaunchOptions, RunnerError> {
         let mut options = RuntimeLaunchOptions {
+            profile_picture_url: lease.request.profile_picture_url.clone(),
             environment: self.runtime_environment.clone(),
             ..RuntimeLaunchOptions::default()
         };
@@ -665,6 +678,9 @@ pub trait AgentCreationQueue {
 
 pub trait RuntimeLauncher {
     fn validate_ready(&self) -> Result<(), RunnerError>;
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::LocalDocker
+    }
     fn uses_core_runtime_heartbeat(&self) -> bool {
         true
     }
@@ -721,6 +737,10 @@ where
 {
     fn validate_ready(&self) -> Result<(), RunnerError> {
         (**self).validate_ready()
+    }
+
+    fn runner_class(&self) -> RunnerClass {
+        (**self).runner_class()
     }
 
     fn uses_core_runtime_heartbeat(&self) -> bool {
@@ -886,6 +906,9 @@ impl Default for FinitePrivateRuntimeDefaults {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RuntimeLaunchOptions {
     pub finite_private: Option<FinitePrivateLaunchKey>,
+    /// Public profile metadata selected before launch. It is not a secret and
+    /// stays provider-neutral.
+    pub profile_picture_url: Option<String>,
     /// Bounded non-secret values from the provider-neutral RuntimeSpec.
     pub environment: BTreeMap<String, String>,
 }
@@ -924,6 +947,7 @@ impl std::fmt::Debug for RuntimeLaunchOptions {
         formatter
             .debug_struct("RuntimeLaunchOptions")
             .field("finite_private", &self.finite_private)
+            .field("has_profile_picture", &self.profile_picture_url.is_some())
             .field(
                 "environment_keys",
                 &self.environment.keys().collect::<Vec<_>>(),
@@ -1504,6 +1528,10 @@ impl DockerLauncher {
 }
 
 impl RuntimeLauncher for DockerLauncher {
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::LocalDocker
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         self.config.validate()
     }
@@ -1514,6 +1542,7 @@ impl RuntimeLauncher for DockerLauncher {
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
+            runner_classes: vec![self.runner_class()],
             draining: self.config.drain_new_leases,
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_docker_container_count(&self.config),
@@ -1632,15 +1661,9 @@ impl RuntimeLauncher for DockerLauncher {
             },
             self.config.command_timeout,
         )?;
-        let state_root = self
-            .config
-            .work_root
-            .join("docker")
-            .join(sanitize_sandbox_name(&lease.request.source_machine_id));
-        if state_root.exists() {
-            std::fs::remove_dir_all(&state_root)
-                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-        }
+        // Runtime destruction tears down replaceable compute only. Durable
+        // user state has an independent recovery lifecycle and is never
+        // purged as a side effect of a runtime-control request.
         Ok(())
     }
 
@@ -1873,7 +1896,11 @@ fn docker_equivalent_runtime_env(
         ("FINITECHAT_HERMES_ROOM_NAME".to_string(), agent_name),
         (
             "FINITECHAT_HERMES_AGENT_PICTURE_URL".to_string(),
-            env.agent_picture_url.to_string(),
+            options
+                .profile_picture_url
+                .as_deref()
+                .unwrap_or(env.agent_picture_url)
+                .to_string(),
         ),
         (
             "FINITECHAT_HERMES_INBOUND_STREAM".to_string(),
@@ -2244,6 +2271,10 @@ impl PhalaLauncher {
 }
 
 impl RuntimeLauncher for PhalaLauncher {
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::Phala
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         self.config.validate()
     }
@@ -2254,6 +2285,7 @@ impl RuntimeLauncher for PhalaLauncher {
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
+            runner_classes: vec![self.runner_class()],
             draining: self.config.drain_new_leases,
             max_sandbox_count: self.config.max_cvm_count,
             active_sandbox_count: None,
@@ -2891,6 +2923,10 @@ impl EnclaviaLauncher {
 }
 
 impl RuntimeLauncher for EnclaviaLauncher {
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::Enclavia
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         self.config.validate()
     }
@@ -2901,6 +2937,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
+            runner_classes: vec![self.runner_class()],
             draining: self.config.drain_new_leases,
             max_sandbox_count: self.config.max_enclave_count,
             active_sandbox_count: active_enclavia_enclave_count(&self.config),
@@ -3633,6 +3670,7 @@ mod tests {
     #[test]
     fn run_once_reports_capacity_without_agent_lease_when_runner_is_draining() {
         let capacity = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::LocalDocker],
             draining: true,
             max_sandbox_count: Some(4),
             active_sandbox_count: Some(2),
@@ -3668,6 +3706,7 @@ mod tests {
     #[test]
     fn run_once_reports_capacity_without_agent_lease_when_sandbox_limit_is_full() {
         let capacity = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::LocalDocker],
             draining: false,
             max_sandbox_count: Some(2),
             active_sandbox_count: Some(2),
@@ -4202,11 +4241,13 @@ mod tests {
     }
 
     #[test]
-    fn runner_binary_defaults_to_docker_backend_for_v2() {
+    fn runner_binary_advertises_one_worker_class_without_product_backend_switching() {
         let main_rs = read_repo_file("crates/finite-saas-runner/src/main.rs");
 
-        assert!(main_rs.contains(r#"optional_env("FC_RUNNER_BACKEND", "docker")"#));
+        assert!(main_rs.contains(r#"optional_env("FC_RUNNER_CLASS", "local_docker")"#));
+        assert!(main_rs.contains(r#""kata" =>"#));
         assert!(main_rs.contains(r#""enclavia" =>"#));
+        assert!(!main_rs.contains("FC_RUNNER_BACKEND"));
     }
 
     #[test]
@@ -4232,6 +4273,7 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            profile_picture_url: None,
             environment: BTreeMap::from([(
                 "FINITE_SITES_API".to_string(),
                 "http://192.168.64.1:18789".to_string(),
@@ -4297,6 +4339,106 @@ mod tests {
     }
 
     #[test]
+    fn kata_plan_is_microvm_isolated_durable_and_keeps_secrets_out_of_argv() {
+        let config = KataConfig {
+            nerdctl_bin: PathBuf::from("/run/current-system/sw/bin/nerdctl"),
+            kata_runtime_bin: PathBuf::from("/run/current-system/sw/bin/kata-runtime"),
+            source_host_id: "finite-lat-1".to_string(),
+            image: "ghcr.io/finitecomputer/finite-agent-runtime:prod@sha256:abc123".to_string(),
+            runtime_artifact_id: Some("artifact-prod".to_string()),
+            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
+            runtime_state_schema_version: Some("runtime-state-v1".to_string()),
+            work_root: PathBuf::from("/var/lib/finite-saas-runner"),
+            ..KataConfig::default()
+        };
+        config.validate().unwrap();
+        let lease = sample_lease("agent_request_ABC.123");
+        let options = RuntimeLaunchOptions {
+            finite_private: Some(FinitePrivateLaunchKey {
+                api_key_id: "fp_key_prod".to_string(),
+                raw_api_key: "fpk_must_never_reach_argv".to_string(),
+                base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
+                model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
+                revoke_on_launch_failure: true,
+            }),
+            profile_picture_url: Some("https://chat.finite.computer/blobs/profile".to_string()),
+            environment: BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "http://10.88.0.1:8789".to_string(),
+            )]),
+        };
+        let plan = kata::kata_launch_plan(&config, &lease);
+        assert_eq!(plan.container_name, "finite-kata-abc-123");
+        assert_eq!(
+            plan.state_root,
+            PathBuf::from("/var/lib/finite-saas-runner/kata/finite-kata-abc-123")
+        );
+        assert_eq!(
+            plan.env_file,
+            PathBuf::from(
+                "/var/lib/finite-saas-runner/kata-metadata/finite-kata-abc-123/launch.env"
+            )
+        );
+
+        let command = kata::kata_run_command(&config, &plan, &lease);
+        let args = os_strings_to_strings(&command.args);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--namespace", "finite"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--runtime", "io.containerd.kata.v2"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--publish", "127.0.0.1::8080"])
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--volume",
+                "/var/lib/finite-saas-runner/kata/finite-kata-abc-123:/data",
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--env-file",
+                "/var/lib/finite-saas-runner/kata-metadata/finite-kata-abc-123/launch.env",
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "computer.finite.v2.runtime_artifact_id=artifact-prod",
+            ]
+        }));
+        assert!(args.iter().all(|arg| !arg.contains("fpk_must_never")));
+        assert!(!format!("{command:?}").contains("fpk_must_never"));
+        assert_eq!(args.last().map(String::as_str), Some(config.image.as_str()));
+
+        let env = kata::kata_runtime_env(&config, &plan, &lease, &options);
+        assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_must_never_reach_argv");
+        assert_env(
+            &env,
+            "FINITECHAT_HERMES_AGENT_PICTURE_URL",
+            "https://chat.finite.computer/blobs/profile",
+        );
+        assert_env(&env, "FINITE_SITES_API", "http://10.88.0.1:8789");
+
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join("launch.env");
+        kata::write_kata_env_file(&env_file, &env).unwrap();
+        let metadata = std::fs::metadata(&env_file).unwrap();
+        #[cfg(unix)]
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(
+            std::fs::read_to_string(env_file)
+                .unwrap()
+                .contains("FINITE_PRIVATE_API_KEY=fpk_must_never_reach_argv")
+        );
+    }
+
+    #[test]
     fn opaque_runtime_environment_is_bounded_non_secret_and_cannot_override_contract() {
         let valid = BTreeMap::from([(
             "FINITE_SITES_API".to_string(),
@@ -4320,6 +4462,7 @@ mod tests {
                 "{:?}",
                 RuntimeLaunchOptions {
                     finite_private: None,
+                    profile_picture_url: None,
                     environment: valid,
                 }
             )
@@ -4403,6 +4546,7 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            profile_picture_url: None,
             environment: BTreeMap::new(),
         };
 
@@ -4492,6 +4636,7 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            profile_picture_url: None,
             environment: BTreeMap::new(),
         };
 
@@ -4553,6 +4698,7 @@ mod tests {
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
             }),
+            profile_picture_url: None,
             environment: BTreeMap::new(),
         };
         let env = enclavia_runtime_env(&config, &plan, &lease, &options);
@@ -5204,6 +5350,8 @@ mod tests {
                 project_id: "project_123".to_string(),
                 idempotency_key: "browser-submit-1".to_string(),
                 display_name: "Oslo Agent".to_string(),
+                runner_class: RunnerClass::Phala,
+                profile_picture_url: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: Some("off2026".to_string()),
                 agent_runtime_id: None,

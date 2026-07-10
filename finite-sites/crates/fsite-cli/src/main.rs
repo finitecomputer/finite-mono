@@ -2100,7 +2100,30 @@ fn view(args: &[String]) -> Result<(), CliError> {
         }
     }
     let target = target.ok_or_else(|| CliError::Usage(view_help().to_string()))?;
-    let url = view_target_url(&target);
+    let discovered_url = if is_http_url(&target) {
+        None
+    } else {
+        let client = api::Client::from_env();
+        let paths = keys::identity_paths()?;
+        match keys::load_identity(&paths)? {
+            Some(identity) => {
+                let key = keys::user_key_for(&identity)?;
+                match client.project_status(&key, &target) {
+                    Ok(project) => Some(served_output_url(&project, &target)?),
+                    Err(_) if client.uses_default_production() => None,
+                    Err(error) => return Err(error),
+                }
+            }
+            None if client.uses_default_production() => None,
+            None => {
+                return Err(CliError::Key(
+                    "a local Finite identity is required to resolve a site name against this Finite Sites server; run `fsite auth register` or pass the served URL from `fsite project status`"
+                        .to_string(),
+                ));
+            }
+        }
+    };
+    let url = view_target_url(&target, discovered_url.as_deref());
     let llms_url = append_url_path(&url, "llms.txt");
     if output_json {
         let value = serde_json::json!({
@@ -2121,12 +2144,46 @@ fn view(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn view_target_url(target: &str) -> String {
-    if target.starts_with("http://") || target.starts_with("https://") {
-        if target.ends_with('/') {
-            return target.to_string();
+fn served_output_url(
+    project: &finitesites_proto::dto::ProjectStatusResponse,
+    target: &str,
+) -> Result<String, CliError> {
+    let output = project
+        .outputs
+        .iter()
+        .find(|output| {
+            output.output_id == target
+                || output.output_name == target
+                || output.site_name == target
+        })
+        .or_else(|| (project.outputs.len() == 1).then(|| &project.outputs[0]))
+        .ok_or_else(|| {
+            CliError::Api(format!(
+                "Project `{}` does not have one unambiguous served output; pass the output URL from `fsite project status {}`",
+                project.slug, project.slug
+            ))
+        })?;
+    let url = display_output_url(output).trim();
+    if url.is_empty() {
+        return Err(CliError::Api(format!(
+            "Project `{}` returned an empty served output URL",
+            project.slug
+        )));
+    }
+    Ok(url.to_string())
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn view_target_url(target: &str, discovered_url: Option<&str>) -> String {
+    let value = discovered_url.unwrap_or(target);
+    if is_http_url(value) {
+        if value.ends_with('/') {
+            return value.to_string();
         }
-        return format!("{target}/");
+        return format!("{value}/");
     }
     format!("https://{target}.finite.chat/")
 }
@@ -2623,8 +2680,15 @@ mod tests {
     #[test]
     fn view_target_url_supports_url_or_name() {
         assert_eq!(
-            view_target_url("finitechat-native-mockup"),
+            view_target_url("finitechat-native-mockup", None),
             "https://finitechat-native-mockup.finite.chat/"
+        );
+        assert_eq!(
+            view_target_url(
+                "finitechat-native-mockup",
+                Some("http://finitechat-native-mockup.sites.localhost:8787/")
+            ),
+            "http://finitechat-native-mockup.sites.localhost:8787/"
         );
         assert_eq!(
             append_url_path("https://finitechat-native-mockup.finite.chat/", "llms.txt"),

@@ -147,20 +147,23 @@ rename deployment paths from `finite-computer` to v2.
 ## SaaS Runner
 
 Docker is the local preflight backend. Kata is the first production Runner;
-Phala is the confidential fast-follow candidate. The current process-wide
-backend env is transitional scaffolding while Project-selected placement lands:
+Phala is the confidential fast-follow candidate. Placement is Project-selected
+and workers advertise exactly one supported adapter class:
 
 ```text
 RuntimeSpec.runner_class = "kata"
 ```
 
-Do not add `FC_RUNNER_BACKEND=kata` as another global branch; Kata must enter
-through the generic Runner Contract and the same conformance suite as Phala.
+Production uses `FC_RUNNER_CLASS=kata`; local development uses
+`FC_RUNNER_CLASS=apple_container`. This is worker identity, not a product
+feature switch: Core only leases requests whose `RuntimeSpec.runner_class`
+matches the worker's advertised capacity. Kata implements the same narrow
+Runner Contract as Apple Container, Docker, Phala, and Enclavia.
 
 Enclavia can be selected for a single pre-created enclave evaluation target:
 
 ```text
-FC_RUNNER_BACKEND=enclavia
+FC_RUNNER_CLASS=enclavia
 FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<enclave-uuid>
 ```
 

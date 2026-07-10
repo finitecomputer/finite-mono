@@ -304,6 +304,8 @@ CREATE TABLE IF NOT EXISTS agent_creation_requests (
   project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
   idempotency_key TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  runner_class TEXT NOT NULL DEFAULT 'phala' CHECK (runner_class IN ('local_docker', 'apple_container', 'kata', 'phala', 'enclavia')),
+  profile_picture_url TEXT,
   status TEXT NOT NULL CHECK (status IN ('requested', 'launching', 'running', 'failed', 'cancelled')),
   requested_launch_code TEXT,
   agent_runtime_id TEXT REFERENCES agent_runtimes(id),
@@ -327,6 +329,24 @@ ALTER TABLE agent_creation_requests
 
 ALTER TABLE agent_creation_requests
   ADD COLUMN IF NOT EXISTS failure_message TEXT;
+
+ALTER TABLE agent_creation_requests
+  ADD COLUMN IF NOT EXISTS runner_class TEXT NOT NULL DEFAULT 'phala';
+
+ALTER TABLE agent_creation_requests
+  ADD COLUMN IF NOT EXISTS profile_picture_url TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'agent_creation_requests_runner_class_check'
+  ) THEN
+    ALTER TABLE agent_creation_requests
+      ADD CONSTRAINT agent_creation_requests_runner_class_check
+      CHECK (runner_class IN ('local_docker', 'apple_container', 'kata', 'phala', 'enclavia'));
+  END IF;
+END $$;
 
 -- Partition key for the agent-creation lease queue. Agent creation is a shared
 -- new-sandbox pool with no per-request host today, so this is NULL by default

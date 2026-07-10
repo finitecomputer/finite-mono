@@ -506,8 +506,9 @@ async fn redeem_link(
             if token_site.id != site.id {
                 return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
             }
+            let cookie_policy = viewer_cookie_policy(&state.api_url, &state.base_domain);
             let cookie = format!(
-                "{VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={VIEWER_COOKIE_TTL_SECONDS}; HttpOnly; SameSite=Lax"
+                "{VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={VIEWER_COOKIE_TTL_SECONDS}; HttpOnly; {cookie_policy}"
             );
             Response::builder()
                 .status(StatusCode::SEE_OTHER)
@@ -526,8 +527,9 @@ async fn redeem_link(
     }
 }
 
-async fn logout() -> Response {
-    let cookie = format!("{VIEWER_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax");
+async fn logout(State(state): State<Arc<AppState>>) -> Response {
+    let cookie_policy = viewer_cookie_policy(&state.api_url, &state.base_domain);
+    let cookie = format!("{VIEWER_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; {cookie_policy}");
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(LOCATION, "/")
@@ -536,9 +538,20 @@ async fn logout() -> Response {
         .expect("static response builds")
 }
 
+fn viewer_cookie_policy(api_url: &str, base_domain: &str) -> &'static str {
+    if api_url.starts_with("https://")
+        || base_domain == "localhost"
+        || base_domain.ends_with(".localhost")
+    {
+        "SameSite=None; Secure"
+    } else {
+        "SameSite=Lax"
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::decode_request_path;
+    use super::{decode_request_path, viewer_cookie_policy};
 
     #[test]
     fn decode_request_path_rules() {
@@ -553,5 +566,21 @@ mod tests {
         assert_eq!(decode_request_path("/bad%zz"), None);
         assert_eq!(decode_request_path("/nul%00byte"), None);
         assert_eq!(decode_request_path("no-slash"), None);
+    }
+
+    #[test]
+    fn viewer_cookies_can_reach_https_and_local_dashboard_previews() {
+        assert_eq!(
+            viewer_cookie_policy("https://api.finite.chat", "finite.chat"),
+            "SameSite=None; Secure"
+        );
+        assert_eq!(
+            viewer_cookie_policy("http://127.0.0.1:8787", "sites.localhost"),
+            "SameSite=None; Secure"
+        );
+        assert_eq!(
+            viewer_cookie_policy("http://10.0.0.4:8787", "sites.internal"),
+            "SameSite=Lax"
+        );
     }
 }

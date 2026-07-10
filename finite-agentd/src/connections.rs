@@ -224,10 +224,10 @@ impl ConnectionManager {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "Telegram".to_owned());
         let mut value = self.telegram_config_object()?;
-        if !value
+        if value
             .get("token")
             .and_then(Value::as_str)
-            .is_some_and(|token| !token.is_empty())
+            .is_none_or(|token| token.is_empty())
         {
             return Err(AgentdError::ConfigConflict(
                 "Connect Telegram before choosing its default chat".to_owned(),

@@ -248,9 +248,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not result.ok:
             return SendResult(success=False, error=result.error, retryable=result.retryable)
         edited_message_id = str(result.data.get("message_id") or message_id)
-        self._remember_outbound_message_route(
-            str(message_id), conversation_id, segment_id, kind
-        )
+        self._remember_outbound_message_route(str(message_id), conversation_id, segment_id, kind)
         if edited_message_id:
             self._remember_outbound_message_route(
                 edited_message_id, conversation_id, segment_id, kind

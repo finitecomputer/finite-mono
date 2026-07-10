@@ -5,6 +5,7 @@ import {
   hostedDeviceAttachments,
   hostedDeviceConfig,
   hostedDeviceHeaders,
+  hostedDeviceProfileImage,
   hostedDeviceRuntimeCommand,
 } from "@/lib/hosted-web-device";
 
@@ -78,6 +79,31 @@ test("hostedDeviceHeaders rejects unverified or header-only identities", () => {
       ),
     /verified WorkOS account/
   );
+});
+
+test("profile images use the user Device's public image upload", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedHeaders = new Headers();
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedHeaders = new Headers(init?.headers);
+    return Response.json({ image_url: "https://chat.example/blobs/profile.png" });
+  }) as typeof fetch;
+
+  const imageUrl = await hostedDeviceProfileImage(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    new Blob(["png"], { type: "image/png" })
+  );
+
+  assert.equal(observedUrl, "https://device.internal/v1/app/images");
+  assert.equal(observedHeaders.get("content-type"), "image/png");
+  assert.equal(observedHeaders.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(imageUrl, "https://chat.example/blobs/profile.png");
 });
 
 test("runtime commands use the narrow hosted-device endpoint", async (context) => {

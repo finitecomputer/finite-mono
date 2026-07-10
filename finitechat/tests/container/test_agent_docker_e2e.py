@@ -209,9 +209,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         self.assertNotIn("gateway_home_channel_yaml", script)
 
     def test_gateway_launcher_has_agentd_prepare_and_supervised_modes(self) -> None:
-        script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(
-            encoding="utf-8"
-        )
+        script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
         prepared = script.index('if [[ "${1:-}" == "--prepare-only" ]]')
         health = script.index("python /opt/health_server.py &", prepared)
@@ -392,7 +390,13 @@ exec {sys.executable!s} "$@"
             self.assertFalse((existing_home / "managed-skills").exists())
             existing_config = (existing_hermes_home / "config.yaml").read_text(encoding="utf-8")
             self.assertNotIn("external_dirs", existing_config)
-            self.assertEqual(json.loads(existing_config)["model"], expected_model)
+            try:
+                existing_config_data = json.loads(existing_config)
+            except json.JSONDecodeError:
+                import yaml
+
+                existing_config_data = yaml.safe_load(existing_config)
+            self.assertEqual(existing_config_data["model"], expected_model)
 
     def test_gateway_launcher_fails_closed_without_replacing_invalid_config(self) -> None:
         reconciler = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"

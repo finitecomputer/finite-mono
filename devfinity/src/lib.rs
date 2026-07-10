@@ -790,6 +790,8 @@ wait "$postgres_pid"
             3,
             45,
         );
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
     }
 
     fn write_hosted_web_device(&self, yaml: &mut String) {
@@ -831,6 +833,8 @@ wait "$postgres_pid"
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.hosted_web_device, 1, 2, 3, 45);
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
     }
 
     fn write_finitesites(&self, yaml: &mut String) {
@@ -1099,7 +1103,7 @@ wait "$postgres_pid"
         self.write_environment(
             yaml,
             &[
-                ("FC_RUNNER_BACKEND", "apple-container".to_string()),
+                ("FC_RUNNER_CLASS", "apple_container".to_string()),
                 ("FC_CORE_URL", self.core_url()),
                 ("FC_CORE_API_TOKEN", self.core_token.clone()),
                 (
@@ -1204,6 +1208,11 @@ wait "$postgres_pid"
                 "user_devfinity".to_string(),
             ),
             ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
+            (
+                "FC_DASHBOARD_DEFAULT_RUNNER_CLASS",
+                "apple_container".to_string(),
+            ),
+            ("FC_DASHBOARD_RUNNER_CLASSES", "apple_container".to_string()),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_CORE_API_TOKEN", self.core_token.clone()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
@@ -2630,6 +2639,10 @@ mod tests {
         assert!(yaml.contains("core:"));
         assert!(yaml.contains("finitechat:"));
         assert!(yaml.contains("hosted-web-device:"));
+        assert!(
+            yaml.contains("finitechat:\n    description: \"Local Finite Chat delivery server\"")
+        );
+        assert_eq!(yaml.matches("restart: always").count(), 2);
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
@@ -2648,7 +2661,7 @@ mod tests {
         assert!(yaml.contains("--promoted"));
         assert!(yaml.contains("runner:"));
         assert!(yaml.contains("finite-saas-runner -- serve"));
-        assert!(yaml.contains("FC_RUNNER_BACKEND=apple-container"));
+        assert!(yaml.contains("FC_RUNNER_CLASS=apple_container"));
         assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FINITE_SITES_API"));
         assert!(yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE=off2026"));

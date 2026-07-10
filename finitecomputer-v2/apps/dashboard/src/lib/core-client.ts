@@ -79,6 +79,8 @@ export type CoreAgentCreationRequest = {
   project_id: string;
   idempotency_key: string;
   display_name: string;
+  runner_class: CoreRunnerClass;
+  profile_picture_url?: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   requested_launch_code?: string | null;
   agent_runtime_id?: string | null;
@@ -90,12 +92,21 @@ export type CoreAgentCreationRequestSummary = {
   id: string;
   project_id: string;
   display_name: string;
+  runner_class: CoreRunnerClass;
+  profile_picture_url?: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id?: string | null;
   failure_message?: string | null;
   created_at: string;
   updated_at: string;
 };
+
+export type CoreRunnerClass =
+  | "local_docker"
+  | "apple_container"
+  | "kata"
+  | "phala"
+  | "enclavia";
 
 export type CoreAgentCreationResult = {
   project: CoreProject;
@@ -422,6 +433,8 @@ export async function requestCoreAgentCreation(input: {
   displayName: string;
   launchCode: string;
   idempotencyKey: string;
+  runnerClass: CoreRunnerClass;
+  profilePictureUrl?: string | null;
 }) {
   const status = coreBridgeStatus();
   if (!status.configured) {
@@ -437,7 +450,10 @@ export async function requestCoreAgentCreation(input: {
     account,
     {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        ...input,
+        profilePictureUrl: optionalString(input.profilePictureUrl),
+      }),
     }
   );
   invalidateCoreReadCache();

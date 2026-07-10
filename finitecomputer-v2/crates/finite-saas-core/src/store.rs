@@ -2,43 +2,44 @@ use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
-    AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass, BillingOverview,
-    BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FIRST_SELF_SERVE_LAUNCH_CODE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
-    RelayHeartbeat, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimeRelayCredential, RuntimeStatusSnapshot, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
+    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
+    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
+    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
+    FIRST_SELF_SERVE_LAUNCH_CODE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
+    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
+    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
+    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeControlRequestStatus, RuntimeRelayCredential, RuntimeStatusSnapshot,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
+    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, chat_identity_id_for_user, current_time_iso,
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, new_agent_creation_request_id,
     new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email, normalize_source_host_id,
-    parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
-    parse_finite_private_api_key_status, parse_finite_private_grant_status,
-    parse_finite_private_reservation_status, parse_import_candidate_status,
-    parse_runtime_artifact_kind, parse_runtime_control_kind, parse_runtime_control_request_status,
-    parse_runtime_summary_status, parse_time, parse_user_link_status,
-    project_room_membership_id_for, project_runtime_link_id_for, runtime_relay_token_hash,
-    should_replace_stripe_subscription, source_import_key, trim_to_option,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_source_host_id, parse_agent_creation_request_status,
+    parse_billing_class, parse_billing_subscription_status, parse_finite_private_api_key_status,
+    parse_finite_private_grant_status, parse_finite_private_reservation_status,
+    parse_import_candidate_status, parse_runner_class, parse_runtime_artifact_kind,
+    parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_summary_status,
+    parse_time, parse_user_link_status, project_room_membership_id_for,
+    project_runtime_link_id_for, runtime_relay_token_hash, should_replace_stripe_subscription,
+    source_import_key, trim_to_option,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -128,9 +129,26 @@ impl CoreStore {
         &self,
         input: RequestAgentCreationInput,
     ) -> CoreResult<RequestAgentCreationResult> {
+        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
+            .await
+    }
+
+    pub async fn request_agent_creation_configured(
+        &self,
+        input: RequestAgentCreationInput,
+        configuration: AgentCreationConfiguration,
+    ) -> CoreResult<RequestAgentCreationResult> {
         match self {
-            Self::Memory(store) => store.request_agent_creation(input).await,
-            Self::Postgres(store) => store.request_agent_creation(input).await,
+            Self::Memory(store) => {
+                store
+                    .request_agent_creation_configured(input, configuration)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .request_agent_creation_configured(input, configuration)
+                    .await
+            }
         }
     }
 
@@ -604,8 +622,17 @@ impl MemoryCoreStore {
         &self,
         input: RequestAgentCreationInput,
     ) -> CoreResult<RequestAgentCreationResult> {
+        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
+            .await
+    }
+
+    pub async fn request_agent_creation_configured(
+        &self,
+        input: RequestAgentCreationInput,
+        configuration: AgentCreationConfiguration,
+    ) -> CoreResult<RequestAgentCreationResult> {
         let mut state = self.state.lock().await;
-        state.request_agent_creation(input)
+        state.request_agent_creation_configured(input, configuration)
     }
 
     pub async fn request_runtime_restart(
@@ -999,9 +1026,18 @@ impl PostgresCoreStore {
         &self,
         input: RequestAgentCreationInput,
     ) -> CoreResult<RequestAgentCreationResult> {
+        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
+            .await
+    }
+
+    pub async fn request_agent_creation_configured(
+        &self,
+        input: RequestAgentCreationInput,
+        configuration: AgentCreationConfiguration,
+    ) -> CoreResult<RequestAgentCreationResult> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_request_agent_creation(&tx, input).await?;
+        let result = postgres_request_agent_creation(&tx, input, configuration).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1586,6 +1622,7 @@ fn agent_creation_requests_for_workos_user(
 async fn postgres_request_agent_creation<C>(
     client: &C,
     input: RequestAgentCreationInput,
+    configuration: AgentCreationConfiguration,
 ) -> CoreResult<RequestAgentCreationResult>
 where
     C: GenericClient + Sync,
@@ -1612,7 +1649,7 @@ where
         user_id = user_id.as_deref().unwrap_or("-"),
         org_id = org_id.as_deref().unwrap_or("-"),
     );
-    let result = postgres_request_agent_creation_inner(client, input)
+    let result = postgres_request_agent_creation_inner(client, input, configuration)
         .instrument(span)
         .await;
     if let Err(error) = &result {
@@ -1630,6 +1667,7 @@ where
 async fn postgres_request_agent_creation_inner<C>(
     client: &C,
     input: RequestAgentCreationInput,
+    configuration: AgentCreationConfiguration,
 ) -> CoreResult<RequestAgentCreationResult>
 where
     C: GenericClient + Sync,
@@ -1645,6 +1683,8 @@ where
         trim_to_option(Some(&input.display_name)).ok_or(CoreError::MissingAgentDisplayName)?;
     let idempotency_key = normalize_idempotency_key(&input.idempotency_key)
         .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
+    let profile_picture_url =
+        normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
     let launch_code = trim_to_option(Some(&input.launch_code));
     let billing_class = if launch_code.is_some() {
         BillingClass::Off2026
@@ -1748,6 +1788,8 @@ where
         project_id: project_id.clone(),
         idempotency_key,
         display_name,
+        runner_class: configuration.runner_class,
+        profile_picture_url,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: launch_code,
         agent_runtime_id: None,
@@ -2249,6 +2291,17 @@ where
         .as_deref()
         .map(normalize_source_host_id)
         .transpose()?;
+    let runner_classes = input
+        .runner_capacity
+        .as_ref()
+        .map(|capacity| {
+            capacity
+                .runner_classes
+                .iter()
+                .map(|runner_class| runner_class.as_str().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
     let Some(row) = client
         .query_opt(
@@ -2267,6 +2320,10 @@ where
                         OR $5::text IS NULL
                         OR target_source_host_id = $5
                       )
+                  AND (
+                        cardinality($6::text[]) = 0
+                        OR runner_class = ANY($6::text[])
+                      )
                 ORDER BY created_at, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -2282,6 +2339,7 @@ where
              WHERE request.id = candidate.id
              RETURNING request.id, request.customer_org_id, request.owner_user_id,
                        request.project_id, request.idempotency_key, request.display_name,
+                       request.runner_class, request.profile_picture_url,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
                        request.runner_id, request.lease_token, request.lease_expires_at::text,
                        request.failure_message, request.created_at::text, request.updated_at::text",
@@ -2291,6 +2349,7 @@ where
                 &lease_expires_at,
                 &now,
                 &source_host_id,
+                &runner_classes,
             ],
         )
         .await
@@ -2460,7 +2519,8 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, status, requested_launch_code, agent_runtime_id,
+                       display_name, runner_class, profile_picture_url,
+                       status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
             &[&input.request_id, &failure_message, &now],
@@ -2497,7 +2557,8 @@ where
                  updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, status, requested_launch_code, agent_runtime_id,
+                       display_name, runner_class, profile_picture_url,
+                       status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
             &[&input.request_id, &now],
@@ -2798,6 +2859,7 @@ where
         .query(
             "SELECT request.id, request.customer_org_id, request.owner_user_id,
                     request.project_id, request.idempotency_key, request.display_name,
+                    request.runner_class, request.profile_picture_url,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
                     request.runner_id, request.lease_token, request.lease_expires_at::text,
                     request.failure_message, request.created_at::text, request.updated_at::text
@@ -2887,6 +2949,7 @@ fn project_from_row(row: &Row) -> Project {
 
 fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest> {
     let status: String = row.get("status");
+    let runner_class: String = row.get("runner_class");
     Ok(AgentCreationRequest {
         id: row.get("id"),
         customer_org_id: row.get("customer_org_id"),
@@ -2894,6 +2957,10 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
         project_id: row.get("project_id"),
         idempotency_key: row.get("idempotency_key"),
         display_name: row.get("display_name"),
+        runner_class: parse_runner_class(&runner_class).ok_or_else(|| {
+            CoreError::Store(format!("invalid agent runner class {runner_class}"))
+        })?,
+        profile_picture_url: row.get("profile_picture_url"),
         status: parse_agent_creation_request_status(&status).ok_or_else(|| {
             CoreError::Store(format!("invalid agent creation request status {status}"))
         })?,
@@ -3065,7 +3132,8 @@ where
     client
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                    display_name, status, requested_launch_code, agent_runtime_id,
+                    display_name, runner_class, profile_picture_url,
+                    status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
              FROM agent_creation_requests
@@ -3088,7 +3156,8 @@ where
     let row = client
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                    display_name, status, requested_launch_code, agent_runtime_id,
+                    display_name, runner_class, profile_picture_url,
+                    status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
              FROM agent_creation_requests WHERE id = $1
@@ -3408,14 +3477,17 @@ where
         .execute(
             "INSERT INTO agent_creation_requests (
                id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name,
-               status, requested_launch_code, agent_runtime_id, runner_id, lease_token,
+               runner_class, profile_picture_url, status, requested_launch_code,
+               agent_runtime_id, runner_id, lease_token,
                lease_expires_at, failure_message, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                     $12::text::timestamptz, $13, $14::text::timestamptz, $15::text::timestamptz)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                     $14::text::timestamptz, $15, $16::text::timestamptz, $17::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                status = EXCLUDED.status,
                display_name = EXCLUDED.display_name,
+               runner_class = EXCLUDED.runner_class,
+               profile_picture_url = EXCLUDED.profile_picture_url,
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                runner_id = EXCLUDED.runner_id,
                lease_token = EXCLUDED.lease_token,
@@ -3429,6 +3501,8 @@ where
                 &request.project_id,
                 &request.idempotency_key,
                 &request.display_name,
+                &request.runner_class.as_str(),
+                &request.profile_picture_url,
                 &request.status.as_str(),
                 &request.requested_launch_code,
                 &request.agent_runtime_id,
@@ -3884,7 +3958,8 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, status, requested_launch_code, agent_runtime_id,
+                       display_name, runner_class, profile_picture_url,
+                       status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
             &[&request_id, &runtime_id, &now],
@@ -3914,7 +3989,8 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, status, requested_launch_code, agent_runtime_id,
+                       display_name, runner_class, profile_picture_url,
+                       status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
             &[&request_id, &runtime_id, &now],

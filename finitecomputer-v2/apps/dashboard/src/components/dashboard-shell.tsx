@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
@@ -187,6 +187,11 @@ function DashboardAppSection({
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
   const links = sectionLinks(pathname, selectedMachine, saasMode);
+  const scrollRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [pathname]);
 
   return (
     <div className="ocean-app-section">
@@ -248,7 +253,7 @@ function DashboardAppSection({
         </div>
       </header>
 
-      <main className="ocean-app-scroll">
+      <main ref={scrollRef} className="ocean-app-scroll">
         <div className="ocean-app-content">{children}</div>
       </main>
     </div>

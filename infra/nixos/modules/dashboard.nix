@@ -26,6 +26,8 @@
       PORT = "3000";
       FC_WORKOS_AUTH_ENABLED = "true";
       FC_DASHBOARD_RUNTIME_MODE = "canary";
+      FC_DASHBOARD_DEFAULT_RUNNER_CLASS = "kata";
+      FC_DASHBOARD_RUNNER_CLASSES = "kata";
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";

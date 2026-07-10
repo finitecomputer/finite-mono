@@ -440,6 +440,10 @@ impl AppleContainerLauncher {
 }
 
 impl RuntimeLauncher for AppleContainerLauncher {
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::AppleContainer
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         self.config.validate()?;
         if APPLE_CONTAINER_PREFLIGHT.get().is_none() {
@@ -493,6 +497,7 @@ impl RuntimeLauncher for AppleContainerLauncher {
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
+            runner_classes: vec![self.runner_class()],
             draining: self.config.drain_new_leases,
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_owned_container_count(&self.config),

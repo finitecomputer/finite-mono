@@ -76,9 +76,7 @@ def agentd_status() -> dict[str, Any]:
         "status": "running" if ok else "starting",
         "ok": ok,
         "version": payload.get("version"),
-        "processes": {
-            name: processes.get(name, {}).get("state", "starting") for name in required
-        },
+        "processes": {name: processes.get(name, {}).get("state", "starting") for name in required},
     }
 
 

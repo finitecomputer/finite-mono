@@ -136,6 +136,7 @@ export function HostedWebChat({
   const typingRoomRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | null>(null);
   const pendingRemoteSeqRef = useRef<number | null>(null);
+  const latestSiteIdRef = useRef<string | null>(null);
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const markedReadSeqRef = useRef(new Map<string, number>());
@@ -290,9 +291,14 @@ export function HostedWebChat({
     if (sites.length === 0) {
       setBrowserOpen(false);
       setActiveSiteId(null);
+      latestSiteIdRef.current = null;
       return;
     }
-    if (!activeSiteId || !sites.some((site) => site.id === activeSiteId)) {
+    const latestSiteId = sites[0]!.id;
+    if (latestSiteIdRef.current !== latestSiteId) {
+      latestSiteIdRef.current = latestSiteId;
+      setActiveSiteId(latestSiteId);
+    } else if (!activeSiteId || !sites.some((site) => site.id === activeSiteId)) {
       setActiveSiteId(sites[0]!.id);
     }
   }, [activeSiteId, sites]);
@@ -1354,11 +1360,11 @@ function sitesFromMessages(messages: HostedChatMessage[]) {
       const value = raw.replace(/[.,;:!?]+$/u, "");
       try {
         const url = new URL(value);
-        const local = url.hostname === "127.0.0.1"
-          || url.hostname === "localhost"
-          || url.hostname.endsWith(".localhost");
-        const finite = url.hostname === "finite.chat" || url.hostname.endsWith(".finite.chat");
-        if ((!local && !finite) || seen.has(url.toString())) continue;
+        const local = url.hostname.endsWith(".localhost");
+        const finite = url.hostname.endsWith(".finite.chat");
+        const reservedHost = /^(?:api|git)\./u.test(url.hostname);
+        const repository = url.pathname.endsWith(".git");
+        if ((!local && !finite) || reservedHost || repository || seen.has(url.toString())) continue;
         seen.add(url.toString());
         sites.push({ id: url.toString(), label: url.hostname, url: url.toString() });
       } catch {

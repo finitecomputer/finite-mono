@@ -85,6 +85,13 @@ browser before pushing. After push, use the private output URL from `project
 status` as the served preview, then verify it with `fsite view` and a real
 browser. Do not make an output public merely to preview it.
 
+Treat the server-returned `output_url` as authoritative. `fsite view NAME`
+resolves an owned Project through the configured `FINITE_SITES_API`, so it may
+return a local `*.sites.localhost` URL instead of `*.finite.chat`. Never
+synthesize a production URL from a slug, and never present a Project Git
+remote as a site preview. If the Project has multiple outputs, pass the exact
+`output_url` to `fsite view`.
+
 If an existing site or document exposes `/llms.txt`, read it for the platform
 handoff. A project-authored `/llms.txt` remains the project's authority and
 must not be overwritten by generic guidance.
@@ -217,6 +224,9 @@ Pushing creates the Version. Confirm the expected output and private preview:
 fsite project status PROJECT --output json
 fsite view URL_OR_NAME --output json
 ```
+
+Report the exact URL returned by those commands. Do not replace a local or
+staging hostname with a production-shaped `*.finite.chat` hostname.
 
 ## Edit A Shared Project
 

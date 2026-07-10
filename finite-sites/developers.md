@@ -96,8 +96,13 @@ git push origin main
 Open the local site:
 
 ```sh
+FINITE_SITES_API=http://127.0.0.1:8787 fsite view finitechat-native-mockup --output json
 open http://finitechat-native-mockup.sites.localhost:8787/
 ```
+
+The name form of `fsite view` resolves through the configured API for Projects
+owned by the local Finite identity. Never infer a `finite.chat` URL from a
+local slug; use the server-returned `output_url`.
 
 `*.sites.localhost` resolves to loopback in modern browsers. For curl, pass a
 Host header against `127.0.0.1:8787`.

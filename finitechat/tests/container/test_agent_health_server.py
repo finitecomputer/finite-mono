@@ -93,7 +93,7 @@ class AgentHealthServerTest(unittest.TestCase):
         self.assertIsNone(missing_identity["agent_npub"])
 
     def test_agentd_required_waits_for_all_supervised_processes(self) -> None:
-        self.health.AGENTD_REQUIRED = True
+        self.health.__dict__["AGENTD_REQUIRED"] = True
         self.addCleanup(setattr, self.health, "AGENTD_REQUIRED", False)
         self.write_bridge({"status": "connected", "ok": True})
         starting = self.health.runtime_health()
@@ -121,7 +121,7 @@ class AgentHealthServerTest(unittest.TestCase):
 
     def test_runtime_startup_never_calls_deleted_invite_cli(self) -> None:
         gateway = GATEWAY.read_text(encoding="utf-8")
-        self.assertNotIn(" hermes --home \"$agent_home\" invite", gateway)
+        self.assertNotIn(' hermes --home "$agent_home" invite', gateway)
         self.assertNotIn("current-invite.json", gateway)
         self.assertIn("deleted invite-session protocol", gateway)
 

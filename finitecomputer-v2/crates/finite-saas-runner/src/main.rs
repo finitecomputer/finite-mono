@@ -4,8 +4,8 @@ use finite_saas_runner::{
     AgentCreationRunner, AppleContainerConfig, AppleContainerLauncher, CoreHttpAgentCreationQueue,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
     DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
-    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, PhalaConfig, PhalaLauncher,
-    RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher,
+    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
+    PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -68,9 +68,14 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     let finite_private_api_key_override =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
     let runtime_environment = optional_runtime_environment()?;
-    let backend = optional_env("FC_RUNNER_BACKEND", "docker").to_ascii_lowercase();
-    let outcome = match backend.as_str() {
-        "docker" => {
+    // This identifies the adapter offered by this worker. Placement remains
+    // project-selected in Core; product code never toggles a process-global
+    // backend to change an existing agent's runtime.
+    let runner_class = optional_env("FC_RUNNER_CLASS", "local_docker")
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    let outcome = match runner_class.as_str() {
+        "local_docker" => {
             let launcher = DockerLauncher::new(DockerConfig {
                 docker_bin: optional_path("FC_RUNNER_DOCKER_BIN", "docker"),
                 source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
@@ -121,7 +126,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 },
             )?
         }
-        "apple-container" => {
+        "apple_container" => {
             let launcher = AppleContainerLauncher::new(AppleContainerConfig {
                 container_bin: optional_path("FC_RUNNER_APPLE_CONTAINER_BIN", "container"),
                 source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
@@ -162,6 +167,63 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
                 stop_timeout_secs: optional_u64("FC_RUNNER_APPLE_CONTAINER_STOP_TIMEOUT_SECS", 30)?,
+            });
+            run_once_with_launcher(
+                queue,
+                launcher,
+                RunOnceConfig {
+                    runner_id,
+                    lease_seconds,
+                    runtime_ready_timeout,
+                    runtime_ready_interval,
+                    finite_private_base_url,
+                    finite_private_model,
+                    finite_private_api_key_override,
+                    runtime_environment,
+                },
+            )?
+        }
+        "kata" => {
+            let launcher = KataLauncher::new(KataConfig {
+                nerdctl_bin: optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
+                kata_runtime_bin: optional_path("FC_RUNNER_KATA_RUNTIME_BIN", "kata-runtime"),
+                namespace: optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
+                runtime: optional_env("FC_RUNNER_KATA_OCI_RUNTIME", "io.containerd.kata.v2"),
+                source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
+                image: runtime_artifact.reference,
+                runtime_artifact_id: Some(runtime_artifact.id),
+                runtime_artifact_kind: Some(runtime_artifact.kind),
+                runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
+                work_root: required_path("FC_RUNNER_WORK_ROOT")?,
+                finitechat_server_url: optional_env(
+                    "FC_RUNNER_FINITECHAT_SERVER_URL",
+                    DEFAULT_FINITECHAT_SERVER_URL,
+                ),
+                agent_picture_url: optional_env(
+                    "FC_RUNNER_AGENT_PICTURE_URL",
+                    DEFAULT_FINITE_AGENT_PICTURE_URL,
+                ),
+                name_prefix: optional_env("FC_RUNNER_KATA_NAME_PREFIX", "finite-kata"),
+                container_port: optional_u16("FC_RUNNER_KATA_CONTAINER_PORT", 8080)?,
+                cpus: optional_u32_value("FC_RUNNER_KATA_CPUS")?.or(Some(4)),
+                memory: optional_env_value("FC_RUNNER_KATA_MEMORY")
+                    .or_else(|| Some("8G".to_string())),
+                pull_policy: optional_env_value("FC_RUNNER_KATA_PULL_POLICY")
+                    .or_else(|| Some("missing".to_string())),
+                max_container_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?,
+                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
+                available_memory_bytes: host_available_memory_bytes(),
+                command_timeout: Duration::from_secs(optional_u64(
+                    "FC_RUNNER_COMMAND_TIMEOUT_SECS",
+                    15,
+                )?),
+                launch_timeout: Duration::from_secs(optional_u64(
+                    "FC_RUNNER_LAUNCH_TIMEOUT_SECS",
+                    900,
+                )?),
+                readiness_timeout: runtime_ready_timeout,
+                readiness_interval: runtime_ready_interval,
+                stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 30)?,
             });
             run_once_with_launcher(
                 queue,
@@ -281,7 +343,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
             )?
         }
         other => bail!(
-            "FC_RUNNER_BACKEND must be docker, apple-container, phala, or enclavia, got {other:?}"
+            "FC_RUNNER_CLASS must be local_docker, apple_container, kata, phala, or enclavia, got {other:?}"
         ),
     };
     Ok(outcome)

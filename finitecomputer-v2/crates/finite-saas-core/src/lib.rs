@@ -77,6 +77,20 @@ pub enum RuntimeArtifactKind {
     OciImage,
 }
 
+/// Product placement choice stored with an agent creation request. Provider
+/// vocabulary stops at the runner adapter; feature behavior does not branch on
+/// this value.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerClass {
+    LocalDocker,
+    AppleContainer,
+    Kata,
+    #[default]
+    Phala,
+    Enclavia,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeControlKind {
@@ -146,6 +160,8 @@ pub enum CoreError {
     MissingAgentDisplayName,
     #[error("agent creation idempotency key is required")]
     MissingAgentCreationIdempotencyKey,
+    #[error("agent profile picture URL is invalid")]
+    InvalidAgentProfilePictureUrl,
     #[error("launch code is required")]
     MissingLaunchCode,
     #[error("launch code is invalid")]
@@ -510,6 +526,8 @@ pub struct AgentCreationRequest {
     pub project_id: String,
     pub idempotency_key: String,
     pub display_name: String,
+    pub runner_class: RunnerClass,
+    pub profile_picture_url: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
     pub agent_runtime_id: Option<String>,
@@ -896,6 +914,13 @@ pub struct RequestAgentCreationInput {
     pub now: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCreationConfiguration {
+    pub runner_class: RunnerClass,
+    pub profile_picture_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestAgentCreationResult {
@@ -1055,6 +1080,11 @@ pub struct RunnerLeaseCapacity {
     pub active_sandbox_count: Option<u32>,
     #[serde(default)]
     pub available_memory_bytes: Option<u64>,
+    /// Adapter classes this worker can actually reconcile. Empty is accepted
+    /// only for backwards-compatible test/old-worker leasing; current workers
+    /// always advertise one or more classes.
+    #[serde(default)]
+    pub runner_classes: Vec<RunnerClass>,
 }
 
 impl RunnerLeaseCapacity {
@@ -1064,6 +1094,10 @@ impl RunnerLeaseCapacity {
 
     pub fn accepts_agent_creation(&self) -> bool {
         self.accepts_runtime_control() && !self.sandbox_limit_reached()
+    }
+
+    pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
+        self.runner_classes.is_empty() || self.runner_classes.contains(&runner_class)
     }
 
     pub fn agent_creation_rejection_reason(&self) -> Option<&'static str> {
@@ -1323,6 +1357,14 @@ impl BridgeCoreState {
         &mut self,
         input: RequestAgentCreationInput,
     ) -> CoreResult<RequestAgentCreationResult> {
+        self.request_agent_creation_configured(input, AgentCreationConfiguration::default())
+    }
+
+    pub fn request_agent_creation_configured(
+        &mut self,
+        input: RequestAgentCreationInput,
+        configuration: AgentCreationConfiguration,
+    ) -> CoreResult<RequestAgentCreationResult> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
             .ok_or(CoreError::MissingVerifiedEmail)?;
@@ -1334,6 +1376,8 @@ impl BridgeCoreState {
             trim_to_option(Some(&input.display_name)).ok_or(CoreError::MissingAgentDisplayName)?;
         let idempotency_key = normalize_idempotency_key(&input.idempotency_key)
             .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
+        let profile_picture_url =
+            normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
         let launch_code = trim_to_option(Some(&input.launch_code));
         let billing_class = if launch_code.is_some() {
             BillingClass::Off2026
@@ -1414,6 +1458,8 @@ impl BridgeCoreState {
             project_id: project_id.clone(),
             idempotency_key,
             display_name,
+            runner_class: configuration.runner_class,
+            profile_picture_url,
             status: AgentCreationRequestStatus::Requested,
             requested_launch_code: launch_code,
             agent_runtime_id: None,
@@ -1792,6 +1838,12 @@ impl BridgeCoreState {
             .agent_creation_requests
             .values()
             .filter(|request| self.agent_creation_request_is_leasable(request, now_time))
+            .filter(|request| {
+                input
+                    .runner_capacity
+                    .as_ref()
+                    .is_none_or(|capacity| capacity.supports_runner_class(request.runner_class))
+            })
             .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
             .map(|request| request.id.clone());
 
@@ -3934,6 +3986,18 @@ impl RuntimeControlRequestStatus {
     }
 }
 
+impl RunnerClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalDocker => "local_docker",
+            Self::AppleContainer => "apple_container",
+            Self::Kata => "kata",
+            Self::Phala => "phala",
+            Self::Enclavia => "enclavia",
+        }
+    }
+}
+
 impl AgentCreationRequestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -3986,6 +4050,17 @@ impl FinitePrivateSettlementKind {
 pub fn parse_runtime_artifact_kind(value: &str) -> Option<RuntimeArtifactKind> {
     match value {
         "oci_image" => Some(RuntimeArtifactKind::OciImage),
+        _ => None,
+    }
+}
+
+pub fn parse_runner_class(value: &str) -> Option<RunnerClass> {
+    match value {
+        "local_docker" => Some(RunnerClass::LocalDocker),
+        "apple_container" => Some(RunnerClass::AppleContainer),
+        "kata" => Some(RunnerClass::Kata),
+        "phala" => Some(RunnerClass::Phala),
+        "enclavia" => Some(RunnerClass::Enclavia),
         _ => None,
     }
 }
@@ -4197,6 +4272,22 @@ fn normalize_idempotency_key(value: &str) -> Option<String> {
     } else {
         Some(trimmed.chars().take(128).collect())
     }
+}
+
+pub(crate) fn normalize_profile_picture_url(value: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let valid_scheme = value.starts_with("https://") || value.starts_with("http://");
+    if !valid_scheme
+        || value.len() > 2_048
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(CoreError::InvalidAgentProfilePictureUrl);
+    }
+    Ok(Some(value))
 }
 
 fn current_time_iso() -> CoreResult<String> {
@@ -4791,6 +4882,62 @@ mod tests {
             state.visible_projects_for_user(&user.id),
             vec![first.project]
         );
+    }
+
+    #[test]
+    fn project_selected_runner_class_routes_to_a_matching_worker() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let requested = state
+            .request_agent_creation_configured(
+                RequestAgentCreationInput {
+                    verified_email: "kata@finite.vip".to_string(),
+                    workos_user_id: "user_workos_kata".to_string(),
+                    display_name: "Kata Agent".to_string(),
+                    launch_code: "off2026".to_string(),
+                    idempotency_key: "kata-submit".to_string(),
+                    now: Some(NOW.to_string()),
+                },
+                AgentCreationConfiguration {
+                    runner_class: RunnerClass::Kata,
+                    profile_picture_url: Some(
+                        "https://chat.finite.computer/v1/blobs/profile".to_string(),
+                    ),
+                },
+            )
+            .unwrap();
+        assert_eq!(requested.request.runner_class, RunnerClass::Kata);
+
+        let phala = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "phala-worker".to_string(),
+                source_host_id: None,
+                lease_token: "phala-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert!(phala.is_none());
+
+        let kata = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "kata-worker".to_string(),
+                source_host_id: None,
+                lease_token: "kata-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap()
+            .expect("Kata worker should claim Kata placement");
+        assert_eq!(kata.request.id, requested.request.id);
     }
 
     #[test]

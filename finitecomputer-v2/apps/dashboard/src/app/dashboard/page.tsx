@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { randomUUID } from "node:crypto";
 import {
   ActivityIcon,
@@ -19,12 +20,10 @@ import {
   cancelFailedAgentCreationRequestAction,
   claimCoreImportCandidatesAction,
   issueFinitePrivateApiKeyAction,
-  openBillingPortalAction,
   resetFinitePrivateGrantAction,
   revokeFinitePrivateApiKeyAction,
   revokeFinitePrivateGrantAction,
   rotateFinitePrivateApiKeyAction,
-  startBillingCheckoutAction,
 } from "@/app/actions";
 import { CoreAgentCreationForm } from "@/components/core-agent-creation-form";
 import { FormActionButton } from "@/components/form-action-button";
@@ -41,7 +40,6 @@ import {
   loadCoreBillingOverview,
   loadCoreMe,
   type CoreAgentCreationRequestSummary,
-  type CoreBillingOverviewResult,
   type CoreFinitePrivateAdminStateResult,
   type CoreFinitePrivateApiKey,
   type CoreFinitePrivateGrant,
@@ -64,6 +62,12 @@ import {
   loadOptionalViewerContext,
 } from "@/lib/dashboard-auth";
 import { stripeBillingStatus } from "@/lib/stripe-billing";
+import {
+  AGENT_DRAFT_COOKIE,
+  defaultRunnerClass,
+  unsealAgentOnboardingDraft,
+  type AgentOnboardingDraft,
+} from "@/lib/agent-onboarding";
 
 function shortValue(value: string | null | undefined, length = 12) {
   if (!value) {
@@ -109,6 +113,10 @@ export default async function DashboardPage({
     const billing = await loadCoreBillingOverview({
       cacheMode: billingReturnParam === "success" ? "fresh" : "swr",
     });
+    const draft = await unsealAgentOnboardingDraft(
+      (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
+      account.workosUserId
+    );
     const coreProjects = core.me?.projects ?? [];
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const claimableCandidates = core.me?.claimable_candidates ?? [];
@@ -144,22 +152,17 @@ export default async function DashboardPage({
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
     const localDevelopmentLaunchCode = dashboardDevLaunchCode(account);
 
+    if (draft && billing.billing?.can_create_agent) {
+      redirect("/dashboard/agent-creation-requests/complete");
+    }
+
     const showCreateAgent =
       core.configured &&
       Boolean(core.account.email) &&
-      (Boolean(billing.billing?.can_create_agent) || Boolean(localDevelopmentLaunchCode)) &&
       coreProjects.length === 0 &&
       pendingAgentCreationRequests.length === 0 &&
-      failedAgentCreationRequests.length === 0;
-    const showBillingSetup =
-      core.configured &&
-      Boolean(core.account.email) &&
-      !showCreateAgent &&
       !billingSyncPending &&
-      coreProjects.length === 0 &&
-      pendingAgentCreationRequests.length === 0 &&
-      failedAgentCreationRequests.length === 0 &&
-      Boolean(billing.billing?.requires_billing);
+      failedAgentCreationRequests.length === 0;
     // While a successful checkout is still syncing, the billing setup panel
     // (and its Start checkout button) must stay hidden to avoid a second
     // subscription attempt.
@@ -176,7 +179,6 @@ export default async function DashboardPage({
       pendingAgentCreationRequests.length === 0 &&
       failedAgentCreationRequests.length === 0 &&
       !showCreateAgent &&
-      !showBillingSetup &&
       !showBillingSyncState;
 
     return (
@@ -203,14 +205,17 @@ export default async function DashboardPage({
         {showBillingSyncState && billingReturn.kind === "sync-timeout" ? (
           <BillingSyncTimeoutPanel />
         ) : null}
-        {showBillingSetup && billingReturn.kind === "cancelled" ? (
+        {showCreateAgent && billingReturn.kind === "cancelled" ? (
           <BillingCheckoutCancelledNotice />
         ) : null}
-        {showBillingSetup ? (
-          <BillingSetupPanel result={billing} />
-        ) : null}
         {showCreateAgent ? (
-          <CoreAgentCreationPanel error={agentCreationError} />
+          <CoreAgentCreationPanel
+            error={agentCreationError}
+            draft={draft}
+            requiresAccess={
+              !billing.billing?.can_create_agent && !localDevelopmentLaunchCode
+            }
+          />
         ) : null}
         {showEmptyAccount ? (
           <section className="ocean-utility-card">
@@ -766,7 +771,15 @@ function CoreImportCandidatesPanel({
   );
 }
 
-function CoreAgentCreationPanel({ error }: { error: string | null }) {
+function CoreAgentCreationPanel({
+  error,
+  draft,
+  requiresAccess,
+}: {
+  error: string | null;
+  draft: AgentOnboardingDraft | null;
+  requiresAccess: boolean;
+}) {
   const idempotencyKey = randomUUID();
 
   return (
@@ -778,12 +791,20 @@ function CoreAgentCreationPanel({ error }: { error: string | null }) {
         <div>
           <h1 className="ocean-utility-card__title">Create an agent</h1>
           <p className="text-sm text-muted-foreground">
-            Name your agent and start a hosted Hermes runtime.
+            Give your agent a name and make it yours.
           </p>
         </div>
       </div>
 
-      <CoreAgentCreationForm error={error} idempotencyKey={idempotencyKey} />
+      <CoreAgentCreationForm
+        error={error}
+        idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
+        initialName={draft?.displayName}
+        initialPictureUrl={draft?.profilePictureUrl}
+        runnerClass={draft?.runnerClass ?? defaultRunnerClass()}
+        requiresAccess={requiresAccess}
+        stripeConfigured={stripeBillingStatus().configured}
+      />
     </section>
   );
 }
@@ -851,52 +872,6 @@ function BillingCheckoutCancelledNotice() {
           </p>
         </div>
       </div>
-    </section>
-  );
-}
-
-function BillingSetupPanel({ result }: { result: CoreBillingOverviewResult }) {
-  const stripeStatus = stripeBillingStatus();
-  const account = result.billing?.billing_account;
-  const subscriptionStatus = account?.subscription_status ?? null;
-  const canUsePortal = Boolean(account?.stripe_customer_id);
-
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <CreditCardIcon className="size-5" />
-        </span>
-        <div>
-          <h1 className="ocean-utility-card__title">Set up billing</h1>
-          <p className="text-sm text-muted-foreground">
-            Subscribe through Stripe before creating your hosted agent. Promo codes work at checkout.
-          </p>
-        </div>
-      </div>
-
-      {!stripeStatus.configured ? (
-        <div className="ocean-empty-state">
-          Stripe billing is not configured: {stripeStatus.missing.join(", ")}.
-        </div>
-      ) : result.error ? (
-        <div className="ocean-empty-state">{result.error}</div>
-      ) : (
-        <div className="grid gap-4">
-          {subscriptionStatus ? (
-            <div className="rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 text-sm text-muted-foreground">
-              Current billing status:{" "}
-              <span className="font-semibold text-foreground">{subscriptionStatus}</span>
-            </div>
-          ) : null}
-          <form action={canUsePortal ? openBillingPortalAction : startBillingCheckoutAction}>
-            <FormActionButton className="w-fit" pendingLabel="Opening Stripe...">
-              <CreditCardIcon />
-              {canUsePortal ? "Manage billing" : "Start checkout"}
-            </FormActionButton>
-          </form>
-        </div>
-      )}
     </section>
   );
 }

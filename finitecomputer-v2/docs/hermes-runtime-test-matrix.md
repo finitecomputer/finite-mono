@@ -267,7 +267,8 @@ Shape:
 
 - use a pre-created Enclavia enclave with container port `8080` and persistent
   encrypted `/data` storage;
-- push the same promoted runtime image with `FC_RUNNER_BACKEND=enclavia`;
+- push the same promoted runtime image with an evaluation worker advertising
+  `FC_RUNNER_CLASS=enclavia`;
 - inject the same Docker-equivalent runtime env through Enclavia secrets;
 - reach health and invite through
   `https://<enclave-id>.enclaves.beta.enclavia.io/proxy/...`;

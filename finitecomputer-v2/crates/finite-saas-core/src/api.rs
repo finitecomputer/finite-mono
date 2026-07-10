@@ -3,21 +3,21 @@ use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AgentCreationLease, AgentCreationRequest, BillingOverview, BillingSubscriptionStatus,
-    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
-    CustomerBillingAccount, ExistingHostProjectImport, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
-    ProjectImportCandidate, ProvisionFinitePrivateRuntimeKeyInput,
+    AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, BillingOverview,
+    BillingSubscriptionStatus, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
+    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
+    ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateGrant,
+    FinitePrivateSettlementKind, FinitePrivateUsageDecision, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, ProjectImportCandidate, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput,
     RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
+    RunnerClass, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput, normalize_owner_email,
@@ -99,6 +99,10 @@ pub struct CreateAgentRequest {
     pub display_name: String,
     pub launch_code: String,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub runner_class: RunnerClass,
+    #[serde(default)]
+    pub profile_picture_url: Option<String>,
     pub now: Option<String>,
 }
 
@@ -440,6 +444,8 @@ pub struct AgentCreationRequestSummary {
     pub id: String,
     pub project_id: String,
     pub display_name: String,
+    pub runner_class: RunnerClass,
+    pub profile_picture_url: Option<String>,
     pub status: crate::AgentCreationRequestStatus,
     pub agent_runtime_id: Option<String>,
     pub failure_message: Option<String>,
@@ -453,6 +459,8 @@ impl From<AgentCreationRequest> for AgentCreationRequestSummary {
             id: request.id,
             project_id: request.project_id,
             display_name: request.display_name,
+            runner_class: request.runner_class,
+            profile_picture_url: request.profile_picture_url,
             status: request.status,
             agent_runtime_id: request.agent_runtime_id,
             failure_message: request.failure_message,
@@ -1313,14 +1321,20 @@ async fn create_agent_request(
     Ok(Json(
         state
             .store
-            .request_agent_creation(RequestAgentCreationInput {
-                verified_email: identity.email,
-                workos_user_id: identity.workos_user_id,
-                display_name: input.display_name,
-                launch_code: input.launch_code,
-                idempotency_key: input.idempotency_key,
-                now: input.now,
-            })
+            .request_agent_creation_configured(
+                RequestAgentCreationInput {
+                    verified_email: identity.email,
+                    workos_user_id: identity.workos_user_id,
+                    display_name: input.display_name,
+                    launch_code: input.launch_code,
+                    idempotency_key: input.idempotency_key,
+                    now: input.now,
+                },
+                AgentCreationConfiguration {
+                    runner_class: input.runner_class,
+                    profile_picture_url: input.profile_picture_url,
+                },
+            )
             .await?,
     ))
 }
@@ -3246,6 +3260,8 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: "off2026".to_string(),
             idempotency_key: "browser-submit-1".to_string(),
+            runner_class: RunnerClass::Kata,
+            profile_picture_url: Some("https://chat.finite.computer/v1/blobs/profile".to_string()),
             now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();
@@ -3274,6 +3290,11 @@ mod tests {
         assert_eq!(result.project.display_name, "Oslo Agent");
         assert!(result.project.import_candidate_id.is_none());
         assert!(result.request.agent_runtime_id.is_none());
+        assert_eq!(result.request.runner_class, RunnerClass::Kata);
+        assert_eq!(
+            result.request.profile_picture_url.as_deref(),
+            Some("https://chat.finite.computer/v1/blobs/profile")
+        );
         assert!(!result.reused);
 
         let response = app
@@ -3300,6 +3321,10 @@ mod tests {
         assert!(me.projects[0].runtime.is_none());
         assert_eq!(me.agent_creation_requests.len(), 1);
         assert_eq!(me.agent_creation_requests[0].project_id, result.project.id);
+        assert_eq!(
+            me.agent_creation_requests[0].runner_class,
+            RunnerClass::Kata
+        );
         assert_eq!(
             me.agent_creation_requests[0].status,
             crate::AgentCreationRequestStatus::Requested
@@ -3333,6 +3358,8 @@ mod tests {
             display_name: "Second Agent".to_string(),
             launch_code: "off2026".to_string(),
             idempotency_key: "browser-submit-2".to_string(),
+            runner_class: RunnerClass::Phala,
+            profile_picture_url: None,
             now: Some("2026-05-25T13:00:00Z".to_string()),
         })
         .unwrap();
@@ -3387,6 +3414,8 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: "off2026".to_string(),
             idempotency_key: "browser-submit-1".to_string(),
+            runner_class: RunnerClass::Phala,
+            profile_picture_url: None,
             now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();
@@ -3675,6 +3704,8 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: "off2026".to_string(),
             idempotency_key: "browser-submit-1".to_string(),
+            runner_class: RunnerClass::Phala,
+            profile_picture_url: None,
             now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();

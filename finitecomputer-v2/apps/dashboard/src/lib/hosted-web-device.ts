@@ -127,6 +127,7 @@ export type HostedChatState = {
     notice_busy: boolean;
     scan_in_flight: boolean;
     scan_result: string;
+    image_upload_url?: string | null;
   };
 };
 
@@ -285,6 +286,34 @@ export async function hostedDeviceAttachments(
     method: "POST",
     body: formData,
   });
+}
+
+export async function hostedDeviceProfileImage(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  bytes: Blob,
+) {
+  const contentType = bytes.type.trim().toLowerCase();
+  if (!contentType.startsWith("image/")) {
+    throw new Error("Choose an image file.");
+  }
+  const headers = hostedDeviceHeaders(config, account);
+  headers.set("content-type", contentType);
+  const response = await fetch(`${config.baseUrl}/v1/app/images`, {
+    method: "POST",
+    cache: "no-store",
+    headers,
+    body: bytes,
+    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(await responseError(response));
+  }
+  const result = (await response.json()) as { image_url?: unknown };
+  if (typeof result.image_url !== "string" || !result.image_url.trim()) {
+    throw new Error("The image upload did not finish.");
+  }
+  return result.image_url;
 }
 
 export async function hostedDeviceAttachment(

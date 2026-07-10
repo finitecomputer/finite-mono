@@ -179,6 +179,20 @@ git push finite main
 Pushing the configured Deploy Branch creates a new immutable Version. Finite
 Sites validates and serves the committed bytes under `path`.
 
+Confirm the URL returned by the configured server and preview that exact
+origin:
+
+```sh
+fsite project status my-project --output json
+fsite view my-project --output json
+```
+
+For an owned Project, `fsite view NAME` resolves the served output through the
+configured `FINITE_SITES_API`; it does not invent a production hostname. This
+is why the same command returns `https://NAME.finite.chat/` in production and
+`http://NAME.sites.localhost:PORT/` in local development. When a Project has
+multiple outputs, pass the explicit `output_url` from `project status`.
+
 ## Publish A Stateful App
 
 Stateful app Outputs use the same Project Repository model. The difference is

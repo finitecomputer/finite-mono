@@ -173,10 +173,69 @@ send_and_require_reply() {
 
 restart_process() {
   local process="$1"
+  # A dependency restart can leave dependants in process-compose's Skipped
+  # state. `process restart` does not revive a skipped process, so model the
+  # actual outage explicitly and always finish with a start transition.
   process-compose \
     --use-uds \
     --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
-    process restart "$process" >/dev/null
+    process stop "$process" >/dev/null || true
+
+  local stopped_at state
+  stopped_at="$(date +%s)"
+  while true; do
+    state="$(
+      process-compose \
+        --use-uds \
+        --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
+        process get "$process" --output json 2>/dev/null || true
+    )"
+    if node -e '
+      const state = JSON.parse(process.argv[1] || "[]")[0];
+      process.exit(state?.status !== "Running" ? 0 : 1);
+    ' "$state"; then
+      break
+    fi
+    if (( "$(date +%s)" - stopped_at >= 60 )); then
+      echo "$process did not finish stopping within 60s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  process-compose \
+    --use-uds \
+    --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
+    process start "$process" >/dev/null 2>&1 || true
+
+  local started
+  started="$(date +%s)"
+  while true; do
+    state="$(
+      process-compose \
+        --use-uds \
+        --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
+        process get "$process" --output json 2>/dev/null || true
+    )"
+    if node -e '
+      const state = JSON.parse(process.argv[1] || "[]")[0];
+      process.exit(state?.status === "Running" && state?.is_ready === "Ready" ? 0 : 1);
+    ' "$state"; then
+      return 0
+    fi
+    # Starting a dependant before process-compose has observed its dependency
+    # as Ready can leave it Skipped even though the CLI returned success.
+    # Retry the idempotent start once readiness catches up.
+    process-compose \
+      --use-uds \
+      --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
+      process start "$process" >/dev/null 2>&1 || true
+    if (( "$(date +%s)" - started >= 120 )); then
+      echo "$process did not return to Ready within 120s" >&2
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 container_started_at() {

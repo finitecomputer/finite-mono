@@ -139,6 +139,10 @@ export async function cancelFailedAgentCreationRequestAction(formData: FormData)
 }
 
 export async function startBillingCheckoutAction() {
+  redirect(await billingCheckoutDestination());
+}
+
+export async function billingCheckoutDestination() {
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
     throw new Error(billing.error ?? "A verified WorkOS account is required for billing.");
@@ -164,7 +168,7 @@ export async function startBillingCheckoutAction() {
       billing.billing.billing_account?.stripe_subscription_id
     )
   ) {
-    return redirectToBillingPortal(stripeCustomerId);
+    return billingPortalDestination(stripeCustomerId);
   }
 
   const checkout = await stripe.checkout.sessions.create({
@@ -194,7 +198,7 @@ export async function startBillingCheckoutAction() {
     throw new Error("Stripe did not return a Checkout URL.");
   }
 
-  redirect(checkout.url);
+  return checkout.url;
 }
 
 export async function openBillingPortalAction() {
@@ -204,16 +208,16 @@ export async function openBillingPortalAction() {
     return startBillingCheckoutAction();
   }
 
-  return redirectToBillingPortal(stripeCustomerId);
+  redirect(await billingPortalDestination(stripeCustomerId));
 }
 
-async function redirectToBillingPortal(stripeCustomerId: string) {
+async function billingPortalDestination(stripeCustomerId: string) {
   const portal = await requireStripeClient().billingPortal.sessions.create({
     customer: stripeCustomerId,
     return_url: stripeDashboardReturnUrl("/dashboard"),
   });
 
-  redirect(portal.url);
+  return portal.url;
 }
 
 export async function approveFinitePrivateGrantAction(formData: FormData) {

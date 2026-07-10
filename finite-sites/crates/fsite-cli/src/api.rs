@@ -174,6 +174,10 @@ impl Client {
         Client { base_url }
     }
 
+    pub fn uses_default_production(&self) -> bool {
+        self.base_url == DEFAULT_API_URL
+    }
+
     /// Sign and send one request; decode the JSON response or surface the
     /// server's error body.
     fn request<T: serde::de::DeserializeOwned>(

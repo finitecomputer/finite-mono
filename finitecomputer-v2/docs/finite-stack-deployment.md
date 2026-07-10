@@ -103,23 +103,11 @@ It is isolated compute on finite-lat-1, not an operator-blind environment. The
 first trusted cohort may launch on provider-durable state before the off-host
 Recovery Snapshot design is complete, with honest product/support disclosure.
 
-Phala is the confidential fast-follow lane. The runner uses
-the official `phala` CLI as the provider management pipe because it already
-handles authenticated deploys, client-side env sealing, `--wait`, and restart.
-The v2 Rust runner still owns the product contract: lease from Core, render a
-Docker-equivalent compose file, provide a runtime-scoped Finite Private key,
-wait for the provider-neutral `/healthz` readiness contract, publish optional
-agent contact metadata separately, then complete the Core request. Runner
-readiness never depends on chat contact, room admission, or a particular chat
-product flow.
-
-Host prerequisites:
-
-```sh
-npm install -g phala@1.1.19
-install -d -m 700 /var/lib/finite/saas-runner
-install -d -m 750 /etc/finite-computer
-```
+The NixOS host pins Kata Containers, Cloud Hypervisor, nerdctl, CNI plugins,
+and containerd. No globally installed provider CLI is required. The runner is
+rootful only because it owns the containerd socket and CNI namespaces; its
+typed contract is deliberately limited to launch, status, restart, stop, and
+compute-only destroy.
 
 Runner env is configured from:
 
@@ -131,45 +119,51 @@ Use
 `../infra/hosts/lat1/systemd/runner.env.example` as the template. The
 production shape is:
 
-- `FC_RUNNER_BACKEND=phala`
+- `FC_RUNNER_CLASS=kata`
 - `FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>`
-- `PHALA_CLOUD_API_KEY=<host-only Phala API key>`
-- `FC_RUNNER_PHALA_INSTANCE_TYPE=tdx.small`
-- `FC_RUNNER_PHALA_DISK_SIZE=40G`
-- `FC_RUNNER_PHALA_PUBLIC_LOGS=false`
-- `FC_RUNNER_PHALA_PUBLIC_SYSINFO=false`
+- `FC_RUNNER_KATA_NAMESPACE=finite`
+- `FC_RUNNER_KATA_OCI_RUNTIME=io.containerd.kata.v2`
+- `FC_RUNNER_KATA_CPUS=4`
+- `FC_RUNNER_KATA_MEMORY=8G`
 
 For each leased Project, the runner writes a provider work directory under:
 
 ```text
-/var/lib/finite/saas-runner/phala/<runtime-name>/
+/var/lib/finite-saas-runner/kata/<runtime-name>/
 ```
 
-That directory contains a rendered `docker-compose.yml` and sealed-env input
-file. The compose file mounts Phala named volume `agent_state` at `/data`, the
-same durable state path used by the Docker runner. It points the runtime at
-`https://chat.finite.computer`, exposes port `8080`, and records the public
-agent contact endpoint as:
+That directory is bind-mounted at `/data` and survives restart, image
+replacement, stop, and destroy. Runtime compute is a Kata microVM. Agent HTTP
+port `8080` is dynamically published on loopback and recorded in Core; only
+same-host services can reach it. A transient root-only env file carries launch
+credentials to nerdctl and is deleted immediately after container creation.
+It never appears in process arguments.
 
 ```text
-https://<app-id>-8080.dstack-pha-<teepod>.phala.network/contact
+http://127.0.0.1:<allocated-port>/contact
 ```
 
 `/contact` is a product-facing discovery fact, not a Runner health gate. The
 Runtime may keep compatibility routes internally, but Core and new clients do
 not publish or canonize them.
 
-Do not pass OpenRouter or user-owned model keys through this lane. Core issues
-a runtime-scoped Finite Private key and the runner gives that key only to the
-new runtime through the Phala env sealing path.
+Core issues a runtime-scoped Finite Private key and the runner gives that key
+only to the new runtime at launch. Later inference changes are explicit typed
+agent-local mutations through finite-agentd; the platform never edits a remote
+`.env` file.
 
 Acceptance for enabling the runner is not "Phala accepted the deploy." A SaaS
-launch is accepted only after Core records the runtime, the Phala endpoint
+launch is accepted only after Core records the runtime, the Kata endpoint
 returns `ready=true` from `/healthz`, the Hosted Web Device creates or resumes
 the canonical room using the agent identity from `/contact`, Hermes answers
-multiple real turns through Finite Private, and a Phala restart preserves the
+multiple real turns through Finite Private, and a Kata restart preserves the
 same agent identity, room, memory, and workspace state. Native and Electron
 Devices may join that room later without changing the Runner contract.
+
+Phala remains the confidential fast-follow lane. A separate worker advertises
+`FC_RUNNER_CLASS=phala` and uses the official CLI for authenticated deploy,
+sealed environment delivery, and provider lifecycle. It implements the same
+Runner Contract and acceptance matrix; it is not part of this rollout.
 
 ## Enclavia Evaluation Lane
 
@@ -198,7 +192,7 @@ The Enclavia enclave must already exist and should be created with:
 Runner env:
 
 ```text
-FC_RUNNER_BACKEND=enclavia
+FC_RUNNER_CLASS=enclavia
 FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>
 FC_RUNNER_ENCLAVIA_BIN=/usr/local/bin/enclavia
 FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<pre-created enclave UUID>
