@@ -4,14 +4,8 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # ########################################################################
-    # ## TODO: pin the image digest after the first CI build pushes         ##
-    # ## ghcr.io/finitecomputer/finite-saas-dashboard (built from           ##
-    # ## infra/images/dashboard.Dockerfile). This placeholder digest WILL   ##
-    # ## NOT PULL — the deploy fails loudly until it is replaced.           ##
-    # ########################################################################
-    # 2026-07-10.1, source 8e79cff976bc24a5914f1ed0a0b48ea1c4ed5bf7.
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:19401197997705069c3a5dfa9cad8d9f42d17b780cb911f471824c84bc0bc493";
+    # 2026-07-10.2, source 36d224ca3b85896bb5153257c7bfc6924c489053.
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:c65a628494e68db55a9f5a4686d4fbfde424bebf7742b911c2f2425e6db7b869";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
