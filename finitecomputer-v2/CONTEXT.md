@@ -70,6 +70,10 @@ The dashboard login and billing identity used to create and administer Projects.
 In v2 today this is WorkOS.
 _Avoid_: Nostr identity, Agent Runtime key
 
+**Internal Operator**:
+An Account Auth member of Finite's configured internal operator organization.
+_Avoid_: Customer Organization administrator, permission taxonomy, role slug
+
 **Hosted Web Device**:
 A Finite-operated Finite Chat device bound to one Account Auth identity whose server-held device state powers dashboard web chat.
 _Avoid_: Browser E2EE, dashboard relay, Agent Principal Key
@@ -210,7 +214,7 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - A **Finite Private Runaway Guard** limits pathological continuous inference;
   it does not represent customer billing or a dollar-denominated budget.
 - A **Launch Code Batch** contains an explicit number of **Launch Codes** and can expire or be revoked before every code is redeemed.
-- Only an Account Auth administrator may issue a **Launch Code Batch**; participant redemption does not grant administrative authority.
+- Only an **Internal Operator** may issue a **Launch Code Batch**; participant redemption does not grant administrative authority.
 - A **Launch Code** grants a Core-owned entitlement to exactly one Account Auth organization without creating or proving a paid Stripe subscription.
 - A **Runner** reattaches to an **Agent Runtime** by its **Provider Runtime Handle**.
 - **Phala** is a **Confidential Runner** implementation, not the product model.
@@ -219,6 +223,8 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - **Core** verifies the standard Account Auth credential on every user-scoped
   request; dashboard identity headers and Runner credentials cannot assert a
   user or administrator.
+- The current internal admin surface uses one **Internal Operator** check;
+  finer capability permissions are a customer-run concern.
 - **Account Auth** authorizes access to one **Hosted Web Device**, but that
   device has its own revocable Finite Chat key and durable store.
 - A **Hosted Web Device** is a user device alongside Electron or native

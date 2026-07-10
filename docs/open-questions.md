@@ -57,6 +57,7 @@ Notes:
 
 - 2026-07-10: Paul moved turn cancellation out of the internal production canary and into the later customer-facing run.
 - 2026-07-10: `finite-agentd/src/daemon.rs` acknowledges and discards inbound runtime payloads that are not requests; current chat turns are ordinary chat events rather than implemented cancellable runtime commands.
+- 2026-07-10: Paul consciously kept Stop Hermes out of this run, including its training-oriented Launch Code path. The product response is to make talking to and steering the agent simpler and better, not to normalize fear of an opaque process or mislabel process termination as turn cancellation.
 
 ## Dashboard Finite Sites list/share authority (opened 2026-07-10)
 
@@ -98,3 +99,16 @@ Notes:
 - 2026-07-10: this is recorded for Austin's review; it is not work in the [internal production canary](runs/production-canary.md).
 - 2026-07-10: The dashboard iframe/proxy implementation still exists. Its embedded Product Client requires `window.nostr`; WorkOS does not supply that signer, so the iframe is transport/UI composition rather than an identity solution.
 - 2026-07-10: Paul decided to hide Brain from both admin and main-product navigation for now without deleting the iframe work. Electron has a local Finite Chat identity and is the likely good client shape, but no Electron-to-Brain signer or Folder Key bridge is currently wired.
+
+## One chat product across Hosted and Electron Devices (opened 2026-07-10)
+
+Wrong: Dashboard chat is implemented in `hosted-web-chat.tsx` while Electron has a separate Vite renderer in `finitechat/apps/electron-chat/src/App.tsx`. They share Finite Chat concepts but can drift in interaction, copy, features, and bug fixes, contradicting the promise that Electron is another Device rather than another chat product.
+
+Rejected so far: Making Electron depend on Hosted Web Device uptime, treating its renderer as an unrelated legacy UI, or indefinitely duplicating product behavior between two implementations.
+
+A real solution must: preserve Electron's local Device key and durable store; keep dashboard chat usable without Electron; share one canonical product interaction and `AppState`/`AppAction` behavior; and define which UI components, presentation model, and platform adapters are actually shared without moving local secrets into the browser.
+
+Notes:
+
+- 2026-07-10: The internal production canary remains dashboard-only. This question repairs the run's previous dangling reference to Electron/device-unification architecture; it is not added to the active queue.
+- 2026-07-10: The current hosted UI lives in `finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx`; Electron's renderer lives in `finitechat/apps/electron-chat/src/App.tsx`.

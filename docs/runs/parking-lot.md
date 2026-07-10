@@ -18,3 +18,4 @@ One line per idea outside the active run. This is not a queue; an item becomes w
 - 2026-07-10 — Add a Kata-path equivalent of SaaS smoke coverage to automated CI.
 - 2026-07-10 — Revisit rich remote-Markdown image cards in chat after the launch path is stable.
 - 2026-07-10 — Audit the WorkOS AuthKit lifecycle around expired/reused login state without changing identity architecture in a launch-blocker run.
+- 2026-07-10 — Before the customer run needs split operator duties, replace the single internal-operator check with an idiomatic WorkOS permission taxonomy for runtime read/operate/upgrade, Finite Private key/limit management, and Launch Code management.

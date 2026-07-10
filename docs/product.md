@@ -12,6 +12,7 @@ During the internal-canary and white-glove-training phase, the public landing pa
 
 - The product speaks plainly. User-facing surfaces do not make people learn our infrastructure, protocols, or internal service names to accomplish ordinary work.
 - Chat is the north star: responsive, legible, attachment-capable, recoverable, and continuous across supported restarts.
+- Make the agent easier to understand and steer instead of teaching people to fear or manage Hermes as infrastructure. Honest turn cancellation may still be useful, but a fake process-level stop is not a substitute for better interaction.
 - The dashboard has one clear personal home: Agent, Connections, and Chat. Brain joins that navigation only when its Principal, signer, and Folder Key path works for the current client; hidden unfinished entry points are not product capability.
 - Connections, Sites, Brain, and skills stay composable product capabilities. They do not turn Runner, Runtime Management, or the runtime image into a feature control plane.
 - The agent's identity and durable work belong to the agent; a person's account opens their own dashboard and Devices. We never present a privacy or recovery promise stronger than the evidence.

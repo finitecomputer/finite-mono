@@ -39,19 +39,15 @@ code and one key per Finite Home—not a secret shared between a human and agent
   Core. Core validates the JWT signature against the WorkOS JWKS and checks
   issuer, client id, expiry, and subject on every user-scoped request; caller-
   supplied identity headers are not authentication.
-- Core consumes standard WorkOS session claims and permissions instead of
-  minting a parallel Finite session token or treating a role slug as a
-  permission. Account Auth remains an adapter that can be replaced without
-  changing Project, Agent Runtime, Principal, or product-grant semantics.
+- Core consumes standard WorkOS session claims instead of minting a parallel
+  Finite session token. Account Auth remains an adapter that can be replaced
+  without changing Project, Agent Runtime, Principal, or product-grant
+  semantics.
 - Finite operators belong to one internal WorkOS operator organization. Core
-  requires that exact `org_id` plus the action's permission claim for an
-  administrator request; Launch Code Batch management requires
-  `launch-codes:manage`.
-- The first operator organization uses one operator role aggregating
-  `runtimes:read`, `runtimes:operate`, `runtimes:upgrade`,
-  `finite-private:keys:manage`, `finite-private:limits:manage`, and
-  `launch-codes:manage`. Core checks the capability permission on each route,
-  never the role slug, so duties can be split later without changing APIs.
+  requires that exact validated `org_id` for every administrator request. The
+  internal canary has one operator predicate across admin routes; named
+  permissions and split duties are deferred until customer admission needs
+  them.
 - The WorkOS operator organization and Core Customer Organizations are
   different objects. Customer ownership, billing, Projects, and entitlements
   remain Core concepts, and ordinary customer/canary accounts do not become
@@ -138,12 +134,9 @@ human-agent signer.
 - Core rejects caller-supplied identity headers without a valid matching
   WorkOS access token, and a Runner credential is rejected on every user and
   administrator route.
-- Core accepts Launch Code Batch management only when the validated token has
-  both the configured operator `org_id` and `launch-codes:manage`; either claim
-  missing or stale fails closed until the WorkOS session is refreshed.
-- Removing any operator permission denies only its mapped Core capability:
-  runtime reads, runtime operations, runtime upgrades, Finite Private key
-  management, Finite Private limit management, or Launch Code management.
+- Core accepts every administrator route only when the validated token has the
+  configured operator `org_id`; a missing or different organization fails
+  closed.
 - The internal WorkOS operator organization id is never persisted as or
   inferred to be a Core Customer Organization id.
 - Core/Runner logs, facts, release evidence, and Runtime Management messages

@@ -41,7 +41,7 @@ runtime-scoped Finite Private keys, and usage decisions.
 ## Sponsored Launch Code Flow
 
 1. A dashboard administrator whose validated WorkOS session selects Finite's
-   internal operator organization and carries `launch-codes:manage` asks Core
+   configured internal operator organization asks Core
    to generate a named Launch Code Batch containing the exact number of
    individually single-use codes needed for the sponsored cohort and an
    explicit expiry.
@@ -225,8 +225,8 @@ Launch Code entitlement.
 
 Every Launch Code belongs to a named batch, is individually single-use, and is
 bound to one Account Auth organization on first successful redemption. Only a
-WorkOS-authenticated administrator in Finite's internal operator organization
-with `launch-codes:manage` may ask Core to issue or revoke a batch. The operator
+WorkOS-authenticated administrator in Finite's configured internal operator
+organization may ask Core to issue or revoke a batch. The operator
 organization is not a Core Customer Organization. A batch has an explicit code
 count and expiry, defaults to seven days, and may be configured for at most 30
 days. Indefinite batches are not allowed; the internal canary uses a 24-hour
