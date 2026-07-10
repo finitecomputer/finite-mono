@@ -6,6 +6,8 @@ export const AGENT_DRAFT_COOKIE = "finite-agent-draft";
 export const AGENT_DRAFT_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_AGENT_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 
+const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exhausted";
+
 const RUNNER_CLASSES = new Set<CoreRunnerClass>([
   "local_docker",
   "apple_container",
@@ -23,6 +25,14 @@ export type AgentOnboardingDraft = {
   idempotencyKey: string;
   issuedAtMs: number;
 };
+
+export function agentCreationErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Could not create agent.";
+  if (message.toLowerCase().includes(AGENT_CREATION_ENTITLEMENT_EXHAUSTED)) {
+    return "This account already has an agent. Open it from your dashboard, or ask an operator to remove it before creating another.";
+  }
+  return message;
+}
 
 export function configuredRunnerClasses(
   env: Record<string, string | undefined> = process.env

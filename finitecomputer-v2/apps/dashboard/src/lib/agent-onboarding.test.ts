@@ -2,12 +2,31 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentCreationErrorMessage,
   configuredRunnerClasses,
   defaultRunnerClass,
   normalizeAgentDisplayName,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
+
+test("agent creation exhaustion is explained in customer language", () => {
+  const expected =
+    "This account already has an agent. Open it from your dashboard, or ask an operator to remove it before creating another.";
+  assert.equal(
+    agentCreationErrorMessage(new Error("agent creation entitlement is exhausted")),
+    expected
+  );
+  assert.equal(
+    agentCreationErrorMessage(new Error("Agent creation entitlement is exhausted (409)")),
+    expected
+  );
+});
+
+test("other agent creation errors remain useful", () => {
+  assert.equal(agentCreationErrorMessage(new Error("Enter your Launch Code.")), "Enter your Launch Code.");
+  assert.equal(agentCreationErrorMessage(null), "Could not create agent.");
+});
 
 const env = {
   WORKOS_COOKIE_PASSWORD: "agent-onboarding-test-password-32-characters",

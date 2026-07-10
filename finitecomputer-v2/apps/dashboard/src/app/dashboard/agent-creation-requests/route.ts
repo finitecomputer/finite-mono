@@ -6,6 +6,7 @@ import {
   AGENT_DRAFT_COOKIE,
   AGENT_DRAFT_TTL_SECONDS,
   MAX_AGENT_PROFILE_IMAGE_BYTES,
+  agentCreationErrorMessage,
   normalizeAgentDisplayName,
   resolveRunnerClass,
   sealAgentOnboardingDraft,
@@ -38,7 +39,7 @@ function dashboardRedirect(
     url.searchParams.set("new", "1");
     url.searchParams.set(
       "agentCreationError",
-      error instanceof Error ? error.message : "Could not create agent."
+      agentCreationErrorMessage(error)
     );
   }
   return NextResponse.redirect(url, { status: 303 });
