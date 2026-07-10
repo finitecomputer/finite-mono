@@ -403,7 +403,10 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
           (action) => actionName(action) === "SendChatMessage"
         )
       );
-      await expectVisibleText(page, message);
+      await page
+        .getByRole("paragraph")
+        .filter({ hasText: message })
+        .waitFor({ state: "visible", timeout: 15_000 });
 
       const sendAction = hostedDevice.state.actions.find(
         (action) => actionName(action) === "SendChatMessage"
