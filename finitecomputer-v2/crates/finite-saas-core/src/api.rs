@@ -2345,13 +2345,13 @@ async fn require_verified_identity(
         .workos()
         .verify_access_token(&access_token)
         .await
-        .map_err(workos_api_error)?;
+        .map_err(|error| workos_api_error_at("access_token", error))?;
     let user = state
         .auth
         .workos()
         .verified_user(&session.subject)
         .await
-        .map_err(workos_api_error)?;
+        .map_err(|error| workos_api_error_at("user_lookup", error))?;
     let email = normalize_owner_email(Some(&user.email))
         .ok_or_else(|| ApiError::unauthorized("invalid account"))?;
     Ok(VerifiedIdentity {
@@ -2375,6 +2375,11 @@ async fn require_admin_identity(
         ));
     }
     Ok(identity)
+}
+
+fn workos_api_error_at(stage: &'static str, error: WorkosAuthError) -> ApiError {
+    tracing::warn!(stage, error = %error, "WorkOS authentication rejected");
+    workos_api_error(error)
 }
 
 fn workos_api_error(error: WorkosAuthError) -> ApiError {
