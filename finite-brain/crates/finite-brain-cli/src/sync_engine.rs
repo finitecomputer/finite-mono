@@ -23,10 +23,10 @@ use serde::Deserialize;
 
 use crate::{
     APP_SPECIFIC_KIND, AgentState, CliEnvironment, CliError, ConflictEntry, ConflictState,
-    LocalFolderKey, SyncChangeReport, SyncOnceReport, UnlockedFolder, current_tree_root,
-    deterministic_id, load_signer, read_agent_state, read_working_tree_state,
-    server_url_for_command, sign_event, signed_json_request_to_server, tag_vec, timestamp,
-    timestamp_from_unix, unix_timestamp, write_agent_state, write_json_file,
+    SessionFolderKeyring, SyncChangeReport, SyncOnceReport, current_tree_root, deterministic_id,
+    load_signer, read_agent_state, read_working_tree_state, server_url_for_command, sign_event,
+    signed_json_request, signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix,
+    unix_timestamp, write_agent_state, write_json_file,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -48,10 +48,18 @@ pub(crate) fn run_working_tree_sync(
     let export = fetch_encrypted_export(env, &server_url, &agent_state.vault_id)?;
     let mounted_exports =
         fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.vault_id, &export)?;
-    let mut opened_grants = open_export_folder_key_grants(env, &root, &auth, &export)?;
+    let mut session_keys = SessionFolderKeyring::default();
+    open_export_folder_key_grants_into_session(&auth, &export, &mut session_keys)?;
     for mounted in &mounted_exports {
-        opened_grants += open_export_folder_key_grants(env, &root, &auth, &mounted.export)?;
+        open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
     }
+    let opened_grants = session_keys.len();
+    let newly_readable_keys = newly_readable_session_key_count(
+        &prior_tree_state,
+        &export,
+        &mounted_exports,
+        &session_keys,
+    );
     let local_result = push_local_working_tree_changes(
         env,
         &root,
@@ -59,8 +67,9 @@ pub(crate) fn run_working_tree_sync(
         &agent_state,
         &export,
         &mounted_exports,
+        &session_keys,
     )?;
-    let force_bootstrap_reason = sync_bootstrap_reason(&local_result, opened_grants);
+    let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
     let remote_result = if let Some(reason) = force_bootstrap_reason {
         fetch_bootstrap_remote_sync(env, &server_url, &agent_state.vault_id, reason)?
     } else {
@@ -84,6 +93,7 @@ pub(crate) fn run_working_tree_sync(
         &remote_result.bootstrap,
         &mounted_materializations,
         &local_result.path_overrides,
+        &session_keys,
     )?;
     restore_conflicted_files(
         &root,
@@ -119,7 +129,7 @@ pub(crate) fn run_working_tree_sync(
     } else if local_result.pushed_count > 0 {
         "pushed-local-changes".to_owned()
     } else if !remote_changes.is_empty()
-        || opened_grants > 0
+        || newly_readable_keys > 0
         || (remote_result.used_bootstrap
             && latest_sequence > prior_tree_state.sync.latest_sequence
             && active_remote_object_count > 0)
@@ -155,6 +165,54 @@ pub(crate) fn run_working_tree_sync(
         local_changes: local_result.changes,
         remote_changes,
     })
+}
+
+pub(crate) fn open_vault_session_folder_keys(
+    env: &CliEnvironment,
+    args: &[String],
+    vault_id: &str,
+) -> Result<SessionFolderKeyring, CliError> {
+    let path = format!("/_admin/vaults/{vault_id}/export");
+    let response = signed_json_request(env, args, "GET", &path, None)?;
+    let export: CliEncryptedVaultExport = serde_json::from_value(response)?;
+    if export.vault.id != vault_id {
+        return Err(CliError::InvalidInput(format!(
+            "encrypted export returned vault {} while opening {vault_id}",
+            export.vault.id
+        )));
+    }
+    let auth = load_signer(env)?;
+    let mut keyring = SessionFolderKeyring::default();
+    open_export_folder_key_grants_into_session(&auth, &export, &mut keyring)?;
+    Ok(keyring)
+}
+
+fn newly_readable_session_key_count(
+    prior_tree_state: &finite_brain_core::portability::VaultWorkingTreeStateManifest,
+    export: &CliEncryptedVaultExport,
+    mounted_exports: &[MountedFolderSyncContext],
+    session_keys: &SessionFolderKeyring,
+) -> usize {
+    let primary = export.folders.iter().filter(|folder| {
+        session_keys.contains(&export.vault.id, &folder.id, folder.current_key_version)
+            && !prior_tree_state.folder_roots.iter().any(|root| {
+                root.source_vault_id.is_none() && root.folder_id == folder.id && root.can_read
+            })
+    });
+    let mounted = mounted_exports.iter().filter(|mounted| {
+        mounted.source_folder().is_some_and(|folder| {
+            session_keys.contains(
+                &mounted.export.vault.id,
+                &folder.id,
+                folder.current_key_version,
+            ) && !prior_tree_state.folder_roots.iter().any(|root| {
+                root.source_vault_id.as_deref() == Some(mounted.export.vault.id.as_str())
+                    && root.folder_id == folder.id
+                    && root.can_read
+            })
+        })
+    });
+    primary.count() + mounted.count()
 }
 
 pub(crate) fn pending_working_tree_change_count(root: &Path) -> Result<usize, CliError> {
@@ -646,13 +704,32 @@ fn restore_conflicted_files(
     Ok(())
 }
 
-fn open_export_folder_key_grants(
-    env: &CliEnvironment,
-    root: &Path,
+fn open_export_folder_key_grants_into_session(
     auth: &crate::LocalSigner,
     export: &CliEncryptedVaultExport,
+    session_keys: &mut SessionFolderKeyring,
 ) -> Result<usize, CliError> {
-    let opened_vault_id = read_agent_state(root)?.vault_id;
+    let opened = opened_export_folder_key_grants(auth, export)?;
+    let mut opened_count = 0;
+    for grant in opened {
+        let folder_key = FolderKey::from_base64(&grant.folder_key)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        if session_keys.insert(
+            grant.vault_id,
+            grant.folder_id,
+            grant.key_version,
+            folder_key,
+        ) {
+            opened_count += 1;
+        }
+    }
+    Ok(opened_count)
+}
+
+fn opened_export_folder_key_grants(
+    auth: &crate::LocalSigner,
+    export: &CliEncryptedVaultExport,
+) -> Result<Vec<CliFolderKeyGrantPlaintext>, CliError> {
     let keys = auth.keys.clone();
     let recipient = NostrPublicKey::parse(&auth.npub)
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
@@ -662,119 +739,33 @@ fn open_export_folder_key_grants(
         if grant.recipient_npub != auth.npub {
             continue;
         }
-        let Ok(event) = Event::from_json(grant.wrapped_event_json.clone()) else {
-            continue;
+        let unusable_grant = || {
+            CliError::InvalidInput(format!(
+                "encrypted Folder Key Grant for {}/{} v{} could not be opened by the local signer; verify this Member Identity has a valid current grant",
+                export.vault.id, grant.folder_id, grant.key_version
+            ))
         };
-        let Ok(opened_wrap) = open_gift_wrap(&keys, &event, &validation) else {
-            continue;
-        };
-        let Ok(plaintext) =
+        let event =
+            Event::from_json(grant.wrapped_event_json.clone()).map_err(|_| unusable_grant())?;
+        let opened_wrap =
+            open_gift_wrap(&keys, &event, &validation).map_err(|_| unusable_grant())?;
+        let plaintext =
             serde_json::from_str::<CliFolderKeyGrantPlaintext>(&opened_wrap.rumor.content)
-        else {
-            continue;
-        };
+                .map_err(|_| unusable_grant())?;
         if plaintext.version != "finite-folder-key-grant-v1"
             || plaintext.vault_id != export.vault.id
             || plaintext.folder_id != grant.folder_id
             || plaintext.key_version != grant.key_version
+            || plaintext.issuer_npub != grant.issuer_npub
             || plaintext.recipient_npub != auth.npub
         {
-            continue;
+            return Err(unusable_grant());
         }
-        FolderKey::from_base64(&plaintext.folder_key)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        FolderKey::from_base64(&plaintext.folder_key).map_err(|_| unusable_grant())?;
         opened.push(plaintext);
     }
 
-    if opened.is_empty() {
-        return Ok(0);
-    }
-
-    let mut persisted_count = 0_usize;
-    mutate_agent_state_at_root(root, timestamp(env), |state, now| {
-        let mut changed = false;
-        for grant in opened {
-            let folder_id = grant.folder_id.clone();
-            let key_version = grant.key_version;
-            if !state.local_folder_keys.iter().any(|key| {
-                local_folder_key_matches(
-                    key,
-                    &opened_vault_id,
-                    &grant.vault_id,
-                    &folder_id,
-                    key_version,
-                )
-            }) {
-                state.local_folder_keys.push(LocalFolderKey {
-                    vault_id: Some(grant.vault_id.clone()),
-                    folder_id: folder_id.clone(),
-                    key_version,
-                    key_base64: grant.folder_key.clone(),
-                    source: format!("folder-key-grant:{}", grant.issuer_npub),
-                    opened_at: now.clone(),
-                });
-                persisted_count += 1;
-                changed = true;
-            }
-            if let Some(folder) = state.unlocked_folders.iter().find(|folder| {
-                unlocked_folder_matches(folder, &opened_vault_id, &grant.vault_id, &folder_id)
-            }) {
-                if key_version > folder.key_version {
-                    let folder = state
-                        .unlocked_folders
-                        .iter_mut()
-                        .find(|folder| {
-                            unlocked_folder_matches(
-                                folder,
-                                &opened_vault_id,
-                                &grant.vault_id,
-                                &folder_id,
-                            )
-                        })
-                        .expect("folder found above");
-                    folder.key_version = key_version;
-                    folder.opened_at = now.clone();
-                    folder.source = "folder-key-grant".to_owned();
-                    changed = true;
-                }
-            } else {
-                state.unlocked_folders.push(UnlockedFolder {
-                    vault_id: Some(grant.vault_id.clone()),
-                    folder_id,
-                    key_version,
-                    opened_at: now.clone(),
-                    source: "folder-key-grant".to_owned(),
-                });
-                changed = true;
-            }
-        }
-        if changed {
-            state.add_activity(now, "folder_keys.opened", "Folder Key Grants opened");
-        }
-    })?;
-    Ok(persisted_count)
-}
-
-fn local_folder_key_matches(
-    key: &LocalFolderKey,
-    opened_vault_id: &str,
-    vault_id: &str,
-    folder_id: &str,
-    key_version: u32,
-) -> bool {
-    key.vault_id.as_deref().unwrap_or(opened_vault_id) == vault_id
-        && key.folder_id == folder_id
-        && key.key_version == key_version
-}
-
-fn unlocked_folder_matches(
-    folder: &UnlockedFolder,
-    opened_vault_id: &str,
-    vault_id: &str,
-    folder_id: &str,
-) -> bool {
-    folder.vault_id.as_deref().unwrap_or(opened_vault_id) == vault_id
-        && folder.folder_id == folder_id
+    Ok(opened)
 }
 
 fn push_local_working_tree_changes(
@@ -784,6 +775,7 @@ fn push_local_working_tree_changes(
     agent_state: &AgentState,
     export: &CliEncryptedVaultExport,
     mounted_exports: &[MountedFolderSyncContext],
+    session_keys: &SessionFolderKeyring,
 ) -> Result<LocalSyncResult, CliError> {
     let tree_state = read_working_tree_state(root)?;
     let changes = scan_working_tree_changes(root, &tree_state)?;
@@ -792,7 +784,6 @@ fn push_local_working_tree_changes(
     }
 
     let intents = plan_working_tree_change_intents(&tree_state, &changes);
-    let keys_by_folder = local_folder_keys_by_route(root, &agent_state.vault_id)?;
     let mut current_key_version_by_folder = export
         .folders
         .iter()
@@ -822,7 +813,7 @@ fn push_local_working_tree_changes(
         agent_state,
         signing_keys: &signing_keys,
         actor_npub: &actor_npub,
-        keys_by_folder: &keys_by_folder,
+        session_keys,
         current_key_version_by_folder: &current_key_version_by_folder,
     };
     let mut result = LocalSyncResult::default();
@@ -951,30 +942,13 @@ fn sync_route_label(route: WorkingTreeIntentRoute) -> &'static str {
     }
 }
 
-fn local_folder_keys_by_route(
-    root: &Path,
-    opened_vault_id: &str,
-) -> Result<BTreeMap<(String, String, u32), LocalFolderKey>, CliError> {
-    Ok(read_agent_state(root)?
-        .local_folder_keys
-        .into_iter()
-        .map(|key| {
-            let vault_id = key
-                .vault_id
-                .clone()
-                .unwrap_or_else(|| opened_vault_id.to_owned());
-            ((vault_id, key.folder_id.clone(), key.key_version), key)
-        })
-        .collect())
-}
-
 struct SubmitIntentContext<'a> {
     env: &'a CliEnvironment,
     server_url: &'a str,
     agent_state: &'a AgentState,
     signing_keys: &'a Keys,
     actor_npub: &'a str,
-    keys_by_folder: &'a BTreeMap<(String, String, u32), LocalFolderKey>,
+    session_keys: &'a SessionFolderKeyring,
     current_key_version_by_folder: &'a BTreeMap<(String, String), u32>,
 }
 
@@ -1015,15 +989,11 @@ fn submit_change_intent(
             "folder {folder_id} is missing from encrypted export for vault {route_vault_id}"
         )));
     };
-    let current_local_key = context
-        .keys_by_folder
-        .get(&(
-            route_vault_id.clone(),
-            folder_id.to_string(),
-            current_key_version,
-        ))
-        .cloned();
-    if current_local_key.is_none() {
+    let current_session_key =
+        context
+            .session_keys
+            .get(&route_vault_id, &folder_id.to_string(), current_key_version);
+    if current_session_key.is_none() {
         return Ok(SubmitIntentOutcome::Conflict(format!(
             "current Folder Key v{current_key_version} unavailable for {route_vault_id}/{folder_id}"
         )));
@@ -1039,15 +1009,13 @@ fn submit_change_intent(
             let target_path = intent.target_path.as_ref().ok_or_else(|| {
                 CliError::InvalidInput("write intent is missing target path".to_owned())
             })?;
-            let local_key = current_local_key.expect("checked above");
-            let key = FolderKey::from_base64(&local_key.key_base64)
-                .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+            let key = current_session_key.expect("checked above");
             let aad = FolderObjectAad {
                 vault_id: VaultId::new(route_vault_id.clone())
                     .map_err(|error| CliError::InvalidInput(error.to_string()))?,
                 folder_id: folder_id.clone(),
                 object_id: object_id.clone(),
-                key_version: local_key.key_version,
+                key_version: current_key_version,
             };
             let plaintext = match content {
                 WorkingTreeIntentContent::PageMarkdown(markdown) => {
@@ -1059,7 +1027,7 @@ fn submit_change_intent(
                     ..
                 } => encode_folder_object_asset_plaintext(target_path, bytes, content_type)?,
             };
-            let envelope = encrypt_folder_object(&key, &aad, &plaintext)
+            let envelope = encrypt_folder_object(key, &aad, &plaintext)
                 .map_err(|error| CliError::InvalidInput(error.to_string()))?;
             let envelope_json = envelope.canonical_json();
             let operation = match intent.action {
@@ -1077,13 +1045,13 @@ fn submit_change_intent(
                     object_id,
                     operation,
                     base_revision: intent.base_revision,
-                    key_version: local_key.key_version,
+                    key_version: current_key_version,
                     envelope_json: envelope_json.clone(),
                 },
             )?;
             let body = serde_json::json!({
                 "baseRevision": intent.base_revision,
-                "keyVersion": local_key.key_version,
+                "keyVersion": current_key_version,
                 "cipher": CIPHER_AES_256_GCM,
                 "ciphertext": envelope_json,
                 "revisionEvent": event
@@ -1274,10 +1242,10 @@ fn materialize_remote_projection(
     bootstrap: &CliSyncBootstrap,
     mounted_folders: &[MountedFolderMaterializeContext],
     path_overrides: &BTreeMap<(String, String, String), String>,
+    session_keys: &SessionFolderKeyring,
 ) -> Result<(), CliError> {
     let prior_state = read_working_tree_state(root)?;
     let vault = vault_from_export(export)?;
-    let local_keys = local_folder_keys_by_route(root, &export.vault.id)?;
     let mut prior_paths = prior_state
         .objects
         .iter()
@@ -1303,7 +1271,7 @@ fn materialize_remote_projection(
     let mut readable_folder_routes = BTreeSet::new();
     {
         let mut append_context = OpenedObjectsAppendContext {
-            local_keys: &local_keys,
+            session_keys,
             prior_paths: &prior_paths,
             opened_pages: &mut opened_pages,
             opened_assets: &mut opened_assets,
@@ -1323,21 +1291,17 @@ fn materialize_remote_projection(
     }
 
     for folder in &export.folders {
-        if local_keys.contains_key(&(
-            export.vault.id.clone(),
-            folder.id.clone(),
-            folder.current_key_version,
-        )) {
+        if session_keys.contains(&export.vault.id, &folder.id, folder.current_key_version) {
             readable_folder_routes.insert((export.vault.id.clone(), folder.id.clone()));
         }
     }
     for mounted in mounted_folders {
         if let Some(folder) = mounted.source_folder()
-            && local_keys.contains_key(&(
-                mounted.export.vault.id.clone(),
-                folder.id.clone(),
+            && session_keys.contains(
+                &mounted.export.vault.id,
+                &folder.id,
                 folder.current_key_version,
-            ))
+            )
         {
             readable_folder_routes.insert((mounted.export.vault.id.clone(), folder.id.clone()));
         }
@@ -1392,7 +1356,7 @@ fn materialize_remote_projection(
 }
 
 struct OpenedObjectsAppendContext<'a> {
-    local_keys: &'a BTreeMap<(String, String, u32), LocalFolderKey>,
+    session_keys: &'a SessionFolderKeyring,
     prior_paths: &'a BTreeMap<(String, String, String), String>,
     opened_pages: &'a mut Vec<OpenedPage>,
     opened_assets: &'a mut Vec<OpenedAsset>,
@@ -1413,15 +1377,13 @@ fn append_opened_objects_from_bootstrap(
     }) {
         let envelope = EncryptedFolderObjectEnvelope::from_json(&object.ciphertext)
             .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let Some(local_key) = context.local_keys.get(&(
-            export.vault.id.clone(),
-            object.folder_id.clone(),
-            envelope.key_version,
-        )) else {
+        let Some(folder_key) =
+            context
+                .session_keys
+                .get(&export.vault.id, &object.folder_id, envelope.key_version)
+        else {
             continue;
         };
-        let key = FolderKey::from_base64(&local_key.key_base64)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
         let aad = FolderObjectAad {
             vault_id: source_vault_id.clone(),
             folder_id: FolderId::new(object.folder_id.clone())
@@ -1430,7 +1392,7 @@ fn append_opened_objects_from_bootstrap(
                 .map_err(|error| CliError::InvalidInput(error.to_string()))?,
             key_version: envelope.key_version,
         };
-        let plaintext = open_folder_object(&key, &aad, &envelope)
+        let plaintext = open_folder_object(folder_key, &aad, &envelope)
             .map_err(|error| CliError::InvalidInput(error.to_string()))?;
         let folder = export
             .folders
@@ -2764,17 +2726,8 @@ mod tests {
             .to_npub()
             .unwrap();
         let agent_state = AgentState::new("vault", "2026-06-26T23:30:00Z");
-        let keys_by_folder = BTreeMap::from([(
-            ("vault".to_owned(), "general".to_owned(), 1),
-            LocalFolderKey {
-                vault_id: Some("vault".to_owned()),
-                folder_id: "general".to_owned(),
-                key_version: 1,
-                key_base64: FolderKey::from_bytes([1; 32]).to_base64(),
-                source: "test".to_owned(),
-                opened_at: "2026-06-26T23:30:00Z".to_owned(),
-            },
-        )]);
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("vault", "general", 1, FolderKey::from_bytes([1; 32]));
         let current_key_version_by_folder =
             BTreeMap::from([(("vault".to_owned(), "general".to_owned()), 2)]);
         let context = SubmitIntentContext {
@@ -2783,7 +2736,7 @@ mod tests {
             agent_state: &agent_state,
             signing_keys: &keys,
             actor_npub: &actor_npub,
-            keys_by_folder: &keys_by_folder,
+            session_keys: &session_keys,
             current_key_version_by_folder: &current_key_version_by_folder,
         };
         let intent = WorkingTreeChangeIntent {
@@ -2984,16 +2937,8 @@ mod tests {
         )
         .unwrap();
         let folder_key = FolderKey::from_bytes([3; 32]);
-        let mut agent_state = AgentState::new("vault", "2026-06-26T23:30:00Z");
-        agent_state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("vault".to_owned()),
-            folder_id: "home".to_owned(),
-            key_version: 1,
-            key_base64: folder_key.to_base64(),
-            source: "test".to_owned(),
-            opened_at: "2026-06-26T23:30:00Z".to_owned(),
-        });
-        write_agent_state(root, &agent_state).unwrap();
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("vault", "home", 1, folder_key.clone());
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
@@ -3051,6 +2996,7 @@ mod tests {
             &bootstrap,
             &[],
             &BTreeMap::new(),
+            &session_keys,
         )
         .unwrap();
 
@@ -3080,16 +3026,8 @@ mod tests {
         )
         .unwrap();
         let folder_key = FolderKey::from_bytes([8; 32]);
-        let mut agent_state = AgentState::new("dest", "2026-06-26T23:30:00Z");
-        agent_state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("source".to_owned()),
-            folder_id: "shared-lab".to_owned(),
-            key_version: 1,
-            key_base64: folder_key.to_base64(),
-            source: "test".to_owned(),
-            opened_at: "2026-06-26T23:30:00Z".to_owned(),
-        });
-        write_agent_state(root, &agent_state).unwrap();
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("source", "shared-lab", 1, folder_key.clone());
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
@@ -3182,6 +3120,7 @@ mod tests {
             },
             &[mounted],
             &BTreeMap::new(),
+            &session_keys,
         )
         .unwrap();
 
@@ -3224,7 +3163,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_local_keys_do_not_make_current_folder_readable() {
+    fn historical_session_keys_do_not_make_current_folder_readable() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         fs::create_dir_all(root.join(".finitebrain")).unwrap();
@@ -3238,16 +3177,8 @@ mod tests {
             },
         )
         .unwrap();
-        let mut agent_state = AgentState::new("vault", "2026-06-26T23:30:00Z");
-        agent_state.local_folder_keys.push(LocalFolderKey {
-            vault_id: Some("vault".to_owned()),
-            folder_id: "home".to_owned(),
-            key_version: 1,
-            key_base64: FolderKey::from_bytes([1; 32]).to_base64(),
-            source: "test".to_owned(),
-            opened_at: "2026-06-26T23:30:00Z".to_owned(),
-        });
-        write_agent_state(root, &agent_state).unwrap();
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("vault", "home", 1, FolderKey::from_bytes([1; 32]));
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
@@ -3289,6 +3220,7 @@ mod tests {
             &bootstrap,
             &[],
             &BTreeMap::new(),
+            &session_keys,
         )
         .unwrap();
 

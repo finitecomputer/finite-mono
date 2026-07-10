@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
+use finite_brain_core::FolderKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -14,6 +16,7 @@ pub(crate) struct AgentState {
     pub(crate) auth_npub: Option<String>,
     pub(crate) daemon: DaemonState,
     pub(crate) sync: AgentSyncState,
+    #[serde(default)]
     pub(crate) unlocked_folders: Vec<UnlockedFolder>,
     #[serde(default)]
     pub(crate) local_folder_keys: Vec<LocalFolderKey>,
@@ -151,6 +154,43 @@ pub(crate) struct LocalFolderKey {
     pub(crate) key_base64: String,
     pub(crate) source: String,
     pub(crate) opened_at: String,
+}
+
+#[derive(Default)]
+pub(crate) struct SessionFolderKeyring {
+    keys: BTreeMap<(String, String, u32), FolderKey>,
+}
+
+impl SessionFolderKeyring {
+    pub(crate) fn insert(
+        &mut self,
+        vault_id: impl Into<String>,
+        folder_id: impl Into<String>,
+        key_version: u32,
+        folder_key: FolderKey,
+    ) -> bool {
+        self.keys
+            .insert((vault_id.into(), folder_id.into(), key_version), folder_key)
+            .is_none()
+    }
+
+    pub(crate) fn get(
+        &self,
+        vault_id: &str,
+        folder_id: &str,
+        key_version: u32,
+    ) -> Option<&FolderKey> {
+        self.keys
+            .get(&(vault_id.to_owned(), folder_id.to_owned(), key_version))
+    }
+
+    pub(crate) fn contains(&self, vault_id: &str, folder_id: &str, key_version: u32) -> bool {
+        self.get(vault_id, folder_id, key_version).is_some()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
