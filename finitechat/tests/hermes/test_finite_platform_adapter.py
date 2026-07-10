@@ -1261,7 +1261,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(ack_calls), 1)
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-14")
 
-    def test_stream_loop_retries_attachment_materialization_without_poll_or_early_ack(self):
+    def _assert_stream_loop_reconnects_without_poll(self, error, transport_error):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
@@ -1288,9 +1288,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     self.module._FiniteChatResult(
                         False,
                         {},
-                        "attachment is temporarily unavailable: server returned HTTP 503",
+                        error,
                         True,
-                        transport_error=False,
+                        transport_error=transport_error,
                     ),
                 )
                 return
@@ -1352,6 +1352,15 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.service_url, "http://127.0.0.1:9999")
         self.assertEqual(len(adapter.handled_messages), 1)
         self.assertEqual(adapter.handled_messages[0].text, "caught up after reconnect")
+
+    def test_stream_loop_reconnects_and_catches_up_without_poll_fallback(self):
+        self._assert_stream_loop_reconnects_without_poll("connection reset", True)
+
+    def test_stream_loop_retries_attachment_materialization_without_poll_or_early_ack(self):
+        self._assert_stream_loop_reconnects_without_poll(
+            "attachment is temporarily unavailable: server returned HTTP 503",
+            False,
+        )
 
     def test_stream_reconnect_backoff_is_bounded(self):
         self.assertEqual(
