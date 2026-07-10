@@ -20,10 +20,11 @@
     };
   };
 
-  # The generic kata-v2 shim reads this path; use Cloud Hypervisor and the
-  # kernel/image pinned inside the independently locked Kata package.
+  # The generic kata-v2 shim reads this path. Use the QEMU backend shipped by
+  # the locked Nix Kata package; its generated config pins the QEMU binary,
+  # guest kernel, and guest image in the same closure.
   environment.etc."kata-containers/configuration.toml".source =
-    "${kataPackages.kata-runtime}/share/defaults/kata-containers/configuration-clh.toml";
+    "${kataPackages.kata-runtime}/share/defaults/kata-containers/configuration-qemu.toml";
 
   # nerdctl's rootful CNI network is declared rather than generated at first
   # launch, keeping host rebuilds reproducible and port publishing available.
@@ -62,8 +63,8 @@
     ];
   };
 
-  # containerd discovers runtime-v2 shims by PATH. The Kata package also
-  # carries Cloud Hypervisor and the pinned guest assets referenced above.
+  # containerd discovers runtime-v2 shims by PATH. The Kata package closure
+  # also carries QEMU and the pinned guest assets referenced above.
   systemd.services.containerd.path = lib.mkAfter [ kataPackages.kata-runtime ];
 
   environment.systemPackages = [

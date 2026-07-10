@@ -103,16 +103,16 @@ It is isolated compute on finite-lat-1, not an operator-blind environment. The
 first trusted cohort may launch on provider-durable state before the off-host
 Recovery Snapshot design is complete, with honest product/support disclosure.
 
-The NixOS host pins Kata Containers, Cloud Hypervisor, nerdctl, CNI plugins,
-and containerd. No globally installed provider CLI is required. The runner is
-rootful only because it owns the containerd socket and CNI namespaces; its
-typed contract is deliberately limited to launch, status, restart, stop, and
-compute-only destroy.
+The NixOS host pins Kata Containers, QEMU, the guest kernel and image, nerdctl,
+CNI plugins, and containerd in one closure. No globally installed provider CLI
+is required. The runner is rootful only because it owns the containerd socket
+and CNI namespaces; its typed contract is deliberately limited to launch,
+status, restart, stop, and compute-only destroy.
 
 Runner env is configured from:
 
 ```text
-/etc/finite-computer/runner.env
+/etc/finite/runner.env
 ```
 
 Use
