@@ -147,7 +147,10 @@ fn doctor<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     let server_url = server_url_for_optional_command(env, args);
-    let working_tree = find_agent_state(&env.cwd).ok().flatten();
+    let (working_tree, working_tree_discovery_error) = match find_agent_state(&env.cwd) {
+        Ok(working_tree) => (working_tree, None),
+        Err(error) => (None, Some(error.to_string())),
+    };
     let identity = load_identity_optional(env)?;
     let working_tree_boundary = working_tree
         .as_ref()
@@ -176,11 +179,18 @@ fn doctor<W: Write>(
                     "no Finite identity yet; it is minted on first signing use, or adopt an existing secret with fbrain auth import",
                 )
             }),
-        working_tree: match (working_tree.as_ref(), working_tree_boundary.as_ref()) {
-            (Some(root), Some(Ok(()))) => {
+        working_tree: match (
+            working_tree.as_ref(),
+            working_tree_boundary.as_ref(),
+            working_tree_discovery_error.as_deref(),
+        ) {
+            (Some(root), Some(Ok(())), _) => {
                 CheckState::ok(format!("Vault Working Tree at {}", root.display()))
             }
-            (Some(_), Some(Err(error))) => CheckState::warn(error.to_string()),
+            (Some(_), Some(Err(error)), _) => CheckState::warn(error.to_string()),
+            (_, _, Some(error)) => CheckState::warn(format!(
+                "Vault Working Tree discovery failed: {error}; inspect the Working Tree boundary before continuing"
+            )),
             _ => CheckState::warn("not inside a Vault Working Tree"),
         },
         daemon: match daemon_state {
@@ -3877,11 +3887,12 @@ mod tests {
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
-        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("insecure Vault Working Tree boundary"));
-        assert!(error.contains("fbrain repair"));
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            &error,
+            CliError::InsecureWorkingTreePermissions { .. }
+        ));
+        assert!(error.to_string().contains("fbrain repair"));
 
         let mut doctor_output = Vec::new();
         run_with_env(["doctor", "--json"], env.clone(), &mut doctor_output).unwrap();
@@ -3944,6 +3955,96 @@ mod tests {
                 .unwrap()
                 .contains("managed symlink")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_control_directory_symlink_is_discovered_without_following_it() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let control_dir = tree.join(".finitebrain");
+        fs::rename(&control_dir, tree.join("finitebrain-backup")).unwrap();
+        symlink(tmp.path().join("missing-external-control"), &control_dir).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new()).unwrap_err();
+        assert!(matches!(&error, CliError::InsecureWorkingTree { .. }));
+        assert!(error.to_string().contains("managed symlink"));
+
+        let mut doctor_output = Vec::new();
+        run_with_env(["doctor", "--json"], env.clone(), &mut doctor_output).unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["workingTree"]["state"], "warn");
+        assert!(
+            doctor["workingTree"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("managed symlink")
+        );
+        let repair_error = run_with_env(["repair"], env, &mut Vec::new()).unwrap_err();
+        assert!(repair_error.to_string().contains("remove the link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_recovers_an_untraversable_control_directory() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let control_dir = tree.join(".finitebrain");
+        fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o100)).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        let mut doctor_output = Vec::new();
+        run_with_env(["doctor", "--json"], env.clone(), &mut doctor_output).unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["workingTree"]["state"], "warn");
+        assert!(
+            doctor["workingTree"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("expected 0700")
+        );
+
+        run_with_env(["repair"], env.clone(), &mut Vec::new()).unwrap();
+        run_with_env(["status", "--json"], env, &mut Vec::new()).unwrap();
+        assert_eq!(unix_mode(&control_dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_managed_file_reports_typed_permissions_and_repair_recovers_it() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::InsecureWorkingTreePermissions { .. }
+        ));
+
+        let mut doctor_output = Vec::new();
+        run_with_env(["doctor", "--json"], env.clone(), &mut doctor_output).unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["workingTree"]["state"], "warn");
+        assert!(
+            doctor["workingTree"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("expected 0600")
+        );
+
+        run_with_env(["repair"], env.clone(), &mut Vec::new()).unwrap();
+        run_with_env(["status", "--json"], env, &mut Vec::new()).unwrap();
+        assert_eq!(unix_mode(&state_path), 0o600);
     }
 
     #[cfg(unix)]
@@ -4035,6 +4136,68 @@ mod tests {
         assert!(!remigrated_body.contains(&raw_folder_key));
         assert!(!remigrated_body.contains("localFolderKeys"));
         assert!(!remigrated_body.contains("unlockedFolders"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_keys_are_scrubbed_before_insecure_permissions_block_the_command() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let raw_folder_key = FolderKey::from_bytes([101; 32]).to_base64();
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
+        legacy["localFolderKeys"] = serde_json::json!([{
+            "folderId": "general",
+            "keyVersion": 1,
+            "keyBase64": raw_folder_key
+        }]);
+        legacy["unlockedFolders"] = serde_json::json!([{"folderId": "general"}]);
+        write_json_file(&state_path, &legacy).unwrap();
+        fs::set_permissions(&tree, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(tree.join(".finitebrain"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        let error = run_with_env(["status", "--json"], env.clone(), &mut Vec::new()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CliError::InsecureWorkingTreePermissions { .. }
+        ));
+        let migrated_body = fs::read_to_string(&state_path).unwrap();
+        assert!(migrated_body.contains("finitebrain-agent-state-v2"));
+        assert!(!migrated_body.contains(&raw_folder_key));
+        assert!(!migrated_body.contains("localFolderKeys"));
+        assert!(!migrated_body.contains("unlockedFolders"));
+        assert_eq!(unix_mode(&state_path), 0o600);
+
+        run_with_env(["repair"], env.clone(), &mut Vec::new()).unwrap();
+        run_with_env(["status", "--json"], env, &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn unknown_future_agent_state_is_rejected_without_rewrite() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let mut future: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        future["version"] = Value::String("finitebrain-agent-state-v3".to_owned());
+        future["localFolderKeys"] = serde_json::json!([{"future": "opaque"}]);
+        write_json_file(&state_path, &future).unwrap();
+        let before = fs::read(&state_path).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let error = run_with_env(["status", "--json"], env, &mut Vec::new()).unwrap_err();
+
+        assert!(matches!(error, CliError::AgentStateMigration { .. }));
+        assert_eq!(fs::read(state_path).unwrap(), before);
     }
 
     #[test]
@@ -4238,9 +4401,10 @@ mod tests {
             env,
             &mut Vec::new(),
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
 
+        assert!(matches!(&error, CliError::GrantOpening { .. }));
+        let error = error.to_string();
         assert!(error.contains("encrypted Folder Key Grant"));
         assert!(error.contains("local signer"));
         assert!(!error.contains("not-a-nostr-event"));
@@ -4249,6 +4413,53 @@ mod tests {
         assert!(!migrated_body.contains("localFolderKeys"));
         assert!(!migrated_body.contains("unlockedFolders"));
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sync_now_scrubs_legacy_keys_before_an_unavailable_signer_blocks_the_command() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let raw_folder_key = FolderKey::from_bytes([103; 32]).to_base64();
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
+        legacy["localFolderKeys"] = serde_json::json!([{
+            "folderId": "general",
+            "keyVersion": 1,
+            "keyBase64": raw_folder_key,
+            "source": "legacy-test",
+            "openedAt": "2026-06-24T20:46:36Z"
+        }]);
+        legacy["unlockedFolders"] = serde_json::json!([{"folderId": "general"}]);
+        write_json_file(&state_path, &legacy).unwrap();
+
+        let corrupt_identity = "corrupt-identity-sentinel";
+        fs::write(identity_file_for(&tmp), corrupt_identity).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let error = run_with_env(
+            ["sync", "now", "--server", "http://127.0.0.1:9", "--json"],
+            env,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(&error, CliError::Identity(_)));
+        let error = error.to_string();
+        assert!(!error.contains(corrupt_identity));
+        assert!(!error.contains(&raw_folder_key));
+        let migrated_body = fs::read_to_string(state_path).unwrap();
+        assert!(migrated_body.contains("finitebrain-agent-state-v2"));
+        assert!(!migrated_body.contains(&raw_folder_key));
+        assert!(!migrated_body.contains("localFolderKeys"));
+        assert!(!migrated_body.contains("unlockedFolders"));
     }
 
     #[test]

@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use finite_brain_core::portability::{
-    MAX_WORKING_TREE_ASSET_BYTES, OkfOmittedFolder, OpenedAsset, OpenedPage, WorkingTreeChange,
-    WorkingTreeChangeIntent, WorkingTreeFolderRoot, WorkingTreeIntentAction,
-    WorkingTreeIntentContent, WorkingTreeIntentRoute, WorkingTreeMaterializeInput,
-    WorkingTreeObjectManifestEntry, WorkingTreeProjection, materialize_vault_working_tree,
-    plan_working_tree_change_intents,
+    MAX_WORKING_TREE_ASSET_BYTES, OkfOmittedFolder, OpenedAsset, OpenedPage,
+    VaultWorkingTreeStateManifest, WorkingTreeChange, WorkingTreeChangeIntent,
+    WorkingTreeFolderRoot, WorkingTreeIntentAction, WorkingTreeIntentContent,
+    WorkingTreeIntentRoute, WorkingTreeMaterializeInput, WorkingTreeObjectManifestEntry,
+    WorkingTreeProjection, materialize_vault_working_tree, plan_working_tree_change_intents,
 };
 use finite_brain_core::{
     DisplayName, EncryptedFolderObjectEnvelope, Folder, FolderAccessMode, FolderId, FolderKey,
@@ -713,8 +713,13 @@ fn open_export_folder_key_grants_into_session(
     let opened = opened_export_folder_key_grants(auth, export)?;
     let mut opened_count = 0;
     for grant in opened {
-        let folder_key = FolderKey::from_base64(&grant.folder_key)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let folder_key =
+            FolderKey::from_base64(&grant.folder_key).map_err(|_| CliError::GrantOpening {
+                vault_id: grant.vault_id.clone(),
+                folder_id: grant.folder_id.clone(),
+                key_version: grant.key_version,
+                reason: "opened grant did not contain a valid Folder Key".to_owned(),
+            })?;
         if session_keys.insert(
             grant.vault_id,
             grant.folder_id,
@@ -741,10 +746,13 @@ fn opened_export_folder_key_grants(
             continue;
         }
         let unusable_grant = || {
-            CliError::InvalidInput(format!(
-                "encrypted Folder Key Grant for {}/{} v{} could not be opened by the local signer; verify this Member Identity has a valid current grant",
-                export.vault.id, grant.folder_id, grant.key_version
-            ))
+            CliError::GrantOpening {
+                vault_id: export.vault.id.clone(),
+                folder_id: grant.folder_id.clone(),
+                key_version: grant.key_version,
+                reason: "the local signer could not validate and decrypt it; verify this Member Identity has a valid current grant"
+                    .to_owned(),
+            }
         };
         let event =
             Event::from_json(grant.wrapped_event_json.clone()).map_err(|_| unusable_grant())?;
@@ -1365,8 +1373,87 @@ fn materialize_remote_projection(
             Some((&mounted.mount.source_folder_id, &mounted.display_path)),
         )?;
     }
+    preserve_unreadable_prior_projection(
+        &prior_state,
+        &mut projection,
+        &export.vault.id,
+        &readable_folder_routes,
+    )?;
     remove_stale_object_files(root, &prior_state.objects, &projection.state.objects)?;
     write_projection_files(root, &projection.files, &projection.binary_files)?;
+    Ok(())
+}
+
+fn preserve_unreadable_prior_projection(
+    prior_state: &VaultWorkingTreeStateManifest,
+    projection: &mut WorkingTreeProjection,
+    primary_vault_id: &str,
+    readable_folder_routes: &BTreeSet<(String, String)>,
+) -> Result<(), CliError> {
+    let is_unreadable = |source_vault_id: Option<&str>, folder_id: &str| {
+        let source_vault_id = source_vault_id.unwrap_or(primary_vault_id);
+        !readable_folder_routes.contains(&(source_vault_id.to_owned(), folder_id.to_owned()))
+    };
+
+    for root in &prior_state.folder_roots {
+        let route = (root.source_vault_id.clone(), root.folder_id.clone());
+        if !is_unreadable(root.source_vault_id.as_deref(), &root.folder_id) {
+            continue;
+        }
+        if let Some(candidate) = projection.state.folder_roots.iter_mut().find(|candidate| {
+            (
+                candidate.source_vault_id.clone(),
+                candidate.folder_id.clone(),
+            ) == route
+        }) {
+            candidate.path.clone_from(&root.path);
+            candidate.can_read = false;
+            candidate.metadata_only = true;
+        } else {
+            let mut preserved = root.clone();
+            preserved.can_read = false;
+            preserved.metadata_only = true;
+            projection.state.folder_roots.push(preserved);
+        }
+    }
+
+    for object in &prior_state.objects {
+        let route_is_unreadable =
+            is_unreadable(object.source_vault_id.as_deref(), &object.folder_id);
+        let object_key = (
+            object.source_vault_id.clone(),
+            object.folder_id.clone(),
+            object.object_id.clone(),
+        );
+        if route_is_unreadable
+            && !projection.state.objects.iter().any(|candidate| {
+                (
+                    candidate.source_vault_id.clone(),
+                    candidate.folder_id.clone(),
+                    candidate.object_id.clone(),
+                ) == object_key
+            })
+        {
+            projection.state.objects.push(object.clone());
+        }
+    }
+
+    projection.state.folder_roots.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.source_vault_id.cmp(&right.source_vault_id))
+            .then(left.folder_id.cmp(&right.folder_id))
+    });
+    projection.state.objects.sort_by(|left, right| {
+        left.source_vault_id
+            .cmp(&right.source_vault_id)
+            .then(left.folder_id.cmp(&right.folder_id))
+            .then(left.path.cmp(&right.path))
+    });
+    projection.files.insert(
+        ".finitebrain/working-tree-state.json".to_owned(),
+        serde_json::to_string_pretty(&projection.state)?,
+    );
     Ok(())
 }
 
@@ -3190,12 +3277,30 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         initialize_private_working_tree(root).unwrap();
+        let persisted_plaintext = "# Persisted until explicit removal\n";
+        fs::create_dir_all(root.join("home/notes")).unwrap();
+        fs::write(root.join("home/notes/persisted.md"), persisted_plaintext).unwrap();
         write_json_file(
             &root.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
                 version: "finite-vault-working-tree-state-v1".to_owned(),
-                folder_roots: Vec::new(),
-                objects: Vec::new(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "home".to_owned(),
+                    source_vault_id: None,
+                    path: "home".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: vec![WorkingTreeObjectManifestEntry {
+                    folder_id: "home".to_owned(),
+                    source_vault_id: None,
+                    path: "notes/persisted.md".to_owned(),
+                    object_id: "obj_persisted001".to_owned(),
+                    revision: 1,
+                    key_version: 1,
+                    content_type: "text/markdown".to_owned(),
+                    content_hash: sha256_hex(persisted_plaintext.as_bytes()),
+                }],
                 sync: WorkingTreeSyncState { latest_sequence: 0 },
             },
         )
@@ -3252,6 +3357,12 @@ mod tests {
         assert_eq!(state.folder_roots[0].folder_id, "home");
         assert!(!state.folder_roots[0].can_read);
         assert!(state.folder_roots[0].metadata_only);
+        assert_eq!(state.objects.len(), 1);
+        assert_eq!(state.objects[0].object_id, "obj_persisted001");
+        assert_eq!(
+            fs::read_to_string(root.join("home/notes/persisted.md")).unwrap(),
+            persisted_plaintext
+        );
     }
 
     #[allow(dead_code)]

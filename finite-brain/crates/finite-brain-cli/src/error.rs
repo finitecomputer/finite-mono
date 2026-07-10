@@ -12,7 +12,28 @@ pub enum CliError {
     InvalidInput(String),
     Http(String),
     Identity(String),
-    InsecureWorkingTree { path: PathBuf, reason: String },
+    InsecureWorkingTree {
+        path: PathBuf,
+        reason: String,
+    },
+    InsecureWorkingTreePermissions {
+        path: PathBuf,
+        actual_mode: u32,
+        expected_mode: u32,
+    },
+    InsecureWorkingTreeOwnership {
+        path: PathBuf,
+    },
+    AgentStateMigration {
+        path: PathBuf,
+        reason: String,
+    },
+    GrantOpening {
+        vault_id: String,
+        folder_id: String,
+        key_version: u32,
+        reason: String,
+    },
     MissingServer,
     MissingWorkingTree,
     MissingArgument(&'static str),
@@ -34,6 +55,34 @@ impl fmt::Display for CliError {
                 f,
                 "insecure Vault Working Tree boundary at {}: {reason}; run `fbrain repair` from the Working Tree",
                 path.display()
+            ),
+            Self::InsecureWorkingTreePermissions {
+                path,
+                actual_mode,
+                expected_mode,
+            } => write!(
+                f,
+                "insecure Vault Working Tree permissions at {}: mode is {actual_mode:04o}, expected {expected_mode:04o}; run `fbrain repair` from the Working Tree",
+                path.display()
+            ),
+            Self::InsecureWorkingTreeOwnership { path } => write!(
+                f,
+                "insecure Vault Working Tree ownership at {}: path is not owned by the current operating-system account; move it to current-account ownership before running `fbrain repair`",
+                path.display()
+            ),
+            Self::AgentStateMigration { path, reason } => write!(
+                f,
+                "Agent State migration failed at {}: {reason}; restore a valid active state file or remove the Working Tree explicitly",
+                path.display()
+            ),
+            Self::GrantOpening {
+                vault_id,
+                folder_id,
+                key_version,
+                reason,
+            } => write!(
+                f,
+                "encrypted Folder Key Grant for {vault_id}/{folder_id} v{key_version} could not be opened: {reason}"
             ),
             Self::MissingServer => write!(f, "no FiniteBrain server URL configured"),
             Self::MissingWorkingTree => write!(f, "no Vault Working Tree found"),

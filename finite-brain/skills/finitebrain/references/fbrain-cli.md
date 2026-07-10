@@ -44,10 +44,11 @@ fbrain share link|accept|revoke|source|folder-invite|folder-accept
 `fbrain` signs with the current Finite Home's Local Identity Key, at
 `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
 `~/.finite/identity/identity.json` otherwise. Whichever Finite tool runs first
-mints the key in that home; `fbrain` finds it. An Agent Runtime uses its own
-key, not the human user's Finite Chat key. The first `fbrain` command that
-needs to sign mints an identity if none exists; `auth status` only reports and
-never creates one.
+mints the key in that home; `fbrain` finds it. FiniteBrain does not require a
+human/agent key split: controllers sharing one keypair are the same Member
+Identity, while separate keypairs are separate Member Identities. The first
+`fbrain` command that needs to sign mints an identity if none exists; `auth
+status` only reports and never creates one.
 
 ```sh
 fbrain auth status --json

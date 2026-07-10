@@ -9,6 +9,8 @@ use crate::CliError;
 
 const CONTROL_DIR_NAME: &str = ".finitebrain";
 const ENCRYPTED_SYNC_DIR_NAME: &str = "encrypted-sync";
+const MAX_MANAGED_ENTRY_COUNT: usize = 10_000;
+const MAX_MANAGED_DEPTH: usize = 32;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize)]
@@ -43,10 +45,22 @@ pub(crate) fn initialize_private_working_tree(root: &Path) -> Result<(), CliErro
 }
 
 pub(crate) fn validate_private_working_tree(root: &Path) -> Result<(), CliError> {
+    validate_working_tree_managed_structure(root)?;
     validate_private_directory(root)?;
     let control_dir = root.join(CONTROL_DIR_NAME);
     validate_private_directory(&control_dir)?;
     validate_managed_entries(&control_dir)
+}
+
+pub(crate) fn validate_working_tree_managed_structure(root: &Path) -> Result<(), CliError> {
+    let root_metadata = fs::symlink_metadata(root)?;
+    reject_symlink_or_wrong_kind(root, &root_metadata, true)?;
+    validate_owner_traversal_permission(root, &root_metadata)?;
+    let control_dir = root.join(CONTROL_DIR_NAME);
+    let control_metadata = fs::symlink_metadata(&control_dir)?;
+    reject_symlink_or_wrong_kind(&control_dir, &control_metadata, true)?;
+    validate_owner_traversal_permission(&control_dir, &control_metadata)?;
+    validate_managed_entry_structure(&control_dir)
 }
 
 pub(crate) fn repair_private_working_tree(
@@ -58,11 +72,13 @@ pub(crate) fn repair_private_working_tree(
     let control_metadata = fs::symlink_metadata(&control_dir)?;
     reject_symlink_or_wrong_kind(&control_dir, &control_metadata, true)?;
 
+    set_private_directory_permissions(root)?;
+    set_private_directory_permissions(&control_dir)?;
+
     let mut directories = vec![control_dir.clone()];
     let mut files = Vec::new();
     collect_managed_entries(&control_dir, &mut directories, &mut files)?;
 
-    set_private_directory_permissions(root)?;
     for directory in &directories {
         set_private_directory_permissions(directory)?;
     }
@@ -103,6 +119,21 @@ pub(crate) fn write_private_file_atomic(path: &Path, body: &[u8]) -> Result<(), 
     write_atomic_platform(path, parent, body)
 }
 
+pub(crate) fn write_private_file_atomic_for_migration(
+    path: &Path,
+    body: &[u8],
+) -> Result<(), CliError> {
+    let parent = path.parent().ok_or_else(|| CliError::InsecureWorkingTree {
+        path: path.to_path_buf(),
+        reason: "Finite-managed control file has no parent directory".to_owned(),
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    reject_symlink_or_wrong_kind(parent, &parent_metadata, true)?;
+    let target_metadata = fs::symlink_metadata(path)?;
+    reject_symlink_or_wrong_kind(path, &target_metadata, false)?;
+    write_atomic_platform(path, parent, body)
+}
+
 fn control_dir_exists(path: &Path) -> Result<bool, CliError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -116,45 +147,113 @@ fn collect_managed_entries(
     directories: &mut Vec<PathBuf>,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), CliError> {
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(managed_symlink_error(&path));
-        }
-        if metadata.is_dir() {
-            directories.push(path.clone());
-            collect_managed_entries(&path, directories, files)?;
-        } else if metadata.is_file() {
-            files.push(path);
-        } else {
-            return Err(CliError::InsecureWorkingTree {
-                path,
-                reason: "Finite-managed path is neither a regular file nor a directory".to_owned(),
-            });
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    let mut entry_count = 0usize;
+    while let Some((current, depth)) = pending.pop() {
+        for entry in fs::read_dir(&current)? {
+            let path = entry?.path();
+            entry_count = entry_count.saturating_add(1);
+            enforce_managed_traversal_bounds(&path, depth, entry_count)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                reject_symlink_or_wrong_kind(&path, &metadata, true)?;
+                set_private_directory_permissions(&path)?;
+                directories.push(path.clone());
+                pending.push((path, depth + 1));
+            } else if metadata.is_file() {
+                reject_symlink_or_wrong_kind(&path, &metadata, false)?;
+                files.push(path);
+            } else if metadata.file_type().is_symlink() {
+                return Err(managed_symlink_error(&path));
+            } else {
+                return Err(CliError::InsecureWorkingTree {
+                    path,
+                    reason: "Finite-managed path is neither a regular file nor a directory"
+                        .to_owned(),
+                });
+            }
         }
     }
     Ok(())
 }
 
 fn validate_managed_entries(directory: &Path) -> Result<(), CliError> {
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(managed_symlink_error(&path));
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    let mut entry_count = 0usize;
+    while let Some((current, depth)) = pending.pop() {
+        for entry in fs::read_dir(&current)? {
+            let path = entry?.path();
+            entry_count = entry_count.saturating_add(1);
+            enforce_managed_traversal_bounds(&path, depth, entry_count)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                reject_symlink_or_wrong_kind(&path, &metadata, true)?;
+                validate_private_directory_metadata(&path, &metadata)?;
+                pending.push((path, depth + 1));
+            } else if metadata.is_file() {
+                validate_private_file(&path, &metadata)?;
+            } else if metadata.file_type().is_symlink() {
+                return Err(managed_symlink_error(&path));
+            } else {
+                return Err(CliError::InsecureWorkingTree {
+                    path,
+                    reason: "Finite-managed path is neither a regular file nor a directory"
+                        .to_owned(),
+                });
+            }
         }
-        if metadata.is_dir() {
-            validate_private_directory_metadata(&path, &metadata)?;
-            validate_managed_entries(&path)?;
-        } else if metadata.is_file() {
-            validate_private_file(&path, &metadata)?;
-        } else {
-            return Err(CliError::InsecureWorkingTree {
-                path,
-                reason: "Finite-managed path is neither a regular file nor a directory".to_owned(),
-            });
+    }
+    Ok(())
+}
+
+fn validate_managed_entry_structure(directory: &Path) -> Result<(), CliError> {
+    let mut pending = vec![(directory.to_path_buf(), 0usize)];
+    let mut entry_count = 0usize;
+    while let Some((current, depth)) = pending.pop() {
+        for entry in fs::read_dir(&current)? {
+            let path = entry?.path();
+            entry_count = entry_count.saturating_add(1);
+            enforce_managed_traversal_bounds(&path, depth, entry_count)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                reject_symlink_or_wrong_kind(&path, &metadata, true)?;
+                validate_owner_traversal_permission(&path, &metadata)?;
+                pending.push((path, depth + 1));
+            } else if metadata.is_file() {
+                reject_symlink_or_wrong_kind(&path, &metadata, false)?;
+                validate_owner_read_permission(&path, &metadata)?;
+            } else if metadata.file_type().is_symlink() {
+                return Err(managed_symlink_error(&path));
+            } else {
+                return Err(CliError::InsecureWorkingTree {
+                    path,
+                    reason: "Finite-managed path is neither a regular file nor a directory"
+                        .to_owned(),
+                });
+            }
         }
+    }
+    Ok(())
+}
+
+fn enforce_managed_traversal_bounds(
+    path: &Path,
+    parent_depth: usize,
+    entry_count: usize,
+) -> Result<(), CliError> {
+    if entry_count > MAX_MANAGED_ENTRY_COUNT {
+        return Err(CliError::InsecureWorkingTree {
+            path: path.to_path_buf(),
+            reason: format!(
+                "Finite-managed control state exceeds {MAX_MANAGED_ENTRY_COUNT} entries"
+            ),
+        });
+    }
+    if parent_depth >= MAX_MANAGED_DEPTH {
+        return Err(CliError::InsecureWorkingTree {
+            path: path.to_path_buf(),
+            reason: format!("Finite-managed control state exceeds depth {MAX_MANAGED_DEPTH}"),
+        });
     }
     Ok(())
 }
@@ -189,7 +288,7 @@ fn reject_symlink_or_wrong_kind(
             reason: format!("Finite-managed path must be a {expected_kind}"),
         });
     }
-    Ok(())
+    validate_current_owner(path, metadata)
 }
 
 fn managed_symlink_error(path: &Path) -> CliError {
@@ -208,9 +307,10 @@ fn validate_private_directory_metadata(
 
     let mode = metadata.permissions().mode() & 0o7777;
     if mode != 0o700 {
-        return Err(CliError::InsecureWorkingTree {
+        return Err(CliError::InsecureWorkingTreePermissions {
             path: path.to_path_buf(),
-            reason: format!("directory mode is {mode:04o}; expected 0700"),
+            actual_mode: mode,
+            expected_mode: 0o700,
         });
     }
     Ok(())
@@ -235,9 +335,10 @@ fn validate_private_file_permissions(path: &Path, metadata: &fs::Metadata) -> Re
 
     let mode = metadata.permissions().mode() & 0o7777;
     if mode != 0o600 {
-        return Err(CliError::InsecureWorkingTree {
+        return Err(CliError::InsecureWorkingTreePermissions {
             path: path.to_path_buf(),
-            reason: format!("control file mode is {mode:04o}; expected 0600"),
+            actual_mode: mode,
+            expected_mode: 0o600,
         });
     }
     Ok(())
@@ -248,6 +349,74 @@ fn validate_private_file_permissions(
     _path: &Path,
     _metadata: &fs::Metadata,
 ) -> Result<(), CliError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_current_owner(path: &Path, metadata: &fs::Metadata) -> Result<(), CliError> {
+    use std::os::unix::fs::MetadataExt;
+
+    validate_owner_ids(path, metadata.uid(), rustix::process::geteuid().as_raw())
+}
+
+#[cfg(unix)]
+fn validate_owner_ids(path: &Path, owner_uid: u32, effective_uid: u32) -> Result<(), CliError> {
+    if owner_uid != effective_uid {
+        return Err(CliError::InsecureWorkingTreeOwnership {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_current_owner(_path: &Path, _metadata: &fs::Metadata) -> Result<(), CliError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_owner_traversal_permission(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & 0o500 != 0o500 {
+        return Err(CliError::InsecureWorkingTreePermissions {
+            path: path.to_path_buf(),
+            actual_mode: mode,
+            expected_mode: 0o700,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_owner_traversal_permission(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+) -> Result<(), CliError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_owner_read_permission(path: &Path, metadata: &fs::Metadata) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & 0o400 == 0 {
+        return Err(CliError::InsecureWorkingTreePermissions {
+            path: path.to_path_buf(),
+            actual_mode: mode,
+            expected_mode: 0o600,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_owner_read_permission(_path: &Path, _metadata: &fs::Metadata) -> Result<(), CliError> {
     Ok(())
 }
 
@@ -359,6 +528,39 @@ fn write_atomic_platform(path: &Path, parent: &Path, body: &[u8]) -> Result<(), 
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn managed_control_traversal_rejects_excessive_depth() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("vault");
+        initialize_private_working_tree(&root).unwrap();
+        let mut directory = root.join(CONTROL_DIR_NAME);
+        for index in 0..=MAX_MANAGED_DEPTH {
+            directory = directory.join(format!("level-{index}"));
+            create_private_directory(&directory).unwrap();
+        }
+
+        let error = validate_private_working_tree(&root).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds depth"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_validation_rejects_a_different_effective_account() {
+        let error = validate_owner_ids(Path::new("/vault/.finitebrain"), 1000, 1001).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CliError::InsecureWorkingTreeOwnership { .. }
+        ));
+    }
 }
 
 #[cfg(not(unix))]
