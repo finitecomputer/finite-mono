@@ -587,8 +587,7 @@ function CoreProjectsPanel({
         <div>
           <h1 className="ocean-utility-card__title">Agent</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your agent and open its Hosted Web Device, with Electron and native Devices
-            joining the same Finite Chat room later.
+            Manage your agent and chat with it from your dashboard.
           </p>
         </div>
       </div>

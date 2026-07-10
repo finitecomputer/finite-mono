@@ -77,7 +77,7 @@ test("hostedDeviceHeaders rejects unverified or header-only identities", () => {
           source: "header",
         }
       ),
-    /verified WorkOS account/
+    /Sign in again/
   );
 });
 

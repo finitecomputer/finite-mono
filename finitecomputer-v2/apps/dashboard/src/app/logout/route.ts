@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
   if (!status.ready) {
     return NextResponse.json(
       {
-        error: "WorkOS auth is enabled but not configured",
+        error: "Sign out is temporarily unavailable",
         missing: status.missing,
       },
       { status: 503 },

@@ -145,7 +145,7 @@ export async function startBillingCheckoutAction() {
 export async function billingCheckoutDestination() {
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
-    throw new Error(billing.error ?? "A verified WorkOS account is required for billing.");
+    throw new Error(billing.error ?? "Sign in again to manage billing.");
   }
 
   const stripe = requireStripeClient();

@@ -14,7 +14,7 @@ export async function GET(
     const upstream = await streamHostedWebChat(machineId, request.signal);
     if (!upstream.ok || !upstream.body) {
       return Response.json(
-        { error: "Hosted Web Device update stream is unavailable." },
+        { error: "Chat updates are unavailable right now." },
         { status: upstream.status || 502 }
       );
     }

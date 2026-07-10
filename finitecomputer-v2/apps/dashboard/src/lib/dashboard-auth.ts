@@ -18,6 +18,8 @@ export type AccountAuthContext = {
   email: string | null;
   workosUserId: string | null;
   emailVerified: boolean;
+  /** Present only on the server; never pass this context to a client component. */
+  accessToken?: string;
   source: "workos" | "header" | "dev" | "none";
 };
 
@@ -92,6 +94,10 @@ export async function getAccountAuthContext(): Promise<AccountAuthContext> {
       email: normalizeEmail(auth.user?.email),
       workosUserId: auth.user?.id ?? null,
       emailVerified: auth.user?.emailVerified ?? false,
+      accessToken:
+        "accessToken" in auth && typeof auth.accessToken === "string"
+          ? auth.accessToken
+          : undefined,
       source: "workos",
     } satisfies AccountAuthContext;
 
@@ -157,6 +163,7 @@ export function accountFromWorkosSessionCookie(
     email: normalizeEmail(typeof user.email === "string" ? user.email : null),
     workosUserId: typeof user.id === "string" ? user.id : null,
     emailVerified: user.emailVerified === true,
+    accessToken: typeof workosSession.accessToken === "string" ? workosSession.accessToken : undefined,
     source: "workos",
   };
 }

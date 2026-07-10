@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { HostedWebChat } from "@/components/hosted-web-chat";
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
 export default async function HostedWebChatPage({
@@ -13,22 +13,15 @@ export default async function HostedWebChatPage({
 }) {
   const { machineId } = await params;
   const query = await searchParams;
-  const [access, account] = await Promise.all([
+  const [access, viewer] = await Promise.all([
     loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" }),
-    getAccountAuthContext(),
+    loadOptionalViewerContext(),
   ]);
   if (!access) {
     redirect("/dashboard");
   }
   return (
     <HostedWebChat
-      brainHref={productHref(
-        process.env.FC_ACCOUNT_BRAIN_URL,
-        process.env.FC_BRAIN_UPSTREAM_URL
-          ? `/dashboard/machines/${encodeURIComponent(access.machineId)}/brain`
-          : null,
-        access.machineId
-      )}
       connectionsHref={productHref(
         process.env.FC_ACCOUNT_CONNECTIONS_URL,
         `/dashboard/machines/${encodeURIComponent(access.machineId)}/connections`,
@@ -37,7 +30,8 @@ export default async function HostedWebChatPage({
       initialDraft={initialDraft(query.prompt)}
       machineId={access.machineId}
       machineLabel={access.displayName}
-      viewerEmail={account.email}
+      showSkills={viewer.isAdmin}
+      viewerEmail={viewer.email}
     />
   );
 }

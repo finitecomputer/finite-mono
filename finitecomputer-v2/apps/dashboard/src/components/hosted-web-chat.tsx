@@ -18,7 +18,6 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  BrainIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
@@ -37,7 +36,6 @@ import {
   RefreshCwIcon,
   RotateCcwIcon,
   Share2Icon,
-  SparklesIcon,
   WrenchIcon,
   XIcon,
   type LucideIcon,
@@ -71,6 +69,13 @@ import type {
   HostedChatTopic,
   HostedChatTypingMember,
 } from "@/lib/hosted-web-device";
+import {
+  initialHostedChatSnapshotSource,
+  nextHostedChatSnapshotGeneration,
+  recordHostedChatSnapshot,
+  shouldApplyHttpHostedChatSnapshot,
+  shouldApplyStreamHostedChatSnapshot,
+} from "@/lib/hosted-web-chat-snapshots";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const TYPING_IDLE_MS = 2_200;
@@ -98,18 +103,18 @@ type TranscriptItem =
   | { type: "tools"; id: string; messages: HostedChatMessage[] };
 
 export function HostedWebChat({
-  brainHref,
   connectionsHref,
   initialDraft,
   machineId,
   machineLabel,
+  showSkills,
   viewerEmail,
 }: {
-  brainHref?: string | null;
   connectionsHref?: string | null;
   initialDraft?: string;
   machineId: string;
   machineLabel: string;
+  showSkills: boolean;
   viewerEmail?: string | null;
 }) {
   const apiBase = `/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device`;
@@ -140,29 +145,42 @@ export function HostedWebChat({
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const markedReadSeqRef = useRef(new Map<string, number>());
+  const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   const hasState = state !== null;
 
+  const applyHttpSnapshot = useCallback((next: HostedChatState, requestGeneration: number) => {
+    const source = snapshotSourceRef.current;
+    if (!shouldApplyHttpHostedChatSnapshot(source, requestGeneration, next.rev)) {
+      return false;
+    }
+    snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
+    setState(next);
+    return true;
+  }, []);
+
   const load = useCallback(async () => {
+    const requestGeneration = snapshotSourceRef.current.generation;
     try {
       const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
-      setState(next);
+      applyHttpSnapshot(next, requestGeneration);
       setError(null);
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, [apiBase]);
+  }, [apiBase, applyHttpSnapshot]);
 
   const dispatch = useCallback(
     async (action: HostedChatAction) => {
+      const requestGeneration = snapshotSourceRef.current.generation;
       const next = await chatRequest<HostedChatState>(`${apiBase}/actions`, {
         method: "POST",
         body: JSON.stringify(action),
       });
-      setState(next);
+      applyHttpSnapshot(next, requestGeneration);
       return next;
     },
-    [apiBase]
+    [apiBase, applyHttpSnapshot]
   );
 
   const dispatchQuiet = useCallback(
@@ -194,9 +212,18 @@ export function HostedWebChat({
       }
       const nextEvents = new EventSource(`${apiBase}/updates`);
       events = nextEvents;
+      snapshotSourceRef.current = nextHostedChatSnapshotGeneration(snapshotSourceRef.current);
       const onState = (event: MessageEvent<string>) => {
         try {
           const next = JSON.parse(event.data) as HostedChatState;
+          if (events !== nextEvents) {
+            return;
+          }
+          const source = snapshotSourceRef.current;
+          if (!shouldApplyStreamHostedChatSnapshot(source, next.rev)) {
+            return;
+          }
+          snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
           setState(next);
           setError(null);
           setStreamConnected(true);
@@ -213,7 +240,7 @@ export function HostedWebChat({
         nextEvents.close();
         events = null;
         setStreamConnected(false);
-        setError((current) => current ?? "Reconnecting to your Hosted Web Device…");
+        setError((current) => current ?? "Reconnecting…");
         reconnectTimer = setTimeout(connect, STREAM_RECONNECT_DELAY_MS);
       });
     };
@@ -442,11 +469,12 @@ export function HostedWebChat({
         if (selectedChat) formData.set("chat_id", selectedChat.chat_id);
         formData.set("caption", text);
         for (const attachment of attachments) formData.append("files", attachment.file);
+        const requestGeneration = snapshotSourceRef.current.generation;
         next = await chatRequest<HostedChatState>(`${apiBase}/attachments`, {
           method: "POST",
           body: formData,
         });
-        setState(next);
+        applyHttpSnapshot(next, requestGeneration);
       } else {
         next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
@@ -596,7 +624,7 @@ export function HostedWebChat({
         selectedChat={selectedChat}
         liveMembers={state?.typing_members ?? []}
         connectionsHref={connectionsHref}
-        brainHref={brainHref}
+        showSkills={showSkills}
         onCreateChat={(topic) => void createChat(topic)}
         onCreateTopic={() => setCreateTopicOpen(true)}
         onOpenChat={(topic, chat) => void openChat(topic, chat)}
@@ -648,7 +676,6 @@ export function HostedWebChat({
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
             <ProductNavButton href={connectionsHref} icon={PlugIcon} label="Connections" />
-            <ProductNavButton href={brainHref} icon={BrainIcon} label="Brain" />
             {sites.length > 0 ? (
               <button
                 type="button"
@@ -679,9 +706,9 @@ export function HostedWebChat({
                   setShowLatest(!shouldFollowScrollRef.current);
                 }}
               >
-                {!state && !error ? <ChatLoading label="Opening your Hosted Web Device…" /> : null}
+                {!state && !error ? <ChatLoading label="Opening your chat…" /> : null}
                 {state && !selectedRoom ? (
-                  <EmptyChat title="Joining your agent" body="Your Hosted Web Device is joining the agent room." />
+                  <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
                 {selectedRoom && messages.length === 0 ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
@@ -906,7 +933,7 @@ export function HostedWebChat({
           <form className="finite-chat__rename-form" onSubmit={renameChat}>
             <DialogHeader>
               <DialogTitle>Rename chat</DialogTitle>
-              <DialogDescription>Hermes can suggest a title from the first exchange; your name always wins.</DialogDescription>
+              <DialogDescription>Choose a name that makes this chat easy to find later.</DialogDescription>
             </DialogHeader>
             <div className="finite-chat__rename-field">
               <label htmlFor="finite-chat-rename-title">Name</label>
@@ -930,7 +957,6 @@ export function HostedWebChat({
 }
 
 function ChatSidebar({
-  brainHref,
   collapsed,
   connectionsHref,
   isOpen,
@@ -945,10 +971,10 @@ function ChatSidebar({
   onToggleOpen,
   selectedChat,
   selectedTopic,
+  showSkills,
   topics,
   viewerEmail,
 }: {
-  brainHref?: string | null;
   collapsed: boolean;
   connectionsHref?: string | null;
   isOpen: boolean;
@@ -963,6 +989,7 @@ function ChatSidebar({
   onToggleOpen: () => void;
   selectedChat: HostedChatSummary | null;
   selectedTopic: HostedChatTopic | null;
+  showSkills: boolean;
   topics: HostedChatTopic[];
   viewerEmail?: string | null;
 }) {
@@ -1078,8 +1105,7 @@ function ChatSidebar({
             <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
             <AppMenuLink href={`/dashboard/machines/${encodeURIComponent(machineId)}`} icon={MonitorIcon} label="Agent" note="Status and recovery" />
             <AppMenuLink href={connectionsHref} icon={PlugIcon} label="Connections" note="Product access" />
-            <AppMenuLink href={brainHref} icon={BrainIcon} label="Brain" note="Knowledge and memory" />
-            <AppMenuLink href={`/dashboard/skills?machine=${encodeURIComponent(machineId)}`} icon={SparklesIcon} label="Skills" note="Managed capabilities" />
+            {showSkills ? <AppMenuLink href={`/dashboard/skills?machine=${encodeURIComponent(machineId)}`} icon={WrenchIcon} label="Skills" note="Managed capabilities" /> : null}
             <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
             <DropdownMenuItem asChild className="finite-chat__app-menu-item">
               <Link href="/logout"><LogOutIcon /><span><strong>Sign out</strong><small>End this session</small></span></Link>

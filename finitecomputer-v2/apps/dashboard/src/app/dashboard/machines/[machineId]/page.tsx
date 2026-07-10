@@ -10,11 +10,9 @@ import {
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
-import { CopyButton } from "@/components/copy-button";
 import { FormActionButton } from "@/components/form-action-button";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
-import { fetchRuntimeAgentNpub, truncateNpub } from "@/lib/agent-contact";
 import {
   loadDashboardMachineAccess,
   type DashboardMachineAccess,
@@ -51,20 +49,13 @@ export default async function MachineDetailPage({
     redirect("/");
   }
 
-  // The runtime origin is reached server-side only. Devices use the Agent
-  // Principal's npub for the one canonical MLS Add + Welcome flow.
-  const agentNpub = access.coreProject?.runtime
-    ? await fetchRuntimeAgentNpub(access.primaryUrl)
-    : null;
-  return <ImportedMachineOverview access={access} agentNpub={agentNpub} />;
+  return <ImportedMachineOverview access={access} />;
 }
 
 async function ImportedMachineOverview({
   access,
-  agentNpub,
 }: {
   access: DashboardMachineAccess;
-  agentNpub: string | null;
 }) {
   const overview = access.coreProject?.runtime
     ? coreRuntimeOverview(
@@ -121,36 +112,7 @@ async function ImportedMachineOverview({
           </div>
         </div>
       </section>
-
-      {agentNpub ? <AgentContactCard agentNpub={agentNpub} /> : null}
-
     </div>
-  );
-}
-
-function AgentContactCard({ agentNpub }: { agentNpub: string }) {
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <MessageSquareIcon className="size-5" />
-        </span>
-        <div>
-          <h2 className="ocean-utility-card__title">Agent address</h2>
-          <p className="text-sm text-muted-foreground">
-            Use this address to connect another Finite Chat app.
-          </p>
-        </div>
-      </div>
-      <div className="grid gap-3">
-        <div className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground">
-          {truncateNpub(agentNpub)}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <CopyButton value={agentNpub} label="Copy address" />
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -199,8 +161,8 @@ async function loadRelayOverview(
     if (!heartbeat?.lastSeenAt) {
       return {
         state: "missing",
-        label: "No relay heartbeat yet.",
-        description: "Chat relay has not checked in yet.",
+        label: "Still starting",
+        description: "Your agent is still starting.",
         lastSeenAt: null,
       };
     }
@@ -209,24 +171,24 @@ async function loadRelayOverview(
     if (!Number.isFinite(ageMs)) {
       return {
         state: "stale",
-        label: "Relay heartbeat timestamp is invalid.",
+        label: "Needs attention",
         description: "Machine status needs attention.",
         lastSeenAt: heartbeat.lastSeenAt,
       };
     }
 
-    const lastSeenLabel = `Relay last seen ${formatRelativeAge(ageMs)}.`;
+    const lastSeenLabel = `Your agent was last active ${formatRelativeAge(ageMs)}.`;
     return {
       state: ageMs <= RELAY_FRESH_MS ? "connected" : "stale",
       label: lastSeenLabel,
-      description: ageMs <= RELAY_FRESH_MS ? "Chat relay is connected." : lastSeenLabel,
+      description: ageMs <= RELAY_FRESH_MS ? "Your agent is online." : lastSeenLabel,
       lastSeenAt: heartbeat.lastSeenAt,
     };
-  } catch (error) {
+  } catch {
     return {
       state: "unavailable",
-      label: error instanceof Error ? error.message : "Relay status unavailable.",
-      description: "Machine status is unavailable.",
+      label: "Status unavailable",
+      description: "Your agent status is unavailable right now.",
       lastSeenAt: null,
     };
   }

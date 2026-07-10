@@ -33,6 +33,7 @@ test("WorkOS session cookie account fallback extracts a usable verified identity
       email: "paul@finite.vip",
       workosUserId: "user_123",
       emailVerified: true,
+      accessToken: unsignedJwt({ exp: 2_000 }),
       source: "workos",
     }
   );
@@ -72,6 +73,7 @@ test("WorkOS session cookie account fallback keeps unverified email state explic
       email: "paul@finite.vip",
       workosUserId: "user_123",
       emailVerified: false,
+      accessToken: unsignedJwt({ exp: 2_000 }),
       source: "workos",
     }
   );

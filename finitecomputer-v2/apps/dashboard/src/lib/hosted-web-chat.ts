@@ -6,11 +6,17 @@ import {
   hostedDeviceAttachment,
   hostedDeviceAttachments,
   hostedDeviceConfig,
+  hostedDeviceRuntimeCommand,
   hostedDeviceState,
   hostedDeviceUpdates,
   type HostedChatAction,
+  type HostedChatProfile,
   type HostedChatState,
+  type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
+
+const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
+const OWNER_CLAIM = "agent.owner.claim";
 
 export class HostedWebChatError extends Error {
   constructor(
@@ -26,12 +32,12 @@ export async function bootstrapHostedWebChat(machineId: string) {
   let state = await hostedDeviceState(context.config, context.account);
   state = await ensureRuntimeStarted(context, state);
 
-  if (!state.rooms.some((room) => room.is_agent_chat)) {
-    const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
-    if (agentNpub) {
-      state = await connectAgentProfile(context, state, agentNpub);
-    }
+  const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
+  if (!agentNpub) {
+    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
   }
+  state = await connectAgentProfile(context, state, agentNpub);
+  await claimAgentOwner(context, state, agentNpub);
 
   return state;
 }
@@ -73,7 +79,7 @@ export async function streamHostedWebChatAttachment(
 async function hostedWebChatContext(machineId: string) {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
-    throw new HostedWebChatError("A verified WorkOS account is required for web chat.", 401);
+    throw new HostedWebChatError("Sign in again to use chat.", 401);
   }
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) {
@@ -99,9 +105,7 @@ async function connectAgentProfile(
   state = await hostedDeviceAction(context.config, context.account, {
     ScanTarget: { value: agentNpub },
   });
-  const profile = state.profiles.find(
-    (candidate) => candidate.account_id === state.active_profile_id
-  );
+  const profile = profileForNpub(state, agentNpub);
   if (!profile) {
     return state;
   }
@@ -111,6 +115,42 @@ async function connectAgentProfile(
       display_name: `Chat with ${context.agentName}`,
     },
   });
+}
+
+async function claimAgentOwner(
+  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
+  state: HostedChatState,
+  agentNpub: string
+) {
+  const profile = profileForNpub(state, agentNpub);
+  const roomId = state.selected_room_id?.trim();
+  if (!profile || !roomId) {
+    throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
+  }
+  const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
+    room_id: roomId,
+    target_account_id: profile.account_id,
+    command: OWNER_CLAIM,
+    resource_key: "agent.connections",
+    schema: EMPTY_SCHEMA,
+    body: {},
+    wait_millis: 45_000,
+  });
+  assertCommandSucceeded(response);
+}
+
+function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile | null {
+  return state.profiles.find((profile) => profile.npub.toLowerCase() === npub.toLowerCase()) ?? null;
+}
+
+function assertCommandSucceeded(response: HostedRuntimeCommandResponse) {
+  if (response.status === "succeeded") {
+    return;
+  }
+  throw new HostedWebChatError(
+    response.error?.message || "Your chat is not ready yet. Try again shortly.",
+    response.error?.code === "unauthorized" ? 403 : 502
+  );
 }
 
 async function ensureRuntimeStarted(

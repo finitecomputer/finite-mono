@@ -217,7 +217,7 @@ export function hostedDeviceHeaders(
   contentType = false
 ) {
   if (!account.workosUserId || !account.emailVerified) {
-    throw new Error("A verified WorkOS account is required for web chat.");
+    throw new Error("Sign in again to use chat.");
   }
   const headers = new Headers({
     accept: "application/json",
@@ -363,5 +363,5 @@ async function responseError(response: Response) {
   } catch {
     // Preserve the bounded plain-text response below.
   }
-  return text.slice(0, 500) || `Hosted Web Device returned ${response.status}`;
+  return text.slice(0, 500) || "Chat is unavailable right now.";
 }

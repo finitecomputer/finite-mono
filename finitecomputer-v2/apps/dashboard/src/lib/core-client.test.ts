@@ -12,19 +12,17 @@ import {
   coreProjectPrimaryUrl,
   type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
-  loadCoreFinitePrivateAdminState,
   loadCoreSourceHostRelayEndpoint,
 } from "./core-client";
 
-test("coreBridgeStatus requires both Core URL and service token", () => {
+test("coreBridgeStatus requires the Core URL but not a service token for user routes", () => {
   assert.deepEqual(coreBridgeStatus({}), {
     configured: false,
-    missing: ["FC_CORE_BASE_URL", "FC_CORE_API_TOKEN"],
+    missing: ["FC_CORE_BASE_URL"],
   });
   assert.deepEqual(
     coreBridgeStatus({
       FC_CORE_BASE_URL: "http://127.0.0.1:4200",
-      FC_CORE_API_TOKEN: "secret",
     }),
     {
       configured: true,
@@ -33,23 +31,20 @@ test("coreBridgeStatus requires both Core URL and service token", () => {
   );
 });
 
-test("coreIdentityHeaders forwards only verified WorkOS account identity", () => {
+test("coreIdentityHeaders forwards the AuthKit bearer and no caller-supplied identity", () => {
   assert.deepEqual(
     coreIdentityHeaders(
       {
         email: "test@finite.vip",
         workosUserId: "user_123",
         emailVerified: true,
+        accessToken: "authkit-access-token",
         source: "workos",
-      },
-      "core-token"
+      }
     ),
     {
-      authorization: "Bearer core-token",
+      authorization: "Bearer authkit-access-token",
       "content-type": "application/json",
-      "x-finite-workos-user-id": "user_123",
-      "x-finite-workos-email": "test@finite.vip",
-      "x-finite-workos-email-verified": "true",
     }
   );
 
@@ -58,13 +53,12 @@ test("coreIdentityHeaders forwards only verified WorkOS account identity", () =>
       coreIdentityHeaders(
         {
           email: "test@finite.vip",
-          workosUserId: null,
-          emailVerified: false,
-          source: "dev",
-        },
-        "core-token"
+          workosUserId: "user_123",
+          emailVerified: true,
+          source: "workos",
+        }
       ),
-    /verified WorkOS account/
+    /Sign in again/
   );
 });
 
@@ -167,74 +161,6 @@ test("loadCoreSourceHostRelayEndpoint reads relay routing through service auth",
     assert.equal(requestedAuth, "Bearer core-token");
     assert.equal(endpoint?.url, "https://relay.smoke.finite.computer");
     assert.equal(endpoint?.admin_token, "smoke-token");
-  } finally {
-    if (previousBaseUrl === undefined) {
-      delete process.env.FC_CORE_BASE_URL;
-    } else {
-      process.env.FC_CORE_BASE_URL = previousBaseUrl;
-    }
-    if (previousToken === undefined) {
-      delete process.env.FC_CORE_API_TOKEN;
-    } else {
-      process.env.FC_CORE_API_TOKEN = previousToken;
-    }
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("loadCoreFinitePrivateAdminState reads grant and key status through service auth", async () => {
-  const previousBaseUrl = process.env.FC_CORE_BASE_URL;
-  const previousToken = process.env.FC_CORE_API_TOKEN;
-  const previousFetch = globalThis.fetch;
-  let requestedUrl: string | null = null;
-  let requestedAuth: string | null = null;
-
-  process.env.FC_CORE_BASE_URL = "https://core.example.com";
-  process.env.FC_CORE_API_TOKEN = "core-token";
-  globalThis.fetch = (async (input, init) => {
-    requestedUrl = String(input);
-    requestedAuth = new Headers(init?.headers).get("authorization");
-    return new Response(
-      JSON.stringify({
-        grants: [
-          {
-            id: "fp_grant_1",
-            user_id: "user_1",
-            limit_profile_id: "finite-private-generous",
-            status: "active",
-            current_window_started_at: null,
-            current_window_used_units: 42,
-            created_at: "2026-05-26T12:00:00Z",
-            updated_at: "2026-05-26T12:00:00Z",
-          },
-        ],
-        apiKeys: [
-          {
-            id: "fp_key_1",
-            grant_id: "fp_grant_1",
-            project_id: "project_1",
-            agent_runtime_id: "runtime_1",
-            key_hash: "hash-only",
-            status: "active",
-            created_at: "2026-05-26T12:00:00Z",
-            updated_at: "2026-05-26T12:00:00Z",
-          },
-        ],
-        adminAuditEvents: [],
-      }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
-  }) as typeof fetch;
-
-  try {
-    const result = await loadCoreFinitePrivateAdminState();
-    assert.equal(
-      requestedUrl,
-      "https://core.example.com/api/core/v1/finite-private/admin-state"
-    );
-    assert.equal(requestedAuth, "Bearer core-token");
-    assert.equal(result.state?.grants[0]?.current_window_used_units, 42);
-    assert.equal(result.state?.apiKeys[0]?.key_hash, "hash-only");
   } finally {
     if (previousBaseUrl === undefined) {
       delete process.env.FC_CORE_BASE_URL;
