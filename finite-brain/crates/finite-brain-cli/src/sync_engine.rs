@@ -43,8 +43,8 @@ pub(crate) fn run_working_tree_sync(
     activity_kind: &str,
 ) -> Result<SyncOnceReport, CliError> {
     let root = current_tree_root(env)?;
-    let prior_tree_state = read_working_tree_state(&root)?;
     let agent_state = read_agent_state(&root)?;
+    let prior_tree_state = read_working_tree_state(&root)?;
     let server_url = server_url_for_command(env, args)?;
     let auth = load_signer(env)?;
     let export = fetch_encrypted_export(env, &server_url, &agent_state.vault_id)?;

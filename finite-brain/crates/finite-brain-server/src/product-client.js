@@ -102,8 +102,6 @@ const FiniteBrainProductClient = (() => {
       "fbrain open \"$VAULT\" \"$TREE\" --server \"$SERVER\"",
       "cd \"$TREE\"",
       "fbrain sync now --summary",
-      "fbrain unlock --all",
-      "fbrain sync now --summary",
       "fbrain conflicts --json",
       "```",
       "",

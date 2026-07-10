@@ -5,8 +5,9 @@ humans and agents.
 
 If a human asks you to work in a FiniteBrain vault, use the `fbrain` CLI. A
 Vault Working Tree is the editable local source of truth for an agent: sync
-first, unlock readable Folders, edit ordinary markdown, then sync encrypted
-changes back.
+first, edit ordinary markdown in readable Folders, then sync encrypted changes
+back. Each key-using operation reopens encrypted Folder Key Grants in memory;
+there is no durable CLI unlock state.
 
 The current hosted smoke service is `https://brain.smoke.finite.computer`.
 Use `https://brain.smoke.finite.computer/client` for the Product Client.
@@ -138,8 +139,6 @@ cd "$HOME/finitebrain/<vault-id>"
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" doctor
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" repair # only when doctor reports an insecure boundary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
-fbrain --config-dir "$FBRAIN_CONFIG_DIR" unlock --all
-fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" conflicts --json
 ```
 
@@ -151,6 +150,13 @@ Finite-managed `.finitebrain/` state; it never recursively changes member
 content. Removing a Working Tree is an ordinary filesystem deletion and makes
 no secure-erasure promise for device storage, backups, snapshots, or prior
 copies.
+
+The first current `fbrain` command that reads legacy v1 Agent State atomically
+rewrites it as v2 without `localFolderKeys` or `unlockedFolders` before
+continuing. Replacing the active file removes those values from the current
+state only; it is not secure erasure from backups, snapshots, filesystem
+history, or prior copies. Encrypted grants and recovery artifacts remain the
+authority for reopening access.
 
 Before editing, read the Vault Working Tree's `AGENTS.md`, `HUMANS.md`,
 Folder-local `_index.md`, `config.md`, and `log.md` files when present.

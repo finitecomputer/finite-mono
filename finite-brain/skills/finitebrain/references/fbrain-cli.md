@@ -20,13 +20,13 @@ loopback IPs.
 
 ```sh
 fbrain [--config-dir <path>] doctor
+fbrain repair
 fbrain auth status|import [--file <path>]
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
 fbrain open <vault-id> [path]
 fbrain status [--json]
-fbrain unlock [folder|--all]
 fbrain conflicts
 fbrain resolve <id>
 fbrain activity
@@ -77,8 +77,6 @@ cd <tree-path>
 fbrain status --json
 fbrain sync status --json
 fbrain sync now --summary
-fbrain unlock --all
-fbrain sync now --summary
 fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
@@ -95,18 +93,18 @@ Useful `sync now --json` fields include `status`, `latestSequence`,
 values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, and
 `blocked-local-conflicts`.
 
-## Unlocking Folder Keys
+## Operation-Scoped Folder Keys
 
-```sh
-fbrain unlock --all
-fbrain unlock <folder-id>
-fbrain unlock --all --json
-```
+`sync`, daemon, sharing, and access-administration operations reopen the
+encrypted Folder Key Grants they need through the acting Member Identity's
+signer and retain raw keys only in memory for that operation. The legacy
+`fbrain unlock` command is removed and exits unsuccessfully with guidance to
+run `fbrain sync now`.
 
-`unlock` opens readable Folder Keys into local session state. After opening a
-fresh Vault Working Tree, run `sync now --summary`, `unlock --all`, then
-`sync now --summary` again so newly readable Folders are materialized before
-editing. Use a specific Folder id when you only need one Folder opened.
+Existing v1 Agent State is atomically migrated before protected work continues:
+`localFolderKeys` and `unlockedFolders` are removed and the state becomes v2.
+This scrub is not secure erasure from backups, snapshots, filesystem history,
+or prior copies.
 
 ## Daemon Watch
 

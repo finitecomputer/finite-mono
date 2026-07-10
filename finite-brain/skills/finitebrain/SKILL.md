@@ -1,14 +1,15 @@
 ---
 name: finitebrain
-description: FiniteBrain vault and LLM wiki operations through ordinary file edits plus the fbrain CLI control plane. Use when setting up or acting as a FiniteBrain agent participant; opening, syncing, unlocking, or editing Vault Working Trees; building, ingesting, querying, linting, or maintaining LLM wiki content inside readable folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing vault, folder, permission, invitation, and share-link admin flows.
+description: FiniteBrain vault and LLM wiki operations through ordinary file edits plus the fbrain CLI control plane. Use when setting up or acting as a FiniteBrain agent participant; opening, syncing, or editing Vault Working Trees; building, ingesting, querying, linting, or maintaining LLM wiki content inside readable folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing vault, folder, permission, invitation, and share-link admin flows.
 ---
 
 # FiniteBrain
 
 Use `fbrain` as the control plane and the Vault Working Tree as the content
 surface. The repeatable loop is: verify identity, open or enter the tree, sync,
-unlock readable Folders, edit wiki content and source assets with ordinary file
-tools, sync, and prove conflicts are empty.
+edit wiki content and source assets in readable Folders with ordinary file
+tools, sync, and prove conflicts are empty. Key-using operations reopen grants
+into memory for that operation; the CLI has no durable unlock state.
 
 ## Quick Start
 
@@ -30,8 +31,6 @@ fbrain --config-dir "$FBRAIN_CONFIG" auth status --json
 fbrain --config-dir "$FBRAIN_CONFIG" open "$VAULT" "$TREE" --server "$SERVER"
 cd "$TREE"
 fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
-fbrain --config-dir "$FBRAIN_CONFIG" unlock --all
-fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG" conflicts --json
 ```
 
@@ -45,11 +44,11 @@ fbrain -- <args>` may be the available entrypoint.
 1. Verify runtime state with `doctor`, `auth status --json`, and `status --json`.
    Completion: acting identity, working tree path, server source, daemon state,
    sync state, and blockers are known.
-2. Sync before reading broadly: run `sync now --summary`, then `unlock --all`,
-   then `sync now --summary` again. Finish with `conflicts --json`.
-   Completion: latest sequence is recorded, readable Folder Keys are opened in
-   local session state, newly readable Folders are materialized, and open
-   conflicts are either empty or named.
+2. Sync before reading broadly with `sync now --summary`, then finish with
+   `conflicts --json`.
+   Completion: latest sequence is recorded, encrypted grants were reopened for
+   that sync operation, readable Folders are materialized, and open conflicts
+   are either empty or named.
 3. Orient before editing: identify the target Folder scope, then read its
    `AGENTS.md`, `HUMANS.md`, `config.md` or `SCHEMA.md`, `_index.md` or
    `index.md`, recent `log.md`, and relevant wiki pages. Search that Folder
