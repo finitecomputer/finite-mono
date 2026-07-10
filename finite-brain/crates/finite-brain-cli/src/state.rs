@@ -67,7 +67,6 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
                 status: "no-working-tree".to_owned(),
                 latest_sequence: 0,
             },
-            unlocked_folders: Vec::new(),
             conflicts: Vec::new(),
             blocked: vec!["no Vault Working Tree found".to_owned()],
         });
@@ -103,7 +102,6 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
             status: state.sync.status,
             latest_sequence: tree_state.sync.latest_sequence,
         },
-        unlocked_folders: state.unlocked_folders,
         conflicts: open_conflicts,
         blocked,
     })
@@ -197,12 +195,43 @@ pub(crate) fn find_agent_state(start: &Path) -> Result<Option<PathBuf>, CliError
 
 pub(crate) fn read_agent_state(root: &Path) -> Result<AgentState, CliError> {
     validate_private_working_tree(root)?;
-    read_json_file(&root.join(".finitebrain/agent-state.json"))
+    let path = root.join(".finitebrain/agent-state.json");
+    let mut body = String::new();
+    fs::File::open(&path)?.read_to_string(&mut body)?;
+    let mut value: serde_json::Value = serde_json::from_str(&body)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| CliError::InvalidInput("Agent State must be a JSON object".to_owned()))?;
+    let version = object
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let contains_legacy_state =
+        object.contains_key("localFolderKeys") || object.contains_key("unlockedFolders");
+    let needs_hard_migration =
+        version.as_deref() == Some("finitebrain-agent-state-v1") || contains_legacy_state;
+    if needs_hard_migration {
+        object.remove("localFolderKeys");
+        object.remove("unlockedFolders");
+        object.insert(
+            "version".to_owned(),
+            serde_json::Value::String(crate::AGENT_STATE_VERSION.to_owned()),
+        );
+        write_json_file(&path, &value)?;
+    } else if version.as_deref() != Some(crate::AGENT_STATE_VERSION) {
+        return Err(CliError::Unsupported(format!(
+            "Agent State version {}",
+            version.as_deref().unwrap_or("missing")
+        )));
+    }
+    serde_json::from_value(value).map_err(CliError::from)
 }
 
 pub(crate) fn write_agent_state(root: &Path, state: &AgentState) -> Result<(), CliError> {
     validate_private_working_tree(root)?;
-    write_json_file(&root.join(".finitebrain/agent-state.json"), state)
+    let mut current = state.clone();
+    current.version = crate::AGENT_STATE_VERSION.to_owned();
+    write_json_file(&root.join(".finitebrain/agent-state.json"), &current)
 }
 
 pub(crate) fn read_working_tree_state(

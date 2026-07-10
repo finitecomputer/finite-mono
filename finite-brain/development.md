@@ -111,7 +111,6 @@ fbrain auth status --json
 fbrain open <vault-id> ./vault-tree
 cd ./vault-tree
 fbrain sync now --summary
-fbrain unlock --all
 fbrain conflicts --json
 fbrain status --json
 fbrain activity

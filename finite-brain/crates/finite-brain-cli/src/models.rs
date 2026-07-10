@@ -16,10 +16,6 @@ pub(crate) struct AgentState {
     pub(crate) auth_npub: Option<String>,
     pub(crate) daemon: DaemonState,
     pub(crate) sync: AgentSyncState,
-    #[serde(default)]
-    pub(crate) unlocked_folders: Vec<UnlockedFolder>,
-    #[serde(default)]
-    pub(crate) local_folder_keys: Vec<LocalFolderKey>,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) activity: Vec<ActivityEntry>,
     pub(crate) created_at: String,
@@ -48,8 +44,6 @@ impl AgentState {
                 mode: "automatic".to_owned(),
                 status: "idle".to_owned(),
             },
-            unlocked_folders: Vec::new(),
-            local_folder_keys: Vec::new(),
             conflicts: Vec::new(),
             activity: Vec::new(),
             created_at: now.to_owned(),
@@ -131,29 +125,6 @@ impl fmt::Display for DaemonRunState {
 pub(crate) struct AgentSyncState {
     pub(crate) mode: String,
     pub(crate) status: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnlockedFolder {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_id: Option<String>,
-    pub folder_id: String,
-    pub key_version: u32,
-    pub opened_at: String,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LocalFolderKey {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) vault_id: Option<String>,
-    pub(crate) folder_id: String,
-    pub(crate) key_version: u32,
-    pub(crate) key_base64: String,
-    pub(crate) source: String,
-    pub(crate) opened_at: String,
 }
 
 #[derive(Default)]
@@ -294,7 +265,6 @@ pub(crate) struct StatusReport {
     pub(crate) auth: AuthStatus,
     pub(crate) daemon: DaemonStatus,
     pub(crate) sync: SyncStatus,
-    pub(crate) unlocked_folders: Vec<UnlockedFolder>,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) blocked: Vec<String>,
 }

@@ -16,7 +16,7 @@ mod working_tree_security;
 
 pub use environment::CliEnvironment;
 pub use error::CliError;
-pub use models::{ActivityEntry, ConflictEntry, ConflictState, UnlockedFolder};
+pub use models::{ActivityEntry, ConflictEntry, ConflictState};
 
 pub(crate) use admin::*;
 pub(crate) use args::*;
@@ -49,7 +49,7 @@ use finite_nostr::{NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, wr
 use nostr::{Keys, Kind};
 use sha2::{Digest, Sha256};
 
-pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v1";
+pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
 pub(crate) const VAULT_DIRECTORY_VERSION: &str = "finite-vault-directory-v1";
 pub(crate) const WORKING_TREE_STATE_VERSION: &str = "finite-vault-working-tree-state-v1";
 pub(crate) const APP_SPECIFIC_KIND: u16 = 30_078;
@@ -123,7 +123,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nunlock [folder|--all]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -1039,74 +1039,24 @@ fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<
             "Sync: {} ({})",
             report.sync.mode, report.sync.status
         )?;
-        writeln!(
-            output,
-            "Unlocked Folders: {}",
-            report.unlocked_folders.len()
-        )?;
         writeln!(output, "Conflicts: {}", report.conflicts.len())?;
         Ok(())
     }
 }
 
 fn unlock<W: Write>(
-    args: &[String],
+    _args: &[String],
     env: &CliEnvironment,
-    json: bool,
-    output: &mut W,
+    _json: bool,
+    _output: &mut W,
 ) -> Result<(), CliError> {
-    let all = args.iter().any(|arg| arg == "--all");
-    let target = args.iter().find(|arg| !arg.starts_with("--")).cloned();
-    let root = current_tree_root(env)?;
-    let tree = read_working_tree_state(&root)?;
-    let mut opened = Vec::new();
-    mutate_agent_state(env, |state, now| {
-        let mut known = state
-            .unlocked_folders
-            .iter()
-            .map(|folder| folder.folder_id.clone())
-            .collect::<BTreeSet<_>>();
-        let candidates = if all {
-            tree.folder_roots
-                .iter()
-                .filter(|root| root.can_read)
-                .map(|root| root.folder_id.clone())
-                .collect::<Vec<_>>()
-        } else {
-            vec![
-                target
-                    .clone()
-                    .ok_or(CliError::MissingArgument("folder or --all"))?,
-            ]
-        };
-        for folder_id in candidates {
-            if known.insert(folder_id.clone()) {
-                state.unlocked_folders.push(UnlockedFolder {
-                    vault_id: Some(state.vault_id.clone()),
-                    folder_id: folder_id.clone(),
-                    key_version: 1,
-                    opened_at: now.clone(),
-                    source: "prototype-local-signer".to_owned(),
-                });
-                opened.push(folder_id);
-            }
-        }
-        state.add_activity(
-            now,
-            "folder_keys.opened",
-            "Folder Keys opened in local session",
-        );
-        Ok(())
-    })?;
-    if json {
-        write_json(output, &serde_json::json!({ "opened": opened }))
-    } else if opened.is_empty() {
-        writeln!(output, "no new Folder Keys opened")?;
-        Ok(())
-    } else {
-        writeln!(output, "opened {}", opened.join(", "))?;
-        Ok(())
+    if let Some(root) = find_agent_state(&env.cwd)? {
+        read_agent_state(&root)?;
     }
+    Err(CliError::Unsupported(
+        "fbrain unlock was removed; run `fbrain sync now` to reopen encrypted Folder Key Grants for that operation"
+            .to_owned(),
+    ))
 }
 
 fn conflicts<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<(), CliError> {
@@ -4032,6 +3982,96 @@ mod tests {
     }
 
     #[test]
+    fn legacy_agent_state_is_scrubbed_and_restored_legacy_state_is_scrubbed_again() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let raw_folder_key = FolderKey::from_bytes([99; 32]).to_base64();
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
+        legacy["localFolderKeys"] = serde_json::json!([{
+            "vaultId": "vault",
+            "folderId": "general",
+            "keyVersion": 1,
+            "keyBase64": raw_folder_key,
+            "source": "legacy-test",
+            "openedAt": "2026-06-24T20:46:36Z"
+        }]);
+        legacy["unlockedFolders"] = serde_json::json!([{
+            "vaultId": "vault",
+            "folderId": "general",
+            "keyVersion": 1,
+            "source": "legacy-test",
+            "openedAt": "2026-06-24T20:46:36Z"
+        }]);
+        write_json_file(&state_path, &legacy).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let mut status_output = Vec::new();
+        run_with_env(["status", "--json"], env.clone(), &mut status_output).unwrap();
+        let status: Value = serde_json::from_slice(&status_output).unwrap();
+        assert!(status.get("unlockedFolders").is_none());
+        let migrated_body = fs::read_to_string(&state_path).unwrap();
+        let migrated: Value = serde_json::from_str(&migrated_body).unwrap();
+        assert_eq!(migrated["version"], "finitebrain-agent-state-v2");
+        assert!(migrated.get("localFolderKeys").is_none());
+        assert!(migrated.get("unlockedFolders").is_none());
+        assert!(!migrated_body.contains(&raw_folder_key));
+
+        let mut human_status = Vec::new();
+        run_with_env(["status"], env.clone(), &mut human_status).unwrap();
+        assert!(
+            !String::from_utf8(human_status)
+                .unwrap()
+                .contains("Unlocked Folders")
+        );
+
+        write_json_file(&state_path, &legacy).unwrap();
+        run_with_env(["conflicts", "--json"], env, &mut Vec::new()).unwrap();
+        let remigrated_body = fs::read_to_string(state_path).unwrap();
+        assert!(!remigrated_body.contains(&raw_folder_key));
+        assert!(!remigrated_body.contains("localFolderKeys"));
+        assert!(!remigrated_body.contains("unlockedFolders"));
+    }
+
+    #[test]
+    fn removed_unlock_fails_with_sync_guidance_after_scrubbing_legacy_state() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let raw_folder_key = FolderKey::from_bytes([100; 32]).to_base64();
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
+        legacy["localFolderKeys"] = serde_json::json!([{
+            "folderId": "general",
+            "keyVersion": 1,
+            "keyBase64": raw_folder_key,
+            "source": "legacy-test",
+            "openedAt": "2026-06-24T20:46:36Z"
+        }]);
+        legacy["unlockedFolders"] = serde_json::json!([]);
+        write_json_file(&state_path, &legacy).unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let error = run_with_env(["unlock", "--all"], env, &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("fbrain unlock was removed"));
+        assert!(error.contains("fbrain sync now"));
+        let migrated_body = fs::read_to_string(state_path).unwrap();
+        assert!(!migrated_body.contains(&raw_folder_key));
+        assert!(!migrated_body.contains("localFolderKeys"));
+        assert!(!migrated_body.contains("unlockedFolders"));
+    }
+
+    #[test]
     fn grant_folder_opens_session_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
         let secret = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -4163,6 +4203,19 @@ mod tests {
         let tree = tmp.path().join("vault");
         initialize_private_working_tree(&tree).unwrap();
         write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
+        legacy["localFolderKeys"] = serde_json::json!([{
+            "folderId": "general",
+            "keyVersion": 1,
+            "keyBase64": folder_key.to_base64(),
+            "source": "legacy-test",
+            "openedAt": "2026-06-24T20:46:36Z"
+        }]);
+        legacy["unlockedFolders"] = serde_json::json!([]);
+        write_json_file(&state_path, &legacy).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
             &VaultWorkingTreeStateManifest {
@@ -4191,11 +4244,10 @@ mod tests {
         assert!(error.contains("encrypted Folder Key Grant"));
         assert!(error.contains("local signer"));
         assert!(!error.contains("not-a-nostr-event"));
-        assert!(
-            !fs::read_to_string(tree.join(".finitebrain/agent-state.json"))
-                .unwrap()
-                .contains(&folder_key.to_base64())
-        );
+        let migrated_body = fs::read_to_string(state_path).unwrap();
+        assert!(!migrated_body.contains(&folder_key.to_base64()));
+        assert!(!migrated_body.contains("localFolderKeys"));
+        assert!(!migrated_body.contains("unlockedFolders"));
         assert_eq!(server.join().unwrap().len(), 1);
     }
 
@@ -4850,7 +4902,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_unlock_conflicts_activity_and_access_commands_use_agent_state() {
+    fn daemon_conflicts_activity_and_access_commands_use_agent_state() {
         let tmp = TempDir::new().unwrap();
         let tree = tmp.path().join("vault");
         run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
@@ -4887,11 +4939,6 @@ mod tests {
         run_with_env(["daemon", "start", "--json"], env.clone(), &mut output).unwrap();
         let json: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(json["state"], "running");
-
-        let mut output = Vec::new();
-        run_with_env(["unlock", "--all", "--json"], env.clone(), &mut output).unwrap();
-        let json: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["opened"][0], "general");
 
         let mut state = read_agent_state(&tree).unwrap();
         state.conflicts.push(ConflictEntry {
