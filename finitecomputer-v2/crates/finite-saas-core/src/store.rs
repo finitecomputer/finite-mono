@@ -6715,7 +6715,18 @@ mod tests {
                 .batch_execute(crate::RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL)
                 .await
                 .unwrap_err();
-            assert!(active_error.to_string().contains("active upgrade requests"));
+            let db_error = active_error
+                .as_db_error()
+                .expect("rollback rescue refusal must be a PostgreSQL error");
+            assert_eq!(
+                db_error.code(),
+                &tokio_postgres::error::SqlState::RAISE_EXCEPTION
+            );
+            assert_eq!(
+                db_error.message(),
+                "runtime upgrade rollback rescue refused: active upgrade requests still exist"
+            );
+            raw.batch_execute("ROLLBACK").await.unwrap();
             assert_eq!(
                 raw.query_one(
                     "SELECT kind FROM runtime_control_requests WHERE id = 'rescue-request'",
