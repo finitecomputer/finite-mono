@@ -151,19 +151,22 @@ not publish or canonize them.
 
 ### Current production preflight (2026-07-10T19:03Z)
 
-**Blocked; this is not Kata readiness proof.** Read-only inspection found the
-`finite-lat-1` runner timer enabled and active, with its last service exit
-`0`. It is configured for `finite-agent-runtime-2026-07-10.5`, a maximum of
-12 Runtimes with 2 active, and 4 CPU / 8G per Runtime; the observed launch
-shape has two read-write host binds at `/data`. The selected `.5` artifact
-returned `503` from both `/healthz` and `/contact`, while the older `.2`
-artifact returned `200`; `finite-agentd` reported `bridge status stream_error`
-after its Finite Chat inbound stream ended. In addition, the live environment
-contains only `FC_CORE_API_TOKEN`, not the required
-`FC_CORE_RUNNER_API_TOKEN`. Do not launch the production canary or treat the
-timer, capacity, artifact selection, or bind configuration as end-to-end
-success until the route-scoped credential is deployed and the selected artifact
-is ready. No live mutation was made during this preflight.
+**Ready for the authorized fixed-artifact rollout; this is not Kata readiness
+proof.** Read-only inspection found the `finite-lat-1` runner timer enabled and
+active, a maximum of 12 Runtimes with 2 active, and 4 CPU / 8G per Runtime; the
+observed launch shape has two read-write host binds at `/data`. The selected
+`.5` artifact returned `503` because one pending attachment carried a historical
+Chat-server loopback blob URL into the Kata guest, where it ended the Hermes
+inbound stream. The canonical public blob exists. The repository already makes
+the Chat server write its public origin and makes the Runtime reroute historical
+loopback blob paths through its trusted server origin before verifying the
+encrypted bytes. Publish and promote a fresh post-fix artifact and prove it
+with the canary's fresh launch; the old `.5` guest need not be repaired first.
+The live environment also contains only `FC_CORE_API_TOKEN`, not the required
+`FC_CORE_RUNNER_API_TOKEN`. Do not treat the timer, capacity, artifact
+selection, or bind configuration as end-to-end success until the route-scoped
+credential and fixed artifact are deployed. No live mutation was made during
+this preflight.
 
 Core issues a runtime-scoped Finite Private key and the runner gives that key
 only to the new runtime at launch. Later inference changes are explicit typed

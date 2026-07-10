@@ -54,37 +54,40 @@ Finite Private limits exist to interrupt a runaway agent loop, not to meter cust
 
 The currently deployed legacy-built limiter already generates a fresh accounting request id for every upstream attempt. The mono-built replacement regressed by trusting caller-supplied `x-request-id`, which permits reservation reuse. Do not deploy the recorded mono limiter digest until the existing live behavior and its duplicate-client-id regression test are ported: generate the accounting id inside the limiter for every accepted attempt and use it only for that attempt's reserve/settle pair. No Core fingerprinting system or broader metering redesign is required for this fix.
 
-**Status: PARTIALLY VERIFIED — live denial proof remains blocked.** At
+**Status: COMPLETE — retain the deployed limiter unchanged.** At
 2026-07-10T20:21Z, a read-only query of the production Core database found the
 only profile used by active grants (`finite-private-generous`, 56 active
 grants) has a finite 18,000-second burst window and 50,000,000-unit burst cap;
 its deployed weekly cap is unset. The deployed limiter reported ready with its
 authenticated usage-API check returning `200`, and the Core access log showed
-active reserve/settle traffic. No retained log includes a denial response body,
-and denied decisions intentionally create no reservation row, so the required
-production over-limit denial-before-upstream assertion cannot be established
-through a read-only query. Proving it requires an authorized live reservation
-attempt plus upstream-call correlation; none was made during this run.
+active reserve/settle traffic. Paul confirmed the working deployed limiter is
+accepted for this internal canary, so no synthetic production denial attempt,
+policy change, image rollout, or additional limiter work is required. The
+mono replacement remains guarded by the duplicate-caller-request-id regression
+test and its fresh per-attempt accounting id fix; that image was not deployed
+by this run.
 
 ### P0 — verify the production Kata Runner path
 
 The product contract and dashboard policy select Kata for production, and the Nix module defines an enabled Kata Runner timer, while `infra/README.md` still calls the Runner dormant because of an older Phala/Enclavia path. Before creating the canary request, verify the live Kata timer, route-scoped Core credential, capacity, promoted Runtime artifact, durable-volume binding, and readiness path. Reconcile the operational docs from that evidence. Do not add provider selection UI or use the canary to finish Phala.
 
-**Status: BLOCKED — do not create the canary request.** Read-only production
-preflight at 2026-07-10T19:03Z found `finite-saas-runner.timer` enabled and
-active on `finite-lat-1`, with its last service exit `0`. Its configured Kata
-lane selects `finite-agent-runtime-2026-07-10.5`, capacity is 12 total / 2
-active at 4 CPU and 8G per Runtime, and the observed launch shape has two
-read-write host binds at `/data`. This is configuration evidence, not product
-readiness evidence: artifact `.5` returned `503` from both `/healthz` and
-`/contact`; `finite-agentd` reported `bridge status stream_error` because the
-Finite Chat inbound stream ended. The older `.2` artifact returned `200` for
-those endpoints. The live runner environment also has only the shared
-`FC_CORE_API_TOKEN`; the required route-scoped `FC_CORE_RUNNER_API_TOKEN` is
-not deployed. No production state was changed. The Kata launch, contact,
-two-way-turn, and restart-preservation checks remain unverified until a
-route-scoped Runner credential is deployed and the selected artifact reaches
-readiness.
+**Status: READY TO SHIP, pending the authorized production rollout.** Read-only
+production inspection found `finite-saas-runner.timer` enabled and active on
+`finite-lat-1`, capacity of 12 total / 2 active Runtimes at 4 CPU and 8G each,
+and the expected two read-write `/data` binds. The `.5` failure is not a Kata or
+runtime-binary regression: its pending chat attachment contains a historical
+`http://127.0.0.1:8788/blobs/...` reference, which points back at the Kata guest
+and ends the Hermes inbound stream. The same encrypted blob is available from
+the canonical `https://chat.finite.computer/blobs/...` origin. The repository
+already makes the Chat server emit canonical public blob URLs and makes the
+Runtime safely reroute historical loopback blob references through its trusted
+Chat server before cryptographic verification. Publish and promote a fresh
+post-fix Runtime, deploy the Chat-server configuration, and use a fresh Kata
+launch for this canary; repairing the old `.5` guest is not a prerequisite.
+The live Runner also still needs its distinct `FC_CORE_RUNNER_API_TOKEN`. No
+production state was changed during diagnosis, and the launch, contact,
+two-way-turn, and restart-preservation checks remain unverified until that
+authorized rollout.
 
 ### P1 — keep dashboard chat state coherent under real latency
 
