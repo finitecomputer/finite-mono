@@ -690,11 +690,31 @@ mod tests {
     use super::*;
     use axum::extract::{Path, State};
     use finite_saas_core::api::router as core_router;
+    use finite_saas_core::auth::{CoreAuth, WorkosAuthenticator, WorkosAuthenticatorConfig};
     use finite_saas_core::store::CoreStore;
     use finite_saas_core::{ApproveFinitePrivateGrantInput, IssueFinitePrivateApiKeyInput};
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tokio::net::TcpListener;
+
+    fn test_core_auth() -> CoreAuth {
+        let workos = WorkosAuthenticator::new(WorkosAuthenticatorConfig {
+            client_id: "client_limiter_test".to_string(),
+            issuer: "https://identity.limiter.invalid".to_string(),
+            operator_org_id: "org_limiter_operator".to_string(),
+            api_key: "limiter-test-workos-key".to_string(),
+            api_base_url: "https://identity.limiter.invalid".to_string(),
+            jwks_url: "https://identity.limiter.invalid/jwks".to_string(),
+        })
+        .unwrap();
+        CoreAuth::new(
+            workos,
+            "core-service-token",
+            "core-runner-token",
+            "core-token",
+        )
+        .unwrap()
+    }
 
     #[tokio::test]
     async fn limiter_reserves_proxies_settles_and_denies_before_upstream() {
@@ -718,7 +738,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let core_url = spawn(core_router(core_store, "core-token")).await;
+        let core_url = spawn(core_router(core_store, test_core_auth())).await;
 
         #[derive(Clone)]
         struct FakeUpstreamState {
@@ -828,7 +848,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let core_url = spawn(core_router(core_store, "core-token")).await;
+        let core_url = spawn(core_router(core_store, test_core_auth())).await;
 
         #[derive(Clone)]
         struct FakeStreamingUpstreamState {

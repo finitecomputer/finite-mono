@@ -240,7 +240,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       });
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").fill("off2026");
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
@@ -249,7 +249,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       );
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Oslo Bot");
-      assert.equal(post.launchCode, "off2026");
+      assert.equal(post.launchCode, "fixture-launch-code");
       assert.equal(post.runnerClass, "apple_container");
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
@@ -266,7 +266,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Double Submit Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").fill("off2026");
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
@@ -369,7 +369,8 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         async () => `agent navigation did not hydrate from Core\n${await pageText(page)}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
+      assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
+      assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
       await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
 
       const machineSwitcher = page.getByRole("button", {
@@ -386,7 +387,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       assert.equal(await page.getByText("Completed Oslo Bot", { exact: true }).count(), 0);
       await page.getByLabel("Agent name").fill("Second Oslo Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").waitFor({ state: "visible" });
+      await page.getByLabel("Launch Code").waitFor({ state: "visible" });
 
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
@@ -414,11 +415,28 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         .getByRole("button", { name: "New chat", exact: true })
         .waitFor({ state: "visible" });
       await expectVisibleText(page, "browser@finite.vip");
+      assert(
+        hostedDevice.state.runtimeCommands.some(
+          (command) => command.command === "agent.owner.claim"
+        ),
+        "Chat became usable before the owner claim succeeded"
+      );
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
       await page.getByRole("link", { name: "Connections" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
       await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
       await expectVisibleText(page, "Google Workspace");
+      const ownerClaimIndex = hostedDevice.state.runtimeCommands.findIndex(
+        (command) => command.command === "agent.owner.claim"
+      );
+      const connectionsStatusIndex = hostedDevice.state.runtimeCommands.findIndex(
+        (command) => command.command === "agent.connections.status"
+      );
+      assert(ownerClaimIndex >= 0, "Chat/Connections became usable without an owner claim");
+      assert(
+        connectionsStatusIndex > ownerClaimIndex,
+        "Connections status was requested before the owner claim succeeded"
+      );
       await page.getByRole("button", { name: "Use OpenRouter" }).click();
       await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
       await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
@@ -434,14 +452,21 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
       });
-      await page.getByRole("link", { name: "Brain" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/brain$/u);
+      assert.equal(
+        await page.getByRole("link", { name: "Brain", exact: true }).count(),
+        0,
+        "Brain must remain hidden from canary navigation"
+      );
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`
+      );
       await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
       await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
       await brainFrame.getByText("Brain API ready").waitFor({ state: "visible" });
-      await page.getByRole("link", { name: "Chat" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
+      );
 
       await page.getByRole("button", { name: "Rename chat" }).click();
       const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
@@ -635,6 +660,7 @@ function startDashboard(
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
+        FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "fixture-browser-access-token",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_DIST_DIR: ".next-browser-test",
@@ -1140,7 +1166,10 @@ async function handleCoreRequest(
   response: ServerResponse,
   state: CoreState
 ) {
-  if (request.headers.authorization !== `Bearer ${CORE_TOKEN}`) {
+  if (
+    request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
+    request.headers.authorization !== "Bearer fixture-browser-access-token"
+  ) {
     writeJson(response, 401, { error: "missing service token" });
     return;
   }
@@ -1162,7 +1191,7 @@ async function handleCoreRequest(
         id: "org_browser",
         owner_user_id: "user_browser",
         name: "Browser Test",
-        billing_class: "off2026",
+        billing_class: "sponsored",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
@@ -1171,7 +1200,7 @@ async function handleCoreRequest(
         id: "entitlement_browser",
         customer_org_id: "org_browser",
         allowed_new_agent_runtimes: 0,
-        launch_code: "off2026",
+        launch_code: "fixture-launch-code",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },

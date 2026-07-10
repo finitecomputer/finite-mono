@@ -8,6 +8,12 @@ import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 
 const CORE_TOKEN = "browser-core-token";
+const OPERATOR_ORG_ID = "workos_org_browser_operator";
+const ADMIN_ACCESS_TOKEN = [
+  "browser-header",
+  Buffer.from(JSON.stringify({ org_id: OPERATOR_ORG_ID })).toString("base64url"),
+  "browser-signature",
+].join(".");
 
 test("admins keep the SaaS dashboard and separate Finite Private controls", { timeout: 120_000 }, async () => {
   const core = await startFakeCore();
@@ -74,6 +80,8 @@ function startDashboard(port: number, coreUrl: string) {
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "admin@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_admin",
+        FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: ADMIN_ACCESS_TOKEN,
+        FC_WORKOS_OPERATOR_ORG_ID: OPERATOR_ORG_ID,
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_DIST_DIR: ".next-browser-test",
       },
@@ -106,7 +114,10 @@ async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse
 ) {
-  if (request.headers.authorization !== `Bearer ${CORE_TOKEN}`) {
+  if (
+    request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
+    request.headers.authorization !== `Bearer ${ADMIN_ACCESS_TOKEN}`
+  ) {
     writeJson(response, 401, { error: "missing service token" });
     return;
   }
@@ -133,7 +144,7 @@ async function handleCoreRequest(
         id: "org_admin",
         owner_user_id: "user_admin",
         name: "Admin",
-        billing_class: "off2026",
+        billing_class: "sponsored",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },

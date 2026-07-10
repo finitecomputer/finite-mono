@@ -4,8 +4,6 @@ import assert from "node:assert/strict";
 import {
   ONE_TIME_KEY_WARNING,
   canAccessAdminOps,
-  isCoreAdminEmail,
-  parseAdminEmailAllowlist,
   heartbeatAgeLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
@@ -89,19 +87,4 @@ test("oneTimeKeyError surfaces only error states", () => {
     oneTimeKeyError({ status: "error", error: "  " }),
     "The admin action failed.",
   );
-});
-
-test("parseAdminEmailAllowlist trims, lowercases, and drops blanks", () => {
-  const allowlist = parseAdminEmailAllowlist(" Paul@finite.vip ,, austin@finite.vip ,");
-  assert.deepEqual([...allowlist], ["paul@finite.vip", "austin@finite.vip"]);
-  assert.equal(parseAdminEmailAllowlist(undefined).size, 0);
-  assert.equal(parseAdminEmailAllowlist("  ").size, 0);
-});
-
-test("isCoreAdminEmail matches the env allowlist and fails closed", () => {
-  const env = { FC_CORE_ADMIN_EMAILS: "paul@finite.vip,austin@finite.vip" };
-  assert.equal(isCoreAdminEmail("paul@finite.vip", env), true);
-  assert.equal(isCoreAdminEmail("someone@else.com", env), false);
-  assert.equal(isCoreAdminEmail("paul@finite.vip", {}), false);
-  assert.equal(isCoreAdminEmail(null, env), false);
 });

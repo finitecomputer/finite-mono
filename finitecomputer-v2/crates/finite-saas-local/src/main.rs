@@ -34,9 +34,9 @@ enum Command {
         /// Local Core base URL (the limiter's usage/admission API).
         #[arg(long, env = "FC_CORE_URL", default_value = "http://127.0.0.1:14200")]
         core_url: String,
-        /// Local Core service token.
-        #[arg(long, env = "FC_CORE_API_TOKEN")]
-        core_api_token: String,
+        /// Route-scoped Core credential for Finite Private usage admission.
+        #[arg(long, env = "FC_FINITE_PRIVATE_USAGE_API_TOKEN")]
+        finite_private_usage_api_token: String,
         /// Deployed Finite Private limiter, as agents address it (a trailing
         /// /v1 is expected and stripped for upstream proxying).
         #[arg(
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         Command::FinitePrivateLimiterUp {
             listen_addr,
             core_url,
-            core_api_token,
+            finite_private_usage_api_token,
             upstream_base_url,
             dashboard_url,
             agent_host,
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
                 &listen_addr,
                 ChainedLimiterInputs {
                     core_url,
-                    core_api_token,
+                    finite_private_usage_api_token,
                     upstream_base_url,
                     // Secret comes from env only, never argv.
                     upstream_api_key: std::env::var(UPSTREAM_KEY_ENV)

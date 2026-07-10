@@ -5755,7 +5755,7 @@ mod tests {
                 runner_class: RunnerClass::Phala,
                 profile_picture_url: None,
                 status: AgentCreationRequestStatus::Launching,
-                requested_launch_code: Some("off2026".to_string()),
+                requested_launch_code: Some("launch_code_record_123".to_string()),
                 agent_runtime_id: None,
                 runner_id: Some("runner-1".to_string()),
                 lease_token: Some("lease-1".to_string()),

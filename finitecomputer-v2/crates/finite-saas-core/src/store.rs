@@ -1,3 +1,8 @@
+use crate::launch_codes::{
+    IssueLaunchCodeBatchInput, IssuedLaunchCodeBatch, LaunchCodeBatch, LaunchCodeBatchDetails,
+    LaunchCodeRecord, LaunchCodeStatus, RevokeLaunchCodeBatchInput, hash_launch_code,
+    prepare_launch_code_batch,
+};
 use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
@@ -8,26 +13,25 @@ use crate::{
     BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
     ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FIRST_SELF_SERVE_LAUNCH_CODE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
-    RelayHeartbeat, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimeRelayCredential, RuntimeStatusSnapshot, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
+    CustomerOrganization, ExistingHostProjectImport, FailAgentCreationRequestInput,
+    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
+    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
+    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
+    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeControlRequestStatus, RuntimeRelayCredential, RuntimeStatusSnapshot,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
+    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, chat_identity_id_for_user, current_time_iso,
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, new_agent_creation_request_id,
@@ -125,6 +129,33 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.claim_project_imports(input).await,
             Self::Postgres(store) => store.claim_project_imports(input).await,
+        }
+    }
+
+    pub async fn issue_launch_code_batch(
+        &self,
+        input: IssueLaunchCodeBatchInput,
+    ) -> CoreResult<IssuedLaunchCodeBatch> {
+        match self {
+            Self::Memory(store) => store.issue_launch_code_batch(input).await,
+            Self::Postgres(store) => store.issue_launch_code_batch(input).await,
+        }
+    }
+
+    pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
+        match self {
+            Self::Memory(store) => store.list_launch_code_batches().await,
+            Self::Postgres(store) => store.list_launch_code_batches().await,
+        }
+    }
+
+    pub async fn revoke_launch_code_batch(
+        &self,
+        input: RevokeLaunchCodeBatchInput,
+    ) -> CoreResult<LaunchCodeBatchDetails> {
+        match self {
+            Self::Memory(store) => store.revoke_launch_code_batch(input).await,
+            Self::Postgres(store) => store.revoke_launch_code_batch(input).await,
         }
     }
 
@@ -631,6 +662,66 @@ impl MemoryCoreStore {
         state.claim_project_imports(input)
     }
 
+    pub async fn issue_launch_code_batch(
+        &self,
+        input: IssueLaunchCodeBatchInput,
+    ) -> CoreResult<IssuedLaunchCodeBatch> {
+        let prepared = prepare_launch_code_batch(input)?;
+        let response = IssuedLaunchCodeBatch {
+            batch: prepared.batch.clone(),
+            codes: prepared.issued_codes,
+        };
+        let mut state = self.state.lock().await;
+        state
+            .launch_code_batches
+            .insert(prepared.batch.id.clone(), prepared.batch);
+        for record in prepared.records {
+            state.launch_codes.insert(record.id.clone(), record);
+        }
+        Ok(response)
+    }
+
+    pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
+        let state = self.state.lock().await;
+        let mut batches = state
+            .launch_code_batches
+            .values()
+            .map(|batch| memory_launch_code_batch_details(&state, batch))
+            .collect::<Vec<_>>();
+        batches.sort_by(|left, right| {
+            right
+                .batch
+                .created_at
+                .cmp(&left.batch.created_at)
+                .then_with(|| right.batch.id.cmp(&left.batch.id))
+        });
+        Ok(batches)
+    }
+
+    pub async fn revoke_launch_code_batch(
+        &self,
+        input: RevokeLaunchCodeBatchInput,
+    ) -> CoreResult<LaunchCodeBatchDetails> {
+        let actor = input.revoked_by_workos_user_id.trim();
+        if actor.is_empty() {
+            return Err(CoreError::MissingWorkosUserId);
+        }
+        let now = input.now.unwrap_or(current_time_iso()?);
+        parse_time(&now)?;
+        let mut state = self.state.lock().await;
+        let batch_id = input.batch_id.trim();
+        let batch = state
+            .launch_code_batches
+            .get_mut(batch_id)
+            .ok_or(CoreError::LaunchCodeBatchNotFound)?;
+        if batch.revoked_at.is_none() {
+            batch.revoked_at = Some(now);
+            batch.revoked_by_workos_user_id = Some(actor.to_string());
+        }
+        let batch = batch.clone();
+        Ok(memory_launch_code_batch_details(&state, &batch))
+    }
+
     pub async fn request_agent_creation(
         &self,
         input: RequestAgentCreationInput,
@@ -996,6 +1087,23 @@ impl MemoryCoreStore {
     }
 }
 
+fn memory_launch_code_batch_details(
+    state: &BridgeCoreState,
+    batch: &LaunchCodeBatch,
+) -> LaunchCodeBatchDetails {
+    let mut codes = state
+        .launch_codes
+        .values()
+        .filter(|code| code.batch_id == batch.id)
+        .map(LaunchCodeRecord::status)
+        .collect::<Vec<_>>();
+    codes.sort_by(|left, right| left.id.cmp(&right.id));
+    LaunchCodeBatchDetails {
+        batch: batch.clone(),
+        codes,
+    }
+}
+
 impl PostgresCoreStore {
     pub async fn connect(database_url: &str) -> CoreResult<Self> {
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
@@ -1041,6 +1149,93 @@ impl PostgresCoreStore {
         let result = postgres_claim_project_imports(&tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
+    }
+
+    pub async fn issue_launch_code_batch(
+        &self,
+        input: IssueLaunchCodeBatchInput,
+    ) -> CoreResult<IssuedLaunchCodeBatch> {
+        let prepared = prepare_launch_code_batch(input)?;
+        let response = IssuedLaunchCodeBatch {
+            batch: prepared.batch.clone(),
+            codes: prepared.issued_codes,
+        };
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let code_count = i32::try_from(prepared.batch.code_count)
+            .map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?;
+        tx.execute(
+            "INSERT INTO launch_code_batches
+               (id, name, code_count, expires_at, revoked_at,
+                revoked_by_workos_user_id, created_by_workos_user_id, created_at)
+             VALUES ($1, $2, $3, $4::text::timestamptz, NULL, NULL, $5,
+                     $6::text::timestamptz)",
+            &[
+                &prepared.batch.id,
+                &prepared.batch.name,
+                &code_count,
+                &prepared.batch.expires_at,
+                &prepared.batch.created_by_workos_user_id,
+                &prepared.batch.created_at,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+        for record in prepared.records {
+            tx.execute(
+                "INSERT INTO launch_codes
+                   (id, batch_id, code_hash, redeemed_customer_org_id,
+                    redemption_idempotency_key, redeemed_at, created_at)
+                 VALUES ($1, $2, $3, NULL, NULL, NULL, $4::text::timestamptz)",
+                &[
+                    &record.id,
+                    &record.batch_id,
+                    &record.code_hash,
+                    &record.created_at,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        }
+        tx.commit().await.map_err(store_error)?;
+        Ok(response)
+    }
+
+    pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
+        let client = self.client.lock().await;
+        postgres_list_launch_code_batches(&*client).await
+    }
+
+    pub async fn revoke_launch_code_batch(
+        &self,
+        input: RevokeLaunchCodeBatchInput,
+    ) -> CoreResult<LaunchCodeBatchDetails> {
+        let actor = input.revoked_by_workos_user_id.trim();
+        if actor.is_empty() {
+            return Err(CoreError::MissingWorkosUserId);
+        }
+        let now = input.now.unwrap_or(current_time_iso()?);
+        parse_time(&now)?;
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let row = tx
+            .query_opt(
+                "UPDATE launch_code_batches
+                    SET revoked_at = COALESCE(revoked_at, $2::text::timestamptz),
+                        revoked_by_workos_user_id = COALESCE(revoked_by_workos_user_id, $3)
+                  WHERE id = $1
+                  RETURNING id, name, code_count, expires_at::text,
+                            revoked_at::text, revoked_by_workos_user_id,
+                            created_by_workos_user_id, created_at::text",
+                &[&input.batch_id.trim(), &now, &actor],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::LaunchCodeBatchNotFound)?;
+        let batch = launch_code_batch_from_row(&row)?;
+        let details = postgres_launch_code_batch_details(&tx, batch).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(details)
     }
 
     pub async fn admin_request_runtime_upgrade(
@@ -1721,7 +1916,7 @@ where
         normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
     let launch_code = trim_to_option(Some(&input.launch_code));
     let billing_class = if launch_code.is_some() {
-        BillingClass::Off2026
+        BillingClass::Sponsored
     } else {
         BillingClass::Standard
     };
@@ -1734,19 +1929,40 @@ where
             .map(|org| org.id),
         None => None,
     };
-    if let Some(code) = launch_code.as_deref() {
-        validate_postgres_agent_creation_launch_code(
-            client,
-            existing_org_id.as_deref().unwrap_or_default(),
-            code,
-        )
-        .await?;
+    let locked_launch_code = if let Some(code) = launch_code.as_deref() {
+        let locked = lock_postgres_launch_code(client, code, &now).await?;
+        if let (Some(redeemed_org_id), Some(redeemed_key)) = (
+            locked.record.redeemed_customer_org_id.as_deref(),
+            locked.record.redemption_idempotency_key.as_deref(),
+        ) {
+            // A concurrent identical retry may have resolved the org while
+            // this transaction waited on the code row lock. Re-read the
+            // natural-key mapping after the lock before deciding whether the
+            // already-bound redemption is the same account/request.
+            let current_org_id = match select_user_by_email(client, &verified_email).await? {
+                Some(user) => select_personal_org_by_owner(client, &user.id)
+                    .await?
+                    .map(|org| org.id),
+                None => None,
+            };
+            if current_org_id.as_deref() != Some(redeemed_org_id) || idempotency_key != redeemed_key
+            {
+                return Err(CoreError::InvalidLaunchCode);
+            }
+        } else if locked.record.redeemed_customer_org_id.is_some()
+            || locked.record.redemption_idempotency_key.is_some()
+        {
+            return Err(CoreError::InvalidLaunchCode);
+        }
+        Some(locked)
     } else if !match existing_org_id.as_deref() {
         Some(org_id) => postgres_customer_org_has_active_billing(client, org_id).await?,
         None => false,
     } {
         return Err(CoreError::BillingRequired);
-    }
+    } else {
+        None
+    };
     if client
         .query_opt(
             "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
@@ -1767,6 +1983,15 @@ where
     if let Some(existing_request) =
         select_agent_creation_request_by_idempotency(client, &user.id, &idempotency_key).await?
     {
+        if let Some(locked) = locked_launch_code.as_ref()
+            && (locked.record.redeemed_customer_org_id.as_deref() != Some(org.id.as_str())
+                || locked.record.redemption_idempotency_key.as_deref()
+                    != Some(idempotency_key.as_str())
+                || existing_request.requested_launch_code.as_deref()
+                    != Some(locked.record.id.as_str()))
+        {
+            return Err(CoreError::InvalidLaunchCode);
+        }
         let project = select_project(client, &existing_request.project_id)
             .await?
             .ok_or_else(|| missing_request_project_error(&existing_request))?;
@@ -1778,15 +2003,23 @@ where
         });
     }
 
-    let entitlement = if let Some(code) = launch_code.as_deref() {
-        ensure_agent_creation_entitlement_row(client, &org.id, code, &now).await?
-    } else {
-        ensure_standard_agent_creation_entitlement_row(client, &org.id, &now).await?
-    };
+    let allowed_new_agent_runtimes = select_agent_creation_entitlement_by_org(client, &org.id)
+        .await?
+        .map(|entitlement| entitlement.allowed_new_agent_runtimes)
+        .unwrap_or(1);
     let active_request_count =
         postgres_active_agent_creation_entitlement_count(client, &org.id).await?;
-    if active_request_count >= i64::from(entitlement.allowed_new_agent_runtimes) {
+    if active_request_count >= i64::from(allowed_new_agent_runtimes) {
         return Err(CoreError::AgentCreationEntitlementExhausted);
+    }
+    if let Some(locked) = locked_launch_code.as_ref() {
+        ensure_agent_creation_entitlement_row(client, &org.id, &locked.record.id, &now).await?;
+        if locked.record.redeemed_customer_org_id.is_none() {
+            redeem_postgres_launch_code(client, &locked.record.id, &org.id, &idempotency_key, &now)
+                .await?;
+        }
+    } else {
+        ensure_standard_agent_creation_entitlement_row(client, &org.id, &now).await?;
     }
 
     let request_id = new_agent_creation_request_id()?;
@@ -1812,7 +2045,7 @@ where
         runner_class: configuration.runner_class,
         profile_picture_url,
         status: AgentCreationRequestStatus::Requested,
-        requested_launch_code: launch_code,
+        requested_launch_code: locked_launch_code.map(|locked| locked.record.id),
         agent_runtime_id: None,
         runner_id: None,
         lease_token: None,
@@ -2001,7 +2234,7 @@ where
         })
         && (has_active_billing
             || org.billing_class == BillingClass::Grandfathered
-            || org.billing_class == BillingClass::Off2026);
+            || org.billing_class == BillingClass::Sponsored);
     let requires_billing = !has_active_billing && org.billing_class == BillingClass::Standard;
 
     Ok(BillingOverview {
@@ -3282,36 +3515,150 @@ where
     .transpose()
 }
 
-async fn validate_postgres_agent_creation_launch_code<C>(
+async fn postgres_list_launch_code_batches<C>(client: &C) -> CoreResult<Vec<LaunchCodeBatchDetails>>
+where
+    C: GenericClient + Sync,
+{
+    let rows = client
+        .query(
+            "SELECT id, name, code_count, expires_at::text, revoked_at::text,
+                    revoked_by_workos_user_id, created_by_workos_user_id,
+                    created_at::text
+               FROM launch_code_batches
+              ORDER BY created_at DESC, id DESC",
+            &[],
+        )
+        .await
+        .map_err(store_error)?;
+    let mut details = Vec::with_capacity(rows.len());
+    for row in rows {
+        details.push(
+            postgres_launch_code_batch_details(client, launch_code_batch_from_row(&row)?).await?,
+        );
+    }
+    Ok(details)
+}
+
+async fn postgres_launch_code_batch_details<C>(
     client: &C,
-    customer_org_id: &str,
+    batch: LaunchCodeBatch,
+) -> CoreResult<LaunchCodeBatchDetails>
+where
+    C: GenericClient + Sync,
+{
+    let rows = client
+        .query(
+            "SELECT id, redeemed_customer_org_id, redeemed_at::text
+               FROM launch_codes
+              WHERE batch_id = $1
+              ORDER BY id",
+            &[&batch.id],
+        )
+        .await
+        .map_err(store_error)?;
+    let codes = rows
+        .into_iter()
+        .map(|row| LaunchCodeStatus {
+            id: row.get("id"),
+            redeemed_customer_org_id: row.get("redeemed_customer_org_id"),
+            redeemed_at: row.get("redeemed_at"),
+        })
+        .collect();
+    Ok(LaunchCodeBatchDetails { batch, codes })
+}
+
+fn launch_code_batch_from_row(row: &Row) -> CoreResult<LaunchCodeBatch> {
+    let count: i32 = row.get("code_count");
+    Ok(LaunchCodeBatch {
+        id: row.get("id"),
+        name: row.get("name"),
+        code_count: u32::try_from(count).map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?,
+        expires_at: row.get("expires_at"),
+        revoked_at: row.get("revoked_at"),
+        revoked_by_workos_user_id: row.get("revoked_by_workos_user_id"),
+        created_by_workos_user_id: row.get("created_by_workos_user_id"),
+        created_at: row.get("created_at"),
+    })
+}
+
+struct LockedLaunchCode {
+    record: LaunchCodeRecord,
+}
+
+async fn lock_postgres_launch_code<C>(
+    client: &C,
     launch_code: &str,
+    now: &str,
+) -> CoreResult<LockedLaunchCode>
+where
+    C: GenericClient + Sync,
+{
+    let code_hash = hash_launch_code(launch_code)?;
+    parse_time(now)?;
+    let row = client
+        .query_opt(
+            "SELECT code.id, code.batch_id, code.code_hash,
+                    code.redeemed_customer_org_id,
+                    code.redemption_idempotency_key, code.redeemed_at::text,
+                    code.created_at::text,
+                    batch.revoked_at IS NOT NULL AS batch_revoked,
+                    batch.expires_at <= $2::text::timestamptz AS batch_expired
+              FROM launch_codes AS code
+               JOIN launch_code_batches AS batch ON batch.id = code.batch_id
+              WHERE code.code_hash = $1
+              FOR UPDATE OF code, batch",
+            &[&code_hash, &now],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::InvalidLaunchCode)?;
+    let batch_revoked: bool = row.get("batch_revoked");
+    let batch_expired: bool = row.get("batch_expired");
+    let redeemed_customer_org_id: Option<String> = row.get("redeemed_customer_org_id");
+    if redeemed_customer_org_id.is_none() && (batch_revoked || batch_expired) {
+        return Err(CoreError::InvalidLaunchCode);
+    }
+    Ok(LockedLaunchCode {
+        record: LaunchCodeRecord {
+            id: row.get("id"),
+            batch_id: row.get("batch_id"),
+            code_hash: row.get("code_hash"),
+            redeemed_customer_org_id,
+            redemption_idempotency_key: row.get("redemption_idempotency_key"),
+            redeemed_at: row.get("redeemed_at"),
+            created_at: row.get("created_at"),
+        },
+    })
+}
+
+async fn redeem_postgres_launch_code<C>(
+    client: &C,
+    launch_code_id: &str,
+    customer_org_id: &str,
+    idempotency_key: &str,
+    now: &str,
 ) -> CoreResult<()>
 where
     C: GenericClient + Sync,
 {
-    let existing = client
-        .query_opt(
-            "SELECT launch_code FROM agent_creation_entitlements
-             WHERE customer_org_id = $1
-             FOR UPDATE",
-            &[&customer_org_id],
+    let updated = client
+        .execute(
+            "UPDATE launch_codes
+                SET redeemed_customer_org_id = $2,
+                    redemption_idempotency_key = $3,
+                    redeemed_at = $4::text::timestamptz
+              WHERE id = $1
+                AND redeemed_customer_org_id IS NULL
+                AND redemption_idempotency_key IS NULL
+                AND redeemed_at IS NULL",
+            &[&launch_code_id, &customer_org_id, &idempotency_key, &now],
         )
         .await
         .map_err(store_error)?;
-    if let Some(row) = existing {
-        if let Some(expected_code) = row.get::<_, Option<String>>("launch_code")
-            && launch_code != expected_code
-        {
-            return Err(CoreError::InvalidLaunchCode);
-        }
-        return Ok(());
+    if updated != 1 {
+        return Err(CoreError::InvalidLaunchCode);
     }
-    if launch_code == FIRST_SELF_SERVE_LAUNCH_CODE {
-        Ok(())
-    } else {
-        Err(CoreError::InvalidLaunchCode)
-    }
+    Ok(())
 }
 
 /// Find-or-create the linked user by their natural key. The conflict target is
@@ -3373,13 +3720,12 @@ where
 async fn ensure_agent_creation_entitlement_row<C>(
     client: &C,
     customer_org_id: &str,
-    launch_code: &str,
+    launch_code_id: &str,
     now: &str,
 ) -> CoreResult<AgentCreationEntitlement>
 where
     C: GenericClient + Sync,
 {
-    validate_postgres_agent_creation_launch_code(client, customer_org_id, launch_code).await?;
     if let Some(row) = client
         .query_opt(
             "SELECT id, customer_org_id, allowed_new_agent_runtimes, launch_code,
@@ -3391,13 +3737,17 @@ where
         .await
         .map_err(store_error)?
     {
-        return Ok(agent_creation_entitlement_from_row(&row));
+        let entitlement = agent_creation_entitlement_from_row(&row);
+        if entitlement.launch_code.as_deref() != Some(launch_code_id) {
+            return Err(CoreError::InvalidLaunchCode);
+        }
+        return Ok(entitlement);
     }
     let entitlement = AgentCreationEntitlement {
         id: agent_creation_entitlement_id_for(customer_org_id),
         customer_org_id: customer_org_id.to_string(),
         allowed_new_agent_runtimes: 1,
-        launch_code: Some(FIRST_SELF_SERVE_LAUNCH_CODE.to_string()),
+        launch_code: Some(launch_code_id.to_string()),
         created_at: now.to_string(),
         updated_at: now.to_string(),
     };
@@ -6490,6 +6840,22 @@ mod tests {
 
     static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    async fn issue_test_launch_code(store: &CoreStore, _now: &str) -> String {
+        store
+            .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "Postgres test batch".to_string(),
+                code_count: 1,
+                expires_in_hours: Some(crate::launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                created_by_workos_user_id: "workos-test-operator".to_string(),
+                now: None,
+            })
+            .await
+            .unwrap()
+            .codes[0]
+            .code
+            .clone()
+    }
+
     /// Swap the database name in a `postgres://user:pass@host:port/db?query`
     /// URL, preserving auth, host, and any query string.
     fn replace_database(url: &str, db_name: &str) -> String {
@@ -6631,6 +6997,285 @@ mod tests {
                 "{method_name} must stay on row-scoped SQL helpers, not full-state persistence"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_launch_codes_are_one_time_metadata_only_and_idempotent() {
+        with_isolated_postgres(|store| async move {
+            let issued = store
+                .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "Internal canary".to_string(),
+                    code_count: 3,
+                    expires_in_hours: Some(1),
+                    created_by_workos_user_id: "workos_operator".to_string(),
+                    now: Some("2026-07-10T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let batch_id = issued.batch.id.clone();
+            let plaintext = issued.codes[0].code.clone();
+            let unused = issued.codes[1].code.clone();
+            let expiring = issued.codes[2].code.clone();
+
+            let later = store.list_launch_code_batches().await.unwrap();
+            let later_json = serde_json::to_string(&later).unwrap();
+            assert!(!later_json.contains(&plaintext));
+            assert!(!later_json.contains(&unused));
+            assert!(serde_json::to_string(&issued).unwrap().contains(&plaintext));
+
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "canary@finite.vip".to_string(),
+                    workos_user_id: "workos_canary".to_string(),
+                    display_name: "Canary Agent".to_string(),
+                    launch_code: plaintext.clone(),
+                    idempotency_key: "canary-request".to_string(),
+                    now: Some("2026-07-10T12:30:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_ne!(
+                created.request.requested_launch_code.as_deref(),
+                Some(plaintext.as_str())
+            );
+
+            store
+                .revoke_launch_code_batch(RevokeLaunchCodeBatchInput {
+                    batch_id: batch_id.clone(),
+                    revoked_by_workos_user_id: "workos_operator".to_string(),
+                    now: Some("2026-07-10T12:45:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+
+            // Exact retries remain idempotent after both revocation and expiry.
+            let replay = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "canary@finite.vip".to_string(),
+                    workos_user_id: "workos_canary".to_string(),
+                    display_name: "Ignored retry name".to_string(),
+                    launch_code: plaintext.clone(),
+                    idempotency_key: "canary-request".to_string(),
+                    now: Some("2026-07-10T14:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert!(replay.reused);
+            assert_eq!(replay.request.id, created.request.id);
+
+            for (email, workos_id, key, code) in [
+                (
+                    "canary@finite.vip",
+                    "workos_canary",
+                    "different-request",
+                    plaintext.as_str(),
+                ),
+                (
+                    "other@finite.vip",
+                    "workos_other",
+                    "other-request",
+                    plaintext.as_str(),
+                ),
+                (
+                    "unused@finite.vip",
+                    "workos_unused",
+                    "unused-request",
+                    unused.as_str(),
+                ),
+                (
+                    "expired@finite.vip",
+                    "workos_expired",
+                    "expired-request",
+                    expiring.as_str(),
+                ),
+            ] {
+                let error = store
+                    .request_agent_creation(RequestAgentCreationInput {
+                        verified_email: email.to_string(),
+                        workos_user_id: workos_id.to_string(),
+                        display_name: "Rejected Agent".to_string(),
+                        launch_code: code.to_string(),
+                        idempotency_key: key.to_string(),
+                        now: Some("2026-07-10T14:00:00Z".to_string()),
+                    })
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, CoreError::InvalidLaunchCode));
+            }
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let row = raw
+                .query_one(
+                    "SELECT code_hash,
+                            (SELECT launch_code FROM agent_creation_entitlements
+                              WHERE customer_org_id = $1) AS entitlement_code,
+                            (SELECT requested_launch_code FROM agent_creation_requests
+                              WHERE id = $2) AS request_code
+                       FROM launch_codes WHERE id = $3",
+                    &[
+                        &created.request.customer_org_id,
+                        &created.request.id,
+                        &issued.codes[0].id,
+                    ],
+                )
+                .await
+                .unwrap();
+            let code_hash: String = row.get("code_hash");
+            let entitlement_code: Option<String> = row.get("entitlement_code");
+            let request_code: Option<String> = row.get("request_code");
+            assert_ne!(code_hash, plaintext);
+            assert_eq!(
+                entitlement_code.as_deref(),
+                Some(issued.codes[0].id.as_str())
+            );
+            assert_eq!(request_code.as_deref(), Some(issued.codes[0].id.as_str()));
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_launch_code_redemption_serializes_with_revocation() {
+        with_isolated_postgres(|store| async move {
+            let issued = store
+                .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "Revocation race".to_string(),
+                    code_count: 1,
+                    expires_in_hours: Some(24),
+                    created_by_workos_user_id: "workos_operator".to_string(),
+                    now: Some("2026-07-10T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let batch_id = issued.batch.id.clone();
+            let plaintext = issued.codes[0].code.clone();
+
+            // Hold an uncommitted batch revocation. Redemption must block on
+            // the batch row, then observe the committed revocation and fail.
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut raw = raw;
+            let tx = raw.transaction().await.unwrap();
+            tx.execute(
+                "UPDATE launch_code_batches
+                    SET revoked_at = '2026-07-10T12:05:00Z'::timestamptz,
+                        revoked_by_workos_user_id = 'workos_operator'
+                  WHERE id = $1",
+                &[&batch_id],
+            )
+            .await
+            .unwrap();
+
+            let competing = CoreStore::connect_postgres(&store.url).await.unwrap();
+            let redeem = tokio::spawn(async move {
+                competing
+                    .request_agent_creation(RequestAgentCreationInput {
+                        verified_email: "race@finite.vip".to_string(),
+                        workos_user_id: "workos_race".to_string(),
+                        display_name: "Race Agent".to_string(),
+                        launch_code: plaintext,
+                        idempotency_key: "race-request".to_string(),
+                        now: Some("2026-07-10T12:10:00Z".to_string()),
+                    })
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(!redeem.is_finished(), "redemption must wait for batch lock");
+            tx.commit().await.unwrap();
+            let error = redeem.await.unwrap().unwrap_err();
+            assert!(matches!(error, CoreError::InvalidLaunchCode));
+
+            let redeemed: i64 = raw
+                .query_one(
+                    "SELECT COUNT(*) FROM launch_codes
+                      WHERE batch_id = $1 AND redeemed_at IS NOT NULL",
+                    &[&batch_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(redeemed, 0);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_launch_code_concurrent_redemption_has_one_winner() {
+        with_isolated_postgres(|store| async move {
+            let issued = store
+                .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "Concurrent redemption".to_string(),
+                    code_count: 1,
+                    expires_in_hours: Some(24),
+                    created_by_workos_user_id: "workos_operator".to_string(),
+                    now: Some("2026-07-10T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let plaintext = issued.codes[0].code.clone();
+            let first = CoreStore::connect_postgres(&store.url).await.unwrap();
+            let second = CoreStore::connect_postgres(&store.url).await.unwrap();
+            let (first_result, second_result) = tokio::join!(
+                first.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "first@finite.vip".to_string(),
+                    workos_user_id: "workos_first".to_string(),
+                    display_name: "First Agent".to_string(),
+                    launch_code: plaintext.clone(),
+                    idempotency_key: "first-request".to_string(),
+                    now: Some("2026-07-10T12:30:00Z".to_string()),
+                }),
+                second.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "second@finite.vip".to_string(),
+                    workos_user_id: "workos_second".to_string(),
+                    display_name: "Second Agent".to_string(),
+                    launch_code: plaintext,
+                    idempotency_key: "second-request".to_string(),
+                    now: Some("2026-07-10T12:30:00Z".to_string()),
+                }),
+            );
+            let successes = [first_result.as_ref(), second_result.as_ref()]
+                .into_iter()
+                .filter(|result| result.is_ok())
+                .count();
+            assert_eq!(successes, 1);
+            let failures = [first_result, second_result]
+                .into_iter()
+                .filter_map(Result::err)
+                .collect::<Vec<_>>();
+            assert_eq!(failures.len(), 1);
+            assert!(matches!(failures[0], CoreError::InvalidLaunchCode));
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let redeemed: i64 = raw
+                .query_one(
+                    "SELECT COUNT(*) FROM launch_codes WHERE redeemed_at IS NOT NULL",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            let requests: i64 = raw
+                .query_one("SELECT COUNT(*) FROM agent_creation_requests", &[])
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(redeemed, 1);
+            assert_eq!(requests, 1);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -6779,6 +7424,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_row_native_create_lease_complete_and_visible_reads() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             store
                 .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                     id: "artifact-row-native-v1".to_string(),
@@ -6802,7 +7448,7 @@ mod tests {
                 verified_email: "row-native@finite.vip".to_string(),
                 workos_user_id: "workos_row_native".to_string(),
                 display_name: "Row Native Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "browser-submit-row-native".to_string(),
                 now: Some("2026-05-28T12:01:00Z".to_string()),
             };
@@ -6931,6 +7577,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_admin_ops_runtime_overview_and_finite_private_lifecycle() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             // Unique-per-run identifiers keep this test idempotent against an
             // accumulating test database.
             let run = std::time::SystemTime::now()
@@ -6967,7 +7614,7 @@ mod tests {
                     verified_email: owner_email.clone(),
                     workos_user_id: format!("workos_admin_ops_owner_{run}"),
                     display_name: "Admin Ops Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: format!("admin-ops-{run}"),
                     now: None,
                 })
@@ -7155,6 +7802,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_runtime_control_lifecycle_row_scoped() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             let run = "rc-lifecycle";
             let email = format!("{run}@finite.vip");
             let workos = format!("workos_{run}");
@@ -7184,7 +7832,7 @@ mod tests {
                         verified_email: email.clone(),
                         workos_user_id: workos.clone(),
                         display_name: "RC Agent".to_string(),
-                        launch_code: "off2026".to_string(),
+                        launch_code: launch_code.clone(),
                         idempotency_key: format!("{run}-submit"),
                         now: None,
                     },
@@ -7722,6 +8370,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_imported_runtime_does_not_consume_self_serve_launch_entitlement() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             let email = "postgres-import-with-launch@finite.vip".to_string();
             let workos_user_id = "workos_postgres_import_with_launch".to_string();
             let record = ExistingHostProjectImport {
@@ -7778,7 +8427,7 @@ mod tests {
                     verified_email: email.clone(),
                     workos_user_id: workos_user_id.clone(),
                     display_name: "New Hosted Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "first-self-serve-submit".to_string(),
                     now: None,
                 })
@@ -7791,16 +8440,13 @@ mod tests {
                     verified_email: email.clone(),
                     workos_user_id: workos_user_id.clone(),
                     display_name: "Another Hosted Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "second-self-serve-submit".to_string(),
                     now: None,
                 })
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                exhausted,
-                CoreError::AgentCreationEntitlementExhausted
-            ));
+            assert!(matches!(exhausted, CoreError::InvalidLaunchCode));
 
             let requests = store
                 .agent_creation_requests_for_workos_user(&workos_user_id)
@@ -7863,12 +8509,15 @@ mod tests {
     #[tokio::test]
     async fn postgres_agent_creation_lease_partition_by_source_host() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
+            let second_launch_code =
+                issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             let req_a = store
                 .request_agent_creation(RequestAgentCreationInput {
                     verified_email: "part-a@finite.vip".to_string(),
                     workos_user_id: "workos_part_a".to_string(),
                     display_name: "Partition Agent A".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: second_launch_code,
                     idempotency_key: "part-a".to_string(),
                     now: None,
                 })
@@ -7881,7 +8530,7 @@ mod tests {
                     verified_email: "part-b@finite.vip".to_string(),
                     workos_user_id: "workos_part_b".to_string(),
                     display_name: "Partition Agent B".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "part-b".to_string(),
                     now: None,
                 })
@@ -8084,6 +8733,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_constraint_violation_surfaces_structured_detail() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
         let run = "constraint-detail";
         let email = format!("constraint-detail-{run}@finite.vip");
 
@@ -8094,7 +8744,7 @@ mod tests {
                 verified_email: email.clone(),
                 workos_user_id: format!("workos_constraint_detail_{run}"),
                 display_name: "Constraint Detail Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: format!("constraint-detail-{run}"),
                 now: None,
             })
@@ -8381,6 +9031,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_wipe_then_recreate_same_email_gets_fresh_surrogate_ids() {
         with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             let email = "wipe-recreate@finite.vip".to_string();
             let workos_user_id = "workos_wipe_recreate".to_string();
 
@@ -8389,7 +9040,7 @@ mod tests {
                     verified_email: email.clone(),
                     workos_user_id: workos_user_id.clone(),
                     display_name: "Wipe Recreate Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "wipe-recreate-1".to_string(),
                     now: None,
                 })
@@ -8416,6 +9067,9 @@ mod tests {
             drop(raw);
             connection.abort();
 
+            let replacement_launch_code =
+                issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
+
             // Re-signup with the same email. A clean wipe means this succeeds,
             // and — because ids are now surrogate — mints a genuinely fresh
             // user/org/request that share NOTHING with the wiped account.
@@ -8424,7 +9078,7 @@ mod tests {
                     verified_email: email.clone(),
                     workos_user_id: workos_user_id.clone(),
                     display_name: "Wipe Recreate Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: replacement_launch_code,
                     idempotency_key: "wipe-recreate-2".to_string(),
                     now: None,
                 })

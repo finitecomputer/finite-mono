@@ -16,7 +16,7 @@ import {
   loadCoreBillingOverview,
   requestCoreAgentCreation,
 } from "@/lib/core-client";
-import { dashboardDevLaunchCode, getAccountAuthContext } from "@/lib/dashboard-auth";
+import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   hostedDeviceConfig,
   hostedDeviceProfileImage,
@@ -72,30 +72,29 @@ export async function POST(request: Request) {
       issuedAtMs: Date.now(),
     };
     const sealedDraft = await sealAgentOnboardingDraft(draft);
-    const localLaunchCode = dashboardDevLaunchCode(account);
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     const access = String(formData.get("access") ?? "");
 
-    if (localLaunchCode || billing.billing?.can_create_agent) {
-      const creation = await launchDraft(draft, localLaunchCode);
+    if (billing.billing?.can_create_agent) {
+      const creation = await launchDraft(draft);
       const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
 
-    if (access === "promo") {
-      const promoCode = String(formData.get("promoCode") ?? "").trim();
-      if (!promoCode) {
-        throw new Error("Enter your promo code.");
+    if (access === "launch-code") {
+      const launchCode = String(formData.get("launchCode") ?? "").trim();
+      if (!launchCode) {
+        throw new Error("Enter your Launch Code.");
       }
-      const creation = await launchDraft(draft, promoCode);
+      const creation = await launchDraft(draft, launchCode);
       const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
 
     if (access !== "stripe") {
-      throw new Error("Choose payment or enter a promo code.");
+      throw new Error("Enter a Launch Code to continue.");
     }
     if (!stripeBillingStatus().configured) {
       throw new Error("Payment is unavailable right now.");
@@ -118,7 +117,7 @@ export async function GET(request: Request) {
   return dashboardRedirect(request);
 }
 
-async function launchDraft(draft: AgentOnboardingDraft, launchCode: string) {
+async function launchDraft(draft: AgentOnboardingDraft, launchCode = "") {
   return requestCoreAgentCreation({
     displayName: draft.displayName,
     launchCode,

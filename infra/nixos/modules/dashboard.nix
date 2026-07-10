@@ -30,7 +30,6 @@
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
-      FC_CORE_ADMIN_EMAILS = "paul@finite.vip,austin@finite.vip,skyler@finitesupply.xyz";
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s
@@ -39,6 +38,7 @@
     #   WORKOS_API_KEY
     #   WORKOS_CLIENT_ID
     #   WORKOS_COOKIE_PASSWORD
+    #   FC_WORKOS_OPERATOR_ORG_ID        UI gate only; Core revalidates org_id
     #   STRIPE_SECRET_KEY
     #   STRIPE_WEBHOOK_SECRET
     #   GOOGLE_WORKSPACE_CLIENT_ID        (optional in the manifest)

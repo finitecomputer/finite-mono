@@ -96,6 +96,7 @@ test("core project helpers map imported runtimes to dashboard overview state", (
   assert.equal(coreProjectMachineId(project), "test-smoke");
   assert.equal(coreProjectLabel(project), "Smoke");
   assert.equal(coreProjectPrimaryUrl(project), "https://smoke.example.com/app");
+  assert.equal(coreProjectLocationLabel(project, null), "Ready to use");
 });
 
 test("core project helpers expose self-serve launch status without fake runtime links", () => {
@@ -125,7 +126,7 @@ test("core project helpers expose self-serve launch status without fake runtime 
   assert.equal(coreAgentCreationRequestForProject(project, [request]), request);
   assert.equal(coreProjectMachineId(project), null);
   assert.equal(coreProjectLaunchStatusLabel(project, request), "Starting");
-  assert.equal(coreProjectLocationLabel(project, request), "Starting your bot");
+  assert.equal(coreProjectLocationLabel(project, request), "Starting your agent");
 });
 
 test("loadCoreSourceHostRelayEndpoint reads relay routing through service auth", async () => {

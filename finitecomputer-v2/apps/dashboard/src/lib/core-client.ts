@@ -264,7 +264,7 @@ export type CoreCustomerOrganization = {
   id: string;
   owner_user_id: string;
   name: string;
-  billing_class: "grandfathered" | "off2026" | "standard";
+  billing_class: "grandfathered" | "sponsored" | "standard";
   created_at: string;
   updated_at: string;
 };
@@ -456,7 +456,7 @@ export async function claimCoreImportCandidates(selectedCandidateIds: string[]) 
   }
   const cleanIds = selectedCandidateIds.map((id) => id.trim()).filter(Boolean);
   if (cleanIds.length === 0) {
-    throw new Error("Select at least one bot to import.");
+    throw new Error("Select at least one agent to import.");
   }
 
   const result = await coreFetch<{
@@ -1046,7 +1046,7 @@ export function coreProjectLabel(project: CoreVisibleProject) {
     project.project.display_name.trim() ||
     project.runtime?.host_facts.display_name.trim() ||
     project.runtime?.source_machine_id ||
-    "Imported bot"
+    "Imported agent"
   );
 }
 
@@ -1095,13 +1095,13 @@ export function coreProjectLocationLabel(
   request: CoreAgentCreationRequestSummary | null
 ) {
   if (project.runtime) {
-    return `${project.runtime.source_host_id} / ${project.runtime.source_machine_id}`;
+    return "Ready to use";
   }
   if (request?.status === "requested") {
     return "Waiting for launch";
   }
   if (request?.status === "launching") {
-    return "Starting your bot";
+    return "Starting your agent";
   }
   if (request?.status === "failed") {
     return "Launch failed";
@@ -1132,7 +1132,7 @@ function coreAccountReady(
     account.email &&
       account.workosUserId &&
       account.emailVerified &&
-      account.source === "workos" &&
+      (account.source === "workos" || account.source === "dev") &&
       account.accessToken
   );
 }

@@ -61,8 +61,8 @@ pub enum LocalLimiterConfigError {
 pub struct ChainedLimiterInputs {
     /// Local Core base URL (`FC_CORE_URL` in the canary).
     pub core_url: String,
-    /// Local Core service token (`FC_CORE_API_TOKEN`).
-    pub core_api_token: String,
+    /// Route-scoped Core usage credential (`FC_FINITE_PRIVATE_USAGE_API_TOKEN`).
+    pub finite_private_usage_api_token: String,
     /// Deployed limiter base URL as agents address it, i.e. usually ending in
     /// `/v1` (see [`upstream_root_for_chain`] for why that suffix is removed).
     pub upstream_base_url: String,
@@ -88,12 +88,15 @@ pub fn chained_limiter_config(
         .filter(|value| !value.is_empty())
         .ok_or(LocalLimiterConfigError::MissingUpstreamKey)?;
     let core_url = require_field("core url", &inputs.core_url)?;
-    let core_api_token = require_field("core api token", &inputs.core_api_token)?;
+    let finite_private_usage_api_token = require_field(
+        "finite private usage api token",
+        &inputs.finite_private_usage_api_token,
+    )?;
     let upstream_base_url = require_field("upstream base url", &inputs.upstream_base_url)?;
     let dashboard_url = require_field("dashboard url", &inputs.dashboard_url)?;
     Ok(LimiterConfig {
         finite_usage_api_url: core_url.trim_end_matches('/').to_string(),
-        finite_usage_api_service_key: core_api_token.to_string(),
+        finite_usage_api_service_key: finite_private_usage_api_token.to_string(),
         upstream_base_url: upstream_root_for_chain(upstream_base_url),
         vllm_internal_api_key: upstream_api_key.to_string(),
         dashboard_url: dashboard_url.to_string(),
@@ -200,7 +203,7 @@ mod tests {
     fn inputs() -> ChainedLimiterInputs {
         ChainedLimiterInputs {
             core_url: "http://127.0.0.1:14200/".to_string(),
-            core_api_token: "local-core-token".to_string(),
+            finite_private_usage_api_token: "local-usage-token".to_string(),
             upstream_base_url: DEFAULT_DEPLOYED_LIMITER_BASE_URL.to_string(),
             upstream_api_key: Some("fpk_live_operator".to_string()),
             dashboard_url: "http://127.0.0.1:13002/dashboard".to_string(),
@@ -212,7 +215,7 @@ mod tests {
         let config = chained_limiter_config(&inputs()).unwrap();
 
         assert_eq!(config.finite_usage_api_url, "http://127.0.0.1:14200");
-        assert_eq!(config.finite_usage_api_service_key, "local-core-token");
+        assert_eq!(config.finite_usage_api_service_key, "local-usage-token");
         // The /v1 suffix must be stripped: the limiter appends the incoming
         // /v1/... path onto UPSTREAM_BASE_URL.
         assert_eq!(
@@ -241,13 +244,13 @@ mod tests {
     #[test]
     fn chained_config_rejects_missing_fields() {
         let error = chained_limiter_config(&ChainedLimiterInputs {
-            core_api_token: " ".to_string(),
+            finite_private_usage_api_token: " ".to_string(),
             ..inputs()
         })
         .unwrap_err();
         assert_eq!(
             error,
-            LocalLimiterConfigError::MissingField("core api token")
+            LocalLimiterConfigError::MissingField("finite private usage api token")
         );
     }
 

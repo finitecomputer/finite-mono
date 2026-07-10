@@ -98,6 +98,11 @@ DNS A `finite.computer` → 64.34.82.77 (this host). Host Caddy terminates TLS:
 `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`
 
 Consumed by core, dashboard, postgres, and the backup CronJob (see `k8s/`).
+The canary-ready Core, Dashboard, and Runner definitions additionally require
+`FC_CORE_RUNNER_API_TOKEN` and `FC_WORKOS_OPERATOR_ORG_ID`. The 2026-07-10
+read-only preflight confirmed the route-scoped Runner token is not yet live;
+do not roll these definitions until both names have been provisioned in the
+host-only secret material.
 The dashboard manifest additionally references optional keys
 `FC_RELAY_ADMIN_TOKEN` and `FC_RELAY_HOST_ENDPOINTS_JSON` that do not exist
 in the live secret (marked `optional: true`, so pods start without them).

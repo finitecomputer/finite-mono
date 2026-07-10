@@ -74,9 +74,6 @@ async function ImportedMachineOverview({
         <div className="ocean-status-card__inner">
           <StatusPrism state={prismState} className="justify-self-center" />
           <div className="ocean-status-card__copy">
-            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-              {access.machineId}
-            </div>
             <h1 className="ocean-status-card__title">{access.displayName}</h1>
             <p className="ocean-status-card__description">
               {overview.description}

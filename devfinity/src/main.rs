@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use devfinity::workos_fixture::{FixturePaths, serve as serve_workos_fixture};
 use devfinity::{ProcessComposeMode, Stack, StackProfile};
 
 #[derive(Debug, Parser)]
@@ -28,6 +29,14 @@ enum Command {
     Status,
     /// Best-effort cleanup for orphaned devfinity processes.
     Cleanup,
+    /// Run the local read-only WorkOS fixture used by the dev stack.
+    #[command(name = "workos-fixture")]
+    WorkosFixture {
+        #[arg(long)]
+        listen: std::net::SocketAddr,
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -100,5 +109,10 @@ fn run() -> anyhow::Result<ExitCode> {
             stack.status()
         }
         Command::Cleanup => Stack::new(cli.state_dir)?.cleanup(),
+        Command::WorkosFixture { listen, state_dir } => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(serve_workos_fixture(listen, FixturePaths::new(state_dir)))?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }

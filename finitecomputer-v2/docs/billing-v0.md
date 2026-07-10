@@ -244,11 +244,12 @@ and the existing agent-creation path. Do not build a campaign engine,
 participant directory, invitation mailer, scheduling system, analytics stack,
 or separate entitlement service for Launch Codes.
 
-Current implementation gap: Core accepts the repository-visible, hard-coded
-`off2026` value for any new organization and grants one agent-creation
-entitlement. It has no campaign record, expiry, aggregate redemption cap, or
-issuance/revocation policy. Treating that public constant as a secret is not an
-acceptable long-term Launch Code contract.
+Core implements this contract with named, exact-size batches, hashed
+individually single-use codes, bounded expiry, operator-only issuance and
+revocation, and redemption in the same transaction as the creation request.
+Plaintext is returned only by the issuance response; persisted entitlement and
+request rows reference the opaque code record id rather than retaining the
+plaintext value.
 
 ## Finite Private Limits
 

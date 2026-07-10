@@ -57,7 +57,6 @@ import {
 } from "@/lib/billing-return";
 import { coreProjectOverviewHref } from "@/lib/dashboard-machine-access";
 import {
-  dashboardDevLaunchCode,
   getAccountAuthContext,
   loadOptionalViewerContext,
 } from "@/lib/dashboard-auth";
@@ -175,7 +174,6 @@ export default async function DashboardPage({
     }
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
-    const localDevelopmentLaunchCode = dashboardDevLaunchCode(account);
 
     if (draft && billing.billing?.can_create_agent) {
       redirect("/dashboard/agent-creation-requests/complete");
@@ -238,7 +236,7 @@ export default async function DashboardPage({
             error={agentCreationError}
             draft={draft}
             requiresAccess={
-              !billing.billing?.can_create_agent && !localDevelopmentLaunchCode
+              !billing.billing?.can_create_agent
             }
           />
         ) : null}
@@ -725,7 +723,7 @@ function CoreAgentCreationFailedPanel({
             <div className="min-w-0">
               <h2 className="truncate font-semibold text-foreground">{request.display_name}</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                {request.failure_message ?? "The launch failed before a runtime came online."}
+                {request.failure_message ?? "The launch failed before your agent became ready."}
               </p>
             </div>
             <FormActionButton variant="outline" pendingLabel="Resetting...">
@@ -751,9 +749,9 @@ function CoreImportCandidatesPanel({
           <CheckCircle2Icon className="size-5" />
         </span>
         <div>
-          <h1 className="ocean-utility-card__title">Import existing bots</h1>
+          <h1 className="ocean-utility-card__title">Import existing agents</h1>
           <p className="text-sm text-muted-foreground">
-            Add the bots already tied to this email.
+            Add the agents already tied to this email.
           </p>
         </div>
       </div>
@@ -776,13 +774,11 @@ function CoreImportCandidatesPanel({
                 <span className="block truncate font-semibold text-foreground">
                   {candidate.host_facts.display_name}
                 </span>
-                <span className="mt-1 block truncate font-mono text-xs text-muted-foreground">
-                  {candidate.source_host_id} / {candidate.source_machine_id}
+                <span className="mt-1 block truncate text-xs text-muted-foreground">
+                  Already connected to your account
                 </span>
               </span>
-              <span className="text-sm text-muted-foreground">
-                {candidate.host_facts.runtime_status}
-              </span>
+              <span className="text-sm text-muted-foreground">Available</span>
             </label>
           ))}
         </div>
@@ -827,7 +823,9 @@ function CoreAgentCreationPanel({
         initialPictureUrl={draft?.profilePictureUrl}
         runnerClass={draft?.runnerClass ?? defaultRunnerClass()}
         requiresAccess={requiresAccess}
-        stripeConfigured={stripeBillingStatus().configured}
+        stripeConfigured={
+          stripeBillingStatus().configured && process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
+        }
       />
     </section>
   );

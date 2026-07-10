@@ -1,4 +1,6 @@
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -30,12 +32,33 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
     let run_id = smoke_run_id();
     let display_name = format!("Devfinity Rust Smoke Agent {run_id}");
     let idempotency_key = format!("devfinity-rust-smoke-{run_id}");
-    let launch_code = env::var("DEVFINITY_SMOKE_LAUNCH_CODE").unwrap_or_else(|_| "off2026".into());
+    let issued: Value = ureq::post(&format!(
+        "{}/api/core/v1/admin/launch-code-batches",
+        env.core_url
+    ))
+    .set(
+        "authorization",
+        &format!("Bearer {}", env.operator_access_token),
+    )
+    .send_json(serde_json::json!({
+        "name": "Devfinity Rust smoke",
+        "codeCount": 1,
+        "expiresInHours": 24
+    }))?
+    .into_json()?;
+    let launch_code = issued
+        .get("codes")
+        .and_then(Value::as_array)
+        .and_then(|codes| codes.first())
+        .and_then(|code| code.get("code"))
+        .and_then(Value::as_str)
+        .ok_or("Core did not return one Launch Code")?;
 
     let response = ureq::post(&format!("{}/agent-creation-requests", env.dashboard_url))
         .send_form(&[
             ("displayName", display_name.as_str()),
-            ("launchCode", launch_code.as_str()),
+            ("access", "launch-code"),
+            ("launchCode", launch_code),
             ("idempotencyKey", idempotency_key.as_str()),
         ])?;
     assert!(
@@ -45,11 +68,11 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
     );
 
     let me: Value = ureq::get(&format!("{}/api/core/v1/me", env.core_url))
-        .set("authorization", &format!("Bearer {}", env.core_api_token))
+        .set(
+            "authorization",
+            &format!("Bearer {}", env.customer_access_token),
+        )
         .set("content-type", "application/json")
-        .set("x-finite-workos-user-id", &env.dashboard_dev_workos_user_id)
-        .set("x-finite-workos-email", &env.dashboard_dev_email)
-        .set("x-finite-workos-email-verified", "true")
         .call()?
         .into_json()?;
 
@@ -112,26 +135,33 @@ struct DevfinityEnv {
     finitechat_url: String,
     hosted_web_device_url: String,
     finitesites_api_url: String,
-    core_api_token: String,
-    dashboard_dev_email: String,
-    dashboard_dev_workos_user_id: String,
+    operator_access_token: String,
+    customer_access_token: String,
     profile: String,
 }
 
 impl DevfinityEnv {
-    fn from_env() -> Result<Self, env::VarError> {
+    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let fixture_dir = PathBuf::from(env::var("DEVFINITY_STATE_DIR")?).join("workos-fixture");
         Ok(Self {
             core_url: trim_trailing_slash(env::var("FC_CORE_URL")?),
             dashboard_url: trim_trailing_slash(env::var("FC_DASHBOARD_URL")?),
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
             hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
-            core_api_token: env::var("FC_CORE_API_TOKEN")?,
-            dashboard_dev_email: env::var("FC_DASHBOARD_DEV_EMAIL")?,
-            dashboard_dev_workos_user_id: env::var("FC_DASHBOARD_DEV_WORKOS_USER_ID")?,
+            operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
+            customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
             profile: env::var("DEVFINITY_PROFILE")?,
         })
     }
+}
+
+fn read_nonempty_token(path: PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+    let token = fs::read_to_string(path)?.trim().to_string();
+    if token.is_empty() {
+        return Err("WorkOS fixture token was empty".into());
+    }
+    Ok(token)
 }
 
 fn assert_http_contains(

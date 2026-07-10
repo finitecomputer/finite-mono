@@ -39,6 +39,10 @@ code and one key per Finite Home—not a secret shared between a human and agent
   Core. Core validates the JWT signature against the WorkOS JWKS and checks
   issuer, client id, expiry, and subject on every user-scoped request; caller-
   supplied identity headers are not authentication.
+- The standard AuthKit access token does not carry email. After validating its
+  `sub`, Core resolves that exact WorkOS user through the read-only User
+  Management API and requires its email to be verified. Core does not require a
+  custom JWT template or trust an email forwarded by Dashboard.
 - Core consumes standard WorkOS session claims instead of minting a parallel
   Finite session token. Account Auth remains an adapter that can be replaced
   without changing Project, Agent Runtime, Principal, or product-grant
@@ -54,7 +58,9 @@ code and one key per Finite Home—not a secret shared between a human and agent
   operator-organization members.
 - Runner and other services use separate, route-scoped service credentials.
   A Runner credential cannot call user or administrator routes, assert a
-  WorkOS subject, or elevate a user.
+  WorkOS subject, or elevate a user. Core reads the Runner capability from
+  `FC_CORE_RUNNER_API_TOKEN`; the non-Runner service and Finite Private usage
+  capabilities remain separate and all three configured values must differ.
 - The Hosted Web Device is authorized by Account Auth but participates as a
   Finite Chat Device; it is not the agent and not room authority.
 - Agent operations are attributable to the agent npub by default. Acting as the

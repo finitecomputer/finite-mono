@@ -56,10 +56,10 @@ export async function restartCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime restart is only available for hosted agents.");
+    throw new Error("This agent cannot be restarted from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime restart.");
+    throw new Error("This agent cannot be restarted from the dashboard.");
   }
 
   await requestCoreRuntimeRestart(access.coreProject.project.id);
@@ -75,10 +75,10 @@ export async function recoverCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime recovery is only available for hosted agents.");
+    throw new Error("Chat recovery is not available for this agent.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime recovery.");
+    throw new Error("Chat recovery is not available for this agent.");
   }
 
   await requestCoreRuntimeRecoverKnownGoodChat(access.coreProject.project.id);
@@ -94,10 +94,10 @@ export async function stopCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime stop is only available for hosted agents.");
+    throw new Error("This agent cannot be stopped from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime stop.");
+    throw new Error("This agent cannot be stopped from the dashboard.");
   }
 
   await requestCoreRuntimeStop(access.coreProject.project.id);
@@ -113,10 +113,10 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime destroy is only available for hosted agents.");
+    throw new Error("This agent cannot be removed from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime destroy.");
+    throw new Error("This agent cannot be removed from the dashboard.");
   }
 
   await requestCoreRuntimeDestroy(access.coreProject.project.id);
@@ -307,7 +307,7 @@ export async function revokeFinitePrivateApiKeyAction(formData: FormData) {
 // --- Admin Ops (/dashboard/admin) ---
 //
 // The isAdmin checks below are a UI gate only. Core independently authorizes
-// each call against FC_CORE_ADMIN_EMAILS using the admin's verified identity
+// each call from the validated WorkOS operator organization.
 // headers, so a bypassed dashboard gate still cannot mutate Core.
 
 async function requireAdminViewer(action: string) {

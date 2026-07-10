@@ -13,10 +13,7 @@ export async function GET(request: NextRequest) {
 
   if (!status.ready) {
     return NextResponse.json(
-      {
-        error: "Sign in is temporarily unavailable",
-        missing: status.missing,
-      },
+      { error: "Sign in is temporarily unavailable" },
       { status: 503 },
     );
   }

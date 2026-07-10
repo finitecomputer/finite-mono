@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use finite_saas_core::api::router;
+use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
     ApproveFinitePrivateGrantInput, ExistingHostProjectImport, FinitePrivateApiKey,
@@ -449,12 +450,12 @@ async fn main() -> Result<()> {
 }
 
 async fn serve() -> Result<()> {
-    let api_token = required_env("FC_CORE_API_TOKEN")?;
+    let auth = CoreAuth::from_env()?;
     let bind = env::var("FC_CORE_BIND").unwrap_or_else(|_| "127.0.0.1:4200".to_string());
     let addr: SocketAddr = bind.parse()?;
 
     let store = postgres_store_from_env().await?;
-    let app = router(store, api_token).layer(TraceLayer::new_for_http());
+    let app = router(store, auth).layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
     axum::serve(listener, app).await?;

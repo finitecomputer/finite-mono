@@ -11,6 +11,3 @@ data:
   FC_DASHBOARD_BASE_URL: "https://finite.computer"
   NEXT_PUBLIC_WORKOS_REDIRECT_URI: "https://finite.computer/callback"
   STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: "price_1TouEuFwiFww4itkeTQNPYR6"
-  # Comma-separated verified emails that may use the Core admin API
-  # (/api/core/v1/admin/*). Empty default means no admins.
-  FC_CORE_ADMIN_EMAILS: "paul@finite.vip,austin@finite.vip,skyler@finitesupply.xyz"

@@ -1,7 +1,7 @@
 // Pure helpers for the Admin Ops page (/dashboard/admin).
 //
 // The dashboard admin gate here is UI-only. Core independently enforces every
-// admin mutation against its FC_CORE_ADMIN_EMAILS allowlist.
+// admin mutation against its validated WorkOS operator organization.
 
 export type AdminOpsViewer = {
   isAdmin: boolean;
@@ -9,35 +9,6 @@ export type AdminOpsViewer = {
 
 export function canAccessAdminOps(viewer: AdminOpsViewer | null | undefined): boolean {
   return Boolean(viewer?.isAdmin);
-}
-
-/**
- * Parse a comma-separated admin email allowlist with the same semantics as
- * Core's FC_CORE_ADMIN_EMAILS: entries trimmed and lowercased, blanks dropped.
- */
-export function parseAdminEmailAllowlist(raw: string | null | undefined): Set<string> {
-  const allowlist = new Set<string>();
-  for (const entry of (raw ?? "").split(",")) {
-    const email = entry.trim().toLowerCase();
-    if (email) {
-      allowlist.add(email);
-    }
-  }
-  return allowlist;
-}
-
-/**
- * True when the (already normalized) email is in FC_CORE_ADMIN_EMAILS. The
- * dashboard shares Core's allowlist so the UI gate and Core enforcement agree.
- */
-export function isCoreAdminEmail(
-  email: string | null,
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  if (!email) {
-    return false;
-  }
-  return parseAdminEmailAllowlist(env.FC_CORE_ADMIN_EMAILS).has(email);
 }
 
 /** Human label for how long ago a runtime last heartbeated. */
