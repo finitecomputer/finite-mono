@@ -23,7 +23,10 @@ v2 owns:
   follow
 - deployment coordination for finite-lat-1 and finite-lat-2 product services
 - the narrow runtime-local `finite` utility for explicit agent-owned workflows
-  such as `finite skills sync`, never a control-plane client
+  such as `finite skills sync`
+- `finite-agentd`, the agent-owned platform boundary for typed, authorized,
+  agent-local status, recovery, process supervision, and configuration offers;
+  never compute lifecycle, arbitrary remote execution, or a product monolith
 
 v2 depends on separate product repos:
 
@@ -51,15 +54,20 @@ Do not add or preserve these as first-class v2 surfaces:
 - OpenRouter fallback when Finite Private is required
 - product feature commands, feature-specific status, or skills control over the
   Runtime Management Pipe
+- compute restart/replacement through `finite-agentd`; those remain Core to
+  Runner lifecycle operations
 
 Existing users stay on legacy `finitecomputer` until migrated. Migration code
 must be explicit bridge code with a delete condition.
 
 Runtime Management Pipe v1 is outbound-only Agent Runtime telemetry for generic
 health and Product Release identity. It has no inbound command path. Product
-features remain in their owning services, UI, stable APIs, local CLIs, or
-skills; Core must not grow feature schemas, runtime file editing, or
-orchestrator access to support them.
+features remain in their owning services, UI, stable APIs, local CLIs, skills,
+or typed Finite Chat requests to `finite-agentd` when an agent-local action is
+required. Core must not grow feature schemas, runtime file editing, or
+orchestrator access to support them. `finite-agentd` delegates Finite Sites,
+Finite Brain, and Finite Chat product behavior to their independent tools; it
+does not absorb them.
 
 The only legacy Core continuity requirement is Finite Private limiter state:
 grants, API-key hashes/tokens, reservations, usage/audit records, and the
@@ -82,9 +90,11 @@ with a delete condition.
   workflow. Local Docker, Kata, and Phala prove the same image digest; do not
   create provider- or feature-specific image lanes.
 - Keep Hermes pinned to 0.18.2 across image, smoke, and release defaults. The
-  production Finite Chat bridge is the resident Rust sidecar with one held
-  inbound stream; strict mode reconnects with bounded backoff and never falls
-  back to Python polling or CLI-per-message subprocesses.
+  production Finite Chat bridge is supervised by `finite-agentd` and is the
+  only process that holds the inbound Finite Chat sync stream. Hermes and
+  `finite-agentd` consume separate durable loopback inboxes; reconnect uses
+  bounded backoff and never falls back to Python polling or CLI-per-message
+  subprocesses.
 - A fresh agent receives the image's Finite Skills baseline once. Restarts and
   image replacement do not overwrite it. Existing agents update only when they
   explicitly invoke `finite skills sync`; Core, Runner, and Runtime

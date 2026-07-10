@@ -2,6 +2,8 @@
 set -euo pipefail
 
 test -x /runtime/bin/finitechat
+test -x /runtime/bin/finite-agentd
+/runtime/bin/finite-agentd status --json >/dev/null
 
 test -x /runtime/bin/fsite
 /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null

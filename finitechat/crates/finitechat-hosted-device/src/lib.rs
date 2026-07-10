@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
@@ -19,9 +20,14 @@ use finitechat_core::{
     AppAction, AppState, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
     FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
+use finitechat_proto::{
+    DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
+    RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
+    RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
+};
 use futures_util::{Stream, StreamExt};
-use serde::Serialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -43,6 +49,8 @@ pub const MAX_HOSTED_MULTIPART_BODY_BYTES: usize =
 const MAX_MULTIPART_TEXT_FIELD_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_ATTACHMENT_MIME_TYPE_BYTES: usize = 128;
+const MAX_RUNTIME_COMMAND_WAIT_MILLIS: u64 = 60_000;
+const RECENT_RUNTIME_EVENT_LIMIT: u32 = 512;
 
 #[derive(Clone, Debug)]
 pub struct HostedDeviceConfig {
@@ -166,6 +174,7 @@ pub fn app(config: HostedDeviceConfig) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
         .route("/v1/app/actions", post(dispatch_action))
+        .route("/v1/app/runtime-commands", post(dispatch_runtime_command))
         .route("/v1/app/updates", get(app_updates))
         .route(
             "/v1/app/attachments",
@@ -176,6 +185,152 @@ pub fn app(config: HostedDeviceConfig) -> Router {
             get(download_attachment),
         )
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct HostedRuntimeCommandRequest {
+    room_id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    target_account_id: String,
+    command: String,
+    #[serde(default)]
+    resource_key: Option<String>,
+    schema: String,
+    body: Value,
+    #[serde(default = "default_runtime_command_wait_millis")]
+    wait_millis: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct HostedRuntimeCommandResponse {
+    request_id: String,
+    status: RuntimeCommandTerminalStatusV1,
+    body: Option<Value>,
+    error: Option<finitechat_proto::RuntimeCommandErrorV1>,
+}
+
+async fn dispatch_runtime_command(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<HostedRuntimeCommandRequest>,
+) -> Result<Json<HostedRuntimeCommandResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let runtime = state.runtime_for(&user_id)?;
+    let response = tokio::task::spawn_blocking(move || send_runtime_command(&runtime, input))
+        .await
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+fn send_runtime_command(
+    runtime: &FiniteChatRuntime,
+    input: HostedRuntimeCommandRequest,
+) -> Result<HostedRuntimeCommandResponse, HostedDeviceError> {
+    let request_id = random_runtime_request_id()?;
+    let body = serde_json::to_vec(&input.body)?;
+    let request = RuntimeCommandRequestV1 {
+        payload_kind: RuntimeCommandPayloadKindV1::Request,
+        request_id: request_id.clone(),
+        command: input.command,
+        target: RuntimeCommandTargetV1 {
+            account_id: input.target_account_id.clone(),
+            device_id: None,
+        },
+        resource_key: input.resource_key,
+        body: RuntimeCommandJsonPayloadV1 {
+            schema: input.schema,
+            json_payload: body,
+        },
+    };
+    request
+        .validate_structure()
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))?;
+    runtime.send_runtime_command_request_and_wait(
+        input.room_id.clone(),
+        input.conversation_id.clone(),
+        serde_json::to_vec(&request)?,
+    )?;
+
+    let wait_millis = input
+        .wait_millis
+        .clamp(1_000, MAX_RUNTIME_COMMAND_WAIT_MILLIS);
+    let started = Instant::now();
+    loop {
+        if let Some(result) = find_runtime_command_result(
+            runtime,
+            &input.room_id,
+            input.conversation_id.as_deref(),
+            &input.target_account_id,
+            &request_id,
+        )? {
+            let decoded_body = result
+                .body
+                .as_ref()
+                .map(|body| serde_json::from_slice::<Value>(&body.json_payload))
+                .transpose()?;
+            return Ok(HostedRuntimeCommandResponse {
+                request_id,
+                status: result.status,
+                body: decoded_body,
+                error: result.error,
+            });
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(wait_millis) {
+            return Err(HostedDeviceError::Task(
+                "The agent did not respond in time. Try again.".to_owned(),
+            ));
+        }
+        let remaining = Duration::from_millis(wait_millis).saturating_sub(elapsed);
+        runtime.agent_bridge_wait_for_update(
+            remaining
+                .as_millis()
+                .min(u128::from(DEFAULT_UPDATE_TIMEOUT_MILLIS)) as u64,
+        )?;
+    }
+}
+
+fn find_runtime_command_result(
+    runtime: &FiniteChatRuntime,
+    room_id: &str,
+    conversation_id: Option<&str>,
+    target_account_id: &str,
+    request_id: &str,
+) -> Result<Option<RuntimeCommandResultV1>, HostedDeviceError> {
+    for stored in runtime.recent_bridge_events(RECENT_RUNTIME_EVENT_LIMIT)? {
+        if stored.room_id != room_id || stored.sender_account_id != target_account_id {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+        else {
+            continue;
+        };
+        if event.kind != DurableAppEventKind::RuntimeCommandResult
+            || event.conversation_id.as_deref() != conversation_id
+        {
+            continue;
+        }
+        let Ok(result) = serde_json::from_slice::<RuntimeCommandResultV1>(&event.payload) else {
+            continue;
+        };
+        if result.request_id == request_id && result.validate_structure().is_ok() {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
+}
+
+fn random_runtime_request_id() -> Result<String, HostedDeviceError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        HostedDeviceError::Task(format!("request id generation failed: {error}"))
+    })?;
+    Ok(format!("runtime-{}", hex::encode(entropy)))
+}
+
+const fn default_runtime_command_wait_millis() -> u64 {
+    45_000
 }
 
 async fn healthz(State(state): State<HostedDeviceState>) -> Json<HealthResponse> {

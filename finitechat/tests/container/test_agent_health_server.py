@@ -75,6 +75,7 @@ class AgentHealthServerTest(unittest.TestCase):
         self.assertEqual(payload["agent_npub"], "npub1agent")
         self.assertEqual(payload["account_id"], "a" * 64)
         self.assertEqual(payload["bridge"], {"status": "connected", "ok": True})
+        self.assertEqual(payload["agentd"], {"status": "starting", "ok": True})
         for deleted_field in ("url", "invite_id", "room_id", "paired"):
             self.assertNotIn(deleted_field, payload)
         self.assertFalse(hasattr(self.health, "mint_invite"))
@@ -90,6 +91,33 @@ class AgentHealthServerTest(unittest.TestCase):
         missing_identity = self.health.runtime_health()
         self.assertFalse(self.health.runtime_ready(missing_identity))
         self.assertIsNone(missing_identity["agent_npub"])
+
+    def test_agentd_required_waits_for_all_supervised_processes(self) -> None:
+        self.health.AGENTD_REQUIRED = True
+        self.addCleanup(setattr, self.health, "AGENTD_REQUIRED", False)
+        self.write_bridge({"status": "connected", "ok": True})
+        starting = self.health.runtime_health()
+        self.assertFalse(self.health.runtime_ready(starting))
+
+        status_path = self.agent_home / "agentd" / "status.json"
+        status_path.parent.mkdir()
+        status_path.write_text(
+            json.dumps(
+                {
+                    "version": "0.1.0",
+                    "processes": {
+                        "processes": {
+                            name: {"state": "running"}
+                            for name in ("finitechat", "health", "hermes")
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        healthy = self.health.runtime_health()
+        self.assertTrue(self.health.runtime_ready(healthy))
+        self.assertEqual(healthy["agentd"]["version"], "0.1.0")
 
     def test_runtime_startup_never_calls_deleted_invite_cli(self) -> None:
         gateway = GATEWAY.read_text(encoding="utf-8")

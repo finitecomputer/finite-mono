@@ -1192,38 +1192,50 @@ wait "$postgres_pid"
             let _ = writeln!(yaml, "      {}:", ManagedProcess::Runner);
             let _ = writeln!(yaml, "        condition: process_started");
         }
-        self.write_environment(
-            yaml,
-            &[
-                ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
-                ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
-                (
-                    "FC_DASHBOARD_DEV_EMAIL",
-                    "devfinity@finite.computer".to_string(),
-                ),
-                (
-                    "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                    "user_devfinity".to_string(),
-                ),
-                ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
-                ("FC_CORE_BASE_URL", self.core_url()),
-                ("FC_CORE_API_TOKEN", self.core_token.clone()),
-                ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
-                ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
-                // Keep the long-lived local dev server isolated from production
-                // and browser-test build artifacts. Next can otherwise combine
-                // incompatible manifests and serve every App Router path as 404.
-                ("NEXT_DIST_DIR", ".next-devfinity".to_string()),
-                (
-                    "FINITECHAT_HOSTED_API_TOKEN",
-                    self.hosted_web_device_token.clone(),
-                ),
-                (
-                    "NEXT_PUBLIC_WORKOS_REDIRECT_URI",
-                    format!("http://127.0.0.1:{}/callback", self.ports.dashboard),
-                ),
-            ],
-        );
+        let mut dashboard_environment = vec![
+            ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
+            ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
+            (
+                "FC_DASHBOARD_DEV_EMAIL",
+                "devfinity@finite.computer".to_string(),
+            ),
+            (
+                "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+                "user_devfinity".to_string(),
+            ),
+            ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
+            ("FC_CORE_BASE_URL", self.core_url()),
+            ("FC_CORE_API_TOKEN", self.core_token.clone()),
+            ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
+            ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
+            // Keep the long-lived local dev server isolated from production
+            // and browser-test build artifacts. Next can otherwise combine
+            // incompatible manifests and serve every App Router path as 404.
+            ("NEXT_DIST_DIR", ".next-devfinity".to_string()),
+            (
+                "FINITECHAT_HOSTED_API_TOKEN",
+                self.hosted_web_device_token.clone(),
+            ),
+            (
+                "NEXT_PUBLIC_WORKOS_REDIRECT_URI",
+                format!("http://127.0.0.1:{}/callback", self.ports.dashboard),
+            ),
+            (
+                "WORKOS_COOKIE_PASSWORD",
+                "devfinity-local-cookie-password-2026".to_string(),
+            ),
+        ];
+        for name in [
+            "GOOGLE_WORKSPACE_CLIENT_ID",
+            "GOOGLE_WORKSPACE_CLIENT_SECRET",
+        ] {
+            if let Ok(value) = std::env::var(name)
+                && !value.trim().is_empty()
+            {
+                dashboard_environment.push((name, value));
+            }
+        }
+        self.write_environment(yaml, &dashboard_environment);
         self.write_http_probe(yaml, "/dashboard", self.ports.dashboard, 5, 5, 5, 120);
     }
 

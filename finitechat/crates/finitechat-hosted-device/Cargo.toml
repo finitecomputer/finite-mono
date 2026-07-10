@@ -16,7 +16,9 @@ axum = { workspace = true, features = ["multipart"] }
 clap.workspace = true
 finite-identity.workspace = true
 finitechat-core = { path = "../finitechat-core" }
+finitechat-proto = { path = "../finitechat-proto" }
 futures-util.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

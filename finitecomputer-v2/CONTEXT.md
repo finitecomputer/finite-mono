@@ -96,6 +96,20 @@ The outbound-only authenticated channel through which an Agent Runtime reports
 generic health and Product Release telemetry to Core.
 _Avoid_: Command channel, product feature API, chat transport, credential handoff
 
+**Agent Platform Channel**:
+The encrypted, Principal-authenticated Finite Chat command/result/state path
+between an authorized user Device and `finite-agentd` inside one Agent Runtime.
+It accepts only versioned, allowlisted agent-local intents and never shell,
+argv, YAML, environment edits, filesystem paths, or compute lifecycle actions.
+_Avoid_: Runtime Management Pipe, control-plane tunnel, remote shell
+
+**Finite Agent Daemon**:
+The narrow Rust daemon (`finite-agentd`) inside one Agent Runtime that keeps the
+Agent Platform Channel available independently of Hermes, supervises
+agent-local processes, and durably applies or rejects typed local actions. It
+delegates Sites, Brain, and Chat behavior to their independent product tools.
+_Avoid_: `finitec`, Core agent, Runner client, product monolith
+
 **Finite Product Release**:
 A tested compatibility set of hosted services, user-facing binaries, and one Agent Runtime image delivered as one Finite Computer product.
 _Avoid_: Component latest, untested version mix
@@ -205,6 +219,10 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   plugin, not through `finitec`.
 - The **Runtime Management Pipe** v1 flows only from **Agent Runtime** to
   **Core** and carries generic health and Product Release telemetry.
+- The **Agent Platform Channel** uses Finite Chat independently of the
+  **Runtime Management Pipe**. The **Finite Agent Daemon** authenticates the
+  sending Principal, targets one Agent Device, durably deduplicates requests,
+  and returns typed results and encrypted state.
 - Lifecycle requests flow from **Core** to a **Runner** through the Runner work
   contract; they are not inbound Runtime Management Pipe messages.
 - Product features, credentials, chat state, skills commands, shell access,
@@ -243,7 +261,10 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 ## Example Dialogue
 
 > **Dev:** "Can we ship this dashboard feature by adding a Runtime Management Pipe command?"
-> **Domain expert:** "No. Product features belong in their owning service, UI, stable CLI, or skill. The pipe only receives generic health and release telemetry."
+> **Domain expert:** "No. The pipe only receives generic health and release telemetry. Keep the feature in its owning product; if it truly requires an agent-local action, send a typed, authorized intent over the Agent Platform Channel and let `finite-agentd` delegate it."
+
+> **Dev:** "Can `finite-agentd` restart the user's Kata or Phala runtime?"
+> **Domain expert:** "No. It can restart Hermes inside the runtime. Compute lifecycle always goes from Core through the provider-neutral Runner contract."
 
 > **Dev:** "Does opening Electron replace the Hosted Web Device?"
 > **Domain expert:** "No. Account Auth enrolls another Finite Chat Device, and each Device heals independently from the canonical Room log."

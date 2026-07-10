@@ -132,9 +132,16 @@ FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir" \
 FINITE_CONFIG_WORKSPACE="$workspace" \
 python "$config_reconciler" --config "${hermes_home}/config.yaml"
 
-python /opt/health_server.py &
-health_pid="$!"
-trap 'kill "$health_pid" 2>/dev/null || true' EXIT
+if [[ "${1:-}" == "--prepare-only" ]]; then
+    echo "FINITE_AGENT_RUNTIME_PREPARED hermes_home=${hermes_home} agent_home=${agent_home}"
+    exit 0
+fi
+
+if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
+    python /opt/health_server.py &
+    health_pid="$!"
+    trap 'kill "$health_pid" 2>/dev/null || true' EXIT
+fi
 
 echo "FINITE_AGENT_RUNTIME real_hermes_gateway=true hermes_home=${hermes_home} agent_home=${agent_home}"
 exec hermes gateway run --replace

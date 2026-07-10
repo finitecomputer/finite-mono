@@ -44,6 +44,7 @@ use finitechat_proto::{
     FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_RENAME_EVENT_V1, GenericActivityKindV1,
     ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_KEY_PACKAGES_PER_DEVICE,
     MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1,
+    RuntimeCommandRequestV1, RuntimeCommandResultV1, RuntimeStateSnapshotV1,
     delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
     nsec_encode, validate_item_count, validate_string_bytes,
 };
@@ -804,6 +805,17 @@ enum AppRuntimeCommand {
         event: SyncHintEvent,
         response: mpsc::SyncSender<Result<AppBridgeSync, FiniteChatCoreError>>,
     },
+    RecentBridgeEvents {
+        limit: u32,
+        response: mpsc::SyncSender<Result<Vec<AppBridgeAppliedEvent>, FiniteChatCoreError>>,
+    },
+    SendRuntimeEvent {
+        room_id: String,
+        conversation_id: Option<String>,
+        kind: DurableAppEventKind,
+        payload: Vec<u8>,
+        response: mpsc::SyncSender<Result<String, FiniteChatCoreError>>,
+    },
     SendEncodedChatMessage {
         room_id: String,
         app_event_plaintext: Vec<u8>,
@@ -1240,6 +1252,101 @@ impl FiniteChatRuntime {
             })?
     }
 
+    pub fn recent_bridge_events(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<AppBridgeAppliedEvent>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::RecentBridgeEvents {
+                limit,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before reading recent events".to_owned(),
+            })?
+    }
+
+    pub fn send_runtime_command_request_and_wait(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SendRuntimeEvent {
+                room_id,
+                conversation_id,
+                kind: DurableAppEventKind::RuntimeCommandRequest,
+                payload,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before sending runtime command".to_owned(),
+            })?
+    }
+
+    pub fn send_runtime_command_result_and_wait(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SendRuntimeEvent {
+                room_id,
+                conversation_id,
+                kind: DurableAppEventKind::RuntimeCommandResult,
+                payload,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before sending runtime command result".to_owned(),
+            })?
+    }
+
+    pub fn send_runtime_state_snapshot_and_wait(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SendRuntimeEvent {
+                room_id,
+                conversation_id,
+                kind: DurableAppEventKind::RuntimeStateSnapshot,
+                payload,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before sending runtime state".to_owned(),
+            })?
+    }
+
     pub fn send_encoded_chat_message_and_wait(
         &self,
         room_id: String,
@@ -1480,6 +1587,23 @@ fn spawn_app_runtime_worker(
                         Ok(bridge)
                     })();
                     let _ = response.send(result);
+                }
+                AppRuntimeCommand::RecentBridgeEvents { limit, response } => {
+                    let _ = response.send(state.recent_bridge_events(limit));
+                }
+                AppRuntimeCommand::SendRuntimeEvent {
+                    room_id,
+                    conversation_id,
+                    kind,
+                    payload,
+                    response,
+                } => {
+                    let _ = response.send(state.send_runtime_command_request(
+                        room_id,
+                        conversation_id,
+                        kind,
+                        payload,
+                    ));
                 }
                 AppRuntimeCommand::SendEncodedChatMessage {
                     room_id,
@@ -2042,6 +2166,22 @@ impl AppRuntimeState {
 
     fn agent_bridge_poll_once(&mut self) -> Result<AppBridgeSync, FiniteChatCoreError> {
         self.agent_bridge_sync_after_change()
+    }
+
+    fn recent_bridge_events(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<AppBridgeAppliedEvent>, FiniteChatCoreError> {
+        self.core
+            .store
+            .load_app_events(self.core.device.device_ref(), limit)
+            .map(|events| {
+                events
+                    .iter()
+                    .map(app_bridge_event_from_stored_event)
+                    .collect()
+            })
+            .map_err(store_error)
     }
 
     fn agent_bridge_apply_sync_hint(
@@ -3143,6 +3283,50 @@ impl AppRuntimeState {
             self.sync_selected_room_messages();
         }
         Ok(sent)
+    }
+
+    fn send_runtime_command_request(
+        &mut self,
+        room_id: String,
+        conversation_id: Option<String>,
+        kind: DurableAppEventKind,
+        payload: Vec<u8>,
+    ) -> Result<String, FiniteChatCoreError> {
+        if !self.room_is_connected(&room_id) {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not ready to send"),
+            });
+        }
+        match kind {
+            DurableAppEventKind::RuntimeCommandRequest => {
+                let request = serde_json::from_slice::<RuntimeCommandRequestV1>(&payload)
+                    .map_err(client_error)?;
+                request.validate_structure().map_err(client_error)?;
+            }
+            DurableAppEventKind::RuntimeCommandResult => {
+                let result = serde_json::from_slice::<RuntimeCommandResultV1>(&payload)
+                    .map_err(client_error)?;
+                result.validate_structure().map_err(client_error)?;
+            }
+            DurableAppEventKind::RuntimeStateSnapshot => {
+                let snapshot = serde_json::from_slice::<RuntimeStateSnapshotV1>(&payload)
+                    .map_err(client_error)?;
+                snapshot.validate_limits().map_err(client_error)?;
+            }
+            _ => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "unsupported runtime event kind".to_owned(),
+                });
+            }
+        }
+        let event = self.core.send_application_event(
+            &room_id,
+            kind,
+            conversation_id,
+            &payload,
+            "runtime-command",
+        )?;
+        Ok(event.message_id)
     }
 
     fn upload_bridge_attachment(

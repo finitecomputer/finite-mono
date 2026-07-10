@@ -5,6 +5,7 @@ import {
   hostedDeviceAttachments,
   hostedDeviceConfig,
   hostedDeviceHeaders,
+  hostedDeviceRuntimeCommand,
 } from "@/lib/hosted-web-device";
 
 const verifiedAccount = {
@@ -77,4 +78,39 @@ test("hostedDeviceHeaders rejects unverified or header-only identities", () => {
       ),
     /verified WorkOS account/
   );
+});
+
+test("runtime commands use the narrow hosted-device endpoint", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedBody = "";
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedBody = String(init?.body);
+    return new Response(
+      JSON.stringify({ request_id: "request-a", status: "succeeded", body: { ok: true } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  }) as typeof fetch;
+  await hostedDeviceRuntimeCommand(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    {
+      email: "user@example.com",
+      workosUserId: "user-a",
+      emailVerified: true,
+      source: "workos",
+    },
+    {
+      room_id: "room-a",
+      target_account_id: "agent-a",
+      command: "agent.connections.status",
+      schema: "finite.agent.empty.request.v1",
+      body: {},
+    }
+  );
+  assert.equal(observedUrl, "https://device.internal/v1/app/runtime-commands");
+  assert.match(observedBody, /agent\.connections\.status/u);
 });

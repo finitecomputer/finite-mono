@@ -30,6 +30,9 @@ commands against the owning source folder before relying on them.
 - [Managed skills are hot-swappable product revisions](adr/0002-managed-skills-are-hot-swappable-product-revisions.md):
   one editable skills source, immutable promotion, first-turn availability,
   event-driven activation, and rollback without a Runtime reboot.
+- [`finite-agentd` is the agent-owned platform boundary](adr/0003-agentd-is-the-agent-owned-platform-boundary.md):
+  typed agent-local commands and supervision over Finite Chat without widening
+  Runner or the outbound-only Runtime Management Pipe.
 
 ## Imported Orientation Docs
 

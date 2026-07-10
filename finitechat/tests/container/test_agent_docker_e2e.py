@@ -208,6 +208,18 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         self.assertIn('FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}"', script)
         self.assertNotIn("gateway_home_channel_yaml", script)
 
+    def test_gateway_launcher_has_agentd_prepare_and_supervised_modes(self) -> None:
+        script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(
+            encoding="utf-8"
+        )
+
+        prepared = script.index('if [[ "${1:-}" == "--prepare-only" ]]')
+        health = script.index("python /opt/health_server.py &", prepared)
+        gateway = script.index("exec hermes gateway run --replace", health)
+        self.assertLess(prepared, health)
+        self.assertLess(health, gateway)
+        self.assertIn('"${FINITE_AGENTD_SUPERVISED:-0}" != "1"', script)
+
     def test_gateway_launcher_seeds_managed_skills_only_for_fresh_agents(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 

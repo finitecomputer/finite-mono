@@ -15,6 +15,13 @@ FINITECHAT_BIN = os.environ.get("FINITECHAT_BIN", "/usr/local/bin/finitechat")
 HOST = os.environ.get("FINITE_AGENT_HTTP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FINITE_AGENT_HTTP_PORT", "8080"))
 BRIDGE_STATUS_FILE = AGENT_HOME / "hermes-bridge-status.json"
+AGENTD_STATUS_FILE = AGENT_HOME / "agentd" / "status.json"
+AGENTD_REQUIRED = os.environ.get("FINITE_AGENTD_REQUIRED", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def identity() -> dict[str, Any]:
@@ -55,6 +62,26 @@ def bridge_status() -> dict[str, Any]:
     return payload
 
 
+def agentd_status() -> dict[str, Any]:
+    try:
+        payload = json.loads(AGENTD_STATUS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "starting", "ok": not AGENTD_REQUIRED}
+    except Exception as exc:
+        return {"status": "unavailable", "ok": False, "error": str(exc)}
+    processes = payload.get("processes", {}).get("processes", {})
+    required = ("finitechat", "health", "hermes")
+    ok = all(processes.get(name, {}).get("state") == "running" for name in required)
+    return {
+        "status": "running" if ok else "starting",
+        "ok": ok,
+        "version": payload.get("version"),
+        "processes": {
+            name: processes.get(name, {}).get("state", "starting") for name in required
+        },
+    }
+
+
 def runtime_health() -> dict[str, Any]:
     payload = identity()
     # `npub` remains the generic identity-health field. `agent_npub` is the
@@ -62,11 +89,16 @@ def runtime_health() -> dict[str, Any]:
     # native Devices to perform MLS Add + Welcome admission.
     payload["agent_npub"] = payload.get("npub")
     payload["bridge"] = bridge_status()
+    payload["agentd"] = agentd_status()
     return payload
 
 
 def runtime_ready(payload: dict[str, Any]) -> bool:
-    return bool(payload.get("ready")) and payload.get("bridge", {}).get("ok") is not False
+    return (
+        bool(payload.get("ready"))
+        and payload.get("bridge", {}).get("ok") is not False
+        and payload.get("agentd", {}).get("ok") is not False
+    )
 
 
 class Handler(BaseHTTPRequestHandler):

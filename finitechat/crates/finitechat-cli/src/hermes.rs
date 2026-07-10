@@ -17,7 +17,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -49,7 +49,10 @@ use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
     AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
-    EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, npub_encode,
+    EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
+    RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1, RuntimeCommandDeliveryV1,
+    RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1, RuntimeCommandResultDeliveryV1,
+    RuntimeStateSnapshotDeliveryV1, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -59,6 +62,7 @@ use crate::CliError;
 
 const CONFIG_FILE: &str = "config.json";
 const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
+const AGENTD_INBOX_FILE: &str = "agentd-inbox.json";
 const HERMES_RUNNING_FILE: &str = "hermes-running.json";
 const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
 const BACKUP_ACTIVITY_FILE: &str = ".finitechat-backup-active";
@@ -327,6 +331,8 @@ struct HermesServiceState {
     runtime: Arc<FiniteChatRuntime>,
     inbox_lock: Arc<Mutex<()>>,
     running_lock: Arc<Mutex<()>>,
+    bridge_updates: Arc<(Mutex<u64>, Condvar)>,
+    joined_account_ids: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -421,7 +427,10 @@ async fn prepare_hermes_service(
         runtime,
         inbox_lock: Arc::new(Mutex::new(())),
         running_lock: Arc::new(Mutex::new(())),
+        bridge_updates: Arc::new((Mutex::new(0), Condvar::new())),
+        joined_account_ids: Arc::new(Mutex::new(Vec::new())),
     };
+    start_resident_bridge_sync(state.clone())?;
     let started = HermesServiceStarted {
         service: "finitechat-hermes",
         version: env!("CARGO_PKG_VERSION"),
@@ -464,7 +473,83 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .route("/readyz", get(hermes_service_readyz))
         .route("/v1/hermes/inbound", get(hermes_service_inbound))
         .route("/v1/hermes/{action}", post(hermes_service_action))
+        .route("/v1/agentd/inbound", get(agentd_service_inbound))
+        .route("/v1/agentd/ack", post(agentd_service_ack))
+        .route("/v1/agentd/result", post(agentd_service_result))
+        .route("/v1/agentd/state", post(agentd_service_state))
         .with_state(state)
+}
+
+fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError> {
+    std::thread::Builder::new()
+        .name("finitechat-resident-sync".to_owned())
+        .spawn(move || {
+            let mut retry_millis = 250u64;
+            loop {
+                match state.runtime.agent_bridge_wait_for_update(30_000) {
+                    Ok(bridge) => {
+                        retry_millis = 250;
+                        if !bridge.joined_account_ids.is_empty()
+                            && let Ok(mut joined) = state.joined_account_ids.lock()
+                        {
+                            joined.extend(bridge.joined_account_ids);
+                            joined.sort();
+                            joined.dedup();
+                        }
+                        signal_bridge_update(&state);
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(retry_millis));
+                        retry_millis = (retry_millis.saturating_mul(2)).min(5_000);
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| CliError::Hermes(format!("could not start resident sync: {error}")))
+}
+
+fn signal_bridge_update(state: &HermesServiceState) {
+    let (generation, wake) = &*state.bridge_updates;
+    if let Ok(mut generation) = generation.lock() {
+        *generation = generation.wrapping_add(1);
+        wake.notify_all();
+    }
+}
+
+fn bridge_generation(state: &HermesServiceState) -> u64 {
+    state
+        .bridge_updates
+        .0
+        .lock()
+        .map(|generation| *generation)
+        .unwrap_or(0)
+}
+
+fn wait_for_bridge_update(
+    state: &HermesServiceState,
+    observed_generation: u64,
+    timeout_millis: u64,
+) {
+    let (generation, wake) = &*state.bridge_updates;
+    let Ok(guard) = generation.lock() else {
+        return;
+    };
+    if *guard != observed_generation {
+        return;
+    }
+    let _ = wake.wait_timeout_while(
+        guard,
+        Duration::from_millis(timeout_millis.max(1)),
+        |generation| *generation == observed_generation,
+    );
+}
+
+fn take_joined_accounts(state: &HermesServiceState) -> Vec<String> {
+    let Ok(mut joined) = state.joined_account_ids.lock() else {
+        return Vec::new();
+    };
+    std::mem::take(&mut *joined)
 }
 
 async fn hermes_service_healthz(
@@ -557,6 +642,129 @@ async fn hermes_service_inbound(
         .into_response())
 }
 
+async fn agentd_service_inbound(
+    State(state): State<HermesServiceState>,
+    Query(query): Query<HermesInboundQuery>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(32);
+    std::thread::spawn(move || {
+        if let Err(error) = run_agentd_inbound_stream(state, query, tx.clone()) {
+            let record = json!({
+                "type": "error",
+                "error": error.to_string(),
+            });
+            if let Ok(line) = serde_json::to_string(&record) {
+                let _ = tx.blocking_send(Ok(Bytes::from(format!("{line}\n"))));
+            }
+        }
+    });
+
+    let body_stream = stream::unfold(
+        (
+            rx,
+            tokio::time::interval(Duration::from_millis(HERMES_SERVICE_HEARTBEAT_MILLIS)),
+        ),
+        |(mut rx, mut heartbeat)| async move {
+            tokio::select! {
+                item = rx.recv() => item.map(|bytes| (bytes, (rx, heartbeat))),
+                _ = heartbeat.tick() => Some((Ok(Bytes::from_static(b"\n")), (rx, heartbeat))),
+            }
+        },
+    );
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(body_stream),
+    )
+        .into_response())
+}
+
+async fn agentd_service_ack(
+    State(state): State<HermesServiceState>,
+    Json(ack): Json<RuntimeCommandDeliveryAckV1>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let result = tokio::task::spawn_blocking(move || handle_agentd_ack(&state, ack))
+        .await
+        .map_err(|error| service_internal_error(error.to_string()))?;
+    result.map(Json).map_err(service_cli_error)
+}
+
+async fn agentd_service_result(
+    State(state): State<HermesServiceState>,
+    Json(delivery): Json<RuntimeCommandResultDeliveryV1>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let result = tokio::task::spawn_blocking(move || handle_agentd_result(&state, delivery))
+        .await
+        .map_err(|error| service_internal_error(error.to_string()))?;
+    result.map(Json).map_err(service_cli_error)
+}
+
+async fn agentd_service_state(
+    State(state): State<HermesServiceState>,
+    Json(delivery): Json<RuntimeStateSnapshotDeliveryV1>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let result = tokio::task::spawn_blocking(move || handle_agentd_state(&state, delivery))
+        .await
+        .map_err(|error| service_internal_error(error.to_string()))?;
+    result.map(Json).map_err(service_cli_error)
+}
+
+fn handle_agentd_ack(
+    state: &HermesServiceState,
+    ack: RuntimeCommandDeliveryAckV1,
+) -> Result<Value, CliError> {
+    ack.validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let _guard = lock_service_mutex(&state.inbox_lock)?;
+    let mut inbox = load_agentd_inbox(&state.agent_home)?;
+    let key = agentd_inbox_key(&ack.room_id, ack.seq, &ack.message_id);
+    let before = inbox.events.len();
+    inbox.events.retain(|event| event.key != key);
+    if inbox.events.len() != before {
+        save_agentd_inbox(&state.agent_home, &inbox)?;
+        signal_bridge_update(state);
+    }
+    Ok(json!({
+        "acked": inbox.events.len() != before,
+        "room_id": ack.room_id,
+        "seq": ack.seq,
+        "message_id": ack.message_id,
+    }))
+}
+
+fn handle_agentd_result(
+    state: &HermesServiceState,
+    delivery: RuntimeCommandResultDeliveryV1,
+) -> Result<Value, CliError> {
+    delivery
+        .validate_structure()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let payload = serde_json::to_vec(&delivery.result).map_err(CliError::Serialize)?;
+    let message_id = state
+        .runtime
+        .send_runtime_command_result_and_wait(delivery.room_id, delivery.conversation_id, payload)
+        .map_err(map_core_hermes_error)?;
+    Ok(json!({ "message_id": message_id }))
+}
+
+fn handle_agentd_state(
+    state: &HermesServiceState,
+    delivery: RuntimeStateSnapshotDeliveryV1,
+) -> Result<Value, CliError> {
+    delivery
+        .validate_limits()
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let payload = serde_json::to_vec(&delivery.snapshot).map_err(CliError::Serialize)?;
+    let message_id = state
+        .runtime
+        .send_runtime_state_snapshot_and_wait(delivery.room_id, delivery.conversation_id, payload)
+        .map_err(map_core_hermes_error)?;
+    Ok(json!({ "message_id": message_id }))
+}
+
 fn handle_hermes_service_action(
     state: &HermesServiceState,
     action: &str,
@@ -565,8 +773,14 @@ fn handle_hermes_service_action(
     match action {
         "poll" => handle_hermes_service_poll(state, payload),
         "ack" => {
-            let _guard = lock_service_mutex(&state.inbox_lock)?;
-            output_json_value(|output| cmd_ack(&state.agent_home, payload, output))
+            let result = {
+                let _guard = lock_service_mutex(&state.inbox_lock)?;
+                output_json_value(|output| cmd_ack(&state.agent_home, payload, output))
+            };
+            if result.is_ok() {
+                signal_bridge_update(state);
+            }
+            result
         }
         "send" => {
             let request: HermesSendRequestV1 =
@@ -629,14 +843,15 @@ fn handle_hermes_service_poll(
     let home = load_home(&state.agent_home)?;
 
     loop {
-        let payload = collect_hermes_service_inbound_payload(state, &home, &request, None)?;
+        let observed_generation = bridge_generation(state);
+        let payload = collect_hermes_service_inbound_payload(state, &home, &request)?;
         if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
             return Ok(payload);
         }
 
         let remaining = timeout.saturating_sub(started.elapsed()).as_millis() as u64;
-        let bridge = wait_for_hermes_bridge_update_or_poll(state, remaining)?;
-        let payload = collect_hermes_service_inbound_payload(state, &home, &request, Some(bridge))?;
+        wait_for_bridge_update(state, observed_generation, remaining);
+        let payload = collect_hermes_service_inbound_payload(state, &home, &request)?;
         if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
             return Ok(payload);
         }
@@ -696,82 +911,72 @@ fn run_hermes_inbound_stream(
     let timeout_millis = normalized_hermes_poll_timeout(&request).as_millis() as u64;
 
     loop {
-        let payload = collect_hermes_service_inbound_payload(&state, &home, &request, None)?;
+        let observed_generation = bridge_generation(&state);
+        let payload = collect_hermes_service_inbound_payload(&state, &home, &request)?;
         if !send_hermes_inbound_payload(&tx, &payload)? {
             return Ok(());
         }
-        if hermes_inbound_payload_has_records(&payload) {
-            continue;
-        }
-
-        let bridge = wait_for_hermes_bridge_update_or_poll(&state, timeout_millis)?;
-        let payload =
-            collect_hermes_service_inbound_payload(&state, &home, &request, Some(bridge))?;
-        if !send_hermes_inbound_payload(&tx, &payload)? {
-            return Ok(());
-        }
+        wait_for_bridge_update(&state, observed_generation, timeout_millis);
     }
 }
 
-fn wait_for_hermes_bridge_update_or_poll(
-    state: &HermesServiceState,
-    timeout_millis: u64,
-) -> Result<finitechat_core::AppBridgeSync, CliError> {
-    match state.runtime.agent_bridge_wait_for_update(timeout_millis) {
-        Ok(bridge) => Ok(bridge),
-        Err(_) => {
-            let fallback_sleep_ms = timeout_millis.min(POLL_SLEEP_MS);
-            if fallback_sleep_ms > 0 {
-                std::thread::sleep(Duration::from_millis(fallback_sleep_ms));
+fn run_agentd_inbound_stream(
+    state: HermesServiceState,
+    query: HermesInboundQuery,
+    tx: tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+) -> Result<(), CliError> {
+    let home = load_home(&state.agent_home)?;
+    let room_filter = query.room_id.as_deref();
+    let limit = query.limit.unwrap_or(32).clamp(1, 64) as usize;
+    let timeout_millis = query
+        .timeout_millis
+        .unwrap_or(30_000)
+        .clamp(1_000, MAX_HERMES_POLL_TIMEOUT_MILLIS);
+
+    loop {
+        let observed_generation = bridge_generation(&state);
+        let deliveries = collect_agentd_inbound(&state, &home, room_filter, limit)?;
+        for delivery in deliveries {
+            let line = serde_json::to_string(&delivery).map_err(CliError::Serialize)?;
+            if tx
+                .blocking_send(Ok(Bytes::from(format!("{line}\n"))))
+                .is_err()
+            {
+                return Ok(());
             }
-            state
-                .runtime
-                .agent_bridge_poll_once()
-                .map_err(map_core_hermes_error)
         }
+        wait_for_bridge_update(&state, observed_generation, timeout_millis);
     }
+}
+
+fn collect_agentd_inbound(
+    state: &HermesServiceState,
+    home: &AgentHome,
+    room_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<RuntimeCommandDeliveryV1>, CliError> {
+    let _guard = lock_service_mutex(&state.inbox_lock)?;
+    let mut inbox = load_agentd_inbox(&state.agent_home)?;
+    recover_stored_agentd_events(home, &state.account_id, room_filter, &mut inbox)?;
+    Ok(inbox
+        .events
+        .iter()
+        .filter(|event| room_filter.is_none_or(|room_id| event.room_id == room_id))
+        .take(limit)
+        .map(|event| event.delivery.clone())
+        .collect())
 }
 
 fn collect_hermes_service_inbound_payload(
     state: &HermesServiceState,
     home: &AgentHome,
     request: &PollRequest,
-    bridge: Option<finitechat_core::AppBridgeSync>,
 ) -> Result<Value, CliError> {
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_hermes_inbox(&state.agent_home)?;
     initialize_hermes_inbox_cursors(&state.agent_home, home, &mut inbox)?;
-    let mut joined = Vec::<String>::new();
-
-    if let Some(bridge) = bridge {
-        joined = bridge.joined_account_ids;
-        for applied in &bridge.events {
-            if let Some(room_filter) = &request.room_id
-                && room_filter != &applied.room_id
-            {
-                continue;
-            }
-            if applied.sender_account_id == state.account_id {
-                continue;
-            }
-            let context = HermesPollEventContext {
-                home_dir: &state.agent_home,
-                room_id: &applied.room_id,
-                seq: applied.seq,
-                message_id: &applied.message_id,
-                sender_account_id: &applied.sender_account_id,
-                sender_device_id: &applied.sender_device_id,
-                conversation_id: None,
-                segment_id: None,
-            };
-            if let Some(event) =
-                hermes_poll_event_from_application_plaintext(context, &applied.plaintext)?
-            {
-                enqueue_hermes_inbox_event(&state.agent_home, &mut inbox, event)?;
-            }
-        }
-    }
+    let joined = take_joined_accounts(state);
 
     recover_stored_hermes_events(
         &state.agent_home,
@@ -1354,6 +1559,23 @@ struct HermesInboxEvent {
     event: HermesPollEventV1,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AgentdInboxState {
+    #[serde(default)]
+    events: Vec<AgentdInboxEvent>,
+    #[serde(default)]
+    cursors: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentdInboxEvent {
+    key: String,
+    room_id: String,
+    seq: u64,
+    message_id: String,
+    delivery: RuntimeCommandDeliveryV1,
+}
+
 fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<(), CliError> {
     let request: PollRequest = serde_json::from_value(request).map_err(CliError::Json)?;
     let limit = request.limit.unwrap_or(10).clamp(1, 32) as usize;
@@ -1458,6 +1680,127 @@ fn save_hermes_inbox(home_dir: &Path, inbox: &HermesInboxState) -> Result<(), Cl
         home_dir.join(HERMES_INBOX_FILE),
         &serde_json::to_string_pretty(inbox).map_err(CliError::Serialize)?,
     )
+}
+
+fn load_agentd_inbox(home_dir: &Path) -> Result<AgentdInboxState, CliError> {
+    let path = home_dir.join(AGENTD_INBOX_FILE);
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Default::default());
+        }
+        Err(error) => return Err(CliError::Hermes(error.to_string())),
+    };
+    serde_json::from_str(&raw).map_err(CliError::Json)
+}
+
+fn save_agentd_inbox(home_dir: &Path, inbox: &AgentdInboxState) -> Result<(), CliError> {
+    write_private(
+        home_dir.join(AGENTD_INBOX_FILE),
+        &serde_json::to_string_pretty(inbox).map_err(CliError::Serialize)?,
+    )
+}
+
+fn recover_stored_agentd_events(
+    home: &AgentHome,
+    own_account: &str,
+    room_filter: Option<&str>,
+    inbox: &mut AgentdInboxState,
+) -> Result<(), CliError> {
+    let mut changed = false;
+    for stored in load_recent_agent_app_events(home)? {
+        if let Some(room_id) = room_filter
+            && room_id != stored.room_id
+        {
+            continue;
+        }
+        if stored.seq <= agentd_inbox_cursor(inbox, &stored.room_id) {
+            continue;
+        }
+        if stored.sender.account_id == own_account {
+            changed |= advance_agentd_inbox_cursor(inbox, &stored.room_id, stored.seq);
+            continue;
+        }
+        let delivery = runtime_command_delivery_from_stored(&stored);
+        changed |= advance_agentd_inbox_cursor(inbox, &stored.room_id, stored.seq);
+        let Some(delivery) = delivery else {
+            continue;
+        };
+        let key = agentd_inbox_key(&stored.room_id, stored.seq, &stored.message_id);
+        if inbox.events.iter().any(|event| event.key == key) {
+            continue;
+        }
+        if inbox.events.len() >= MAX_RUNTIME_COMMAND_LEDGER_RECORDS as usize {
+            return Err(CliError::Hermes(format!(
+                "agentd inbox capacity exceeded: max {MAX_RUNTIME_COMMAND_LEDGER_RECORDS}"
+            )));
+        }
+        inbox.events.push(AgentdInboxEvent {
+            key,
+            room_id: stored.room_id,
+            seq: stored.seq,
+            message_id: stored.message_id,
+            delivery,
+        });
+        changed = true;
+    }
+    if changed {
+        save_agentd_inbox(&home.dir, inbox)?;
+    }
+    Ok(())
+}
+
+fn runtime_command_delivery_from_stored(
+    stored: &StoredAppEvent,
+) -> Option<RuntimeCommandDeliveryV1> {
+    let event = serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext).ok()?;
+    if event.validate_limits().is_err() {
+        return None;
+    }
+    let payload = match event.kind {
+        DurableAppEventKind::RuntimeCommandRequest => {
+            let request = serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload).ok()?;
+            if request.validate_structure().is_err() {
+                return None;
+            }
+            RuntimeCommandInboundPayloadV1::Request(request)
+        }
+        DurableAppEventKind::RuntimeCommandCancel => {
+            let cancel = serde_json::from_slice::<RuntimeCommandCancelV1>(&event.payload).ok()?;
+            if cancel.validate_structure().is_err() {
+                return None;
+            }
+            RuntimeCommandInboundPayloadV1::Cancel(cancel)
+        }
+        _ => return None,
+    };
+    let delivery = RuntimeCommandDeliveryV1 {
+        room_id: stored.room_id.clone(),
+        conversation_id: event.conversation_id,
+        seq: stored.seq,
+        message_id: stored.message_id.clone(),
+        sender: stored.sender.clone(),
+        payload,
+    };
+    delivery.validate_structure().ok()?;
+    Some(delivery)
+}
+
+fn agentd_inbox_cursor(inbox: &AgentdInboxState, room_id: &str) -> u64 {
+    inbox.cursors.get(room_id).copied().unwrap_or(0)
+}
+
+fn advance_agentd_inbox_cursor(inbox: &mut AgentdInboxState, room_id: &str, seq: u64) -> bool {
+    let cursor = inbox.cursors.entry(room_id.to_owned()).or_default();
+    if seq <= *cursor {
+        return false;
+    }
+    *cursor = seq;
+    true
+}
+
+fn agentd_inbox_key(room_id: &str, seq: u64, message_id: &str) -> String {
+    format!("{room_id}:{seq}:{message_id}")
 }
 
 fn enqueue_hermes_inbox_event(
@@ -3303,6 +3646,86 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message_id, "msg-11");
         assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 11);
+    }
+
+    #[test]
+    fn agentd_delivery_accepts_only_typed_runtime_commands_and_keeps_chat_separate() {
+        let request = RuntimeCommandRequestV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Request,
+            request_id: "request-1".to_owned(),
+            command: "agent.status.inspect".to_owned(),
+            target: finitechat_proto::RuntimeCommandTargetV1 {
+                account_id: "agent-account".to_owned(),
+                device_id: Some("agent-device".to_owned()),
+            },
+            resource_key: None,
+            body: finitechat_proto::RuntimeCommandJsonPayloadV1 {
+                schema: "finite.agent.status.request.v1".to_owned(),
+                json_payload: br#"{}"#.to_vec(),
+            },
+        };
+        let wrapped = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::RuntimeCommandRequest,
+            conversation_id: Some("topic-main".to_owned()),
+            segment_id: None,
+            payload: serde_json::to_vec(&request).unwrap(),
+        };
+        let stored = StoredAppEvent {
+            room_id: "room-main".to_owned(),
+            seq: 8,
+            message_id: "message-8".to_owned(),
+            sender: finitechat_proto::DeviceRef::new("user-account", "hosted-web"),
+            plaintext: serde_json::to_vec(&wrapped).unwrap(),
+            timestamp_unix_seconds: 10,
+        };
+
+        let delivery = runtime_command_delivery_from_stored(&stored).unwrap();
+        assert_eq!(delivery.room_id, "room-main");
+        assert_eq!(delivery.conversation_id.as_deref(), Some("topic-main"));
+        assert_eq!(delivery.sender.account_id, "user-account");
+        assert!(matches!(
+            delivery.payload,
+            RuntimeCommandInboundPayloadV1::Request(value)
+                if value.command == "agent.status.inspect"
+        ));
+
+        let chat = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: Some("topic-main".to_owned()),
+            segment_id: None,
+            payload: b"normal chat remains Hermes input".to_vec(),
+        };
+        let mut chat_stored = stored;
+        chat_stored.plaintext = serde_json::to_vec(&chat).unwrap();
+        assert!(runtime_command_delivery_from_stored(&chat_stored).is_none());
+    }
+
+    #[test]
+    fn agentd_inbox_cursor_advances_past_non_command_events_without_losing_pending_commands() {
+        let mut inbox = AgentdInboxState::default();
+        assert!(advance_agentd_inbox_cursor(&mut inbox, "room-a", 4));
+        inbox.events.push(AgentdInboxEvent {
+            key: agentd_inbox_key("room-a", 5, "command-5"),
+            room_id: "room-a".to_owned(),
+            seq: 5,
+            message_id: "command-5".to_owned(),
+            delivery: RuntimeCommandDeliveryV1 {
+                room_id: "room-a".to_owned(),
+                conversation_id: None,
+                seq: 5,
+                message_id: "command-5".to_owned(),
+                sender: finitechat_proto::DeviceRef::new("user-account", "hosted-web"),
+                payload: RuntimeCommandInboundPayloadV1::Cancel(RuntimeCommandCancelV1 {
+                    payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Cancel,
+                    request_id: "request-5".to_owned(),
+                    reason: Some("user_requested".to_owned()),
+                }),
+            },
+        });
+        assert!(advance_agentd_inbox_cursor(&mut inbox, "room-a", 5));
+        assert!(!advance_agentd_inbox_cursor(&mut inbox, "room-a", 3));
+        assert_eq!(agentd_inbox_cursor(&inbox, "room-a"), 5);
+        assert_eq!(inbox.events.len(), 1, "cursor movement is not an ack");
     }
 
     #[test]

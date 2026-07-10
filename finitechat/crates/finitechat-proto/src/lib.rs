@@ -825,6 +825,47 @@ pub struct RuntimeCommandCancelV1 {
     pub reason: Option<String>,
 }
 
+/// Local delivery envelope between the resident Finite Chat Device service and
+/// `finite-agentd`. The encrypted Room event remains the authoritative wire
+/// payload; this envelope adds only already-authenticated delivery context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCommandDeliveryV1 {
+    pub room_id: RoomId,
+    pub conversation_id: Option<ConversationId>,
+    pub seq: Seq,
+    pub message_id: MessageId,
+    pub sender: DeviceRef,
+    pub payload: RuntimeCommandInboundPayloadV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum RuntimeCommandInboundPayloadV1 {
+    Request(RuntimeCommandRequestV1),
+    Cancel(RuntimeCommandCancelV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCommandDeliveryAckV1 {
+    pub room_id: RoomId,
+    pub seq: Seq,
+    pub message_id: MessageId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCommandResultDeliveryV1 {
+    pub room_id: RoomId,
+    pub conversation_id: Option<ConversationId>,
+    pub result: RuntimeCommandResultV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeStateSnapshotDeliveryV1 {
+    pub room_id: RoomId,
+    pub conversation_id: Option<ConversationId>,
+    pub snapshot: RuntimeStateSnapshotV1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCommandLedgerStatus {
@@ -1701,6 +1742,106 @@ impl RuntimeCommandCancelV1 {
             validate_string_bytes("runtime_command.cancel.reason", reason, MAX_OBJECT_ID_BYTES)?;
         }
         Ok(())
+    }
+}
+
+impl RuntimeCommandDeliveryV1 {
+    pub fn validate_structure(&self) -> Result<(), RuntimeCommandPayloadError> {
+        validate_bytes_non_empty("runtime_command.delivery.room_id", self.room_id.len())?;
+        validate_string_bytes(
+            "runtime_command.delivery.room_id",
+            &self.room_id,
+            MAX_ROOM_ID_BYTES,
+        )?;
+        validate_bytes_non_empty("runtime_command.delivery.message_id", self.message_id.len())?;
+        validate_string_bytes(
+            "runtime_command.delivery.message_id",
+            &self.message_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        if let Some(conversation_id) = &self.conversation_id {
+            validate_bytes_non_empty(
+                "runtime_command.delivery.conversation_id",
+                conversation_id.len(),
+            )?;
+            validate_string_bytes(
+                "runtime_command.delivery.conversation_id",
+                conversation_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        self.sender.validate_limits()?;
+        match &self.payload {
+            RuntimeCommandInboundPayloadV1::Request(request) => request.validate_structure(),
+            RuntimeCommandInboundPayloadV1::Cancel(cancel) => cancel.validate_structure(),
+        }
+    }
+}
+
+impl RuntimeCommandDeliveryAckV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty("runtime_command.ack.room_id", self.room_id.len())?;
+        validate_string_bytes(
+            "runtime_command.ack.room_id",
+            &self.room_id,
+            MAX_ROOM_ID_BYTES,
+        )?;
+        validate_bytes_non_empty("runtime_command.ack.message_id", self.message_id.len())?;
+        validate_string_bytes(
+            "runtime_command.ack.message_id",
+            &self.message_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        Ok(())
+    }
+}
+
+impl RuntimeCommandResultDeliveryV1 {
+    pub fn validate_structure(&self) -> Result<(), RuntimeCommandPayloadError> {
+        validate_bytes_non_empty(
+            "runtime_command.result_delivery.room_id",
+            self.room_id.len(),
+        )?;
+        validate_string_bytes(
+            "runtime_command.result_delivery.room_id",
+            &self.room_id,
+            MAX_ROOM_ID_BYTES,
+        )?;
+        if let Some(conversation_id) = &self.conversation_id {
+            validate_bytes_non_empty(
+                "runtime_command.result_delivery.conversation_id",
+                conversation_id.len(),
+            )?;
+            validate_string_bytes(
+                "runtime_command.result_delivery.conversation_id",
+                conversation_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        self.result.validate_structure()
+    }
+}
+
+impl RuntimeStateSnapshotDeliveryV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty("runtime_state.delivery.room_id", self.room_id.len())?;
+        validate_string_bytes(
+            "runtime_state.delivery.room_id",
+            &self.room_id,
+            MAX_ROOM_ID_BYTES,
+        )?;
+        if let Some(conversation_id) = &self.conversation_id {
+            validate_bytes_non_empty(
+                "runtime_state.delivery.conversation_id",
+                conversation_id.len(),
+            )?;
+            validate_string_bytes(
+                "runtime_state.delivery.conversation_id",
+                conversation_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        self.snapshot.validate_limits()
     }
 }
 

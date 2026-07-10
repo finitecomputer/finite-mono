@@ -1,10 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
-  LogOutIcon,
   MessageSquareIcon,
   RotateCcwIcon,
-  ServerCogIcon,
   StopCircleIcon,
 } from "lucide-react";
 
@@ -14,7 +12,6 @@ import {
 } from "@/app/actions";
 import { CopyButton } from "@/components/copy-button";
 import { FormActionButton } from "@/components/form-action-button";
-import { SignOutLink } from "@/components/sign-out-link";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
 import { fetchRuntimeAgentNpub, truncateNpub } from "@/lib/agent-contact";
@@ -69,9 +66,11 @@ async function ImportedMachineOverview({
   access: DashboardMachineAccess;
   agentNpub: string | null;
 }) {
-  const runtime = access.coreProject?.runtime ?? null;
-  const overview = runtime
-    ? coreRuntimeOverview(runtime.host_facts.runtime_status, runtime.updated_at)
+  const overview = access.coreProject?.runtime
+    ? coreRuntimeOverview(
+        access.coreProject.runtime.host_facts.runtime_status,
+        access.coreProject.runtime.updated_at
+      )
     : await loadRelayOverview(access.machineId, access.relayEndpoint);
   const prismState = prismStateForRelay(overview);
   const canControlRuntime = access.coreProject
@@ -89,7 +88,7 @@ async function ImportedMachineOverview({
             </div>
             <h1 className="ocean-status-card__title">{access.displayName}</h1>
             <p className="ocean-status-card__description">
-              This agent is available in Finite Chat. {overview.description}
+              {overview.description}
             </p>
             <div className="ocean-status-card__actions">
               {canControlRuntime ? (
@@ -115,14 +114,8 @@ async function ImportedMachineOverview({
               <Button asChild variant="secondary">
                 <Link href={`/dashboard/machines/${encodeURIComponent(access.machineId)}/chat`}>
                   <MessageSquareIcon />
-                  Open web chat
+                  Open chat
                 </Link>
-              </Button>
-              <Button asChild variant="secondary">
-                <SignOutLink>
-                  Sign out
-                  <LogOutIcon />
-                </SignOutLink>
               </Button>
             </div>
           </div>
@@ -131,33 +124,6 @@ async function ImportedMachineOverview({
 
       {agentNpub ? <AgentContactCard agentNpub={agentNpub} /> : null}
 
-      <div className="ocean-action-grid">
-        <div className="ocean-action-card">
-          <span className="ocean-action-card__icon">
-            <MessageSquareIcon className="size-5" />
-          </span>
-          <span className="ocean-action-card__body">
-            <span className="ocean-action-card__title">Finite Chat</span>
-            <span className="ocean-action-card__description">
-              Open the dashboard Hosted Web Device now; Electron and native clients can join later.
-            </span>
-          </span>
-        </div>
-        <div className="ocean-action-card">
-          <span className="ocean-action-card__icon">
-            <RotateCcwIcon className="size-5" />
-          </span>
-          <span className="ocean-action-card__body">
-            <span className="ocean-action-card__title">Runtime restart</span>
-            <span className="ocean-action-card__description">
-              Generic restart preserves the agent&apos;s durable state without adding a chat-specific control path.
-            </span>
-          </span>
-        </div>
-      </div>
-      {runtime ? (
-        <RuntimeFactsCard access={access} />
-      ) : null}
     </div>
   );
 }
@@ -170,10 +136,9 @@ function AgentContactCard({ agentNpub }: { agentNpub: string }) {
           <MessageSquareIcon className="size-5" />
         </span>
         <div>
-          <h2 className="ocean-utility-card__title">Agent identity</h2>
+          <h2 className="ocean-utility-card__title">Agent address</h2>
           <p className="text-sm text-muted-foreground">
-            Hosted Web, Electron, and native clients are independent Devices
-            that start a chat with this Agent Principal.
+            Use this address to connect another Finite Chat app.
           </p>
         </div>
       </div>
@@ -182,82 +147,9 @@ function AgentContactCard({ agentNpub }: { agentNpub: string }) {
           {truncateNpub(agentNpub)}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <CopyButton value={agentNpub} label="Copy agent npub" />
+          <CopyButton value={agentNpub} label="Copy address" />
         </div>
       </div>
-    </section>
-  );
-}
-
-function RuntimeFactsCard({ access }: { access: DashboardMachineAccess }) {
-  const runtime = access.coreProject?.runtime;
-  if (!runtime) {
-    return null;
-  }
-  const facts = runtime.host_facts;
-  const safeUrls = facts.published_app_urls.filter(safeHttpUrl);
-  const rows = [
-    ["Project", access.coreProject?.project.id],
-    ["Runtime", runtime.id],
-    ["Source host", runtime.source_host_id],
-    ["Source machine", runtime.source_machine_id],
-    ["Runtime artifact", runtime.runtime_artifact_id],
-    ["State schema", runtime.state_schema_version],
-    ["Runtime host", facts.runtime_host],
-    ["Status", facts.runtime_status],
-    ["Hermes", facts.hermes_available === false ? "unavailable" : "available"],
-    ["Inference", facts.active_inference_profile],
-    ["Updated", runtime.updated_at],
-  ];
-
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <ServerCogIcon className="size-5" />
-        </span>
-        <div>
-          <h2 className="ocean-utility-card__title">Runtime facts</h2>
-          <p className="text-sm text-muted-foreground">
-            Plaintext operational state for support and recovery.
-          </p>
-        </div>
-      </div>
-
-      <dl className="grid gap-2 text-sm md:grid-cols-2">
-        {rows.map(([label, value]) => (
-          <div
-            key={label}
-            className="grid gap-1 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3"
-          >
-            <dt className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              {label}
-            </dt>
-            <dd className="break-all font-mono text-foreground">{value || "unknown"}</dd>
-          </div>
-        ))}
-      </dl>
-
-      {safeUrls.length ? (
-        <div className="grid gap-2">
-          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Public endpoints
-          </div>
-          <div className="grid gap-2">
-            {safeUrls.map((url) => (
-              <a
-                key={url}
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground hover:underline"
-              >
-                {url}
-              </a>
-            ))}
-          </div>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -269,31 +161,31 @@ function coreRuntimeOverview(
   if (status === "online") {
     return {
       state: "connected",
-      label: "Runtime online.",
-      description: "Runtime is online.",
+      label: "Online",
+      description: "Your agent is online.",
       lastSeenAt: updatedAt,
     };
   }
   if (status === "stale") {
     return {
       state: "stale",
-      label: "Runtime needs attention.",
-      description: "Runtime needs attention.",
+      label: "Needs attention",
+      description: "Your agent needs attention.",
       lastSeenAt: updatedAt,
     };
   }
   if (status === "offline") {
     return {
       state: "missing",
-      label: "Runtime stopped.",
-      description: "Runtime is stopped.",
+      label: "Stopped",
+      description: "Your agent is stopped.",
       lastSeenAt: updatedAt,
     };
   }
   return {
     state: "unavailable",
-    label: "Runtime status pending.",
-    description: "Runtime status is not known yet.",
+    label: "Starting",
+    description: "Your agent is starting.",
     lastSeenAt: updatedAt,
   };
 }
@@ -358,13 +250,4 @@ function formatRelativeAge(ageMs: number) {
   }
   const hours = Math.round(minutes / 60);
   return `${hours}h ago`;
-}
-
-function safeHttpUrl(value: string) {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
 }

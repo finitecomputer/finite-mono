@@ -1,10 +1,7 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
-import { BrainIcon, MessageSquareIcon, PlugIcon } from "lucide-react";
+import { BrainIcon } from "lucide-react";
 
-import { FiniteBrand } from "@/components/finite-brand";
-import { Button } from "@/components/ui/button";
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { PageHeader } from "@/components/page-header";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
 export default async function MachineBrainPage({
@@ -13,45 +10,27 @@ export default async function MachineBrainPage({
   params: Promise<{ machineId: string }>;
 }) {
   const { machineId } = await params;
-  const [access, account] = await Promise.all([
-    loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" }),
-    getAccountAuthContext(),
-  ]);
+  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");
 
-  const base = `/dashboard/machines/${encodeURIComponent(access.machineId)}`;
   const enabled = Boolean(process.env.FC_BRAIN_UPSTREAM_URL?.trim());
   return (
-    <div className="finite-product-surface">
-      <header className="finite-product-surface__bar">
-        <FiniteBrand href={`${base}/chat`} />
-        <div className="finite-product-surface__identity">
-          <BrainIcon className="size-4" />
-          <span>Brain</span>
-          <small>{account.email ?? access.displayName}</small>
-        </div>
-        <nav className="finite-product-surface__actions" aria-label="Agent products">
-          <Button asChild variant="ghost" size="sm">
-            <Link href={`${base}/connections`}><PlugIcon />Connections</Link>
-          </Button>
-          <Button asChild variant="outline" size="sm">
-            <Link href={`${base}/chat`}><MessageSquareIcon />Chat</Link>
-          </Button>
-        </nav>
-      </header>
-
+    <div className="space-y-6">
+      <PageHeader title="Brain" description={`What ${access.displayName} remembers.`} />
       {enabled ? (
-        <iframe
-          className="finite-product-surface__frame"
-          src="/client"
-          title={`${access.displayName} Brain`}
-          allow="clipboard-read; clipboard-write"
-        />
+        <div className="h-[calc(100vh-12rem)] min-h-[36rem] overflow-hidden rounded-[var(--radius-card)] border border-border bg-card">
+          <iframe
+            className="size-full border-0"
+            src="/client"
+            title={`${access.displayName} Brain`}
+            allow="clipboard-read; clipboard-write"
+          />
+        </div>
       ) : (
-        <main className="finite-product-surface__empty">
+        <main className="finite-product-surface__empty rounded-[var(--radius-card)] border border-border bg-card">
           <BrainIcon className="size-10" />
-          <h1>Brain is not connected</h1>
-          <p>Configure an internal FiniteBrain origin to serve the first-party Product Client here.</p>
+          <h2>Brain isn&apos;t available right now</h2>
+          <p>Try again in a few minutes.</p>
         </main>
       )}
     </div>

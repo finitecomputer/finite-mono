@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "devfinity",
+    "finite-agentd",
     "finite-brain/crates/finite-brain-app",
     "finite-brain/crates/finite-brain-cli",
     "finite-brain/crates/finite-brain-core",
@@ -78,6 +79,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 secp256k1 = { version = "0.29.1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"

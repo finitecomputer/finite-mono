@@ -26,16 +26,21 @@ references those env values; it must not persist raw provider keys in
 
 ## Boot Policy
 
-The current first-class runtime image does not implement a separate boot-policy
-shim. Normal restart and recover-known-good both restart the same image and let
-the Finite Chat owned entrypoint reconcile required config. The launcher seeds
+The current first-class runtime image boots `finite-agentd`. It runs the
+image-owned preparation hook once, then independently supervises the resident
+Finite Chat sidecar, health endpoint, and Hermes. Normal restart and
+recover-known-good still restart the same image. The preparation hook seeds
 Hermes defaults only when `config.yaml` is absent. On later boots it repairs
 only the Finite Chat plugin/platform settings and the installed managed-skills
 path. Hermes/user-owned model settings and Telegram or other platform config
-must survive unchanged. The merge is fail-closed and atomically replaces the
-file; an invalid durable config is never replaced with image defaults. A
-stronger recovery policy should not be reintroduced until it is implemented in
-the same Docker image used by local Docker, Kata, and Phala.
+survive unchanged. The merge is fail-closed and atomically replaces the file;
+an invalid durable config is never replaced with image defaults.
+
+The Finite Chat sidecar owns the one held, reconnecting server sync stream and
+writes separate durable local inboxes for Hermes chat delivery and typed
+`finite-agentd` commands. Restarting or breaking Hermes therefore does not
+break the Agent Platform Channel. `finite-agentd` may restart local processes;
+it never starts, stops, replaces, or destroys the Agent Runtime itself.
 
 ## Current OCI Runtime Image
 
@@ -45,6 +50,7 @@ runtime image. It packages:
 - Hermes Agent 0.18.2 in `/runtime/hermes-venv`
 - pinned Google Workspace Python clients in the same Hermes virtualenv
 - Finite Chat CLI at `/runtime/bin/finitechat`
+- Finite Agent Daemon at `/runtime/bin/finite-agentd`
 - Finite Sites CLI at `/runtime/bin/fsite`
 - Finite Brain CLI at `/runtime/bin/fbrain`
 - the local `finite skills sync` utility at `/runtime/bin/finite`
@@ -68,9 +74,11 @@ scope list. The image preinstalls the exact client-library versions; normal
 skill use never performs a runtime `pip install`.
 
 The current image intentionally does not package the legacy `finitec` monolith.
-The narrow `finite` utility owns only explicit local workflows. It is not a
-generic control-plane client or a compatibility layer for legacy machine
-operations.
+The `finite` utility still owns only explicit local workflows such as
+`finite skills sync`. `finite-agentd` is a separate, typed agent-local boundary:
+it accepts no arbitrary shell, argv, YAML, paths, or environment edits; it
+delegates Finite Sites, Brain, and Chat behavior to their independent tools;
+and it has no Runner/provider lifecycle capability.
 
 ## Template Debt
 

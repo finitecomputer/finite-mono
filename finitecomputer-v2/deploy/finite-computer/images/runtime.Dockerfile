@@ -9,6 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY devfinity ./devfinity
+COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity
 COPY finite-nostr ./finite-nostr
@@ -16,6 +17,7 @@ COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat
 COPY finite-sites ./finite-sites
 RUN cargo build --locked --release \
+      --package finite-agentd \
       --package finitechat-cli \
       --package fsite-cli \
       --package finite-brain-cli
@@ -54,6 +56,8 @@ RUN python -m venv /runtime/hermes-venv \
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
+COPY --from=finite-rust-builder /build/target/release/finite-agentd /usr/local/bin/finite-agentd
+COPY --from=finite-rust-builder /build/target/release/finite-agentd /runtime/bin/finite-agentd
 COPY --from=finite-rust-builder /build/target/release/fsite /usr/local/bin/fsite
 COPY --from=finite-rust-builder /build/target/release/fsite /runtime/bin/fsite
 COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbrain
@@ -91,8 +95,9 @@ ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
 ENV FINITE_PRIVATE_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1
 ENV FINITE_PRIVATE_MODEL=glm-5-2
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
+ENV FINITE_AGENTD_REQUIRED=1
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 CMD ["/runtime/healthcheck.sh"]
 ENTRYPOINT ["/opt/agent-entrypoint.sh"]
-CMD ["/opt/run_hermes_gateway.sh"]
+CMD ["/runtime/bin/finite-agentd", "serve"]

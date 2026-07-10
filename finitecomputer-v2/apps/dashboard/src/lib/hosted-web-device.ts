@@ -177,6 +177,24 @@ export type HostedDeviceConfig = {
   apiToken: string;
 };
 
+export type HostedRuntimeCommand = {
+  room_id: string;
+  conversation_id?: string | null;
+  target_account_id: string;
+  command: string;
+  resource_key?: string | null;
+  schema: string;
+  body: unknown;
+  wait_millis?: number;
+};
+
+export type HostedRuntimeCommandResponse = {
+  request_id: string;
+  status: "succeeded" | "failed" | "cancelled";
+  body?: unknown;
+  error?: { code: string; message: string } | null;
+};
+
 export function hostedDeviceConfig(
   env: Record<string, string | undefined> = process.env
 ): HostedDeviceConfig | null {
@@ -229,6 +247,23 @@ export async function hostedDeviceAction(
   });
 }
 
+export async function hostedDeviceRuntimeCommand(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  command: HostedRuntimeCommand
+) {
+  return hostedDeviceJson<HostedRuntimeCommandResponse>(
+    config,
+    account,
+    "/v1/app/runtime-commands",
+    {
+      method: "POST",
+      body: JSON.stringify(command),
+    },
+    65_000
+  );
+}
+
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -274,13 +309,14 @@ async function hostedDeviceJson<T>(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs = HOSTED_DEVICE_TIMEOUT_MS
 ): Promise<T> {
   const response = await fetch(`${config.baseUrl}${path}`, {
     ...init,
     cache: "no-store",
     headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
-    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(await responseError(response));

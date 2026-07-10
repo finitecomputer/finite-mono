@@ -5,11 +5,13 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
   BotIcon,
+  BrainIcon,
   ChevronRightIcon,
   LayoutDashboardIcon,
   Layers3Icon,
   LogOutIcon,
   MessageSquareIcon,
+  PlugIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -61,6 +63,20 @@ function sectionLinks(
         href: machineHref,
         icon: BotIcon,
         active: pathname === "/dashboard" || (machine ? pathname === `/dashboard/machines/${machine.id}` : false),
+      },
+      {
+        label: "Connections",
+        href: machine ? `${machineHref}/connections` : "/dashboard",
+        icon: PlugIcon,
+        active: machine ? pathname === `${machineHref}/connections` : false,
+        disabled: !machine,
+      },
+      {
+        label: "Brain",
+        href: machine ? `${machineHref}/brain` : "/dashboard",
+        icon: BrainIcon,
+        active: machine ? pathname === `${machineHref}/brain` : false,
+        disabled: !machine,
       },
       {
         label: "Chat",
@@ -159,6 +175,7 @@ function DashboardAppSection({
   pathname,
   saasMode,
   showMachineFleet,
+  viewerEmail,
 }: {
   children: React.ReactNode;
   activeMachine: MachineNavItem | null;
@@ -166,6 +183,7 @@ function DashboardAppSection({
   pathname: string;
   saasMode: boolean;
   showMachineFleet: boolean;
+  viewerEmail?: string | null;
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
   const links = sectionLinks(pathname, selectedMachine, saasMode);
@@ -218,6 +236,11 @@ function DashboardAppSection({
         </div>
 
         <div className="ocean-app-header__actions">
+          {viewerEmail ? (
+            <span className="hidden max-w-56 truncate text-sm text-muted-foreground md:inline">
+              {viewerEmail}
+            </span>
+          ) : null}
           <SignOutLink className="ocean-sign-out-button" aria-label="Sign out">
             <LogOutIcon className="size-4" />
             <span>Sign out</span>
@@ -237,6 +260,7 @@ export function DashboardShell({
   isAdmin,
   machines,
   saasMode,
+  viewerEmail,
 }: DashboardShellProps) {
   const pathname = usePathname() ?? "/dashboard";
   const searchParams = useSearchParams();
@@ -248,7 +272,7 @@ export function DashboardShell({
     [selectedMachineId, machines]
   );
   const showMachineFleet = isAdmin || machines.length > 1;
-  const isChatSurface = /^\/dashboard\/machines\/[^/]+\/(?:chat|brain)\/?$/u.test(pathname);
+  const isChatSurface = /^\/dashboard\/machines\/[^/]+\/chat\/?$/u.test(pathname);
 
   if (isChatSurface) {
     return <div className="ocean-shell ocean-shell--chat">{children}</div>;
@@ -262,6 +286,7 @@ export function DashboardShell({
         pathname={pathname}
         saasMode={saasMode}
         showMachineFleet={showMachineFleet}
+        viewerEmail={viewerEmail}
       >
         {children}
       </DashboardAppSection>

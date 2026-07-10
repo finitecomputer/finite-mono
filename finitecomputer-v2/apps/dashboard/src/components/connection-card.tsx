@@ -1,14 +1,15 @@
 import type { ReactNode } from "react";
-import { CheckCircle2Icon, CircleAlertIcon, CircleDashedIcon } from "lucide-react";
+import { CheckCircle2Icon, CircleAlertIcon, LoaderCircleIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-type ConnectionState = "connected" | "disconnected" | "agent-guided";
+type ConnectionState = "connected" | "disconnected" | "loading";
 
 export function ConnectionCard({
   account,
   children,
   description,
+  error,
   footer,
   icon,
   name,
@@ -17,6 +18,7 @@ export function ConnectionCard({
   account?: string | null;
   children: ReactNode;
   description: string;
+  error?: string | null;
   footer?: ReactNode;
   icon: ReactNode;
   name: string;
@@ -43,6 +45,7 @@ export function ConnectionCard({
             </div>
             {account ? <p className="ocean-connection-card__account">{account}</p> : null}
             <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{description}</p>
+            {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
           </div>
         </div>
         <div className="ocean-connection-card__action">{children}</div>
@@ -55,5 +58,5 @@ export function ConnectionCard({
 function connectionStatus(state: ConnectionState) {
   if (state === "connected") return { icon: CheckCircle2Icon, label: "Connected" };
   if (state === "disconnected") return { icon: CircleAlertIcon, label: "Not connected" };
-  return { icon: CircleDashedIcon, label: "Configure with agent" };
+  return { icon: LoaderCircleIcon, label: "Checking…" };
 }
