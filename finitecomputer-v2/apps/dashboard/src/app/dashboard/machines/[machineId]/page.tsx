@@ -4,13 +4,16 @@ import {
   MessageSquareIcon,
   RotateCcwIcon,
   StopCircleIcon,
+  Trash2Icon,
 } from "lucide-react";
 
 import {
+  destroyCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
+import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
 import {
@@ -109,6 +112,27 @@ async function ImportedMachineOverview({
           </div>
         </div>
       </section>
+      {access.canRemoveKataRuntime ? (
+        <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+          <h2 className="font-semibold">Remove this agent</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            This removes the agent&apos;s compute so you can create a new agent. Your saved
+            agent data is retained.
+          </p>
+          <form action={destroyCoreRuntimeAction} className="mt-4">
+            <input type="hidden" name="machineId" value={access.machineId} />
+            <input type="hidden" name="redirectPath" value="/dashboard?new=1" />
+            <ConfirmSubmitButton
+              variant="destructive"
+              pendingLabel="Removing..."
+              confirmMessage="Remove this agent's compute? Your saved agent data will be retained."
+            >
+              <Trash2Icon />
+              Remove agent
+            </ConfirmSubmitButton>
+          </form>
+        </section>
+      ) : null}
     </div>
   );
 }

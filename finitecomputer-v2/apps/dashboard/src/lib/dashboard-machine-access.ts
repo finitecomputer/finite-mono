@@ -1,6 +1,7 @@
 import {
-  findCoreProjectByMachineId,
+  loadCoreMe,
   loadCoreSourceHostRelayEndpoint,
+  type CoreAgentCreationRequestSummary,
   type CoreReadCacheMode,
   type CoreReadOptions,
   type CoreVisibleProject,
@@ -23,6 +24,7 @@ export type DashboardMachineAccess = {
   primaryUrl: string | null;
   publishedAppUrls: string[];
   relayEndpoint: RelayEndpointConfig | null;
+  canRemoveKataRuntime: boolean;
 };
 
 type DashboardMachineAccessOptions = {
@@ -34,11 +36,17 @@ export async function loadDashboardMachineAccess(
   options: DashboardMachineAccessOptions = {}
 ): Promise<DashboardMachineAccess | null> {
   const viewer = await loadOptionalViewerContext();
-  let coreProject = await findCoreProjectByMachineId(machineId, {
+  let core = await loadCoreMe({
     cacheMode: options.coreCacheMode,
   });
+  let coreProject = core.me?.projects.find(
+    (project) => project.runtime?.source_machine_id === machineId
+  ) ?? null;
   if (!coreProject && options.coreCacheMode === "swr") {
-    coreProject = await findCoreProjectByMachineId(machineId);
+    core = await loadCoreMe();
+    coreProject = core.me?.projects.find(
+      (project) => project.runtime?.source_machine_id === machineId
+    ) ?? null;
   }
   const runtime = coreProject?.runtime;
   if (!coreProject || !runtime) {
@@ -60,7 +68,24 @@ export async function loadDashboardMachineAccess(
     relayEndpoint: await relayEndpointForCoreProject(coreProject, {
       cacheMode: options.coreCacheMode,
     }),
+    canRemoveKataRuntime: coreProjectHasRunningKataCreationRequest(
+      coreProject,
+      core.me?.agent_creation_requests ?? []
+    ),
   };
+}
+
+export function coreProjectHasRunningKataCreationRequest(
+  project: CoreVisibleProject,
+  requests: CoreAgentCreationRequestSummary[]
+) {
+  return requests.some(
+    (request) =>
+      request.project_id === project.project.id &&
+      request.agent_runtime_id === project.runtime?.id &&
+      request.status === "running" &&
+      request.runner_class === "kata"
+  );
 }
 
 export async function relayEndpointForCoreProject(

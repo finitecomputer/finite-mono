@@ -118,6 +118,9 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
     throw new Error("This agent cannot be removed from the dashboard.");
   }
+  if (!access.canRemoveKataRuntime) {
+    throw new Error("Only self-service Kata agents can be removed from the dashboard.");
+  }
 
   await requestCoreRuntimeDestroy(access.coreProject.project.id);
 
