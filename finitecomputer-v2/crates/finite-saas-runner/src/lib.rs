@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,93 @@ const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES: usize = 128 * 1024;
+
+fn wait_with_captured_output(
+    mut child: Child,
+    program: &Path,
+    timeout: Duration,
+) -> Result<Output, RunnerError> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: "failed to capture stdout".to_string(),
+        })?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: "failed to capture stderr".to_string(),
+        })?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(RunnerError::CommandTimedOut {
+                        program: program.display().to_string(),
+                        timeout_secs: timeout.as_secs(),
+                    });
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                // A wait failure does not imply the child has exited. Tear it
+                // down before joining the pipe readers so this path cannot
+                // leak a provider process or block forever on EOF.
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(RunnerError::CommandExecution {
+                    program: program.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: "stdout reader panicked".to_string(),
+        })?
+        .map_err(|error| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: error.to_string(),
+        })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: "stderr reader panicked".to_string(),
+        })?
+        .map_err(|error| RunnerError::CommandExecution {
+            program: program.display().to_string(),
+            message: error.to_string(),
+        })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -1541,7 +1628,7 @@ impl DockerLauncher {
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
-        let mut child = process
+        let child = process
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1549,35 +1636,7 @@ impl DockerLauncher {
                 program: command.program.display().to_string(),
                 message: error.to_string(),
             })?;
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if started.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(RunnerError::CommandTimedOut {
-                            program: command.program.display().to_string(),
-                            timeout_secs: timeout.as_secs(),
-                        });
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(RunnerError::CommandExecution {
-                        program: command.program.display().to_string(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| RunnerError::CommandExecution {
-                program: command.program.display().to_string(),
-                message: error.to_string(),
-            })?;
+        let output = wait_with_captured_output(child, &command.program, timeout)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if output.status.success() {
             return Ok(stdout);
@@ -2256,7 +2315,7 @@ impl PhalaLauncher {
         args: Vec<OsString>,
         timeout: Duration,
     ) -> Result<String, RunnerError> {
-        let mut child = Command::new(&self.config.phala_bin)
+        let child = Command::new(&self.config.phala_bin)
             .args(&args)
             .env("PHALA_CLOUD_API_KEY", self.config.api_key.trim())
             .stdout(Stdio::piped())
@@ -2266,35 +2325,7 @@ impl PhalaLauncher {
                 program: self.config.phala_bin.display().to_string(),
                 message: error.to_string(),
             })?;
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if started.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(RunnerError::CommandTimedOut {
-                            program: self.config.phala_bin.display().to_string(),
-                            timeout_secs: timeout.as_secs(),
-                        });
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(RunnerError::CommandExecution {
-                        program: self.config.phala_bin.display().to_string(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| RunnerError::CommandExecution {
-                program: self.config.phala_bin.display().to_string(),
-                message: error.to_string(),
-            })?;
+        let output = wait_with_captured_output(child, &self.config.phala_bin, timeout)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if output.status.success() {
             return Ok(stdout);
@@ -2724,7 +2755,7 @@ impl EnclaviaLauncher {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|error| RunnerError::CommandExecution {
@@ -2734,52 +2765,28 @@ impl EnclaviaLauncher {
 
         if let Some(input) = stdin
             && let Some(mut child_stdin) = child.stdin.take()
+            && let Err(error) = child_stdin.write_all(input.as_bytes())
         {
-            child_stdin.write_all(input.as_bytes()).map_err(|error| {
-                RunnerError::CommandExecution {
-                    program: self.config.enclavia_bin.display().to_string(),
-                    message: format!("failed to write command stdin: {error}"),
-                }
-            })?;
-        }
-
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if started.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(RunnerError::CommandTimedOut {
-                            program: self.config.enclavia_bin.display().to_string(),
-                            timeout_secs: timeout.as_secs(),
-                        });
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(RunnerError::CommandExecution {
-                        program: self.config.enclavia_bin.display().to_string(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| RunnerError::CommandExecution {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunnerError::CommandExecution {
                 program: self.config.enclavia_bin.display().to_string(),
-                message: error.to_string(),
-            })?;
+                message: format!("failed to write command stdin: {error}"),
+            });
+        }
+
+        let output = wait_with_captured_output(child, &self.config.enclavia_bin, timeout)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if output.status.success() {
             return Ok(stdout);
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(RunnerError::CommandExecution {
             program: self.config.enclavia_bin.display().to_string(),
-            message: format!("exit status {} stdout={stdout}", output.status),
+            message: format!(
+                "exit status {} stdout={stdout} stderr={stderr}",
+                output.status
+            ),
         })
     }
 
@@ -3738,6 +3745,27 @@ mod tests {
         Project, RuntimeControlRequestStatus,
     };
     use std::collections::VecDeque;
+
+    #[test]
+    fn captured_provider_output_is_drained_before_the_child_exits() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(
+                "awk 'BEGIN { for (i = 0; i < 50000; i++) print \"stdout\" }'; \
+                 awk 'BEGIN { for (i = 0; i < 50000; i++) print \"stderr\" }' >&2",
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output =
+            wait_with_captured_output(child, Path::new("sh"), Duration::from_secs(5)).unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.len() > 64 * 1024);
+        assert!(output.stderr.len() > 64 * 1024);
+    }
 
     #[test]
     fn runner_id_is_required() {

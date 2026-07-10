@@ -2,7 +2,6 @@ use super::*;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
@@ -808,92 +807,13 @@ fn execute_command(
         .envs(command.env.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = process
+    let child = process
         .spawn()
         .map_err(|error| RunnerError::CommandExecution {
             program: command.program.display().to_string(),
             message: error.to_string(),
         })?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: "failed to capture stdout".to_string(),
-        })?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: "failed to capture stderr".to_string(),
-        })?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
-                    return Err(RunnerError::CommandTimedOut {
-                        program: command.program.display().to_string(),
-                        timeout_secs: timeout.as_secs(),
-                    });
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => {
-                // A wait failure does not imply the child has exited. Tear it
-                // down before joining the pipe readers so this error path
-                // cannot leak a provider process or block forever on EOF.
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(RunnerError::CommandExecution {
-                    program: command.program.display().to_string(),
-                    message: error.to_string(),
-                });
-            }
-        }
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: "stdout reader panicked".to_string(),
-        })?
-        .map_err(|error| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: error.to_string(),
-        })?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: "stderr reader panicked".to_string(),
-        })?
-        .map_err(|error| RunnerError::CommandExecution {
-            program: command.program.display().to_string(),
-            message: error.to_string(),
-        })?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
+    wait_with_captured_output(child, &command.program, timeout)
 }
 
 fn command_failure(command: &AppleContainerCommand, output: &Output) -> RunnerError {

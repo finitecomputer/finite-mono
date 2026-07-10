@@ -197,7 +197,7 @@ impl KataLauncher {
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
-        let mut child = process
+        let child = process
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -205,35 +205,7 @@ impl KataLauncher {
                 program: command.program.display().to_string(),
                 message: error.to_string(),
             })?;
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if started.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(RunnerError::CommandTimedOut {
-                            program: command.program.display().to_string(),
-                            timeout_secs: timeout.as_secs(),
-                        });
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(RunnerError::CommandExecution {
-                        program: command.program.display().to_string(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-        child
-            .wait_with_output()
-            .map_err(|error| RunnerError::CommandExecution {
-                program: command.program.display().to_string(),
-                message: error.to_string(),
-            })
+        wait_with_captured_output(child, &command.program, timeout)
     }
 
     fn run_checked(
