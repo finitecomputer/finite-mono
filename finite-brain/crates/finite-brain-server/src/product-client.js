@@ -1,7 +1,15 @@
 const FiniteBrainProductClient = (() => {
+  const SESSION_STATUS = Object.freeze({
+    LOCKED: "locked",
+    RESUMING: "resuming",
+    UNLOCKED: "unlocked",
+  });
   const state = {
     config: null,
     signerStatus: "checking",
+    sessionStatus: SESSION_STATUS.LOCKED,
+    sessionEpoch: 0,
+    sessionNotice: null,
     pubkeyHex: null,
     activeVaultId: "personal",
     visibleVaults: [],
@@ -46,6 +54,7 @@ const FiniteBrainProductClient = (() => {
     editorSlashSelectedIndex: 0,
     accessFolderDropdownListenerBound: false,
   };
+  let pendingInviteNavigation = null;
 
   const $ = (id) => document.getElementById(id);
   const setOptionalDisabled = (id, disabled) => {
@@ -65,6 +74,36 @@ const FiniteBrainProductClient = (() => {
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
   const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
+  const SESSION_PLAINTEXT_INPUT_IDS = [
+    "accessAddPersonInput",
+    "accessOrganizationVaultNameInput",
+    "accessShareExpiresAtInput",
+    "accessShareLinkInput",
+    "accessShareMountInput",
+    "accessShareTargetInput",
+    "accessTargetNpubInput",
+    "commandPaletteInput",
+    "folderKeyInput",
+    "graphFilterInput",
+    "okfBundleInput",
+    "okfDestinationFolderInput",
+    "organizationVaultNameInput",
+    "pageBaseRevisionInput",
+    "pageDraftInput",
+    "pageFolderIdInput",
+    "pageObjectIdInput",
+    "sidebarSearchInput",
+    "vaultAdminNpubInput",
+    "vaultInviteCodeInput",
+    "vaultInviteEmailInput",
+    "vaultInviteEmailProofCreatedAtInput",
+    "vaultInviteExpiresAtInput",
+    "vaultInviteFoldersInput",
+    "vaultInviteSecretInput",
+    "vaultInviteTargetNpubInput",
+    "vaultInviteUrlInput",
+    "vaultMemberNpubInput",
+  ];
   const DEFAULT_AGENTS_MARKDOWN =
     [
       "# AGENTS.md",
@@ -386,7 +425,7 @@ const FiniteBrainProductClient = (() => {
       "- `restricted` is the default example of a tighter access boundary.",
       "- Open Folders are intended for everyone who belongs in that Vault.",
       "- Restricted Folders are for material that should only be visible to approved",
-      "  people.",
+      "  Member Identities.",
       "- Do not copy restricted titles, summaries, Source Notes, Assets, or log entries",
       "  into a less-restricted Folder.",
       "",
@@ -624,6 +663,22 @@ const FiniteBrainProductClient = (() => {
     return pubkeyHex ? `personal-${pubkeyHex.slice(0, 16)}` : PERSONAL_VAULT_PLACEHOLDER_ID;
   }
 
+  function signerIdentityChanged(previousPubkeyHex, nextPubkeyHex) {
+    return Boolean(
+      previousPubkeyHex &&
+        nextPubkeyHex &&
+        previousPubkeyHex !== nextPubkeyHex
+    );
+  }
+
+  function signedEventMatchesPinnedIdentity(expectedPubkeyHex, signedEvent) {
+    return Boolean(
+      expectedPubkeyHex &&
+        typeof signedEvent?.pubkey === "string" &&
+        signedEvent.pubkey.toLowerCase() === expectedPubkeyHex.toLowerCase()
+    );
+  }
+
   function normalizeVisibleVault(vault) {
     const vaultId = vault?.vaultId || vault?.vault_id || vault?.id || "";
     if (!vaultId) return null;
@@ -661,25 +716,121 @@ const FiniteBrainProductClient = (() => {
   }
 
   function activeVaultLabel() {
+    const lockedSelection = lockedVaultSelection(
+      state.sessionStatus,
+      state.activeVaultId,
+      state.visibleVaults
+    );
+    if (lockedSelection) return lockedSelection.label;
     return state.metadata?.name || activeVaultOption()?.name || state.activeVaultId || "Personal vault";
   }
 
   function resetVaultSessionState() {
-    state.metadata = null;
-    state.keyring = null;
-    state.projection = createClientProjection();
-    state.selectedFolderId = null;
-    state.selectedPageKey = null;
-    state.activeAccessFolderId = null;
-    state.activeAccessIntent = "overview";
-    state.accessResult = null;
-    state.okfPlan = null;
-    state.expandedFolderIds = new Set();
-    state.vaultInvitations = null;
-    state.folderShareLinks = null;
-    state.folderShareLinksFolderId = null;
-    state.sharedFolderInvitations = null;
-    state.sharedFolderConnections = null;
+    state.sessionEpoch += 1;
+    pendingInviteNavigation = null;
+    clearSessionSecretsAndPlaintext(state);
+    clearSessionOwnedDom();
+  }
+
+  function clearSessionOwnedDom() {
+    for (const id of SESSION_PLAINTEXT_INPUT_IDS) {
+      const input = $(id);
+      if (!input) continue;
+      if (input.type === "checkbox") input.checked = false;
+      else input.value = "";
+    }
+    for (const id of [
+      "accessFolderList",
+      "accessResultPanel",
+      "accessWhoHasList",
+      "commandPaletteList",
+      "contextMenu",
+      "editorSlashMenu",
+      "folderShareLinkList",
+      "graphCanvas",
+      "readerFolderList",
+      "replayList",
+      "sharedFolderList",
+      "sidebarSearchResults",
+      "vaultInvitationList",
+      "vaultPeopleList",
+      "vaultSwitchList",
+    ]) {
+      $(id)?.replaceChildren?.();
+    }
+    setText("readerPageTitle", "Session locked");
+    setText("readerPagePath", "Resume the session to reopen encrypted Folder Key Grants");
+    const readerContent = $("readerPageContent");
+    if (readerContent) {
+      readerContent.replaceChildren?.();
+      readerContent.textContent = "Session locked. Resume to reopen encrypted Folder Key Grants.";
+    }
+    if (typeof document.title === "string") document.title = "FiniteBrain";
+    setPill("graphStats", "0 nodes / 0 links", "muted");
+    setText("graphEmptyTitle", "No graph yet");
+    setText("graphEmptyCopy", "Resume the session to rebuild the local graph.");
+    const graphEmptyState = $("graphEmptyState");
+    if (graphEmptyState) graphEmptyState.hidden = false;
+    const editorDrawer = $("editorDrawer");
+    if (editorDrawer) editorDrawer.open = false;
+    for (const id of ["commandPalette", "contextMenu", "editorSlashMenu"]) {
+      const element = $(id);
+      if (element) element.hidden = true;
+    }
+  }
+
+  function lockSession() {
+    resetVaultSessionState();
+    render();
+    log("Locked Product Client session.", { status: state.sessionStatus });
+  }
+
+  function handlePageHide() {
+    lockSession();
+  }
+
+  function handlePageShow(event) {
+    if (event?.persisted) lockSession();
+  }
+
+  async function resumeSession() {
+    return loadVaultReader({ allowResume: true });
+  }
+
+  function sessionContainsSecretsOrPlaintext(target) {
+    return Boolean(
+      target.keyring ||
+        target.metadata ||
+        target.preparedWrite ||
+        target.preparedWriteTarget ||
+        target.okfPlan ||
+        target.lastEmailInviteSecret ||
+        target.lastEmailInviteUrl ||
+        target.lastEmailInvitePostProof ||
+        target.accessResult ||
+        target.visibleVaults?.length ||
+        target.vaultInvitations?.length ||
+        target.folderShareLinks?.length ||
+        target.sharedFolderInvitations?.length ||
+        target.sharedFolderConnections?.length ||
+        target.identityByNpub?.size ||
+        target.projection?.pages?.size ||
+        target.projection?.localDrafts?.size ||
+        target.projection?.conflicts?.length
+    );
+  }
+
+  function sessionOperationIsCurrent(currentEpoch, operationEpoch, status) {
+    return currentEpoch === operationEpoch && status !== SESSION_STATUS.LOCKED;
+  }
+
+  function requireCurrentSessionEpoch(epoch) {
+    if (sessionOperationIsCurrent(state.sessionEpoch, epoch, state.sessionStatus)) return;
+    if (state.sessionEpoch === epoch) {
+      clearSessionSecretsAndPlaintext(state);
+      clearSessionOwnedDom();
+    }
+    throw new Error("Session changed while protected client work was in progress; resume again");
   }
 
   function setActiveVaultId(vaultId, options = {}) {
@@ -697,10 +848,80 @@ const FiniteBrainProductClient = (() => {
     return $("vaultSelect")?.value || $("vaultIdInput")?.value || state.activeVaultId;
   }
 
+  function lockedVaultSelection(status, activeVaultId, visibleVaults) {
+    if (status === SESSION_STATUS.UNLOCKED || visibleVaults.length) return null;
+    return {
+      label: "Selected Vault (locked)",
+      value: activeVaultId || PERSONAL_VAULT_PLACEHOLDER_ID,
+    };
+  }
+
+  function missingVisibleVaultFallback(
+    status,
+    activeVaultId,
+    visibleVaults,
+    pubkeyHex,
+    defaultVaultId
+  ) {
+    if (
+      status === SESSION_STATUS.LOCKED ||
+      !activeVaultId ||
+      activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID ||
+      activeVaultId === defaultVaultId
+    ) {
+      return null;
+    }
+    const normalized = visibleVaults.map(normalizeVisibleVault).filter(Boolean);
+    if (normalized.some((vault) => vault.vaultId === activeVaultId)) return null;
+    const personal = normalized.find((vault) => vault.kind === "personal");
+    const fallbackVaultId = personal?.vaultId || personalVaultIdForPubkey(pubkeyHex);
+    return fallbackVaultId && fallbackVaultId !== activeVaultId ? fallbackVaultId : null;
+  }
+
+  function withActiveVaultOption(options, activeVaultId, metadata) {
+    if (
+      !activeVaultId ||
+      activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID ||
+      options.some((vault) => vault.vaultId === activeVaultId)
+    ) {
+      return options;
+    }
+    const currentMetadata = metadata?.vaultId === activeVaultId ? metadata : null;
+    const kind = currentMetadata?.kind === "personal" ? "personal" : "organization";
+    return [
+      ...options,
+      {
+        vaultId: activeVaultId,
+        kind,
+        name: currentMetadata?.name || activeVaultId,
+        role: currentMetadata?.role || (kind === "personal" ? "owner" : "member"),
+      },
+    ];
+  }
+
   function renderVaultSelect() {
     const select = $("vaultSelect");
     if (!select) return;
-    const options = visibleVaultOptions();
+    const lockedSelection = lockedVaultSelection(
+      state.sessionStatus,
+      state.activeVaultId,
+      state.visibleVaults
+    );
+    if (lockedSelection) {
+      const option = document.createElement("option");
+      option.value = lockedSelection.value;
+      option.textContent = lockedSelection.label;
+      select.replaceChildren(option);
+      select.value = lockedSelection.value;
+      const input = $("vaultIdInput");
+      if (input) input.value = lockedSelection.value;
+      return;
+    }
+    const options = withActiveVaultOption(
+      visibleVaultOptions(),
+      state.activeVaultId,
+      state.metadata
+    );
     const personalOptions = options.filter((vault) => vault.kind === "personal");
     const organizationOptions = options.filter((vault) => vault.kind === "organization");
     const groups = [
@@ -715,17 +936,14 @@ const FiniteBrainProductClient = (() => {
       for (const vault of vaults) {
         const option = document.createElement("option");
         option.value = vault.vaultId;
-      option.textContent =
+        option.textContent =
           vault.kind === "personal" ? vault.name : `${vault.name} - ${vault.role}`;
         group.appendChild(option);
       }
       nodes.push(group);
     }
     select.replaceChildren(...nodes);
-    select.value = options.some((vault) => vault.vaultId === state.activeVaultId)
-      ? state.activeVaultId
-      : options[0]?.vaultId || PERSONAL_VAULT_PLACEHOLDER_ID;
-    state.activeVaultId = select.value || state.activeVaultId;
+    select.value = state.activeVaultId;
     const input = $("vaultIdInput");
     if (input) input.value = state.activeVaultId;
   }
@@ -786,7 +1004,28 @@ const FiniteBrainProductClient = (() => {
     if (options.signEvent) return options.signEvent;
     const provider = options.provider || window.nostr;
     if (typeof provider?.signEvent !== "function") return null;
-    return (event) => provider.signEvent.call(provider, event);
+    if (
+      provider !== window.nostr ||
+      !state.pubkeyHex ||
+      state.sessionStatus === SESSION_STATUS.LOCKED
+    ) {
+      return (event) => provider.signEvent.call(provider, event);
+    }
+    return async (event) => {
+      const sessionEpoch = state.sessionEpoch;
+      const expectedPubkeyHex = state.pubkeyHex;
+      requireCurrentSessionEpoch(sessionEpoch);
+      if (!expectedPubkeyHex) throw new Error("Connect and Resume the signer identity before signing");
+      const signed = await provider.signEvent.call(provider, event);
+      requireCurrentSessionEpoch(sessionEpoch);
+      if (signedEventMatchesPinnedIdentity(expectedPubkeyHex, signed)) return signed;
+      resetVaultSessionState();
+      state.pubkeyHex = null;
+      state.signerStatus = deriveSignerState(window.nostr).status;
+      setText("signerDetail", "Signer identity changed. The previous session was locked.");
+      render();
+      throw new Error("Signer identity changed while signing; the session was locked");
+    };
   }
 
   function requireNip07SignEvent(options = {}) {
@@ -991,11 +1230,11 @@ const FiniteBrainProductClient = (() => {
     if (row.access === "all_members") return countLabel(memberCount, "member");
     if (row.access === "restricted" && metadata?.kind === "organization") {
       return explicitCount
-        ? `${countLabel(adminCount, "admin")} + ${countLabel(explicitCount, "person", "people")}`
+        ? `${countLabel(adminCount, "admin")} + ${countLabel(explicitCount, "Member Identity", "Member Identities")}`
         : `${countLabel(adminCount, "admin")}`;
     }
     if (row.access === "restricted") {
-      return explicitCount ? countLabel(explicitCount, "person", "people") : "Owner only";
+      return explicitCount ? countLabel(explicitCount, "Member Identity", "Member Identities") : "Owner only";
     }
     return "-";
   }
@@ -1024,8 +1263,8 @@ const FiniteBrainProductClient = (() => {
     if (row.access === "all_members") return "Every member of this Vault can open this Folder after their Folder Key is available.";
     if (row.access === "restricted" && metadata?.kind === "organization") {
       return keyOpen
-        ? "Admins and explicitly granted people can open this restricted Folder."
-        : "This restricted Folder needs its Folder Key opened before People or Links can change it.";
+        ? "Admins and explicitly granted Member Identities can open this restricted Folder."
+        : "This restricted Folder needs its Folder Key opened before Member Identities or Links can change it.";
     }
     if (row.access === "restricted") {
       return keyOpen
@@ -1040,8 +1279,8 @@ const FiniteBrainProductClient = (() => {
     if (row.access === "all_members") {
       return "All Vault members have access; use Add when a late member needs this Folder Key.";
     }
-    if (row.access !== "restricted") return "Direct people grants are only needed for restricted Folders.";
-    if (metadata?.kind === "organization") return "Admins can open it; add explicit people when needed.";
+    if (row.access !== "restricted") return "Direct Member Identity grants are only needed for restricted Folders.";
+    if (metadata?.kind === "organization") return "Admins can open it; add explicit Member Identities when needed.";
     return "Personal restricted Folders start owner-only; grant one email when sharing is intentional.";
   }
 
@@ -1052,7 +1291,7 @@ const FiniteBrainProductClient = (() => {
   function accessFlowHint(row, mode, keyOpen) {
     if (!row) return "Choose a Folder to manage access.";
     if (mode === "people" && !folderAllowsDirectGrant(row)) {
-      return "This Folder uses Vault-level access, so there is no direct people list to edit.";
+      return "This Folder uses Vault-level access, so there is no direct Member Identity list to edit.";
     }
     if (mode === "links" && row.access !== "restricted") {
       return "Create links from restricted Folders so the link carries a bounded Folder Key Grant.";
@@ -1063,7 +1302,7 @@ const FiniteBrainProductClient = (() => {
     }
     if (mode === "people") return "Grant adds one email. Remove rotates the Folder Key and re-encrypts readable Pages.";
     if (mode === "links") return "Create a single-use link for a target email, or accept an existing link.";
-    return "Choose People or Links when this Folder needs an access change.";
+    return "Choose Member Identities or Links when this Folder needs an access change.";
   }
 
   function renderAccessSummary(row, metadata, openedFolderKeys) {
@@ -1627,6 +1866,86 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function clearSessionSecretsAndPlaintext(target) {
+    clearSessionKeyring(target.keyring);
+    target.projection?.pages?.clear?.();
+    target.projection?.seenEventIds?.clear?.();
+    target.projection?.localDrafts?.clear?.();
+    if (Array.isArray(target.projection?.conflicts)) target.projection.conflicts.length = 0;
+    target.identityByNpub?.clear?.();
+
+    target.sessionStatus = SESSION_STATUS.LOCKED;
+    target.sessionNotice = null;
+    target.visibleVaults = [];
+    target.metadata = null;
+    target.keyring = null;
+    target.projection = createClientProjection();
+    target.preparedWrite = null;
+    target.preparedWriteTarget = null;
+    target.okfPlan = null;
+    target.lastError = null;
+    target.accessResult = null;
+    target.lastShareLinkId = null;
+    target.lastVaultInvitationCode = null;
+    target.lastVaultInvitationId = null;
+    target.lastEmailInviteSecret = null;
+    target.lastEmailInviteUrl = null;
+    target.lastEmailInvitePostProof = null;
+    target.vaultInvitations = null;
+    target.folderShareLinks = null;
+    target.folderShareLinksFolderId = null;
+    target.sharedFolderInvitations = null;
+    target.sharedFolderConnections = null;
+    target.selectedFolderId = null;
+    target.selectedPageKey = null;
+    target.activeWorkspaceView = "page";
+    target.activeSidebarMode = "files";
+    target.activeAccessFolderId = null;
+    target.activeAccessView = "vault";
+    target.activeAccessIntent = "overview";
+    target.readerMode = "reading";
+    target.editorMode = "visual";
+    target.vaultControlsCollapsedAfterLoad = false;
+    target.expandedFolderIds = new Set();
+    target.contextMenuTarget = null;
+    target.commandPaletteOpen = false;
+    target.editorSlashOpen = false;
+    target.editorSlashQuery = "";
+    target.editorSlashRange = null;
+    target.readerBusy = false;
+    target.accessBusy = false;
+    return target;
+  }
+
+  function sessionStatusView(status) {
+    if (status === SESSION_STATUS.UNLOCKED) {
+      return {
+        action: "Lock session",
+        detail: "Readable content and Session Folder Keys are held in memory for this session.",
+        locked: false,
+        title: "Session unlocked",
+      };
+    }
+    if (status === SESSION_STATUS.RESUMING) {
+      return {
+        action: "Lock session",
+        detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
+        locked: false,
+        title: "Resuming session",
+      };
+    }
+    return {
+      action: "Resume session",
+      detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+      locked: true,
+      title: "Session locked",
+    };
+  }
+
+  function sessionGrantOpeningAllowed(status) {
+    return status === SESSION_STATUS.RESUMING || status === SESSION_STATUS.UNLOCKED;
+  }
+
   function pageKey(folderId, objectId) {
     return `${folderId}/${objectId}`;
   }
@@ -1638,17 +1957,31 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function clearSessionKeyring(keyring) {
+    keyring?.keys?.clear?.();
+    if (Array.isArray(keyring?.openedGrants)) keyring.openedGrants.length = 0;
+  }
+
+  function cloneSessionKeyring(keyring) {
+    return {
+      keys: new Map(keyring?.keys || []),
+      openedGrants: [...(keyring?.openedGrants || [])],
+    };
+  }
+
   function folderKeyId(vaultId, folderId, keyVersion) {
     return `${vaultId}:${folderId}:${keyVersion}`;
   }
 
-  async function importFolderKey(keyring, { vaultId, folderId, keyVersion, folderKey }) {
+  async function importFolderKey(keyring, { vaultId, folderId, keyVersion, folderKey }, options = {}) {
+    options.assertCurrent?.();
     const rawKey = base64ToBytes(folderKey);
     if (rawKey.length !== 32) throw new Error("Folder Key must be 32 bytes");
     const cryptoKey = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, [
       "encrypt",
       "decrypt",
     ]);
+    options.assertCurrent?.();
     const id = folderKeyId(vaultId, folderId, keyVersion);
     keyring.keys.set(id, {
       cryptoKey,
@@ -1660,11 +1993,12 @@ const FiniteBrainProductClient = (() => {
     return keyring.keys.get(id);
   }
 
-  async function openFolderKeyGrantPlaintext(keyring, grantPlaintext) {
+  async function openFolderKeyGrantPlaintext(keyring, grantPlaintext, options = {}) {
     if (grantPlaintext.version !== "finite-folder-key-grant-v1") {
       throw new Error("unsupported Folder Key Grant version");
     }
-    const opened = await importFolderKey(keyring, grantPlaintext);
+    const opened = await importFolderKey(keyring, grantPlaintext, options);
+    options.assertCurrent?.();
     const alreadyOpened = keyring.openedGrants.some(
       (grant) =>
         grant.folderId === grantPlaintext.folderId &&
@@ -1859,10 +2193,12 @@ const FiniteBrainProductClient = (() => {
     const giftWrap = parseJsonObject(wrappedEventJson, `${label} wrapper`);
     validateGiftWrapShell(giftWrap, expectedRecipientHex);
     const sealPlaintext = await decrypt(requireHex64(giftWrap.pubkey, "gift wrap pubkey"), giftWrap.content);
+    options.assertCurrent?.();
     const seal = parseJsonObject(sealPlaintext, `${label} seal`);
     validateSealEvent(seal);
     const sealIssuerHex = requireHex64(seal.pubkey, "seal pubkey");
     const rumorPlaintext = await decrypt(sealIssuerHex, seal.content);
+    options.assertCurrent?.();
     const rumor = parseJsonObject(rumorPlaintext, `${label} rumor`);
     await validateRumorEvent(rumor, sealIssuerHex);
     return {
@@ -1888,13 +2224,24 @@ const FiniteBrainProductClient = (() => {
     const skipped = [];
     for (const grant of exportedVault?.keyGrants || []) {
       try {
+        options.assertCurrent?.();
         const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, options);
-        await openFolderKeyGrantPlaintext(keyring, plaintext);
+        options.assertCurrent?.();
+        await openFolderKeyGrantPlaintext(keyring, plaintext, options);
+        options.assertCurrent?.();
         opened.push({
           folderId: plaintext.folderId,
           keyVersion: plaintext.keyVersion,
         });
       } catch (error) {
+        if (typeof options.assertCurrent === "function") {
+          try {
+            options.assertCurrent();
+          } catch (sessionError) {
+            clearSessionKeyring(keyring);
+            throw sessionError;
+          }
+        }
         skipped.push({
           id: grant.id || grant.folderId || "unknown-grant",
           error: error.message,
@@ -3687,6 +4034,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function startNewPageDraft(folderIdOverride = null) {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return;
     const folderId = folderIdOverride || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
     const objectId = nextDraftObjectId();
     const draftKey = pageKey(folderId, objectId);
@@ -3719,6 +4067,8 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function deletePageFromContextTarget(target) {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const page = pageFromContextTarget(target);
     if (!page || !isReadablePage(page)) throw new Error("Select a readable Page before deleting");
     if (!page.revision) throw new Error("Page delete requires a saved revision");
@@ -3730,16 +4080,17 @@ const FiniteBrainProductClient = (() => {
       baseRevision: page.revision,
       folderId: page.folderId,
       objectId: page.objectId,
-      signEvent: (event) => window.nostr.signEvent(event),
-      vaultId: state.activeVaultId,
+      vaultId,
     });
-    const route = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+    requireCurrentSessionEpoch(sessionEpoch);
+    const route = `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(
       page.folderId
     )}/objects/${encodeURIComponent(page.objectId)}`;
     const result = await protectedRequest(route, {
       method: "DELETE",
       body: JSON.stringify(body),
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     const key = page.key || pageKey(page.folderId, page.objectId);
     state.projection.pages.delete(key);
     state.projection.localDrafts.delete(key);
@@ -4671,7 +5022,10 @@ const FiniteBrainProductClient = (() => {
     setPageContentEditable(content, false);
     if (!page) {
       content.className = "note-content note-content-empty";
-      content.textContent = "Open a vault to read pages.";
+      content.textContent =
+        state.sessionStatus === SESSION_STATUS.UNLOCKED
+          ? "Open a vault to read pages."
+          : "Session locked. Resume to reopen encrypted Folder Key Grants.";
       return;
     }
     if (!isReadablePage(page)) {
@@ -4728,8 +5082,11 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function log(message, value) {
-    console.debug(`[FiniteBrain] ${message}`, value ?? "");
+  function log(message, _value) {
+    // Event labels are useful during development, but values can contain
+    // decrypted titles, paths, identity metadata, or invite material. Never
+    // retain those objects in the browser console beyond Session Lock.
+    console.debug(`[FiniteBrain] ${message}`);
   }
 
   function closeContextMenu() {
@@ -5456,10 +5813,13 @@ const FiniteBrainProductClient = (() => {
       }
     });
     setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled("accessLoadVaultButton", !canLoadVault());
+    setOptionalDisabled(
+      "accessLoadVaultButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault()
+    );
     setOptionalDisabled(
       "accessCreateOrganizationVaultButton",
-      state.signerStatus !== "connected" || state.readerBusy || !state.config
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
     );
     renderVaultPeopleList(metadata);
     renderVaultPeopleControls(metadata);
@@ -5473,7 +5833,7 @@ const FiniteBrainProductClient = (() => {
     setPill("vaultPeopleCount", `${rows.length}`, rows.length ? "ready" : "muted");
     const emptyText = metadata?.kind === "personal"
       ? "Personal Vaults do not use a member list."
-      : "Load an organization Vault to manage people.";
+      : "Load an organization Vault to manage Member Identities.";
     const canManage = canManageVaultPeople(metadata);
     setList("vaultPeopleList", rows, emptyText, (item, person) => {
       const personInfo = document.createElement("div");
@@ -5535,7 +5895,7 @@ const FiniteBrainProductClient = (() => {
           const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
           action(person.id).catch((error) => {
             state.lastError = error.message;
-            log("Failed to update Vault people.", { error: error.message });
+            log("Failed to update Vault Member Identities.", { error: error.message });
           });
         });
         item.appendChild(removeButton);
@@ -5549,7 +5909,7 @@ const FiniteBrainProductClient = (() => {
     setOptionalDisabled("addVaultMemberButton", !canManage);
     setOptionalDisabled("addVaultAdminButton", !canManage);
     const hint = !metadata
-      ? "Load an organization Vault to manage people."
+      ? "Load an organization Vault to manage Member Identities."
       : metadata.kind !== "organization"
         ? "Personal Vaults use Folder access and share links instead of member lists."
         : actorIsVaultAdmin(metadata)
@@ -6152,9 +6512,16 @@ const FiniteBrainProductClient = (() => {
     setPressed("readerModeButton", state.readerMode === "source");
     $("readerModeButton").disabled = !isReadablePage(page);
     if (!page) {
-      setText("readerPageTitle", state.selectedFolderId ? "No page selected" : "No folder selected");
-      setText("readerPagePath", state.selectedFolderId || "No page path loaded");
-      setPill("readerPageMeta", "empty", "muted");
+      const sessionLocked = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
+      setText(
+        "readerPageTitle",
+        sessionLocked ? "Session locked" : state.selectedFolderId ? "No page selected" : "No folder selected"
+      );
+      setText(
+        "readerPagePath",
+        sessionLocked ? "Resume the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
+      );
+      setPill("readerPageMeta", sessionLocked ? "locked" : "empty", sessionLocked ? "warn" : "muted");
       renderPageContent(null);
       renderLinkContext(null);
       renderPageStatus(null);
@@ -6175,14 +6542,40 @@ const FiniteBrainProductClient = (() => {
     renderWorkspaceChrome(page);
   }
 
+  function renderSessionSecurity() {
+    const view = sessionStatusView(state.sessionStatus);
+    setText("sessionSecurityTitle", view.title);
+    setText("sessionSecurityDetail", state.sessionNotice || view.detail);
+    safeSetHidden("resumeSessionButton", !view.locked);
+    safeSetHidden("lockSessionButton", view.locked);
+    setOptionalDisabled(
+      "resumeSessionButton",
+      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
+    );
+    const shell = document.querySelector?.(".obsidian-shell");
+    if (shell) shell.dataset.sessionStatus = state.sessionStatus;
+  }
+
   function render() {
+    if (state.sessionStatus === SESSION_STATUS.LOCKED && sessionContainsSecretsOrPlaintext(state)) {
+      clearSessionSecretsAndPlaintext(state);
+      clearSessionOwnedDom();
+    }
     safeSetHidden("connectSignerButton", state.signerStatus === "connected");
     setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled("loadVaultButton", !canLoadVault());
-    setOptionalDisabled("createOrganizationVaultButton", state.signerStatus !== "connected" || state.readerBusy || !state.config);
+    setOptionalDisabled("loadVaultButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault());
+    setOptionalDisabled(
+      "createOrganizationVaultButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
+    );
+    setOptionalDisabled("obsidianNewPageButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED);
+    setOptionalDisabled("obsidianNewFolderButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.metadata);
     setOptionalDisabled("openFolderKeyButton", !state.metadata);
     setOptionalDisabled("encryptDraftButton", !state.keyring);
-    setOptionalDisabled("refreshReaderButton", state.readerBusy || state.signerStatus !== "connected" || !state.metadata);
+    setOptionalDisabled(
+      "refreshReaderButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.readerBusy || state.signerStatus !== "connected" || !state.metadata
+    );
     setOptionalDisabled("planOkfImportButton", !state.metadata);
     setOptionalDisabled(
       "executeOkfImportButton",
@@ -6190,6 +6583,7 @@ const FiniteBrainProductClient = (() => {
     );
     renderVaultSelect();
 
+    renderSessionSecurity();
     renderVaultControlChrome();
     renderSidebarMode();
     renderReader();
@@ -6243,16 +6637,21 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function protectedRequest(path, options = {}) {
+    const sessionEpoch = state.sessionEpoch;
+    requireCurrentSessionEpoch(sessionEpoch);
     const headers = {
       Authorization: await signAuthHeader(path, options),
     };
+    requireCurrentSessionEpoch(sessionEpoch);
     if (options.body) headers["Content-Type"] = "application/json";
     const response = await fetch(path, {
       method: options.method || "GET",
       headers,
       body: options.body || undefined,
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     const text = await response.text();
+    requireCurrentSessionEpoch(sessionEpoch);
     let body = text;
     try {
       body = JSON.parse(text);
@@ -6275,6 +6674,19 @@ const FiniteBrainProductClient = (() => {
     }
     const response = await protectedRequest("/_admin/vaults");
     state.visibleVaults = (response.vaults || []).map(normalizeVisibleVault).filter(Boolean);
+    const fallbackVaultId = missingVisibleVaultFallback(
+      state.sessionStatus,
+      state.activeVaultId,
+      state.visibleVaults,
+      state.pubkeyHex,
+      state.config?.defaultVaultId
+    );
+    if (fallbackVaultId) {
+      setActiveVaultId(fallbackVaultId);
+      state.sessionNotice = "The previously selected Vault is no longer visible. Resume session to open the fallback Vault.";
+      render();
+      return state.visibleVaults;
+    }
     const personal = visibleVaultOptions().find((vault) => vault.kind === "personal");
     if (
       personal &&
@@ -6400,29 +6812,36 @@ const FiniteBrainProductClient = (() => {
   async function writeDefaultVaultPages(input) {
     const request = input.request || protectedRequest;
     const writes = await buildDefaultVaultPageWrites(input);
+    if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
     for (const write of writes) {
+      if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
       await request(write.path, {
         method: "PUT",
         body: JSON.stringify(write.body),
       });
+      if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
     }
     return writes;
   }
 
   async function createVault(vaultId, kind, name) {
+    const sessionEpoch = state.sessionEpoch;
     const actorNpub = currentActorNpub();
     const plan = await buildVaultBootstrapPlan({ vaultId, kind, name, actorNpub });
+    requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest("/_admin/vaults", {
       method: "POST",
       body: JSON.stringify({ vaultId, kind, name, bootstrapGrants: plan.bootstrapGrants }),
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     await writeDefaultVaultPages({
       actorNpub,
       kind,
       keyring: plan.keyring,
-      signEvent: (event) => window.nostr.signEvent(event),
+      sessionEpoch,
       vaultId,
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     state.keyring = plan.keyring;
     return metadata;
   }
@@ -6463,19 +6882,28 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createOrganizationVaultFromInput(inputId = "organizationVaultNameInput") {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error("Session is locked. Resume the session before creating a Vault");
+    }
+    const sessionEpoch = state.sessionEpoch;
     const input = $(inputId);
     const name = input?.value.trim() || "New organization";
     if (state.signerStatus !== "connected") await connectSigner();
+    requireCurrentSessionEpoch(sessionEpoch);
     if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
     const vaultId = vaultIdFromName("org", name);
     const metadata = await createVault(vaultId, "organization", name);
-    const createdKeyring = state.keyring;
+    requireCurrentSessionEpoch(sessionEpoch);
+    const createdKeyring = cloneSessionKeyring(state.keyring);
     if (input) input.value = "";
     rememberVisibleVault(metadata);
     setActiveVaultId(metadata.vaultId);
+    const createdVaultEpoch = state.sessionEpoch;
     state.keyring = createdKeyring;
     state.metadata = metadata;
+    state.sessionStatus = SESSION_STATUS.UNLOCKED;
     await loadVisibleVaults();
+    requireCurrentSessionEpoch(createdVaultEpoch);
     log("Created organization Vault.", { vaultId: metadata.vaultId });
     render();
   }
@@ -6497,7 +6925,8 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
-  async function connectSigner() {
+  async function connectSigner(options = {}) {
+    const operationEpoch = options.sessionEpoch ?? state.sessionEpoch;
     const derived = deriveSignerState(window.nostr);
     setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     if (!derived.canConnect) {
@@ -6507,18 +6936,35 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     const pubkey = await window.nostr.getPublicKey();
+    if (state.sessionEpoch !== operationEpoch) {
+      throw new Error("Session changed while signer connection was in progress; resume again");
+    }
+    const identityChanged = signerIdentityChanged(state.pubkeyHex, pubkey);
+    if (identityChanged) {
+      resetVaultSessionState();
+      setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
+    }
     state.pubkeyHex = pubkey;
     state.signerStatus = "connected";
     if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId) {
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
-    setText("signerDetail", "Signer connected.");
+    setText(
+      "signerDetail",
+      identityChanged
+        ? "Signer identity changed. The previous session was locked."
+        : "Signer connected."
+    );
     setText("authDetail", "Signed requests are ready for protected Vault routes.");
-    log("Connected signer.", { status: "connected" });
-    await loadVisibleVaults().catch((error) => {
-      state.lastError = error.message;
-      log("Failed to load visible Vaults.", { error: error.message });
+    log(identityChanged ? "Connected a different signer identity." : "Connected signer.", {
+      status: "connected",
     });
+    if (options.loadVisibleVaults !== false && state.sessionStatus !== SESSION_STATUS.LOCKED) {
+      await loadVisibleVaults().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to load visible Vaults.", { error: error.message });
+      });
+    }
     render();
   }
 
@@ -6590,54 +7036,55 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function revokeVaultInvitationById(invitationId) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
+    beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(
-        vaultInvitationRevokePath(state.activeVaultId, invitationId),
+        vaultInvitationRevokePath(vaultId, invitationId),
         { method: "DELETE" }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
         updatedAt: invitation.updatedAt,
       });
       log("Revoked Vault invitation from pending list.", { invitationId });
       await refreshVaultAdminLists();
+      requireCurrentSessionEpoch(sessionEpoch);
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function revokeShareLinkById(shareLinkId) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    beginAccessOperation(sessionEpoch);
     try {
       const shareLink = await protectedRequest(
         `/_admin/share-links/${encodeURIComponent(shareLinkId)}`,
         { method: "DELETE" }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult("warn", "Share link revoked", `${shareLink.id} is ${shareLink.status}.`, {
         updatedAt: shareLink.updatedAt,
       });
       log("Revoked Folder share link from list.", { shareLinkId });
       await refreshFolderShareLinks(state.activeAccessFolderId);
+      requireCurrentSessionEpoch(sessionEpoch);
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function acceptSharedFolderInvitationById(invitationId) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(
         `/_admin/shared-folder-invitations/${encodeURIComponent(invitationId)}/accept`,
         { method: "POST" }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult(
         "ready",
         "Shared Folder mounted",
@@ -6646,22 +7093,23 @@ const FiniteBrainProductClient = (() => {
       );
       log("Accepted shared Folder invitation.", { invitationId });
       await loadVaultMetadata();
+      requireCurrentSessionEpoch(sessionEpoch);
       await refreshVaultAdminLists();
+      requireCurrentSessionEpoch(sessionEpoch);
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function revokeSharedFolderInvitationById(invitationId) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(
         `/_admin/shared-folder-invitations/${encodeURIComponent(invitationId)}`,
         { method: "DELETE" }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult(
         "warn",
         "Shared Folder invitation revoked",
@@ -6670,17 +7118,26 @@ const FiniteBrainProductClient = (() => {
       );
       log("Revoked shared Folder invitation.", { invitationId });
       await refreshVaultAdminLists();
+      requireCurrentSessionEpoch(sessionEpoch);
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
-  async function openAvailableFolderKeyGrants() {
-    if (!state.keyring) state.keyring = createSessionKeyring();
-    const exported = await protectedRequest(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/export`);
+  async function openAvailableFolderKeyGrants(options = {}) {
+    if (!sessionGrantOpeningAllowed(state.sessionStatus)) {
+      throw new Error("Session is locked. Resume the session before opening encrypted Folder Key Grants");
+    }
+    const sessionEpoch = state.sessionEpoch;
+    const assertCurrent = () => requireCurrentSessionEpoch(sessionEpoch);
+    assertCurrent();
+    const keyring = options.keyring || state.keyring || createSessionKeyring();
+    const vaultId = options.vaultId || state.activeVaultId;
+    if (!options.keyring && !state.keyring) state.keyring = keyring;
+    const exported = await protectedRequest(`/_admin/vaults/${encodeURIComponent(vaultId)}/export`);
+    assertCurrent();
     const expectedRecipient = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
-    return openFolderKeyGrants(state.keyring, exported, expectedRecipient);
+    return openFolderKeyGrants(keyring, exported, expectedRecipient, { assertCurrent });
   }
 
   function canLoadVault() {
@@ -6692,44 +7149,74 @@ const FiniteBrainProductClient = (() => {
     );
   }
 
-  async function loadVaultReader() {
+  async function loadVaultReader(options = {}) {
+    const allowResume = options.allowResume === true;
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
+      throw new Error("Session is locked. Use Resume session before loading protected Vault state");
+    }
     setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
+    let relockOnFailure = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
+    let sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
     render();
     try {
-      if (state.signerStatus !== "connected") await connectSigner();
+      await connectSigner({ loadVisibleVaults: false, sessionEpoch });
       if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
+      if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
+        throw new Error("Signer identity changed. Use Resume session to open the new session");
+      }
+      relockOnFailure = relockOnFailure || state.sessionStatus !== SESSION_STATUS.UNLOCKED;
+      if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) state.sessionStatus = SESSION_STATUS.RESUMING;
+      sessionEpoch = state.sessionEpoch;
+      render();
       await loadVisibleVaults().catch((error) => {
         log("Failed to refresh visible Vaults before opening reader.", { error: error.message });
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       await loadVaultMetadata();
+      requireCurrentSessionEpoch(sessionEpoch);
       const grants = await openAvailableFolderKeyGrants();
+      requireCurrentSessionEpoch(sessionEpoch);
       await pullSyncBootstrap();
+      requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       renderGraphView();
+      state.sessionStatus = SESSION_STATUS.UNLOCKED;
+      if (applyPendingInviteNavigation()) {
+        state.sessionNotice = "Invitation details loaded into this resumed session.";
+      }
       log("Loaded Vault reader.", {
         openedFolderKeys: grants.opened.length,
         skippedFolderKeyGrants: grants.skipped.length,
         readablePages: readablePages().length,
       });
+    } catch (error) {
+      if (relockOnFailure && state.sessionEpoch === sessionEpoch) resetVaultSessionState();
+      throw error;
     } finally {
-      state.readerBusy = false;
+      if (state.sessionEpoch === sessionEpoch) state.readerBusy = false;
       render();
     }
   }
 
   async function refreshReader() {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error("Session is locked. Resume the session before refreshing readable content");
+    }
+    const sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
     render();
     try {
       await loadVaultMetadata();
+      requireCurrentSessionEpoch(sessionEpoch);
       if (state.keyring?.openedGrants.length) await pullSyncBootstrap();
+      requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       log("Refreshed Vault reader.", {
         readablePages: readablePages().length,
       });
     } finally {
-      state.readerBusy = false;
+      if (state.sessionEpoch === sessionEpoch) state.readerBusy = false;
       render();
     }
   }
@@ -6873,7 +7360,14 @@ const FiniteBrainProductClient = (() => {
 
   async function createFolderFromToolbar() {
     if (!state.metadata) throw new Error("Open a Vault before creating a Folder");
-    if (state.signerStatus !== "connected") await connectSigner();
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error("Session is locked. Resume the session before creating a Folder");
+    }
+    const sessionEpoch = state.sessionEpoch;
+    const vaultId = state.activeVaultId;
+    const sessionKeyring = state.keyring || createSessionKeyring();
+    if (state.signerStatus !== "connected") await connectSigner({ sessionEpoch });
+    requireCurrentSessionEpoch(sessionEpoch);
     if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
 
     const name = window.prompt("Folder name", "Notes")?.trim();
@@ -6893,25 +7387,31 @@ const FiniteBrainProductClient = (() => {
           keyVersion: 1,
           rawKey,
           recipientNpub,
-          vaultId: state.activeVaultId,
+          vaultId,
         })
       );
+      requireCurrentSessionEpoch(sessionEpoch);
     }
-    if (!state.keyring) state.keyring = createSessionKeyring();
-    await importFolderKey(state.keyring, {
-      vaultId: state.activeVaultId,
-      folderId,
-      keyVersion: 1,
-      folderKey: bytesToBase64(rawKey),
-    });
+    await importFolderKey(
+      sessionKeyring,
+      {
+        vaultId,
+        folderId,
+        keyVersion: 1,
+        folderKey: bytesToBase64(rawKey),
+      },
+      { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
+    );
+    requireCurrentSessionEpoch(sessionEpoch);
     const accessChangeEvent = await buildAdminAccessChangeEvent({
       action: "set-folder-access-mode",
       createdAtUnix,
       folderId,
       keyVersion: 1,
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest(
-      `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders`,
+      `/_admin/vaults/${encodeURIComponent(vaultId)}/folders`,
       {
         method: "POST",
         body: JSON.stringify({
@@ -6928,6 +7428,8 @@ const FiniteBrainProductClient = (() => {
         }),
       }
     );
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.keyring = sessionKeyring;
     state.metadata = metadata;
     state.selectedFolderId = folderId;
     state.expandedFolderIds.add(folderId);
@@ -7594,6 +8096,30 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
+  function captureSessionOperationEpoch() {
+    const sessionEpoch = state.sessionEpoch;
+    requireCurrentSessionEpoch(sessionEpoch);
+    return sessionEpoch;
+  }
+
+  function beginAccessOperation(sessionEpoch) {
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.accessBusy = true;
+    state.accessResult = null;
+    render();
+  }
+
+  function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message) {
+    if (!sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) return;
+    setAccessResult("error", title, detail(error));
+  }
+
+  function finishAccessOperation(sessionEpoch) {
+    if (!sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) return;
+    state.accessBusy = false;
+    render();
+  }
+
   async function buildAccessGrantForRow(row, recipientNpub) {
     const key = openedAccessFolderKey(row);
     return buildFolderKeyGrantRequest({
@@ -7616,113 +8142,127 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  async function mutateVaultPeople(path, options) {
+  async function mutateVaultPeople(path, options, sessionEpoch) {
+    requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest(path, options);
+    requireCurrentSessionEpoch(sessionEpoch);
     state.metadata = metadata;
     rememberVisibleVault(metadata);
-    await loadVisibleVaults().catch((error) => {
-      log("Failed to refresh visible Vaults after Vault people mutation.", { error: error.message });
-    });
+    try {
+      await loadVisibleVaults();
+    } catch (error) {
+      requireCurrentSessionEpoch(sessionEpoch);
+      log("Failed to refresh visible Vaults after Member Identity mutation.", { error: error.message });
+    }
+    requireCurrentSessionEpoch(sessionEpoch);
     return metadata;
   }
 
   async function addVaultMemberFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member email first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    requireCurrentSessionEpoch(sessionEpoch);
+    beginAccessOperation(sessionEpoch);
     try {
       const body = JSON.stringify(await buildVaultPeopleMutationRequest("add-member", targetNpub));
-      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/members`, {
+      requireCurrentSessionEpoch(sessionEpoch);
+      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(vaultId)}/members`, {
         method: "POST",
         body,
-      });
+      }, sessionEpoch);
+      requireCurrentSessionEpoch(sessionEpoch);
       $("vaultMemberNpubInput").value = "";
       setAccessResult("ready", "Member added", `${identityDisplay(targetNpub)} can now belong to this Vault.`);
-      log("Added Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+      log("Added Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId });
     } catch (error) {
-      setAccessResult("error", "Add member failed", error.message);
+      failAccessOperation(sessionEpoch, "Add member failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function addVaultAdminFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin email first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    requireCurrentSessionEpoch(sessionEpoch);
+    beginAccessOperation(sessionEpoch);
     try {
       const body = JSON.stringify(await buildVaultPeopleMutationRequest("add-admin", targetNpub));
-      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/admins`, {
+      requireCurrentSessionEpoch(sessionEpoch);
+      await mutateVaultPeople(`/_admin/vaults/${encodeURIComponent(vaultId)}/admins`, {
         method: "POST",
         body,
-      });
+      }, sessionEpoch);
+      requireCurrentSessionEpoch(sessionEpoch);
       $("vaultAdminNpubInput").value = "";
       setAccessResult("ready", "Admin added", `${identityDisplay(targetNpub)} can manage this Vault.`);
-      log("Added Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+      log("Added Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId });
     } catch (error) {
-      setAccessResult("error", "Add admin failed", error.message);
+      failAccessOperation(sessionEpoch, "Add admin failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function removeVaultMemberFromPanel(targetNpub) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
+    beginAccessOperation(sessionEpoch);
     try {
       const accessChangeEvent = await buildAdminAccessChangeEvent({
         action: "remove-member",
         targetNpub,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       await mutateVaultPeople(
-        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/members/${encodeURIComponent(targetNpub)}`,
+        `/_admin/vaults/${encodeURIComponent(vaultId)}/members/${encodeURIComponent(targetNpub)}`,
         {
           method: "DELETE",
           body: JSON.stringify({ accessChangeEvent }),
-        }
+        },
+        sessionEpoch
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult("warn", "Member removed", `${identityDisplay(targetNpub)} was removed from this Vault.`);
-      log("Removed Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+      log("Removed Vault member.", { targetNpub: identityDisplay(targetNpub), vaultId });
     } catch (error) {
-      setAccessResult("error", "Remove member failed", error.message);
+      failAccessOperation(sessionEpoch, "Remove member failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function removeVaultAdminFromPanel(targetNpub) {
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
+    beginAccessOperation(sessionEpoch);
     try {
       const accessChangeEvent = await buildAdminAccessChangeEvent({
         action: "remove-admin",
         targetNpub,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       await mutateVaultPeople(
-        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/admins/${encodeURIComponent(targetNpub)}`,
+        `/_admin/vaults/${encodeURIComponent(vaultId)}/admins/${encodeURIComponent(targetNpub)}`,
         {
           method: "DELETE",
           body: JSON.stringify({ accessChangeEvent }),
-        }
+        },
+        sessionEpoch
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       setAccessResult("warn", "Admin removed", `${identityDisplay(targetNpub)} is still a member.`);
-      log("Removed Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId: state.activeVaultId });
+      log("Removed Vault admin.", { targetNpub: identityDisplay(targetNpub), vaultId });
     } catch (error) {
-      setAccessResult("error", "Remove admin failed", error.message);
+      failAccessOperation(sessionEpoch, "Remove admin failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
@@ -7813,28 +8353,32 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function grantFolderAccessFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const row = requireGrantableAccessRow();
     const targetNpub = await normalizedTargetNpub();
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    requireCurrentSessionEpoch(sessionEpoch);
+    beginAccessOperation(sessionEpoch);
     try {
       const grant = await buildAccessGrantForRow(row, targetNpub);
+      requireCurrentSessionEpoch(sessionEpoch);
       const accessChangeEvent = await buildAdminAccessChangeEvent({
         action: "grant-folder-access",
         folderId: row.id,
         keyVersion: row.currentKeyVersion,
         targetNpub,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       const body = JSON.stringify({
         targetNpub,
         grant,
         accessChangeEvent,
       });
       const metadata = await protectedRequest(
-        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(row.id)}/access`,
+        `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(row.id)}/access`,
         { method: "POST", body }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       state.metadata = metadata;
       const title = row.access === "all_members" ? "Folder key granted" : "Access granted";
       setAccessResult("ready", title, `${identityDisplay(targetNpub)} can open ${row.path}.`, {
@@ -7842,28 +8386,32 @@ const FiniteBrainProductClient = (() => {
       });
       log("Granted Folder key/access.", { folderId: row.id, targetNpub: identityDisplay(targetNpub) });
     } catch (error) {
-      setAccessResult("error", "Grant failed", error.message);
+      failAccessOperation(sessionEpoch, "Grant failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function removeFolderAccessFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
     const targetNpub = await normalizedTargetNpub();
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    requireCurrentSessionEpoch(sessionEpoch);
+    const operationKeyring = cloneSessionKeyring(state.keyring);
+    const metadataSnapshot = state.metadata;
+    const objectSnapshot = [...state.projection.pages.values()];
+    beginAccessOperation(sessionEpoch);
     try {
-      const removal = await buildFolderAccessRemovalRequest(state.keyring, {
-        vaultId: state.activeVaultId,
-        metadata: state.metadata,
+      const removal = await buildFolderAccessRemovalRequest(operationKeyring, {
+        vaultId,
+        metadata: metadataSnapshot,
         row,
         targetNpub,
-        objects: [...state.projection.pages.values()],
+        objects: objectSnapshot,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       const body = JSON.stringify({
         newKeyVersion: removal.newKeyVersion,
         grants: removal.grants,
@@ -7871,14 +8419,18 @@ const FiniteBrainProductClient = (() => {
         accessChangeEvent: removal.accessChangeEvent,
       });
       const metadata = await protectedRequest(
-        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+        `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(
           row.id
         )}/access/${encodeURIComponent(targetNpub)}`,
         { method: "DELETE", body }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       state.metadata = metadata;
+      state.keyring = operationKeyring;
       await openAvailableFolderKeyGrants();
+      requireCurrentSessionEpoch(sessionEpoch);
       await pullSyncBootstrap();
+      requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       renderGraphView();
       setAccessResult("warn", "Access removed", `${identityDisplay(targetNpub)} was removed from ${row.path}.`, {
@@ -7892,29 +8444,31 @@ const FiniteBrainProductClient = (() => {
         targetNpub: identityDisplay(targetNpub),
       });
     } catch (error) {
-      setAccessResult("error", "Remove failed", error.message);
+      failAccessOperation(sessionEpoch, "Remove failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function createShareLinkFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
     const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target email first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    requireCurrentSessionEpoch(sessionEpoch);
+    beginAccessOperation(sessionEpoch);
     try {
       const expiresAt = shareExpiryIso();
       const grant = await buildAccessGrantForRow(row, recipientNpub);
+      requireCurrentSessionEpoch(sessionEpoch);
       const accessChangeEvent = await buildAdminAccessChangeEvent({
         action: "grant-folder-access",
         folderId: row.id,
         keyVersion: row.currentKeyVersion,
         targetNpub: recipientNpub,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       const body = JSON.stringify({
         recipientNpub,
         grant,
@@ -7923,9 +8477,10 @@ const FiniteBrainProductClient = (() => {
         createPersonalMount: $("accessShareMountInput").checked,
       });
       const shareLink = await protectedRequest(
-        `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(row.id)}/share-links`,
+        `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(row.id)}/share-links`,
         { method: "POST", body }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastShareLinkId = shareLink.id;
       $("accessShareLinkInput").value = shareLink.id;
       setAccessResult("ready", "Share link created", `${shareLink.id} is pending for ${identityDisplay(recipientNpub)}.`, {
@@ -7934,29 +8489,32 @@ const FiniteBrainProductClient = (() => {
       });
       log("Created Folder share link.", { folderId: row.id, shareLinkId: shareLink.id });
       await refreshFolderShareLinks(row.id);
+      requireCurrentSessionEpoch(sessionEpoch);
     } catch (error) {
-      setAccessResult("error", "Share failed", error.message);
+      failAccessOperation(sessionEpoch, "Share failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function acceptShareLinkFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
     const shareLinkId = $("accessShareLinkInput").value.trim() || state.lastShareLinkId;
     if (!shareLinkId) throw new Error("Paste a share link id first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    beginAccessOperation(sessionEpoch);
     try {
       const shareLink = await protectedRequest(`/_admin/share-links/${encodeURIComponent(shareLinkId)}/accept`, {
         method: "POST",
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastShareLinkId = shareLink.id;
       await loadVaultMetadata();
+      requireCurrentSessionEpoch(sessionEpoch);
       const grants = await openAvailableFolderKeyGrants();
+      requireCurrentSessionEpoch(sessionEpoch);
       await pullSyncBootstrap();
+      requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       setAccessResult(
         "ready",
@@ -7969,40 +8527,46 @@ const FiniteBrainProductClient = (() => {
       );
       log("Accepted Folder share link.", { shareLinkId: shareLink.id });
     } catch (error) {
-      setAccessResult("error", "Accept failed", error.message);
+      failAccessOperation(sessionEpoch, "Accept failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function revokeShareLinkFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
     const shareLinkId = $("accessShareLinkInput").value.trim() || state.lastShareLinkId;
     if (!shareLinkId) throw new Error("Paste a share link id first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    beginAccessOperation(sessionEpoch);
     try {
       const shareLink = await protectedRequest(`/_admin/share-links/${encodeURIComponent(shareLinkId)}`, {
         method: "DELETE",
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastShareLinkId = shareLink.id;
       setAccessResult("warn", "Share link revoked", `${shareLink.id} is ${shareLink.status}.`, {
         updatedAt: shareLink.updatedAt,
       });
       log("Revoked Folder share link.", { shareLinkId: shareLink.id });
       await refreshFolderShareLinks(state.folderShareLinksFolderId);
+      requireCurrentSessionEpoch(sessionEpoch);
     } catch (error) {
-      setAccessResult("error", "Revoke failed", error.message);
+      failAccessOperation(sessionEpoch, "Revoke failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function createVaultInvitationFromPanel() {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error("Session is locked. Resume the session before creating an invitation");
+    }
+    const sessionEpoch = state.sessionEpoch;
+    const vaultId = state.activeVaultId;
+    const metadata = state.metadata;
+    const publicBaseUrl = state.config?.publicBaseUrl;
     const targetInput = $("vaultInviteTargetNpubInput").value.trim();
     if (!targetInput) throw new Error("Paste an invite email first");
     state.accessBusy = true;
@@ -8017,7 +8581,9 @@ const FiniteBrainProductClient = (() => {
         if (finiteVipEmail(targetInput)) {
           try {
             resolvedNpub = (await resolveIdentityInputValue(targetInput, "Paste an invite email first")).npub;
-          } catch (_) {
+            requireCurrentSessionEpoch(sessionEpoch);
+          } catch (error) {
+            if (state.sessionEpoch !== sessionEpoch) throw error;
             resolvedNpub = null;
           }
         }
@@ -8031,21 +8597,25 @@ const FiniteBrainProductClient = (() => {
           );
           targetLabel = identityDisplay(resolvedNpub);
         } else {
-          if (!state.keyring) state.keyring = createSessionKeyring();
-          await openAvailableFolderKeyGrants();
-          const request = await buildEmailVaultInvitationRequest(state.keyring, {
+          const sessionKeyring = state.keyring || createSessionKeyring();
+          await openAvailableFolderKeyGrants({ keyring: sessionKeyring, vaultId });
+          requireCurrentSessionEpoch(sessionEpoch);
+          const request = await buildEmailVaultInvitationRequest(sessionKeyring, {
             target: targetInput,
-            metadata: state.metadata,
+            metadata,
             initialFolderAccess: $("vaultInviteFoldersInput").value,
             expiresAt: vaultInvitationExpiryIso(),
-            vaultId: state.activeVaultId,
+            vaultId,
           });
+          requireCurrentSessionEpoch(sessionEpoch);
           body = JSON.stringify(request.body);
           localInviteSecret = request.inviteSecret;
           targetLabel = canonicalInviteEmail(targetInput);
+          state.keyring = sessionKeyring;
         }
       } else {
         const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite email first");
+        requireCurrentSessionEpoch(sessionEpoch);
         body = JSON.stringify(
           buildVaultInvitationRequest({
             targetNpub,
@@ -8055,10 +8625,12 @@ const FiniteBrainProductClient = (() => {
         );
         targetLabel = identityDisplay(targetNpub);
       }
+      requireCurrentSessionEpoch(sessionEpoch);
       const invitation = await protectedRequest(
-        vaultInvitationCreatePath(state.activeVaultId),
+        vaultInvitationCreatePath(vaultId),
         { method: "POST", body }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastVaultInvitationId = invitation.id;
       state.lastVaultInvitationCode = invitation.inviteCode;
       $("vaultInviteCodeInput").value = invitation.inviteCode;
@@ -8066,7 +8638,7 @@ const FiniteBrainProductClient = (() => {
         const invitedEmail = invitation.invitedEmail || canonicalInviteEmail(targetInput);
         state.lastEmailInviteSecret = localInviteSecret;
         state.lastEmailInviteUrl = emailInviteClientUrl({
-          publicBaseUrl: state.config.publicBaseUrl,
+          publicBaseUrl,
           inviteCode: invitation.inviteCode,
           invitedEmail,
           inviteSecret: localInviteSecret,
@@ -8095,21 +8667,25 @@ const FiniteBrainProductClient = (() => {
       });
       await refreshVaultAdminLists();
     } catch (error) {
-      setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
+      if (state.sessionEpoch === sessionEpoch) {
+        setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
+      }
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      if (state.sessionEpoch === sessionEpoch) {
+        state.accessBusy = false;
+        render();
+      }
     }
   }
 
   async function inspectVaultInvitationFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(vaultInvitationLinkPath(code));
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastVaultInvitationId = invitation.id;
       state.lastVaultInvitationCode = invitation.inviteCode;
       $("vaultInviteCodeInput").value = invitation.inviteCode;
@@ -8123,22 +8699,20 @@ const FiniteBrainProductClient = (() => {
       log("Loaded Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
       return invitation;
     } catch (error) {
-      setAccessResult("error", "Inspect failed", vaultInvitationUnavailableDetail(error));
+      failAccessOperation(sessionEpoch, "Inspect failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function loadEmailInviteInstructionsFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
     const inviteSecret = $("vaultInviteSecretInput").value.trim();
     if (!inviteSecret) throw new Error("Paste the client-only Invite Secret first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    beginAccessOperation(sessionEpoch);
     try {
       const body = JSON.stringify({
         email,
@@ -8148,13 +8722,15 @@ const FiniteBrainProductClient = (() => {
         method: "POST",
         body,
       });
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
-      state.lastEmailInvitePostProof = invitation;
+      requireCurrentSessionEpoch(sessionEpoch);
       await openEmailInviteBootstrap(invitation, {
         inviteSecret,
         invitedEmail: email,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
+      state.lastVaultInvitationId = invitation.id;
+      state.lastVaultInvitationCode = invitation.inviteCode;
+      state.lastEmailInvitePostProof = invitation;
       const folderScope = (invitation.bootstrapScope || [])
         .map((folder) => `${folder.folderId} v${folder.keyVersion}`)
         .join(", ");
@@ -8169,11 +8745,10 @@ const FiniteBrainProductClient = (() => {
       });
       return invitation;
     } catch (error) {
-      setAccessResult("error", "Email scope failed", vaultInvitationUnavailableDetail(error));
+      failAccessOperation(sessionEpoch, "Email scope failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
@@ -8184,47 +8759,37 @@ const FiniteBrainProductClient = (() => {
     if (email || inviteSecret) {
       return claimEmailVaultInvitationFromPanel(code);
     }
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const sessionEpoch = captureSessionOperationEpoch();
+    beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(vaultInvitationAcceptPath(code), {
         method: "POST",
       });
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
+      requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(invitation.vaultId);
-      $("vaultInviteCodeInput").value = invitation.inviteCode;
-      await loadVaultMetadata({ preserveActive: true });
-      await loadVisibleVaults();
-      setAccessResult(
-        "ready",
-        invitation.duplicateAccept ? "Invitation already accepted" : "Invitation accepted",
-        `${invitation.vaultId} is now available to this signer.`,
-        {
-          status: invitation.status,
-          "initial access metadata": (invitation.initialFolderAccess || []).join(", ") || "none",
-          "folder keys": "grant or share separately",
-          signer: state.pubkeyHex ? "connected" : "none",
-        }
-      );
+      state.sessionNotice = invitation.duplicateAccept
+        ? "Invitation was already accepted. Resume session to open the selected Vault."
+        : "Invitation accepted. Resume session to open the selected Vault.";
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
-      setAccessResult("error", "Accept failed", vaultInvitationUnavailableDetail(error));
+      failAccessOperation(sessionEpoch, "Accept failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function claimEmailVaultInvitationFromPanel(code) {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error("Session is locked. Resume the session before claiming encrypted Folder Key Grants");
+    }
+    const sessionEpoch = captureSessionOperationEpoch();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
     const inviteSecret = $("vaultInviteSecretInput").value.trim();
     if (!inviteSecret) throw new Error("Paste the client-only Invite Secret first");
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    const invitationSnapshot = state.lastEmailInvitePostProof;
+    const operationKeyring = cloneSessionKeyring(state.keyring);
+    beginAccessOperation(sessionEpoch);
     try {
       const proofCreatedAt = emailProofCreatedAtIso();
       const proofBody = JSON.stringify({
@@ -8232,63 +8797,48 @@ const FiniteBrainProductClient = (() => {
         emailProofCreatedAt: proofCreatedAt,
       });
       const invitation =
-        state.lastEmailInvitePostProof?.inviteCode === code
-          ? state.lastEmailInvitePostProof
+        invitationSnapshot?.inviteCode === code
+          ? invitationSnapshot
           : await protectedRequest(emailInviteBootstrapPath(code), {
               method: "POST",
               body: proofBody,
             });
+      requireCurrentSessionEpoch(sessionEpoch);
       const claimantNpub = currentActorNpub();
-      if (!state.keyring) state.keyring = createSessionKeyring();
       const claimRequest = await buildEmailInviteClaimRequest({
         claimantNpub,
         email,
         emailProofCreatedAt: proofCreatedAt,
         invitation,
         inviteSecret,
-        keyring: state.keyring,
+        keyring: operationKeyring,
       });
+      requireCurrentSessionEpoch(sessionEpoch);
       const claimed = await protectedRequest(emailInviteClaimPath(code), {
         method: "POST",
         body: JSON.stringify(claimRequest.body),
       });
-      state.lastVaultInvitationId = claimed.id;
-      state.lastVaultInvitationCode = claimed.inviteCode;
-      state.lastEmailInvitePostProof = null;
+      requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(claimed.vaultId);
-      $("vaultInviteCodeInput").value = claimed.inviteCode;
-      await loadVaultMetadata({ preserveActive: true });
-      const grants = await openAvailableFolderKeyGrants();
-      await pullSyncBootstrap();
-      selectDefaultReaderTargets();
-      setAccessResult(
-        "ready",
-        claimed.duplicateAccept ? "Email invite already claimed" : "Email invite claimed",
-        `${claimed.vaultId} is now available to this signer.`,
-        {
-          status: claimed.status,
-          openedKeys: String(grants.opened.length + claimRequest.openedGrantCount),
-          signer: state.pubkeyHex ? "connected" : "none",
-        }
-      );
+      state.sessionNotice = claimed.duplicateAccept
+        ? "Email invitation was already claimed. Resume session to open the selected Vault."
+        : "Email invitation claimed. Resume session to open the selected Vault.";
       log("Claimed email Vault invitation.", {
         invitationId: claimed.id,
         vaultId: claimed.vaultId,
       });
     } catch (error) {
-      setAccessResult("error", "Claim failed", vaultInvitationUnavailableDetail(error));
+      failAccessOperation(sessionEpoch, "Claim failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function revokeVaultInvitationFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
     const value = currentVaultInvitationInput();
-    state.accessBusy = true;
-    state.accessResult = null;
-    render();
+    beginAccessOperation(sessionEpoch);
     try {
       let invitationId = state.lastVaultInvitationId;
       let vaultId = state.activeVaultId;
@@ -8297,6 +8847,7 @@ const FiniteBrainProductClient = (() => {
           invitationId = value;
         } else {
           const invitation = await protectedRequest(vaultInvitationLinkPath(value));
+          requireCurrentSessionEpoch(sessionEpoch);
           invitationId = invitation.id;
           vaultId = invitation.vaultId;
           state.lastVaultInvitationId = invitation.id;
@@ -8307,6 +8858,7 @@ const FiniteBrainProductClient = (() => {
         vaultInvitationRevokePath(vaultId, invitationId),
         { method: "DELETE" }
       );
+      requireCurrentSessionEpoch(sessionEpoch);
       state.lastVaultInvitationId = invitation.id;
       state.lastVaultInvitationCode = invitation.inviteCode;
       setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
@@ -8314,30 +8866,37 @@ const FiniteBrainProductClient = (() => {
       });
       log("Revoked Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
       await refreshVaultAdminLists();
+      requireCurrentSessionEpoch(sessionEpoch);
     } catch (error) {
-      setAccessResult("error", "Revoke failed", error.message);
+      failAccessOperation(sessionEpoch, "Revoke failed", error);
       throw error;
     } finally {
-      state.accessBusy = false;
-      render();
+      finishAccessOperation(sessionEpoch);
     }
   }
 
   async function openEnteredFolderKey() {
-    if (!state.keyring) state.keyring = createSessionKeyring();
+    const sessionEpoch = captureSessionOperationEpoch();
+    const keyring = state.keyring || createSessionKeyring();
     const input = activePageInput();
     const folderKey = $("folderKeyInput").value.trim();
     if (!folderKey) throw new Error("Paste a base64 raw Folder Key first");
-    await openFolderKeyGrantPlaintext(state.keyring, {
-      version: "finite-folder-key-grant-v1",
-      vaultId: state.activeVaultId,
-      folderId: input.folderId,
-      keyVersion: currentFolderKeyVersion(input.folderId),
-      issuerNpub: "npub-local-session",
-      recipientNpub: state.pubkeyHex ? npubFromHex(state.pubkeyHex) : "npub-local-session",
-      folderKey,
-      issuedAt: new Date().toISOString(),
-    });
+    await openFolderKeyGrantPlaintext(
+      keyring,
+      {
+        version: "finite-folder-key-grant-v1",
+        vaultId: state.activeVaultId,
+        folderId: input.folderId,
+        keyVersion: currentFolderKeyVersion(input.folderId),
+        issuerNpub: "npub-local-session",
+        recipientNpub: state.pubkeyHex ? npubFromHex(state.pubkeyHex) : "npub-local-session",
+        folderKey,
+        issuedAt: new Date().toISOString(),
+      },
+      { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
+    );
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.keyring = keyring;
     log("Opened Folder Key into the in-memory session keyring.", {
       folderId: input.folderId,
       keyVersion: currentFolderKeyVersion(input.folderId),
@@ -8348,19 +8907,23 @@ const FiniteBrainProductClient = (() => {
   async function prepareDraftWrite(options = {}) {
     if (!state.keyring) throw new Error("Open a Folder Key before encrypting a Page draft");
     if (!state.pubkeyHex) throw new Error("Connect a signer before preparing a signed Page write");
+    const sessionEpoch = state.sessionEpoch;
+    const keyring = state.keyring;
+    const vaultId = state.activeVaultId;
     const input = activePageInput();
     const authorNpub = npubFromHex(state.pubkeyHex);
     const keyVersion = currentFolderKeyVersion(input.folderId);
-    state.preparedWrite = await buildPageWriteRequest(state.keyring, {
+    const preparedWrite = await buildPageWriteRequest(keyring, {
       authorNpub,
       baseRevision: input.baseRevision,
       folderId: input.folderId,
       keyVersion,
       objectId: input.objectId,
       plaintext: encodeFolderObjectPagePlaintext(input.path, input.text),
-      signEvent: (event) => window.nostr.signEvent(event),
-      vaultId: state.activeVaultId,
+      vaultId,
     });
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.preparedWrite = preparedWrite;
     state.preparedWriteTarget = {
       folderId: input.folderId,
       objectId: input.objectId,
@@ -8378,22 +8941,26 @@ const FiniteBrainProductClient = (() => {
       keyVersion,
     });
     if (options.renderAfter !== false) render();
-    return state.preparedWrite;
+    return preparedWrite;
   }
 
   async function savePreparedPage() {
     if (!state.preparedWrite) throw new Error("Prepare a Page write before saving");
+    const sessionEpoch = state.sessionEpoch;
+    const vaultId = state.activeVaultId;
+    const preparedWrite = state.preparedWrite;
     const savedInput = activePageInput();
     const target = state.preparedWriteTarget || savedInput;
     const savedText = savedInput.text;
     const savedPath = target.path || savedInput.path || `${target.objectId}.md`;
-    const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/folders/${encodeURIComponent(
+    const path = `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(
       target.folderId
     )}/objects/${encodeURIComponent(target.objectId)}`;
     const result = await protectedRequest(path, {
       method: "PUT",
-      body: JSON.stringify(state.preparedWrite),
+      body: JSON.stringify(preparedWrite),
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     state.projection.pages.set(pageKey(target.folderId, target.objectId), {
       folderId: target.folderId,
       objectId: target.objectId,
@@ -8418,10 +8985,16 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function pullSyncBootstrap() {
-    const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/sync/bootstrap`;
+    const sessionEpoch = state.sessionEpoch;
+    const keyring = state.keyring;
+    const projection = state.projection;
+    const vaultId = state.activeVaultId;
+    const path = `/_admin/vaults/${encodeURIComponent(vaultId)}/sync/bootstrap`;
     const sync = await protectedRequest(path);
-    const openedSync = await openSyncObjects(state.keyring, sync);
-    state.projection = mergeSyncProjection(state.projection, openedSync);
+    requireCurrentSessionEpoch(sessionEpoch);
+    const openedSync = await openSyncObjects(keyring, sync);
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.projection = mergeSyncProjection(projection, openedSync);
     log("Pulled sync bootstrap into local projection.", {
       conflicts: state.projection.conflicts,
       decryptedPages: openedSync.objects.filter((object) => object.status === "ready").length,
@@ -8526,20 +9099,28 @@ const FiniteBrainProductClient = (() => {
     if (!state.okfPlan) throw new Error("Plan an OKF import before executing it");
     if (!state.keyring) throw new Error("Open destination Folder Keys before importing OKF");
     if (!state.pubkeyHex) throw new Error("Connect a signer before importing OKF");
+    const sessionEpoch = state.sessionEpoch;
+    const plan = state.okfPlan;
+    const keyring = state.keyring;
+    const vaultId = state.activeVaultId;
+    const folderKeyVersions = folderKeyVersionMap();
     const authorNpub = npubFromHex(state.pubkeyHex);
-    const prepared = await prepareOkfImportWrites(state.keyring, state.okfPlan, {
+    const prepared = await prepareOkfImportWrites(keyring, plan, {
       authorNpub,
-      currentKeyVersion: (folderId) => folderKeyVersionMap().get(folderId) || 1,
-      signEvent: (event) => window.nostr.signEvent(event),
-      vaultId: state.activeVaultId,
+      currentKeyVersion: (folderId) => folderKeyVersions.get(folderId) || 1,
+      signEvent: requireNip07SignEvent(),
+      vaultId,
     });
+    requireCurrentSessionEpoch(sessionEpoch);
     const results = [];
     for (const write of prepared.writes) {
+      requireCurrentSessionEpoch(sessionEpoch);
       const result = await protectedRequest(write.path, {
         method: "PUT",
         body: JSON.stringify(write.body),
       });
-      const importedEntry = state.okfPlan.entries.find((entry) => entry.objectId === write.objectId);
+      requireCurrentSessionEpoch(sessionEpoch);
+      const importedEntry = plan.entries.find((entry) => entry.objectId === write.objectId);
       const importedAsset = importedEntry?.kind === "asset";
       const projectionObject = {
         folderId: write.folderId,
@@ -8553,6 +9134,7 @@ const FiniteBrainProductClient = (() => {
         const importedBytes = base64ToBytes(importedEntry?.bytesBase64 || "");
         projectionObject.bytesBase64 = importedEntry?.bytesBase64 || "";
         projectionObject.contentHash = await sha256HexBytes(importedBytes);
+        requireCurrentSessionEpoch(sessionEpoch);
         projectionObject.contentType = importedEntry?.contentType || "application/octet-stream";
         projectionObject.size = importedBytes.length;
       } else {
@@ -8573,10 +9155,22 @@ const FiniteBrainProductClient = (() => {
   }
 
   function bind() {
+    window.addEventListener?.("pagehide", handlePageHide);
+    window.addEventListener?.("pageshow", handlePageShow);
     $("connectSignerButton").addEventListener("click", () => {
       connectSigner().catch((error) => {
         state.lastError = error.message;
         log("Failed to connect signer.", { error: error.message });
+        render();
+      });
+    });
+    onOptionalClick("lockSessionButton", () => {
+      lockSession();
+    });
+    onOptionalClick("resumeSessionButton", () => {
+      resumeSession().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to resume Product Client session.", { error: error.message });
         render();
       });
     });
@@ -8655,7 +9249,7 @@ const FiniteBrainProductClient = (() => {
       state.activeAccessIntent = "people";
       state.activeAccessFolderId = folderId;
       state.accessResult = null;
-      log("Opened Folder people access panel.", { folderId });
+      log("Opened Folder Member Identity access panel.", { folderId });
       render();
     });
     onOptionalClick("accessShareButton", () => {
@@ -8962,42 +9556,92 @@ const FiniteBrainProductClient = (() => {
     });
   }
 
-  function populateInviteFromHash() {
-    const hash = String(window.location?.hash || "");
-    if (!hash.includes("invite")) return;
-    const params = new URLSearchParams(hash.replace(/^#/, ""));
-    let populated = false;
-    const inviteCode = params.get("inviteCode") || params.get("code");
-    if (inviteCode) {
-      state.lastVaultInvitationCode = inviteCode;
-      if ($("vaultInviteCodeInput")) $("vaultInviteCodeInput").value = inviteCode;
-      populated = true;
-    }
-    const inviteEmail = params.get("inviteEmail") || params.get("email");
-    if (inviteEmail) {
+  function inviteNavigationFromHash(hash) {
+    const params = new URLSearchParams(String(hash || "").replace(/^#/, ""));
+    const hasInviteNavigation =
+      params.has("invite") ||
+      params.has("inviteCode") ||
+      params.has("inviteEmail") ||
+      params.has("inviteSecret");
+    if (!hasInviteNavigation) return null;
+    const inviteCode = params.get("inviteCode") || params.get("code") || null;
+    const rawEmail = params.get("inviteEmail") || params.get("email");
+    let inviteEmail = null;
+    if (rawEmail) {
       try {
-        const email = canonicalInviteEmail(inviteEmail);
-        if ($("vaultInviteEmailInput")) $("vaultInviteEmailInput").value = email;
-        populated = true;
-      } catch (error) {
-        state.lastError = error.message;
+        inviteEmail = canonicalInviteEmail(rawEmail);
+      } catch (_) {
+        return null;
       }
     }
-    const inviteSecret = params.get("inviteSecret");
-    if (inviteSecret) {
-      state.lastEmailInviteSecret = inviteSecret;
-      if ($("vaultInviteSecretInput")) $("vaultInviteSecretInput").value = inviteSecret;
+    const inviteSecret = params.get("inviteSecret") || null;
+    if (!inviteCode && !inviteEmail && !inviteSecret) return null;
+    return { inviteCode, inviteEmail, inviteSecret };
+  }
+
+  function populateInviteFromHash() {
+    const hash = String(window.location?.hash || "");
+    const params = new URLSearchParams(hash.replace(/^#/, ""));
+    const hasInviteNavigation =
+      params.has("invite") ||
+      params.has("inviteCode") ||
+      params.has("inviteEmail") ||
+      params.has("inviteSecret");
+    if (!hasInviteNavigation) return false;
+    pendingInviteNavigation = null;
+    const parsedInviteNavigation = inviteNavigationFromHash(hash);
+    const cleanUrl = `${window.location.pathname || ""}${window.location.search || ""}`;
+    const fallbackUrl = cleanUrl || window.location.href.split("#")[0];
+    let fragmentRemoved = false;
+    try {
+      if (typeof window.history?.replaceState === "function") {
+        window.history.replaceState(null, "", fallbackUrl);
+        fragmentRemoved = true;
+      }
+    } catch (_) {
+      fragmentRemoved = false;
+    }
+    if (!fragmentRemoved) {
+      try {
+        window.location?.replace?.(fallbackUrl);
+      } catch (_) {
+        // The secret is still discarded even when the browser refuses URL cleanup.
+      }
+      state.lastError =
+        "Invitation link could not be cleared safely. Its client-only secret was discarded.";
+      return false;
+    }
+    if (!parsedInviteNavigation) {
+      state.lastError = "Invitation link is incomplete or invalid";
+      return false;
+    }
+    pendingInviteNavigation = parsedInviteNavigation;
+    return true;
+  }
+
+  function applyPendingInviteNavigation() {
+    const pending = pendingInviteNavigation;
+    pendingInviteNavigation = null;
+    if (!pending) return false;
+    let populated = false;
+    if (pending.inviteCode) {
+      state.lastVaultInvitationCode = pending.inviteCode;
+      if ($("vaultInviteCodeInput")) $("vaultInviteCodeInput").value = pending.inviteCode;
       populated = true;
     }
-    if (!populated) return;
+    if (pending.inviteEmail) {
+      if ($("vaultInviteEmailInput")) $("vaultInviteEmailInput").value = pending.inviteEmail;
+      populated = true;
+    }
+    if (pending.inviteSecret) {
+      state.lastEmailInviteSecret = pending.inviteSecret;
+      if ($("vaultInviteSecretInput")) $("vaultInviteSecretInput").value = pending.inviteSecret;
+      populated = true;
+    }
+    if (!populated) return false;
     state.activeSidebarMode = "access";
     state.activeAccessView = "folder";
-    try {
-      const cleanUrl = `${window.location.pathname || ""}${window.location.search || ""}`;
-      window.history?.replaceState?.(null, "", cleanUrl || window.location.href.split("#")[0]);
-    } catch (_) {
-      // Fragment cleanup is best-effort; invite data is already in client state.
-    }
+    return true;
   }
 
   async function start() {
@@ -9033,9 +9677,11 @@ const FiniteBrainProductClient = (() => {
     canonicalAdminAccessChangePayload,
     canonicalEmailInviteAuthorizationPayload,
     canonicalInviteEmail,
+    clearSessionSecretsAndPlaintext,
     commandPaletteCommands,
     commandPaletteRows,
     contextMenuItemsForTarget,
+    cloneSessionKeyring,
     createClientProjection,
     createLocalNip07ProviderFromSecret,
     createSessionKeyring,
@@ -9062,8 +9708,12 @@ const FiniteBrainProductClient = (() => {
     graphLayout,
     graphNeighborIds,
     graphStats,
+    handlePageHide,
+    handlePageShow,
     inlineLinkSegments,
     initialVaultInvitationFolders,
+    applyPendingInviteNavigation,
+    inviteNavigationFromHash,
     inviteUnwrapKeypairFromSecret,
     nip44DecryptWithSecret,
     nip44EncryptWithSecret,
@@ -9095,6 +9745,7 @@ const FiniteBrainProductClient = (() => {
     plaintextDevelopmentGrantFromExportGrant,
     plaintextGrantFromGiftWrappedExportGrant,
     planOkfImport,
+    populateInviteFromHash,
     prepareOkfImportWrites,
     projectionPagesFromProjection,
     publicKeyIdentityFromInput,
@@ -9102,17 +9753,26 @@ const FiniteBrainProductClient = (() => {
     readerFolderRows,
     readerPageDetail,
     readerPageRows,
+    resumeSession,
     searchPageRows,
     sharedFolderRelationshipRows,
+    sessionGrantOpeningAllowed,
+    sessionOperationIsCurrent,
+    sessionStatusView,
+    signedEventMatchesPinnedIdentity,
+    signerIdentityChanged,
     hasOrganizationVaultControls,
     showsCreateOrganizationControl,
     sidebarAccessBadgesForFolder,
     sidebarModeLabel,
     shortKey,
     start,
+    lockSession,
     rememberIdentity,
     identityMetadataForNpub,
     identityDisplay,
+    lockedVaultSelection,
+    missingVisibleVaultFallback,
     visibleVaultOptions,
     vaultHealthBadges,
     workspaceChromeState,
@@ -9126,6 +9786,7 @@ const FiniteBrainProductClient = (() => {
     vaultInvitationUnavailableDetail,
     vaultGuideStepRows,
     vaultPeopleRows,
+    withActiveVaultOption,
   };
 })();
 

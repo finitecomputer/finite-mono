@@ -91,19 +91,26 @@ pub(crate) async fn product_client_smoke_nip07_js_handler(
 fn smoke_nip07_signer_script(secret_hex: &str) -> String {
     let secret_json = serde_json::to_string(secret_hex).expect("secret serializes");
     format!(
-        r#"(() => {{
+        r##"(() => {{
   const client = window.FiniteBrainProductClient;
   const defaultSecretHex = {secret_json};
   if (!client) throw new Error("FiniteBrain Product Client did not load before smoke signer");
-  const storageKey = "FINITE_BRAIN_SMOKE_NIP07_SECRET";
-  const configuredSecretHex = (() => {{
+  const fragmentSecretHex = (() => {{
     try {{
-      const fragmentSecret = new URLSearchParams(String(window.location.hash || "").replace(/^#/, "")).get("smokeNip07Secret");
-      return fragmentSecret || window.sessionStorage?.getItem(storageKey) || defaultSecretHex;
+      const params = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+      const fragmentSecret = params.get("smokeNip07Secret");
+      if (!fragmentSecret) return null;
+      params.delete("smokeNip07Secret");
+      const remaining = params.toString();
+      const cleanUrl = String(window.location.pathname || "") + String(window.location.search || "") + (remaining ? "#" + remaining : "");
+      if (typeof window.history?.replaceState !== "function") return null;
+      window.history.replaceState(null, "", cleanUrl || window.location.href.split("#")[0]);
+      return fragmentSecret;
     }} catch (_) {{
-      return defaultSecretHex;
+      return null;
     }}
   }})();
+  const configuredSecretHex = fragmentSecretHex || defaultSecretHex;
   const installSmokeSigner = (secretHex) => {{
     window.nostr = client.createLocalNip07ProviderFromSecret(secretHex);
     const keypair = client.inviteUnwrapKeypairFromSecret(secretHex);
@@ -115,15 +122,12 @@ fn smoke_nip07_signer_script(secret_hex: &str) -> String {
     return window.__FINITE_BRAIN_SMOKE_NIP07__;
   }};
   window.__FINITE_BRAIN_SET_SMOKE_NIP07_SECRET__ = (secretHex) => {{
-    try {{
-      window.sessionStorage?.setItem(storageKey, secretHex);
-    }} catch (_) {{}}
     return installSmokeSigner(secretHex);
   }};
   installSmokeSigner(configuredSecretHex);
   client.start();
 }})();
-"#
+"##
     )
 }
 

@@ -98,6 +98,15 @@
           </div>
         </details>
 
+        <section id="sessionSecurityStatus" class="session-security-status" aria-live="polite">
+          <div class="session-security-copy">
+            <strong id="sessionSecurityTitle">Session locked</strong>
+            <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
+          </div>
+          <button id="resumeSessionButton" type="button">Resume session</button>
+          <button id="lockSessionButton" type="button" hidden>Lock session</button>
+        </section>
+
         <div class="sidebar-toolbar" aria-label="File explorer actions">
           <button id="obsidianNewPageButton" class="sidebar-icon-button" type="button" title="New Page" aria-label="New Page">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -241,7 +250,7 @@
                     <path d="M15 11v6" />
                   </svg>
                   <span>Grant folder access</span>
-                  <small>Choose folder and person</small>
+                  <small>Choose folder and Member Identity</small>
                 </summary>
                 <div class="access-advanced-content">
                   <div class="access-folder-selector">
@@ -351,7 +360,7 @@
                     <section class="access-admin-section vault-access-option primary">
                       <div class="vault-access-option-heading">
                         <h4>Invite by email</h4>
-                        <span class="pill ready">new person</span>
+                        <span class="pill ready">email invite</span>
                       </div>
                       <label class="access-field">
                         <span>Email</span>
@@ -510,11 +519,11 @@
 
               <section id="vaultPeopleSection" class="vault-management-section">
                 <div class="access-section-header">
-                  <span class="section-title">Vault people</span>
+                  <span class="section-title">Vault Member Identities</span>
                   <span id="vaultPeopleCount" class="pill muted">0</span>
                 </div>
                 <ol id="vaultPeopleList" class="access-who-has-list">
-                  <li class="access-empty-state">Load an organization Vault to manage people.</li>
+                  <li class="access-empty-state">Load an organization Vault to manage Member Identities.</li>
                 </ol>
               </section>
 

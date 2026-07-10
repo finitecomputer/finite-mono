@@ -2025,7 +2025,8 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::{
-        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, ORIGIN,
+        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL,
+        ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
@@ -2235,6 +2236,10 @@ mod tests {
             .await
             .expect("client response");
         assert_eq!(client_response.status(), StatusCode::OK);
+        assert_eq!(
+            client_response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, max-age=0"
+        );
         let client_body = to_bytes(client_response.into_body(), 64 * 1024)
             .await
             .expect("client body");
@@ -2250,6 +2255,9 @@ mod tests {
         assert!(client_body.contains("app-ribbon"));
         assert!(client_body.contains("file-sidebar"));
         assert!(client_body.contains("Connect signer"));
+        assert!(client_body.contains("Session locked"));
+        assert!(client_body.contains("resumeSessionButton"));
+        assert!(client_body.contains("lockSessionButton"));
         assert!(!client_body.contains("Open accessible vault"));
         assert!(client_body.contains("vaultControlDetails"));
         assert!(client_body.contains("vaultSelect"));
@@ -2302,6 +2310,10 @@ mod tests {
             .await
             .expect("config response");
         assert_eq!(config_response.status(), StatusCode::OK);
+        assert_eq!(
+            config_response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, max-age=0"
+        );
         let config: ProductClientConfigResponse = read_json(config_response).await;
         assert_eq!(
             config,
@@ -2324,6 +2336,10 @@ mod tests {
             .await
             .expect("client css response");
         assert_eq!(css_response.status(), StatusCode::OK);
+        assert_eq!(
+            css_response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, max-age=0"
+        );
         let css_body = to_bytes(css_response.into_body(), 96 * 1024)
             .await
             .expect("client css body");
@@ -2345,6 +2361,7 @@ mod tests {
         assert!(css_body.contains(".access-inspector"));
         assert!(css_body.contains(".access-badge"));
         assert!(css_body.contains(".okf-controls"));
+        assert!(css_body.contains(".session-security-status"));
 
         let js_response = router
             .clone()
@@ -2357,6 +2374,10 @@ mod tests {
             .await
             .expect("client js response");
         assert_eq!(js_response.status(), StatusCode::OK);
+        assert_eq!(
+            js_response.headers().get(CACHE_CONTROL).unwrap(),
+            "no-store, max-age=0"
+        );
         let js_body = to_bytes(js_response.into_body(), 512 * 1024)
             .await
             .expect("client js body");
@@ -2379,6 +2400,9 @@ mod tests {
         assert!(js_body.contains("graphNeighborIds"));
         assert!(js_body.contains("setGraphHover"));
         assert!(js_body.contains("createSessionKeyring"));
+        assert!(js_body.contains("clearSessionSecretsAndPlaintext"));
+        assert!(js_body.contains("sessionStatusView"));
+        assert!(js_body.contains("sessionGrantOpeningAllowed"));
         assert!(js_body.contains("extractPageLinks"));
         assert!(js_body.contains("openFolderObject"));
         assert!(js_body.contains("mergeSyncProjection"));
@@ -2440,7 +2464,10 @@ mod tests {
         assert!(smoke_signer_body.contains("__FINITE_BRAIN_SMOKE_NIP07__"));
         assert!(smoke_signer_body.contains("__FINITE_BRAIN_SET_SMOKE_NIP07_SECRET__"));
         assert!(smoke_signer_body.contains("smokeNip07Secret"));
-        assert!(smoke_signer_body.contains("sessionStorage"));
+        assert!(!smoke_signer_body.contains("sessionStorage"));
+        assert!(smoke_signer_body.contains("typeof window.history?.replaceState !== \"function\""));
+        assert!(smoke_signer_body.contains("window.history.replaceState"));
+        assert!(!smoke_signer_body.contains("history?.replaceState?."));
         assert!(
             smoke_signer_body
                 .contains("0000000000000000000000000000000000000000000000000000000000000001")

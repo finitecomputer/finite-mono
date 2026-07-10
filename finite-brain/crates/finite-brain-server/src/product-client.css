@@ -1059,6 +1059,62 @@ pre {
   grid-row: 2;
 }
 
+.session-security-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #303030;
+  background: #1f1f1f;
+  padding: 8px 10px;
+}
+
+.session-security-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.session-security-copy strong {
+  color: #dedede;
+  font-size: 12px;
+  text-wrap: balance;
+}
+
+.session-security-copy span {
+  color: #969696;
+  font-size: 10px;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
+.session-security-status button {
+  min-height: 40px;
+  border-color: rgba(124, 108, 255, 0.35);
+  background: rgba(124, 108, 255, 0.09);
+  color: #e5e0ff;
+  font-size: 11px;
+  font-weight: 720;
+  padding: 4px 8px;
+  transition-duration: 140ms;
+  transition-property: background-color, box-shadow, color, transform;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.session-security-status button:not(:disabled):hover {
+  background: rgba(124, 108, 255, 0.15);
+  box-shadow: var(--shadow-access-ring-hover);
+  color: #f3f0ff;
+}
+
+.session-security-status button:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+.obsidian-shell[data-session-status="locked"] .obsidian-workspace {
+  background: #1b1b1b;
+}
+
 .sidebar-toolbar {
   gap: 4px;
   min-height: 40px;

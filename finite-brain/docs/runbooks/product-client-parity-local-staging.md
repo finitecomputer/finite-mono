@@ -13,7 +13,12 @@ This verifies:
 - Rust workspace builds and tests.
 - Product Client assets are served by the Rust app/server.
 - Product Client JS contains the NIP-07, encrypted Page loop, graph/replay, OKF
-  import, and sync projection seams.
+  import, sync projection, and Session Lock seams.
+- Session Lock clears in-memory keys, decrypted projections, drafts, prepared
+  writes, import plans, invite secrets, and rendered plaintext; explicit resume
+  reopens grants through the connected Member Identity.
+- Regression checks reject Product Client use of durable browser storage for
+  raw Folder Keys or decrypted content.
 - Secure server routes enforce Nostr auth, replay rejection, rate limits, CORS
   allowlist behavior, request body limits, and encrypted-object boundaries.
 - OKF import/export, graph/replay, and Vault Working Tree logic stay
@@ -98,6 +103,8 @@ The verifier checks that:
 - the Product Client opens all seeded Pages through Folder Key Grants;
 - Page navigation rows, Graph View projection, workspace state, and
   access/share panel projection work against the fixture.
+- the Product Client exposes explicit locked, resume, and lock states without
+  persisting readable client state.
 
 Then open the local Product Client:
 
@@ -108,6 +115,7 @@ http://127.0.0.1:4015/client
 Expected Product Client behavior:
 
 - Shows NIP-07 availability and signer state.
+- Starts locked and shows explicit **Resume session** feedback.
 - Can load Vault metadata with a valid NIP-07 signer.
 - Can open accessible Folder Key Grants into the in-memory session keyring.
 - Can decrypt accessible Pages locally.
@@ -118,9 +126,28 @@ Expected Product Client behavior:
   right-click Folder/Page actions.
 - Can parse OKF bundles, plan conflicts, rewrite copied relative links, and
   upload imported Pages through encrypted object writes.
+- **Lock session** hides protected content and clears keys, opened grants,
+  decrypted Pages, local drafts, graph/search projections, prepared writes,
+  import state, invite secrets, and rendered plaintext without deleting or
+  changing the external signer.
+- Page navigation/back-forward-cache suspension locks synchronously. A signed
+  event whose `pubkey` differs from the connected Member Identity also hard
+  locks before any protected request is sent.
+- A locked session does not reopen grants until **Resume session** runs the
+  normal encrypted-grant flow. Switching Vaults applies the same clearing rule.
+- An invitation fragment is removed from browser history immediately, held only
+  as a one-shot in-memory pre-session capability, and imported after explicit
+  **Resume session**. Lock, Vault switching, and failed Resume discard it.
 
 Locked or inaccessible Folders must remain locked in the client. The server must
 not return plaintext search results or accept plaintext OKF imports.
+
+The first-party Product Client must not write raw Folder Keys or decrypted
+content to Web Storage, IndexedDB, Cache Storage, cookies, or browser history.
+It denies automatic plaintext egress such as remote embeddings, content-bearing
+analytics, and unprompted external requests. Explicit controller exports are
+allowed, and authorized third-party clients are outside FiniteBrain's
+post-decryption enforcement boundary.
 
 ## Staging Notes
 
@@ -145,3 +172,6 @@ Portable v1 is a hard cut:
 - Do not add old runtime migration shims to this Product Client parity PR.
 - Do not move plaintext OKF import/search onto the server.
 - Do not weaken encrypted object route requirements to ease old-client testing.
+- Do not add durable browser plaintext/key caches as a restart convenience.
+- Do not add human-versus-agent authorization behavior: the signer represents a
+  Member Identity regardless of which controller operates it.
