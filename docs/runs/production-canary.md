@@ -54,6 +54,18 @@ Finite Private limits exist to interrupt a runaway agent loop, not to meter cust
 
 The currently deployed legacy-built limiter already generates a fresh accounting request id for every upstream attempt. The mono-built replacement regressed by trusting caller-supplied `x-request-id`, which permits reservation reuse. Do not deploy the recorded mono limiter digest until the existing live behavior and its duplicate-client-id regression test are ported: generate the accounting id inside the limiter for every accepted attempt and use it only for that attempt's reserve/settle pair. No Core fingerprinting system or broader metering redesign is required for this fix.
 
+**Status: PARTIALLY VERIFIED — live denial proof remains blocked.** At
+2026-07-10T20:21Z, a read-only query of the production Core database found the
+only profile used by active grants (`finite-private-generous`, 56 active
+grants) has a finite 18,000-second burst window and 50,000,000-unit burst cap;
+its deployed weekly cap is unset. The deployed limiter reported ready with its
+authenticated usage-API check returning `200`, and the Core access log showed
+active reserve/settle traffic. No retained log includes a denial response body,
+and denied decisions intentionally create no reservation row, so the required
+production over-limit denial-before-upstream assertion cannot be established
+through a read-only query. Proving it requires an authorized live reservation
+attempt plus upstream-call correlation; none was made during this run.
+
 ### P0 — verify the production Kata Runner path
 
 The product contract and dashboard policy select Kata for production, and the Nix module defines an enabled Kata Runner timer, while `infra/README.md` still calls the Runner dormant because of an older Phala/Enclavia path. Before creating the canary request, verify the live Kata timer, route-scoped Core credential, capacity, promoted Runtime artifact, durable-volume binding, and readiness path. Reconcile the operational docs from that evidence. Do not add provider selection UI or use the canary to finish Phala.
