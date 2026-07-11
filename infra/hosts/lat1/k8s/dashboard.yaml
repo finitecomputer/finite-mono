@@ -59,6 +59,11 @@ spec:
                 secretKeyRef:
                   name: finite-computer-secrets
                   key: WORKOS_COOKIE_PASSWORD
+            - name: FC_WORKOS_OPERATOR_ORG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_WORKOS_OPERATOR_ORG_ID
             - name: FC_RELAY_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:

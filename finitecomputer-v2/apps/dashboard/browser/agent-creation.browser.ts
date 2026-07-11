@@ -21,7 +21,7 @@ type AgentCreationRequest = {
   id: string;
   project_id: string;
   display_name: string;
-  runner_class: "apple_container";
+  runner_class: "apple_container" | "kata";
   profile_picture_url: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id: string | null;
@@ -66,7 +66,12 @@ type CoreState = {
   requests: AgentCreationRequest[];
   creationPosts: unknown[];
   cancelPosts: string[];
+  destroyPosts: string[];
+  recoverPosts: string[];
+  restartPosts: string[];
   createDelayMs: number;
+  canCreateAgent: boolean;
+  creationError: string | null;
 };
 
 type FakeHostedChatState = {
@@ -114,6 +119,7 @@ type FakeHostedChatState = {
     display_content: string;
     kind: "message" | "status" | "tool" | "media";
     status: "running" | "complete";
+    final_delivery: boolean;
     edit_of_message_id: string | null;
     is_mine: boolean;
     media: Array<{
@@ -145,6 +151,14 @@ type FakeHostedChatState = {
     stale: boolean;
     is_agent: boolean;
   }>;
+  devices: Array<{
+    account_id: string;
+    device_id: string;
+    active: boolean;
+    current_device: boolean;
+    revoked: boolean;
+    room_count: number;
+  }>;
   flow: {
     notice_text: string | null;
     notice_busy: boolean;
@@ -161,6 +175,9 @@ type HostedAuthRequest = {
 };
 
 type HostedDeviceState = {
+  unavailable: boolean;
+  ownerClaimGate: Promise<void> | null;
+  releaseOwnerClaimGate: (() => void) | null;
   app: FakeHostedChatState;
   actions: Array<Record<string, unknown>>;
   runtimeCommands: Array<Record<string, unknown>>;
@@ -197,9 +214,9 @@ type FakeSitesState = {
   privateContentRequests: number;
 };
 
-test("dashboard agent creation browser states", { timeout: 120_000 }, async () => {
+test("dashboard agent creation browser states", { timeout: 180_000 }, async () => {
   const hostedDevice = await startFakeHostedDevice();
-  const core = await startFakeCore();
+  const core = await startFakeCore(() => hostedDevice.setAvailable(true));
   const brain = await startFakeBrain();
   const sites = await startFakeSites();
   const dashboardPort = await freePort();
@@ -211,13 +228,35 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
     sites.apiUrl
   );
   const dashboardOutput = collectOutput(dashboard);
+  const paidDashboardPort = await freePort();
+  const paidDashboard = startDashboard(
+    paidDashboardPort,
+    core.url,
+    hostedDevice.url,
+    brain.url,
+    sites.apiUrl,
+    { stripeConfigured: true, distDir: ".next-browser-stripe-test" }
+  );
+  const paidDashboardOutput = collectOutput(paidDashboard);
   let browser: Browser | null = null;
 
   try {
     await waitForDashboard(dashboardPort, dashboardOutput);
+    await waitForDashboard(paidDashboardPort, paidDashboardOutput);
     browser = await chromium.launch({
       headless: true,
       ...chromeExecutable(),
+    });
+
+    core.reset();
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard`);
+      await page.getByLabel("Agent name").fill("Paid Browser Proof");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page
+        .getByRole("button", { name: "Continue to payment" })
+        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Pay securely or use a Launch Code.");
     });
 
     core.reset();
@@ -240,7 +279,12 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       });
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").fill("off2026");
+      assert.equal(
+        await page.getByRole("button", { name: "Continue to payment" }).count(),
+        0,
+        "payment must stay hidden when the webhook/return path is not fully configured"
+      );
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
@@ -249,7 +293,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       );
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Oslo Bot");
-      assert.equal(post.launchCode, "off2026");
+      assert.equal(post.launchCode, "fixture-launch-code");
       assert.equal(post.runnerClass, "apple_container");
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
@@ -266,11 +310,35 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Double Submit Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").fill("off2026");
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(core.state.creationPosts.length, 1);
+    });
+
+    core.reset({
+      canCreateAgent: true,
+      creationError: "billing is required before creating an agent",
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+      await page.getByLabel("Agent name").fill("Fresh Code Bot");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Launch Code").fill("fresh-top-up-code");
+      await page.getByRole("button", { name: "Apply" }).click();
+      await expectVisibleText(page, "billing is required before creating an agent");
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      assert.equal(
+        core.state.creationPosts.length,
+        1,
+        "a failed launch must return to the form instead of resubmitting the saved draft"
+      );
+      assert.equal(
+        (core.state.creationPosts[0] as Record<string, unknown>).launchCode,
+        "fresh-top-up-code",
+        "an explicitly submitted Launch Code must win over stale entitlement capacity"
+      );
     });
 
     core.reset({
@@ -369,7 +437,8 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         async () => `agent navigation did not hydrate from Core\n${await pageText(page)}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
+      assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
+      assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
       await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
 
       const machineSwitcher = page.getByRole("button", {
@@ -386,7 +455,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       assert.equal(await page.getByText("Completed Oslo Bot", { exact: true }).count(), 0);
       await page.getByLabel("Agent name").fill("Second Oslo Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Promo code").waitFor({ state: "visible" });
+      await page.getByLabel("Launch Code").waitFor({ state: "visible" });
 
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
@@ -397,12 +466,17 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
-      assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
+      await main.getByRole("button", { name: "Recover chat" }).waitFor({ state: "visible" });
+      await expectVisibleText(
+        page,
+        "Restarts and reconciles this agent's known-good chat services. This does not restore a backup or delete chat data."
+      );
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Destroy" }).count(), 0);
       const openWebChat = main.getByRole("link", { name: "Open chat" });
       await openWebChat.waitFor({ state: "visible" });
 
+      hostedDevice.holdOwnerClaim();
       await openWebChat.click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
       await expectVisibleText(page, "Hello from Completed Oslo Bot.");
@@ -414,11 +488,51 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         .getByRole("button", { name: "New chat", exact: true })
         .waitFor({ state: "visible" });
       await expectVisibleText(page, "browser@finite.vip");
+      await waitFor(
+        () =>
+          hostedDevice.state.runtimeCommands.some(
+            (command) => command.command === "agent.owner.claim"
+          ),
+        5_000,
+        () => "dashboard did not request the owner claim"
+      );
+      const composer = page.getByLabel("Message your agent");
+      assert.equal(
+        await composer.isDisabled(),
+        true,
+        "chat composer became usable before the owner claim succeeded"
+      );
+      assert.equal(
+        await page.getByRole("link", { name: "Connections", exact: true }).count(),
+        0,
+        "Connections became usable before the owner claim succeeded"
+      );
+      hostedDevice.releaseOwnerClaim();
+      await waitFor(
+        async () => !(await composer.isDisabled()),
+        5_000,
+        () => "chat composer did not become usable after the owner claim succeeded"
+      );
+      await page
+        .getByRole("link", { name: "Connections", exact: true })
+        .first()
+        .waitFor({ state: "visible" });
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
       await page.getByRole("link", { name: "Connections" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
       await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
       await expectVisibleText(page, "Google Workspace");
+      const ownerClaimIndex = hostedDevice.state.runtimeCommands.findIndex(
+        (command) => command.command === "agent.owner.claim"
+      );
+      const connectionsStatusIndex = hostedDevice.state.runtimeCommands.findIndex(
+        (command) => command.command === "agent.connections.status"
+      );
+      assert(ownerClaimIndex >= 0, "Chat/Connections became usable without an owner claim");
+      assert(
+        connectionsStatusIndex > ownerClaimIndex,
+        "Connections status was requested before the owner claim succeeded"
+      );
       await page.getByRole("button", { name: "Use OpenRouter" }).click();
       await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
       await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
@@ -434,14 +548,21 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
       });
-      await page.getByRole("link", { name: "Brain" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/brain$/u);
+      assert.equal(
+        await page.getByRole("link", { name: "Brain", exact: true }).count(),
+        0,
+        "Brain must remain hidden from canary navigation"
+      );
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`
+      );
       await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
       await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
       await brainFrame.getByText("Brain API ready").waitFor({ state: "visible" });
-      await page.getByRole("link", { name: "Chat" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
+      );
 
       await page.getByRole("button", { name: "Rename chat" }).click();
       const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
@@ -456,6 +577,20 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         .getByRole("banner")
         .getByText("Browser QA", { exact: true })
         .waitFor({ state: "visible" });
+
+      await page.getByRole("button", { name: "Devices", exact: true }).click();
+      const devicesDialog = page.getByRole("dialog", { name: "Your devices" });
+      await devicesDialog.getByText("electron-browser-proof", { exact: true }).waitFor({ state: "visible" });
+      await devicesDialog.getByRole("button", { name: "Revoke", exact: true }).click();
+      await page
+        .getByRole("dialog", { name: "Revoke electron-browser-proof?" })
+        .getByRole("button", { name: "Revoke Device", exact: true })
+        .click();
+      await waitFor(() =>
+        hostedDevice.state.actions.some((action) => actionName(action) === "RevokeDevice")
+      );
+      await devicesDialog.getByText("Revoked", { exact: true }).waitFor({ state: "visible" });
+      await page.keyboard.press("Escape");
 
       const bootstrapActions = hostedDevice.state.actions.map(actionName);
       const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
@@ -496,6 +631,29 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         true
       );
 
+      hostedDevice.setAvailable(false);
+      await page.reload();
+      await expectVisibleText(page, "Chat needs attention");
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
+      );
+      const restartAgent = main.getByRole("button", { name: "Restart agent" });
+      await restartAgent.click();
+      await waitFor(() => core.state.restartPosts.includes("project_running"));
+      await restartAgent.waitFor({ state: "visible" });
+      assert.equal(hostedDevice.state.unavailable, true, "restart must not fake chat recovery");
+      const recoverChat = main.getByRole("button", { name: "Recover chat" });
+      await recoverChat.click();
+      await waitFor(() => core.state.recoverPosts.includes("project_running"));
+      await recoverChat.waitFor({ state: "visible" });
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
+      );
+      await page
+        .getByRole("paragraph")
+        .filter({ hasText: message })
+        .waitFor({ state: "visible", timeout: 15_000 });
+
       await page.locator('input[type="file"]').setInputFiles({
         name: "browser-proof.png",
         mimeType: "image/png",
@@ -505,15 +663,36 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.getByRole("button", { name: "Send message" }).click();
       await page.getByRole("img", { name: "browser-proof.png" }).waitFor({ state: "visible" });
 
+      const agentAttachmentResponse = page.waitForResponse((response) =>
+        response.url().includes(
+          "/hosted-device/attachments/room_browser_agent/message_4/attachment_4"
+        )
+      );
       hostedDevice.state.app.messages.push(
         hostedImageMessage("Image returned by agent.", false, 4, "agent-proof.png")
       );
       hostedDevice.emit();
-      await page.getByRole("img", { name: "agent-proof.png" }).waitFor({ state: "visible" });
+      const agentImage = page.getByRole("img", { name: "agent-proof.png" });
+      await agentImage.waitFor({ state: "visible" });
+      await agentImage.evaluate((image) => image.scrollIntoView({ block: "center" }));
+      const attachmentResponse = await agentAttachmentResponse;
+      assert.equal(
+        attachmentResponse.status(),
+        200,
+        `agent attachment download returned ${attachmentResponse.status()}`
+      );
       await waitFor(() =>
+        agentImage.evaluate(
+          (image) =>
+            image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+        )
+      );
+      assert.equal(
         hostedDevice.state.authRequests.some((request) =>
           request.path.startsWith("/v1/app/attachments/")
-        )
+        ),
+        true,
+        "attachment bytes must traverse the authenticated hosted-device route"
       );
 
       hostedDevice.state.app.typing_members = [
@@ -538,12 +717,19 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
+      await expectVisibleText(page, "Completed Oslo Bot is working");
 
       hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
         "complete";
-      hostedDevice.state.app.messages.push(hostedMessage("Browser QA complete.", false, 6));
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Browser QA complete.", false, 6),
+        final_delivery: true,
+      });
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
+      await page
+        .getByText("Completed Oslo Bot is working", { exact: true })
+        .waitFor({ state: "hidden", timeout: 15_000 });
 
       const localSiteUrl = sites.siteUrl;
       hostedDevice.state.app.messages.push(
@@ -578,6 +764,43 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         /\/_finite\/auth\?token=/u
       );
 
+      await page
+        .getByRole("button", { name: "Remembered work", exact: true })
+        .click();
+      await page
+        .getByRole("banner")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_remembered"
+      );
+      const profileChatStartsBeforeReturn = hostedDevice.state.actions.filter(
+        (action) => actionName(action) === "StartProfileChat"
+      ).length;
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
+      );
+      await page.getByRole("main").getByRole("link", { name: "Open chat" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await waitFor(
+        () =>
+          hostedDevice.state.actions.filter(
+            (action) => actionName(action) === "StartProfileChat"
+          ).length > profileChatStartsBeforeReturn,
+        5_000,
+        () => "returning to chat did not run the profile chat bootstrap"
+      );
+      await page
+        .getByRole("banner")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_remembered",
+        "profile chat bootstrap reset the remembered chat"
+      );
+
       await waitFor(() =>
         hostedDevice.state.authRequests.some(
           (request) => request.path === "/v1/app/updates"
@@ -596,15 +819,67 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         assert.equal(request.workosUserId, "user_browser");
       }
     });
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_removable",
+          "Removable Kata Bot",
+          hostedDevice.runtimeStatusUrl,
+          "removable-kata-bot"
+        ),
+      ],
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_removable",
+          projectId: "project_removable",
+          displayName: "Removable Kata Bot",
+          status: "running",
+          runnerClass: "kata",
+          agentRuntimeId: "runtime_removable-kata-bot",
+        }),
+      ],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/removable-kata-bot`
+      );
+      const removeButton = page.getByRole("button", { name: "Remove agent" });
+      await removeButton.waitFor({ state: "visible" });
+      const removeForm = removeButton.locator("xpath=ancestor::form");
+      assert.equal(
+        new URL((await removeForm.getAttribute("action")) ?? "", page.url()).pathname,
+        "/dashboard/machines/removable-kata-bot/remove",
+        "removal must use a stable POST URL instead of a build-specific Server Action id"
+      );
+      assert.equal((await removeForm.getAttribute("method"))?.toLowerCase(), "post");
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await removeButton.click();
+      await page.waitForURL(
+        /\/dashboard\?new=1&agentRemoval=requested$/u
+      );
+      await expectVisibleText(page, "Agent removal started");
+      await expectVisibleText(
+        page,
+        "Its compute is being removed. Saved agent data is retained. It will disappear from your dashboard when removal finishes."
+      );
+      assert.deepEqual(core.state.destroyPosts, ["project_removable"]);
+    });
   } finally {
     await browser?.close().catch(() => {});
     dashboard.kill("SIGTERM");
+    paidDashboard.kill("SIGTERM");
     core.server.close();
     hostedDevice.close();
     brain.server.close();
     sites.server.close();
     await Promise.race([
       once(dashboard, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    await Promise.race([
+      once(paidDashboard, "exit"),
       new Promise((resolve) => setTimeout(resolve, 2_000)),
     ]);
   }
@@ -615,7 +890,8 @@ function startDashboard(
   coreUrl: string,
   hostedDeviceUrl: string,
   brainUrl: string,
-  sitesUrl: string
+  sitesUrl: string,
+  options: { stripeConfigured?: boolean; distDir?: string } = {}
 ) {
   return spawn(
     process.execPath,
@@ -635,9 +911,21 @@ function startDashboard(
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
+        FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "fixture-browser-access-token",
+        FC_DASHBOARD_RUNTIME_MODE: options.stripeConfigured ? "customer" : "canary",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
-        NEXT_DIST_DIR: ".next-browser-test",
+        STRIPE_SECRET_KEY: options.stripeConfigured ? "sk_test_browser_fixture" : "",
+        STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: options.stripeConfigured
+          ? "price_browser_fixture"
+          : "",
+        STRIPE_WEBHOOK_SECRET: options.stripeConfigured ? "whsec_browser_fixture" : "",
+        FC_DASHBOARD_BASE_URL: options.stripeConfigured
+          ? `http://127.0.0.1:${port}`
+          : "",
+        FC_DASHBOARD_PUBLIC_URL: "",
+        NEXT_PUBLIC_APP_URL: "",
+        NEXT_DIST_DIR: options.distDir ?? ".next-browser-test",
       },
       stdio: "pipe",
     }
@@ -747,6 +1035,9 @@ async function startFakeBrain() {
 
 async function startFakeHostedDevice() {
   const state: HostedDeviceState = {
+    unavailable: false,
+    ownerClaimGate: null,
+    releaseOwnerClaimGate: null,
     app: initialHostedChatState(),
     actions: [],
     runtimeCommands: [],
@@ -791,6 +1082,26 @@ async function startFakeHostedDevice() {
     state,
     url,
     runtimeStatusUrl: `${url}/runtime-status`,
+    holdOwnerClaim() {
+      if (state.ownerClaimGate) {
+        throw new Error("owner claim is already held");
+      }
+      state.ownerClaimGate = new Promise((resolve) => {
+        state.releaseOwnerClaimGate = resolve;
+      });
+    },
+    releaseOwnerClaim() {
+      state.releaseOwnerClaimGate?.();
+      state.ownerClaimGate = null;
+      state.releaseOwnerClaimGate = null;
+    },
+    setAvailable(available: boolean) {
+      state.unavailable = !available;
+      if (!available) {
+        for (const stream of streams) stream.end();
+        streams.clear();
+      }
+    },
     emit() {
       state.app.rev += 1;
       emitHostedState(streams, state.app);
@@ -840,6 +1151,11 @@ async function handleHostedDeviceRequest(
     return;
   }
 
+  if (state.unavailable) {
+    writeJson(response, 503, { error: "hosted chat is temporarily unavailable" });
+    return;
+  }
+
   if (request.method === "GET" && path.startsWith("/v1/app/attachments/")) {
     response.writeHead(200, {
       "cache-control": "private, no-store",
@@ -860,6 +1176,9 @@ async function handleHostedDeviceRequest(
   if (request.method === "POST" && path === "/v1/app/runtime-commands") {
     const command = (await readJson(request)) as Record<string, unknown>;
     state.runtimeCommands.push(command);
+    if (command.command === "agent.owner.claim" && state.ownerClaimGate) {
+      await state.ownerClaimGate;
+    }
     writeJson(response, 200, applyRuntimeCommand(state, command));
     return;
   }
@@ -961,6 +1280,24 @@ function initialHostedChatState(): FakeHostedChatState {
     toast: null,
     messages: [],
     profiles: [],
+    devices: [
+      {
+        account_id: "browser-user-account",
+        device_id: "hosted-web",
+        active: true,
+        current_device: true,
+        revoked: false,
+        room_count: 1,
+      },
+      {
+        account_id: "browser-user-account",
+        device_id: "electron-browser-proof",
+        active: true,
+        current_device: false,
+        revoked: false,
+        room_count: 1,
+      },
+    ],
     typing_members: [],
     flow: {
       notice_text: null,
@@ -992,37 +1329,82 @@ function applyHostedAction(
       },
     ];
   } else if (operation === "StartProfileChat") {
-    state.rooms = [
-      {
-        room_id: "room_browser_agent",
-        display_name: "Completed Oslo Bot",
-        state: "Connected",
-        status: "Connected",
-        user_status_text: "Connected",
-        last_message_preview: "Hello from Completed Oslo Bot.",
-        unread_count: 0,
-        is_agent_chat: true,
-      },
-    ];
+    if (!state.rooms.some((room) => room.room_id === "room_browser_agent")) {
+      state.rooms = [
+        {
+          room_id: "room_browser_agent",
+          display_name: "Completed Oslo Bot",
+          state: "Connected",
+          status: "Connected",
+          user_status_text: "Connected",
+          last_message_preview: "Hello from Completed Oslo Bot.",
+          unread_count: 0,
+          is_agent_chat: true,
+        },
+      ];
+      state.topics = [
+        {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          title: "General",
+          active_chat_id: "chat_browser_agent",
+          chats: [
+            {
+              chat_id: "chat_browser_agent",
+              title: "General",
+              active: true,
+            },
+            {
+              chat_id: "chat_browser_remembered",
+              title: "Remembered work",
+              active: false,
+            },
+          ],
+        },
+      ];
+      state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
+    }
+    const selectedTopic = state.selected_room_id === "room_browser_agent"
+      ? state.topics.find(
+          (topic) =>
+            topic.room_id === "room_browser_agent"
+            && topic.topic_id === state.selected_topic_id
+        )
+      : undefined;
+    const selectedChatStillExists = selectedTopic?.chats.some(
+      (chat) => chat.chat_id === state.selected_chat_id
+    );
     state.selected_room_id = "room_browser_agent";
-    state.topics = [
-      {
-        room_id: "room_browser_agent",
-        topic_id: "topic_browser_agent",
-        title: "General",
-        active_chat_id: "chat_browser_agent",
-        chats: [
-          {
-            chat_id: "chat_browser_agent",
-            title: "General",
-            active: true,
-          },
-        ],
-      },
-    ];
-    state.selected_topic_id = "topic_browser_agent";
-    state.selected_chat_id = "chat_browser_agent";
-    state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
+    if (!selectedChatStillExists) {
+      state.selected_topic_id = "topic_browser_agent";
+      state.selected_chat_id = "chat_browser_agent";
+    }
+  } else if (operation === "OpenChat") {
+    const payload = action.OpenChat as Record<string, unknown> | undefined;
+    assert(payload);
+    const roomId = String(payload.room_id ?? "");
+    const topicId = String(payload.topic_id ?? "");
+    const chatId = String(payload.chat_id ?? "");
+    const topic = state.topics.find(
+      (candidate) => candidate.room_id === roomId && candidate.topic_id === topicId
+    );
+    const chat = topic?.chats.find((candidate) => candidate.chat_id === chatId);
+    assert(topic && chat);
+    state.selected_room_id = roomId;
+    state.selected_topic_id = topicId;
+    state.selected_chat_id = chatId;
+    state.topics = state.topics.map((candidate) =>
+      candidate.room_id === roomId && candidate.topic_id === topicId
+        ? {
+            ...candidate,
+            active_chat_id: chatId,
+            chats: candidate.chats.map((candidateChat) => ({
+              ...candidateChat,
+              active: candidateChat.chat_id === chatId,
+            })),
+          }
+        : candidate
+    );
   } else if (operation === "SendChatMessage") {
     const payload = action.SendChatMessage as Record<string, unknown> | undefined;
     assert(payload);
@@ -1036,6 +1418,16 @@ function applyHostedAction(
     const title = String(payload.title ?? "");
     assert(title);
     state.topics[0]!.chats[0]!.title = title;
+  } else if (operation === "RevokeDevice") {
+    const payload = action.RevokeDevice as Record<string, unknown> | undefined;
+    const device = state.devices.find(
+      (candidate) =>
+        candidate.account_id === payload?.account_id
+        && candidate.device_id === payload?.device_id
+    );
+    assert(device && !device.current_device);
+    device.active = false;
+    device.revoked = true;
   }
   state.rev += 1;
 }
@@ -1057,6 +1449,7 @@ function hostedMessage(
     display_content: text,
     kind: "message",
     status: "complete",
+    final_delivery: false,
     edit_of_message_id: null,
     is_mine: isMine,
     media: [],
@@ -1108,11 +1501,11 @@ function singleHeader(value: string | string[] | undefined) {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-async function startFakeCore() {
+async function startFakeCore(onRecover: () => void = () => {}) {
   let state = emptyCoreState();
   const server = http.createServer(async (request, response) => {
     try {
-      await handleCoreRequest(request, response, state);
+      await handleCoreRequest(request, response, state, onRecover);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: String(error) }));
@@ -1138,9 +1531,13 @@ async function startFakeCore() {
 async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  state: CoreState
+  state: CoreState,
+  onRecover: () => void
 ) {
-  if (request.headers.authorization !== `Bearer ${CORE_TOKEN}`) {
+  if (
+    request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
+    request.headers.authorization !== "Bearer fixture-browser-access-token"
+  ) {
     writeJson(response, 401, { error: "missing service token" });
     return;
   }
@@ -1162,7 +1559,7 @@ async function handleCoreRequest(
         id: "org_browser",
         owner_user_id: "user_browser",
         name: "Browser Test",
-        billing_class: "off2026",
+        billing_class: "sponsored",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
@@ -1171,12 +1568,40 @@ async function handleCoreRequest(
         id: "entitlement_browser",
         customer_org_id: "org_browser",
         allowed_new_agent_runtimes: 0,
-        launch_code: "off2026",
+        launch_code: "fixture-launch-code",
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
-      can_create_agent: false,
+      can_create_agent: state.canCreateAgent,
       requires_billing: true,
+    });
+    return;
+  }
+
+  const runtimeControlMatch = request.url?.match(
+    /^\/api\/core\/v1\/me\/projects\/([^/]+)\/runtime\/(restart|recover-known-good-chat)$/u
+  );
+  if (request.method === "POST" && runtimeControlMatch?.[1] && runtimeControlMatch[2]) {
+    const projectId = decodeURIComponent(runtimeControlMatch[1]);
+    const kind = runtimeControlMatch[2];
+    const project = state.projects.find((candidate) => candidate.project.id === projectId);
+    if (kind === "restart") {
+      state.restartPosts.push(projectId);
+    } else {
+      state.recoverPosts.push(projectId);
+      onRecover();
+    }
+    writeJson(response, 200, {
+      id: `runtime_control_${kind}_${state.restartPosts.length + state.recoverPosts.length}`,
+      project_id: projectId,
+      agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
+      source_host_id: project?.runtime?.source_host_id ?? "oslo",
+      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      requested_by_user_id: "user_browser",
+      kind: kind === "restart" ? "restart" : "recover_known_good_chat_runtime",
+      status: "requested",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     });
     return;
   }
@@ -1184,6 +1609,10 @@ async function handleCoreRequest(
   if (request.method === "POST" && request.url === "/api/core/v1/me/agent-creation-requests") {
     const body = await readJson(request);
     state.creationPosts.push(body);
+    if (state.creationError) {
+      writeJson(response, 402, { error: state.creationError });
+      return;
+    }
     if (state.createDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, state.createDelayMs));
     }
@@ -1226,6 +1655,30 @@ async function handleCoreRequest(
     return;
   }
 
+  const destroyMatch = request.url?.match(
+    /^\/api\/core\/v1\/me\/projects\/([^/]+)\/runtime\/destroy$/u
+  );
+  if (request.method === "POST" && destroyMatch?.[1]) {
+    const projectId = decodeURIComponent(destroyMatch[1]);
+    const project = state.projects.find(
+      (candidate) => candidate.project.id === projectId
+    );
+    state.destroyPosts.push(projectId);
+    writeJson(response, 200, {
+      id: `runtime_control_destroy_${state.destroyPosts.length}`,
+      project_id: projectId,
+      agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
+      source_host_id: project?.runtime?.source_host_id ?? "oslo",
+      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      requested_by_user_id: "user_browser",
+      kind: "destroy",
+      status: "requested",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    return;
+  }
+
   const cancelMatch = request.url?.match(/^\/api\/core\/v1\/agent-creation-requests\/([^/]+)\/cancel$/u);
   if (request.method === "POST" && cancelMatch?.[1]) {
     const requestId = decodeURIComponent(cancelMatch[1]);
@@ -1258,7 +1711,12 @@ function emptyCoreState(): CoreState {
     requests: [],
     creationPosts: [],
     cancelPosts: [],
+    destroyPosts: [],
+    recoverPosts: [],
+    restartPosts: [],
     createDelayMs: 0,
+    canCreateAgent: false,
+    creationError: null,
   };
 }
 
@@ -1269,6 +1727,8 @@ function agentCreationRequest({
   status,
   failureMessage = null,
   createdAt = new Date().toISOString(),
+  runnerClass = "apple_container",
+  agentRuntimeId = null,
 }: {
   id: string;
   projectId: string;
@@ -1276,15 +1736,17 @@ function agentCreationRequest({
   status: AgentCreationRequest["status"];
   failureMessage?: string | null;
   createdAt?: string;
+  runnerClass?: AgentCreationRequest["runner_class"];
+  agentRuntimeId?: string | null;
 }): AgentCreationRequest {
   return {
     id,
     project_id: projectId,
     display_name: displayName,
-    runner_class: "apple_container",
+    runner_class: runnerClass,
     profile_picture_url: null,
     status,
-    agent_runtime_id: null,
+    agent_runtime_id: agentRuntimeId,
     failure_message: failureMessage,
     created_at: createdAt,
     updated_at: createdAt,

@@ -41,11 +41,11 @@ wildcard/API routing and keeps chat with the SaaS account plane.
 
 The desired self-serve user flow is:
 
-1. The user logs in through Account Auth, names their agent, selects an icon,
-   and chooses an offered Runner class.
+1. The user logs in through Account Auth, names their agent, and selects an
+   icon. Core assigns the standard Runner class from product policy.
 2. Core creates a Project, Finite Private grant, and Agent Runtime launch
    request without leaking provider-specific handles into the product model.
-3. The selected Runner launches the same compatibility-pinned Hermes Agent
+3. The assigned Runner launches the same compatibility-pinned Hermes Agent
    Runtime image; Kata is the first launch lane and Phala follows through the
    same contract. The image exposes its Product Release's baked Finite Skills
    Revision before the first user turn.
@@ -119,6 +119,8 @@ Use
 `../infra/hosts/lat1/systemd/runner.env.example` as the template. The
 production shape is:
 
+- `FC_CORE_RUNNER_API_TOKEN=<route-scoped Runner credential>` (never reuse the
+  shared `FC_CORE_API_TOKEN`)
 - `FC_RUNNER_CLASS=kata`
 - `FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>`
 - `FC_RUNNER_KATA_NAMESPACE=finite`
@@ -146,6 +148,25 @@ http://127.0.0.1:<allocated-port>/contact
 `/contact` is a product-facing discovery fact, not a Runner health gate. The
 Runtime may keep compatibility routes internally, but Core and new clients do
 not publish or canonize them.
+
+### Current production preflight (2026-07-10T19:03Z)
+
+**Ready for the authorized fixed-artifact rollout; this is not Kata readiness
+proof.** Read-only inspection found the `finite-lat-1` runner timer enabled and
+active, a maximum of 12 Runtimes with 2 active, and 4 CPU / 8G per Runtime; the
+observed launch shape has two read-write host binds at `/data`. The selected
+`.5` artifact returned `503` because one pending attachment carried a historical
+Chat-server loopback blob URL into the Kata guest, where it ended the Hermes
+inbound stream. The canonical public blob exists. The repository already makes
+the Chat server write its public origin and makes the Runtime reroute historical
+loopback blob paths through its trusted server origin before verifying the
+encrypted bytes. Publish and promote a fresh post-fix artifact and prove it
+with the canary's fresh launch; the old `.5` guest need not be repaired first.
+The live environment also contains only `FC_CORE_API_TOKEN`, not the required
+`FC_CORE_RUNNER_API_TOKEN`. Do not treat the timer, capacity, artifact
+selection, or bind configuration as end-to-end success until the route-scoped
+credential and fixed artifact are deployed. No live mutation was made during
+this preflight.
 
 Core issues a runtime-scoped Finite Private key and the runner gives that key
 only to the new runtime at launch. Later inference changes are explicit typed

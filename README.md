@@ -20,14 +20,17 @@ and infrastructure definition in one tree.
 
 Read [docs/monorepo-doctrine.md](docs/monorepo-doctrine.md) for the rules
 (single-repo model, component-scoped release tags, what deliberately stays
-outside). New here? Start with [CONTRIBUTING.md](CONTRIBUTING.md) — local
-stack in ~15 minutes.
+outside). New here? Start with [CONTRIBUTING.md](CONTRIBUTING.md) to choose
+the fast web-design loop or the prerequisite-backed complete SaaS stack.
 
 ## Everyday commands
 
 - `just` — list all root commands and modules
 - `just check` / `just fmt` / `just test` — Rust workspace gates
-- `just dev up` — boot the real local SaaS, including an Apple Container Agent Runtime
+- `just dev web-design` — run the canonical web UI against durable local design
+  fixtures; no credentials or Agent Runtime required
+- `just dev up` — boot the real local SaaS and its Apple Container launch lane
+  (see the [local harness prerequisites](docs/local-integration-harness.md#prerequisites))
 - `just dev saas-smoke` — prove real launch, Hosted Web chat, and restart healing on macOS
 - `just dev smoke` — portable services-only smoke + teardown (Linux CI gate)
 - `just sites …`, `just search …`, `just skills …` — component modules

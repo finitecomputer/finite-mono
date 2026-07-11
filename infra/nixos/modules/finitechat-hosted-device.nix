@@ -16,7 +16,10 @@
     environment = {
       FINITECHAT_HOSTED_BIND = "127.0.0.1:38918";
       FINITECHAT_HOSTED_DATA_ROOT = "/var/lib/finitechat-hosted-device";
+      # Keep HTTP transport on loopback while encrypted Device Link payloads
+      # bind the canonical URL that the joining Device is configured to trust.
       FINITECHAT_SERVER_URL = "http://127.0.0.1:8788";
+      FINITECHAT_PUBLIC_URL = "https://chat.finite.computer";
     };
 
     serviceConfig = {

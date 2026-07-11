@@ -1,20 +1,26 @@
 "use server";
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
-import type { OneTimeKeyActionState } from "@/lib/admin-ops";
 import {
+  launchCodeBatchFormInput,
+  type OneTimeKeyActionState,
+  type OneTimeLaunchCodeActionState,
+} from "@/lib/admin-ops";
+import {
+  adminIssueCoreLaunchCodeBatch,
   adminIssueCoreFinitePrivateFriendKey,
   adminRecoverCoreRuntime,
+  adminRevokeCoreLaunchCodeBatch,
   adminResetCoreFinitePrivateWindow,
   adminRestartCoreRuntime,
   adminRevokeCoreFinitePrivateApiKey,
   adminRotateCoreFinitePrivateApiKey,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
-  claimCoreImportCandidates,
   coreProjectSupportsHostedRestart,
   issueCoreFinitePrivateApiKey,
   linkCoreStripeCustomer,
@@ -32,28 +38,22 @@ import {
 import {
   billingSubscriptionShouldUsePortal,
   requireStripeClient,
+  standardAgentCheckoutMetadata,
   standardAgentPriceId,
   stripeDashboardReturnUrl,
+  stripeIdempotencyKey,
 } from "@/lib/stripe-billing";
-
-export async function claimCoreImportCandidatesAction(formData: FormData) {
-  const selectedCandidateIds = formData
-    .getAll("candidateId")
-    .map((value) => String(value));
-  await claimCoreImportCandidates(selectedCandidateIds);
-  revalidatePath("/");
-  revalidatePath("/dashboard");
-}
+import { ensureStripeCheckoutCustomer } from "@/lib/stripe-checkout";
 
 export async function restartCoreRuntimeAction(formData: FormData) {
   const machineId = String(formData.get("machineId") ?? "");
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime restart is only available for hosted agents.");
+    throw new Error("This agent cannot be restarted from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime restart.");
+    throw new Error("This agent cannot be restarted from the dashboard.");
   }
 
   await requestCoreRuntimeRestart(access.coreProject.project.id);
@@ -69,10 +69,10 @@ export async function recoverCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime recovery is only available for hosted agents.");
+    throw new Error("Chat recovery is not available for this agent.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime recovery.");
+    throw new Error("Chat recovery is not available for this agent.");
   }
 
   await requestCoreRuntimeRecoverKnownGoodChat(access.coreProject.project.id);
@@ -88,10 +88,10 @@ export async function stopCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime stop is only available for hosted agents.");
+    throw new Error("This agent cannot be stopped from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime stop.");
+    throw new Error("This agent cannot be stopped from the dashboard.");
   }
 
   await requestCoreRuntimeStop(access.coreProject.project.id);
@@ -107,10 +107,13 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("Hosted runtime destroy is only available for hosted agents.");
+    throw new Error("This agent cannot be removed from the dashboard.");
   }
   if (!coreProjectSupportsHostedRestart(access.coreProject)) {
-    throw new Error("This hosted agent does not support hosted runtime destroy.");
+    throw new Error("This agent cannot be removed from the dashboard.");
+  }
+  if (!access.canRemoveKataRuntime) {
+    throw new Error("Only self-service Kata agents can be removed from the dashboard.");
   }
 
   await requestCoreRuntimeDestroy(access.coreProject.project.id);
@@ -139,29 +142,26 @@ export async function cancelFailedAgentCreationRequestAction(formData: FormData)
 }
 
 export async function startBillingCheckoutAction() {
-  redirect(await billingCheckoutDestination());
+  redirect(await billingCheckoutDestination(randomUUID()));
 }
 
-export async function billingCheckoutDestination() {
+export async function billingCheckoutDestination(attemptId: string = randomUUID()) {
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
-    throw new Error(billing.error ?? "A verified WorkOS account is required for billing.");
+    throw new Error(billing.error ?? "Sign in again to manage billing.");
   }
 
   const stripe = requireStripeClient();
-  let stripeCustomerId = billing.billing.billing_account?.stripe_customer_id?.trim() ?? "";
-  if (!stripeCustomerId) {
-    const customer = await stripe.customers.create({
-      email: billing.account.email,
-      name: billing.billing.customer_org.name,
-      metadata: {
-        finite_customer_org_id: billing.billing.customer_org.id,
-        finite_workos_user_id: billing.account.workosUserId,
-      },
-    });
-    stripeCustomerId = customer.id;
-    await linkCoreStripeCustomer(stripeCustomerId);
-  }
+  const { stripeCustomerId, customerOrgId } = await ensureStripeCheckoutCustomer({
+    stripe,
+    existingStripeCustomerId:
+      billing.billing.billing_account?.stripe_customer_id?.trim() ?? "",
+    provisionalCustomerOrgId: billing.billing.customer_org.id,
+    customerOrgName: billing.billing.customer_org.name,
+    email: billing.account.email,
+    workosUserId: billing.account.workosUserId,
+    linkCustomer: linkCoreStripeCustomer,
+  });
   if (
     billingSubscriptionShouldUsePortal(
       billing.billing.billing_account?.subscription_status,
@@ -171,28 +171,28 @@ export async function billingCheckoutDestination() {
     return billingPortalDestination(stripeCustomerId);
   }
 
-  const checkout = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: stripeCustomerId,
-    client_reference_id: billing.billing.customer_org.id,
-    allow_promotion_codes: true,
-    success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
-    cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
-    line_items: [
-      {
-        price: standardAgentPriceId(),
-        quantity: 1,
+  const metadata = standardAgentCheckoutMetadata(customerOrgId);
+  const checkout = await stripe.checkout.sessions.create(
+    {
+      mode: "subscription",
+      customer: stripeCustomerId,
+      client_reference_id: metadata.clientReferenceId,
+      allow_promotion_codes: true,
+      success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
+      cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
+      line_items: [
+        {
+          price: standardAgentPriceId(),
+          quantity: 1,
+        },
+      ],
+      metadata: metadata.checkout,
+      subscription_data: {
+        metadata: metadata.subscription,
       },
-    ],
-    metadata: {
-      finite_customer_org_id: billing.billing.customer_org.id,
     },
-    subscription_data: {
-      metadata: {
-        finite_customer_org_id: billing.billing.customer_org.id,
-      },
-    },
-  });
+    { idempotencyKey: stripeIdempotencyKey("checkout", attemptId) }
+  );
 
   if (!checkout.url) {
     throw new Error("Stripe did not return a Checkout URL.");
@@ -301,7 +301,7 @@ export async function revokeFinitePrivateApiKeyAction(formData: FormData) {
 // --- Admin Ops (/dashboard/admin) ---
 //
 // The isAdmin checks below are a UI gate only. Core independently authorizes
-// each call against FC_CORE_ADMIN_EMAILS using the admin's verified identity
+// each call from the validated WorkOS operator organization.
 // headers, so a bypassed dashboard gate still cannot mutate Core.
 
 async function requireAdminViewer(action: string) {
@@ -332,6 +332,40 @@ export async function adminOpsRevokeFinitePrivateKeyAction(formData: FormData) {
 export async function adminOpsResetFinitePrivateWindowAction(formData: FormData) {
   await requireAdminViewer("reset Finite Private burst windows");
   await adminResetCoreFinitePrivateWindow(String(formData.get("grantId") ?? ""));
+  revalidatePath("/dashboard/admin");
+}
+
+// One-time Launch Code issuance returns raw values only in this action state.
+// The dashboard never writes them to a URL, log, cache, or later Core read.
+export async function adminOpsIssueLaunchCodeBatchAction(
+  _prevState: OneTimeLaunchCodeActionState,
+  formData: FormData
+): Promise<OneTimeLaunchCodeActionState> {
+  try {
+    await requireAdminViewer("issue Launch Code batches");
+    const issued = await adminIssueCoreLaunchCodeBatch(launchCodeBatchFormInput(formData));
+    revalidatePath("/dashboard/admin");
+    return {
+      status: "issued",
+      batch: {
+        id: issued.batch.id,
+        name: issued.batch.name,
+        codeCount: issued.batch.code_count,
+        expiresAt: issued.batch.expires_at,
+      },
+      codes: issued.codes.map((code) => ({ id: code.id, code: code.code })),
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      error: error instanceof Error ? error.message : "Issuing the Launch Code batch failed.",
+    };
+  }
+}
+
+export async function adminOpsRevokeLaunchCodeBatchAction(formData: FormData) {
+  await requireAdminViewer("revoke Launch Code batches");
+  await adminRevokeCoreLaunchCodeBatch(String(formData.get("batchId") ?? ""));
   revalidatePath("/dashboard/admin");
 }
 

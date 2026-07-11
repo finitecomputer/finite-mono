@@ -18,7 +18,6 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  BrainIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
@@ -28,6 +27,7 @@ import {
   Loader2Icon,
   LogOutIcon,
   MonitorIcon,
+  MonitorSmartphoneIcon,
   MoreHorizontalIcon,
   PanelLeftIcon,
   PaperclipIcon,
@@ -37,13 +37,18 @@ import {
   RefreshCwIcon,
   RotateCcwIcon,
   Share2Icon,
-  SparklesIcon,
   WrenchIcon,
   XIcon,
   type LucideIcon,
 } from "lucide-react";
 
 import { FiniteBrand } from "@/components/finite-brand";
+import {
+  CHAT_INVALID_UPDATE_MESSAGE,
+  CHAT_TOPIC_DESCRIPTION,
+  CHAT_UNAVAILABLE_MESSAGE,
+  CHAT_WAITING_FOR_AGENT_MESSAGE,
+} from "@/lib/chat-product-copy";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -64,6 +69,7 @@ import {
 import { Input } from "@/components/ui/input";
 import type {
   HostedChatAction,
+  HostedChatDevice,
   HostedChatMediaAttachment,
   HostedChatMessage,
   HostedChatState,
@@ -71,6 +77,29 @@ import type {
   HostedChatTopic,
   HostedChatTypingMember,
 } from "@/lib/hosted-web-device";
+import {
+  initialHostedChatSnapshotSource,
+  nextHostedChatSnapshotGeneration,
+  recordHostedChatSnapshot,
+  shouldApplyHttpHostedChatSnapshot,
+  shouldApplyStreamHostedChatSnapshot,
+} from "@/lib/hosted-web-chat-snapshots";
+import {
+  runInitialHostedChatRetries,
+  shouldRetryHostedChatRequest,
+  type HostedChatRetryAttempt,
+} from "@/lib/hosted-web-chat-retry";
+import {
+  beginPendingChatTurn,
+  attachmentSendError,
+  liveActivityLabel as sharedLiveActivityLabel,
+  messageContent,
+  pendingTurnIsComplete,
+  pendingTurnMatchesSelection,
+  transcriptItems,
+  type ChatSelection,
+  type PendingChatTurn,
+} from "@finite/chat-ui";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const TYPING_IDLE_MS = 2_200;
@@ -79,7 +108,6 @@ const MAX_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_ATTACHMENTS = 8;
 const AUTO_FOLLOW_SCROLL_THRESHOLD_PX = 120;
 const HOME_TOPIC_ID = "home";
-const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
 
 type PendingAttachment = {
   id: string;
@@ -93,23 +121,19 @@ type PreviewSite = {
   url: string;
 };
 
-type TranscriptItem =
-  | { type: "message"; message: HostedChatMessage }
-  | { type: "tools"; id: string; messages: HostedChatMessage[] };
-
 export function HostedWebChat({
-  brainHref,
   connectionsHref,
   initialDraft,
   machineId,
   machineLabel,
+  showSkills,
   viewerEmail,
 }: {
-  brainHref?: string | null;
   connectionsHref?: string | null;
   initialDraft?: string;
   machineId: string;
   machineLabel: string;
+  showSkills: boolean;
   viewerEmail?: string | null;
 }) {
   const apiBase = `/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device`;
@@ -119,7 +143,8 @@ export function HostedWebChat({
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
-  const [awaitingReply, setAwaitingReply] = useState(false);
+  const [ownerClaimed, setOwnerClaimed] = useState(false);
+  const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -127,6 +152,9 @@ export function HostedWebChat({
   const [createTopicTitle, setCreateTopicTitle] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [deviceToRevoke, setDeviceToRevoke] = useState<HostedChatDevice | null>(null);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
@@ -135,34 +163,80 @@ export function HostedWebChat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingRoomRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | null>(null);
-  const pendingRemoteSeqRef = useRef<number | null>(null);
   const latestSiteIdRef = useRef<string | null>(null);
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const markedReadSeqRef = useRef(new Map<string, number>());
+  const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
+  const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
+  const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   const hasState = state !== null;
 
-  const load = useCallback(async () => {
-    try {
-      const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
-      setState(next);
-      setError(null);
-    } catch (caught) {
-      setError(errorMessage(caught));
+  const applyHttpSnapshot = useCallback((next: HostedChatState, requestGeneration: number) => {
+    const source = snapshotSourceRef.current;
+    if (!shouldApplyHttpHostedChatSnapshot(source, requestGeneration, next.rev)) {
+      return false;
     }
+    snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
+    setState(next);
+    return true;
+  }, []);
+
+  const load = useCallback(() => {
+    if (stateLoadRef.current) return stateLoadRef.current;
+    const requestGeneration = snapshotSourceRef.current.generation;
+    const pending = (async (): Promise<HostedChatRetryAttempt> => {
+      try {
+        const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
+        applyHttpSnapshot(next, requestGeneration);
+        setError(null);
+        return "succeeded";
+      } catch (caught) {
+        setError(errorMessage(caught));
+        const status = caught instanceof HostedChatHttpError ? caught.status : null;
+        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+      }
+    })();
+    stateLoadRef.current = pending;
+    void pending.finally(() => {
+      if (stateLoadRef.current === pending) stateLoadRef.current = null;
+    });
+    return pending;
+  }, [apiBase, applyHttpSnapshot]);
+
+  const claimOwner = useCallback(() => {
+    if (ownerClaimRef.current) return ownerClaimRef.current;
+    const pending = (async (): Promise<HostedChatRetryAttempt> => {
+      try {
+        await chatRequest<{ claimed: true }>(`${apiBase}/claim`, { method: "POST" });
+        setOwnerClaimed(true);
+        setError(null);
+        return "succeeded";
+      } catch (caught) {
+        setError(errorMessage(caught));
+        const status = caught instanceof HostedChatHttpError ? caught.status : null;
+        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+      }
+    })();
+    ownerClaimRef.current = pending;
+    void pending.finally(() => {
+      if (ownerClaimRef.current === pending) ownerClaimRef.current = null;
+    });
+    return pending;
   }, [apiBase]);
 
   const dispatch = useCallback(
     async (action: HostedChatAction) => {
+      const requestGeneration = snapshotSourceRef.current.generation;
       const next = await chatRequest<HostedChatState>(`${apiBase}/actions`, {
         method: "POST",
         body: JSON.stringify(action),
       });
-      setState(next);
+      applyHttpSnapshot(next, requestGeneration);
       return next;
     },
-    [apiBase]
+    [apiBase, applyHttpSnapshot]
   );
 
   const dispatchQuiet = useCallback(
@@ -177,8 +251,18 @@ export function HostedWebChat({
   );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (hasState) return;
+    const controller = new AbortController();
+    void runInitialHostedChatRetries(load, controller.signal);
+    return () => controller.abort();
+  }, [hasState, load]);
+
+  useEffect(() => {
+    if (!hasState || ownerClaimed) return;
+    const controller = new AbortController();
+    void runInitialHostedChatRetries(claimOwner, controller.signal);
+    return () => controller.abort();
+  }, [claimOwner, hasState, ownerClaimed]);
 
   useEffect(() => {
     if (!hasState) {
@@ -194,14 +278,23 @@ export function HostedWebChat({
       }
       const nextEvents = new EventSource(`${apiBase}/updates`);
       events = nextEvents;
+      snapshotSourceRef.current = nextHostedChatSnapshotGeneration(snapshotSourceRef.current);
       const onState = (event: MessageEvent<string>) => {
         try {
           const next = JSON.parse(event.data) as HostedChatState;
+          if (events !== nextEvents) {
+            return;
+          }
+          const source = snapshotSourceRef.current;
+          if (!shouldApplyStreamHostedChatSnapshot(source, next.rev)) {
+            return;
+          }
+          snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
           setState(next);
           setError(null);
           setStreamConnected(true);
         } catch {
-          setError("Hosted web chat returned an invalid update.");
+          setError(CHAT_INVALID_UPDATE_MESSAGE);
         }
       };
       nextEvents.addEventListener("open", () => setStreamConnected(true));
@@ -213,7 +306,7 @@ export function HostedWebChat({
         nextEvents.close();
         events = null;
         setStreamConnected(false);
-        setError((current) => current ?? "Reconnecting to your Hosted Web Device…");
+        setError((current) => current ?? "Reconnecting…");
         reconnectTimer = setTimeout(connect, STREAM_RECONNECT_DELAY_MS);
       });
     };
@@ -263,6 +356,10 @@ export function HostedWebChat({
       ?? null,
     [selectedTopic, state?.selected_chat_id]
   );
+  const selectedChatSelection = useMemo<ChatSelection>(
+    () => ({ room: selectedRoom, topic: selectedTopic, chat: selectedChat }),
+    [selectedChat, selectedRoom, selectedTopic]
+  );
   const messages = useMemo(
     () =>
       (state?.messages ?? []).filter(
@@ -273,7 +370,10 @@ export function HostedWebChat({
       ),
     [selectedChat, selectedRoom, selectedTopic, state?.messages]
   );
-  const transcript = useMemo(() => transcriptItems(messages), [messages]);
+  const transcript = useMemo(
+    () => transcriptItems(messages, state?.identity.account_id ?? null),
+    [messages, state?.identity.account_id]
+  );
   const liveMembers = useMemo(
     () =>
       (state?.typing_members ?? []).filter(
@@ -286,6 +386,9 @@ export function HostedWebChat({
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
   const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
+  const awaitingReply = pendingAgentTurns.some((turn) =>
+    pendingTurnMatchesSelection(turn, selectedChatSelection)
+  );
 
   useEffect(() => {
     if (sites.length === 0) {
@@ -304,21 +407,14 @@ export function HostedWebChat({
   }, [activeSiteId, sites]);
 
   useEffect(() => {
-    if (liveMembers.length > 0) {
-      setAwaitingReply(false);
-    }
-  }, [liveMembers.length]);
-
-  useEffect(() => {
-    const pendingSeq = pendingRemoteSeqRef.current;
-    if (pendingSeq === null) {
-      return;
-    }
-    if (messages.some((message) => !message.is_mine && message.seq > pendingSeq)) {
-      pendingRemoteSeqRef.current = null;
-      setAwaitingReply(false);
-    }
-  }, [messages]);
+    if (!state) return;
+    setPendingAgentTurns((turns) => {
+      const pending = turns.filter(
+        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      );
+      return pending.length === turns.length ? turns : pending;
+    });
+  }, [state]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -431,8 +527,13 @@ export function HostedWebChat({
     setSending(true);
     setError(null);
     stopTyping(selectedRoom.room_id);
-    pendingRemoteSeqRef.current = Math.max(0, ...messages.map((message) => message.seq));
-    setAwaitingReply(true);
+    const pendingTurn = beginPendingChatTurn(selectedChatSelection, messages);
+    if (pendingTurn) {
+      setPendingAgentTurns((turns) => [
+        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
+        pendingTurn,
+      ]);
+    }
     try {
       let next: HostedChatState;
       if (attachments.length > 0) {
@@ -442,11 +543,14 @@ export function HostedWebChat({
         if (selectedChat) formData.set("chat_id", selectedChat.chat_id);
         formData.set("caption", text);
         for (const attachment of attachments) formData.append("files", attachment.file);
+        const requestGeneration = snapshotSourceRef.current.generation;
         next = await chatRequest<HostedChatState>(`${apiBase}/attachments`, {
           method: "POST",
           body: formData,
         });
-        setState(next);
+        applyHttpSnapshot(next, requestGeneration);
+        const uploadError = attachmentSendError(next);
+        if (uploadError) throw new Error(uploadError);
       } else {
         next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
@@ -457,8 +561,9 @@ export function HostedWebChat({
       });
       requestAnimationFrame(() => textareaRef.current?.focus());
     } catch (caught) {
-      setAwaitingReply(false);
-      pendingRemoteSeqRef.current = null;
+      if (pendingTurn) {
+        setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
+      }
       setError(errorMessage(caught));
     } finally {
       setSending(false);
@@ -514,7 +619,6 @@ export function HostedWebChat({
     try {
       await dispatch({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
       setSidebarOpen(false);
-      setAwaitingReply(false);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -527,7 +631,6 @@ export function HostedWebChat({
         OpenChat: { room_id: topic.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id },
       });
       setSidebarOpen(false);
-      setAwaitingReply(false);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -541,7 +644,6 @@ export function HostedWebChat({
         StartTopicChat: { room_id: selectedRoom.room_id, topic_id: topic.topic_id, reason: null },
       });
       setSidebarOpen(false);
-      setAwaitingReply(false);
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -580,8 +682,42 @@ export function HostedWebChat({
     }
   }
 
-  const connected = selectedRoom?.state === "Connected";
-  const activityLabel = liveActivityLabel(liveMembers, machineLabel, awaitingReply);
+  async function openDevices() {
+    setDevicesOpen(true);
+    setDeviceToRevoke(null);
+    setDeviceBusy(true);
+    setError(null);
+    try {
+      await dispatch({ RefreshDevices: null });
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setDeviceBusy(false);
+    }
+  }
+
+  async function revokeDevice() {
+    if (!deviceToRevoke || deviceToRevoke.current_device || deviceToRevoke.revoked) return;
+    setDeviceBusy(true);
+    setError(null);
+    try {
+      await dispatch({
+        RevokeDevice: {
+          account_id: deviceToRevoke.account_id,
+          device_id: deviceToRevoke.device_id,
+        },
+      });
+      setDeviceToRevoke(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setDeviceBusy(false);
+    }
+  }
+
+  const connected = ownerClaimed && selectedRoom?.state === "Connected";
+  const availableConnectionsHref = ownerClaimed ? connectionsHref : null;
+  const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
 
   return (
     <div className={sidebarCollapsed ? "finite-chat is-sidebar-collapsed" : "finite-chat"}>
@@ -595,8 +731,8 @@ export function HostedWebChat({
         selectedTopic={selectedTopic}
         selectedChat={selectedChat}
         liveMembers={state?.typing_members ?? []}
-        connectionsHref={connectionsHref}
-        brainHref={brainHref}
+        connectionsHref={availableConnectionsHref}
+        showSkills={showSkills}
         onCreateChat={(topic) => void createChat(topic)}
         onCreateTopic={() => setCreateTopicOpen(true)}
         onOpenChat={(topic, chat) => void openChat(topic, chat)}
@@ -647,8 +783,11 @@ export function HostedWebChat({
             {!streamConnected && state ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
-            <ProductNavButton href={connectionsHref} icon={PlugIcon} label="Connections" />
-            <ProductNavButton href={brainHref} icon={BrainIcon} label="Brain" />
+            <ProductNavButton href={availableConnectionsHref} icon={PlugIcon} label="Connections" />
+            <Button type="button" variant="ghost" size="sm" onClick={() => void openDevices()}>
+              <MonitorSmartphoneIcon />
+              <span>Devices</span>
+            </Button>
             {sites.length > 0 ? (
               <button
                 type="button"
@@ -679,9 +818,9 @@ export function HostedWebChat({
                   setShowLatest(!shouldFollowScrollRef.current);
                 }}
               >
-                {!state && !error ? <ChatLoading label="Opening your Hosted Web Device…" /> : null}
+                {!state && !error ? <ChatLoading label="Opening your chat…" /> : null}
                 {state && !selectedRoom ? (
-                  <EmptyChat title="Joining your agent" body="Your Hosted Web Device is joining the agent room." />
+                  <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
                 {selectedRoom && messages.length === 0 ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
@@ -707,7 +846,12 @@ export function HostedWebChat({
                     ) : null}
                     {transcript.map((item) =>
                       item.type === "message" ? (
-                        <MessageRow key={item.message.message_id} apiBase={apiBase} message={item.message} />
+                        <MessageRow
+                          key={item.message.message_id}
+                          apiBase={apiBase}
+                          message={item.message}
+                          ownAccountId={state?.identity.account_id ?? ""}
+                        />
                       ) : (
                         <ToolRollup key={item.id} messages={item.messages} />
                       )
@@ -736,7 +880,12 @@ export function HostedWebChat({
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
                   <span>{error}</span>
-                  <Button type="button" variant="outline" size="sm" onClick={() => void load()}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load())}
+                  >
                     <RotateCcwIcon />
                     Retry
                   </Button>
@@ -783,7 +932,7 @@ export function HostedWebChat({
                   <textarea
                     ref={textareaRef}
                     aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : "Waiting for the agent room…"}
+                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
                     value={draft}
                     disabled={!connected || sending}
                     rows={1}
@@ -881,7 +1030,7 @@ export function HostedWebChat({
           <form className="finite-chat__rename-form" onSubmit={createTopic}>
             <DialogHeader>
               <DialogTitle>New topic</DialogTitle>
-              <DialogDescription>Topics keep related chats together without creating a new encrypted room.</DialogDescription>
+              <DialogDescription>{CHAT_TOPIC_DESCRIPTION}</DialogDescription>
             </DialogHeader>
             <div className="finite-chat__rename-field">
               <label htmlFor="finite-chat-topic-title">Name</label>
@@ -906,7 +1055,7 @@ export function HostedWebChat({
           <form className="finite-chat__rename-form" onSubmit={renameChat}>
             <DialogHeader>
               <DialogTitle>Rename chat</DialogTitle>
-              <DialogDescription>Hermes can suggest a title from the first exchange; your name always wins.</DialogDescription>
+              <DialogDescription>Choose a name that makes this chat easy to find later.</DialogDescription>
             </DialogHeader>
             <div className="finite-chat__rename-field">
               <label htmlFor="finite-chat-rename-title">Name</label>
@@ -925,12 +1074,72 @@ export function HostedWebChat({
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={devicesOpen}
+        onOpenChange={(open) => {
+          setDevicesOpen(open);
+          if (!open) setDeviceToRevoke(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{deviceToRevoke ? `Revoke ${deviceToRevoke.device_id}?` : "Your devices"}</DialogTitle>
+            <DialogDescription>
+              {deviceToRevoke
+                ? "This permanently stops that Device from sending, receiving, or linking again with the same Device identity."
+                : "Each linked browser or computer is a separate encrypted Device. Revoke one you no longer trust."}
+            </DialogDescription>
+          </DialogHeader>
+          {deviceToRevoke ? (
+            <DialogFooter>
+              <Button type="button" variant="outline" disabled={deviceBusy} onClick={() => setDeviceToRevoke(null)}>
+                Cancel
+              </Button>
+              <Button type="button" variant="destructive" disabled={deviceBusy} onClick={() => void revokeDevice()}>
+                {deviceBusy ? "Revoking…" : "Revoke Device"}
+              </Button>
+            </DialogFooter>
+          ) : (
+            <div className="grid gap-2">
+              {deviceBusy ? <ChatLoading label="Refreshing devices…" /> : null}
+              {!deviceBusy && (state?.devices ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No linked Devices are visible yet.</p>
+              ) : null}
+              {(state?.devices ?? []).map((device) => (
+                <div
+                  key={`${device.account_id}:${device.device_id}`}
+                  className="flex items-center gap-3 rounded-xl border border-border p-3"
+                >
+                  <MonitorSmartphoneIcon className="size-4 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <strong className="block truncate text-sm">{device.device_id}</strong>
+                    <span className="text-xs text-muted-foreground">
+                      {device.current_device
+                        ? "This browser"
+                        : device.revoked
+                          ? "Revoked"
+                          : device.active
+                            ? `Active in ${device.room_count} ${pluralize("room", device.room_count)}`
+                            : "Linked, not currently active"}
+                    </span>
+                  </div>
+                  {!device.current_device && !device.revoked ? (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setDeviceToRevoke(device)}>
+                      Revoke
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
 function ChatSidebar({
-  brainHref,
   collapsed,
   connectionsHref,
   isOpen,
@@ -945,10 +1154,10 @@ function ChatSidebar({
   onToggleOpen,
   selectedChat,
   selectedTopic,
+  showSkills,
   topics,
   viewerEmail,
 }: {
-  brainHref?: string | null;
   collapsed: boolean;
   connectionsHref?: string | null;
   isOpen: boolean;
@@ -963,6 +1172,7 @@ function ChatSidebar({
   onToggleOpen: () => void;
   selectedChat: HostedChatSummary | null;
   selectedTopic: HostedChatTopic | null;
+  showSkills: boolean;
   topics: HostedChatTopic[];
   viewerEmail?: string | null;
 }) {
@@ -1078,8 +1288,7 @@ function ChatSidebar({
             <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
             <AppMenuLink href={`/dashboard/machines/${encodeURIComponent(machineId)}`} icon={MonitorIcon} label="Agent" note="Status and recovery" />
             <AppMenuLink href={connectionsHref} icon={PlugIcon} label="Connections" note="Product access" />
-            <AppMenuLink href={brainHref} icon={BrainIcon} label="Brain" note="Knowledge and memory" />
-            <AppMenuLink href={`/dashboard/skills?machine=${encodeURIComponent(machineId)}`} icon={SparklesIcon} label="Skills" note="Managed capabilities" />
+            {showSkills ? <AppMenuLink href={`/dashboard/skills?machine=${encodeURIComponent(machineId)}`} icon={WrenchIcon} label="Skills" note="Managed capabilities" /> : null}
             <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
             <DropdownMenuItem asChild className="finite-chat__app-menu-item">
               <Link href="/logout"><LogOutIcon /><span><strong>Sign out</strong><small>End this session</small></span></Link>
@@ -1156,9 +1365,17 @@ function ToolRollup({ messages }: { messages: HostedChatMessage[] }) {
   );
 }
 
-function MessageRow({ apiBase, message }: { apiBase: string; message: HostedChatMessage }) {
+function MessageRow({
+  apiBase,
+  message,
+  ownAccountId,
+}: {
+  apiBase: string;
+  message: HostedChatMessage;
+  ownAccountId: string;
+}) {
   const content = messageContent(message);
-  if (message.is_mine) {
+  if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
@@ -1321,82 +1538,10 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function transcriptItems(messages: HostedChatMessage[]): TranscriptItem[] {
-  const projected = collapseEdits(messages);
-  const items: TranscriptItem[] = [];
-  for (const message of projected) {
-    if (!message.is_mine && messageKind(message) === "status") continue;
-    if (!message.is_mine && messageKind(message) === "tool") {
-      const previous = items[items.length - 1];
-      if (previous?.type === "tools") {
-        previous.messages.push(message);
-      } else {
-        items.push({ type: "tools", id: `tools-${message.message_id}`, messages: [message] });
-      }
-      continue;
-    }
-    const previous = items[items.length - 1];
-    if (previous?.type === "tools") {
-      previous.messages = previous.messages.map((toolMessage) => ({
-        ...toolMessage,
-        status: "complete",
-      }));
-    }
-    items.push({ type: "message", message });
-  }
-  return items;
-}
-
-function collapseEdits(messages: HostedChatMessage[]) {
-  const result: HostedChatMessage[] = [];
-  const indexById = new Map<string, number>();
-  for (const message of messages) {
-    const target = message.edit_of_message_id;
-    if (target && indexById.has(target)) {
-      const index = indexById.get(target)!;
-      const original = result[index]!;
-      result[index] = {
-        ...message,
-        kind:
-          message.kind === "message" && original.kind !== "message"
-            ? original.kind
-            : message.kind,
-        message_id: target,
-      };
-      continue;
-    }
-    indexById.set(message.message_id, result.length);
-    result.push(message);
-  }
-  return result;
-}
-
-function messageKind(message: HostedChatMessage) {
-  if (message.kind) return message.kind;
-  const lines = messageContent(message).trim().split(/\n+/u).filter(Boolean);
-  return lines.length > 0 && lines.every((line) => TOOL_LINE_RE.test(line)) ? "tool" : "message";
-}
-
-function messageContent(message: HostedChatMessage) {
-  return message.display_content || message.text || "";
-}
-
 function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
   return { SendMessage: { room_id: roomId, text } };
-}
-
-function liveActivityLabel(members: HostedChatTypingMember[], machineLabel: string, awaitingReply: boolean) {
-  const member = members.find((candidate) => candidate.activity_kind === "working")
-    ?? members.find((candidate) => candidate.activity_kind === "thinking")
-    ?? members.find((candidate) => candidate.activity_kind === "typing")
-    ?? members[0];
-  if (!member) return awaitingReply ? `${machineLabel} is working` : null;
-  const name = member.display_name || machineLabel;
-  if (member.activity_kind === "working") return `${name} is working`;
-  if (member.activity_kind === "thinking") return `${name} is thinking`;
-  return `${name} is typing`;
 }
 
 function sitesFromMessages(messages: HostedChatMessage[]) {
@@ -1477,15 +1622,29 @@ async function chatRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
     const text = await response.text();
     try {
       const parsed = JSON.parse(text) as { error?: string };
-      throw new Error(parsed.error || text || `Chat returned ${response.status}`);
+      throw new HostedChatHttpError(
+        parsed.error || text || `Chat returned ${response.status}`,
+        response.status
+      );
     } catch (error) {
-      if (error instanceof SyntaxError) throw new Error(text || `Chat returned ${response.status}`);
+      if (error instanceof SyntaxError) {
+        throw new HostedChatHttpError(text || `Chat returned ${response.status}`, response.status);
+      }
       throw error;
     }
   }
   return response.json() as Promise<T>;
 }
 
+class HostedChatHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+  }
+}
+
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Hosted web chat is unavailable.";
+  return error instanceof Error ? error.message : CHAT_UNAVAILABLE_MESSAGE;
 }

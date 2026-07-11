@@ -1,8 +1,8 @@
 # Local Development Matrix
 
-> Status: imported from `finite-eng-docs` during Phase 7 on 2026-07-06. This
-> document has not been fully revalidated after the monorepo import. Treat it as
-> orientation background, not an authoritative current runbook.
+> Status: imported from `finite-eng-docs` during Phase 7 on 2026-07-06. The
+> web-dashboard contributor route was revalidated on 2026-07-11; other sections
+> remain orientation background unless they carry a newer dated note.
 
 Date: 2026-07-02
 
@@ -18,9 +18,10 @@ verification note says otherwise.
 
 | Goal | Start in | Primary loop | Notes |
 | --- | --- | --- | --- |
-| Self-serve SaaS dashboard/Core UI | `finitecomputer-v2/apps/dashboard` | `npm ci`, `npm run dev` | Current v2 product surface. Good for WorkOS/dashboard/Project/Finite Private UI. Does not prove real runtime launch. |
-| v2 Agent Runtime proof or SaaS launch readiness | `finitecomputer-v2` plus `finitechat` | `cargo test --workspace`, dashboard checks, then follow `docs/hermes-runtime-test-matrix.md` | Product proof is Hosted Web plus an independent local Device, real streaming Hermes, `fsite`, `fbrain`, local Docker, Kata, Phala, recovery from empty targets, then dashboard-controlled launch. |
-| Legacy dashboard chat UI or designer pass | `finitecomputer` | `nix develop`, `just chat-local-bootstrap smoke-finite`, add provider key, `just chat-local-up smoke-finite skyler@finite.vip 3100` | Best current legacy dashboard-to-agent loop. Uses local relay plus MicroSandbox runtime. Not the v2 product chat path. |
+| Web dashboard/chat design and recovery states | repository root | `npm ci` once in `finitecomputer-v2/apps/dashboard`, then `just dev web-design` | Runs the canonical dashboard UI against deterministic fake Core and Hosted Device services. No provider key, runtime, or production access is needed. This is a design loop, not runtime acceptance. |
+| Self-serve SaaS dashboard/Core UI | `finitecomputer-v2/apps/dashboard` | `npm ci`, `npm run dev` | Current v2 product surface for environment-backed WorkOS/dashboard/Project/Finite Private work. Does not prove real runtime launch. |
+| v2 Agent Runtime proof or SaaS launch readiness | repository root | export the local inference credential, then `just dev saas-smoke` | Canonical full local proof: real Core, Runner, Apple Agent Runtime, streaming Hermes, Hosted Web chat, and restart healing. Use `finitecomputer-v2/docs/hermes-runtime-test-matrix.md` for deeper Docker/Kata/Phala promotion evidence. |
+| Legacy dashboard archaeology | external legacy `finitecomputer` checkout | legacy repo runbooks only | Migration reference only. It is not the v2 product or current web-design path; new design work starts with `just dev web-design` above. |
 | Legacy hosted platform/runtime/control plane | `finitecomputer` | `nix develop`, Cargo commands, root `just` recipes | box1/TRF/smoke and migration bridge lane. Most operator and deployment paths require host secrets or SSH. |
 | Native encrypted chat protocol/server | `finitechat` | `cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3` | Local server and simulator are explicit dev overrides. Production default is `https://chat.finite.computer`. |
 | iOS app build or simulator work | `finitechat` | `ios/ci_scripts/ci_post_clone.sh`, `cargo run -p finitechat-rmp -- run ios` | Requires Xcode. Physical phone work also needs a paired phone and signing team. |
@@ -50,38 +51,59 @@ Documented tools:
   renaming and pruning.
 - Hosted Finite Chat deploy script under
   `infra/hosts/lat1/scripts/deploy-finitechat-server.sh`.
-- Runtime image build path for the Agent Runtime, currently packaging
-  `finitechat`, the Hermes `finitechat` plugin, `fsite`, and `fbrain`; the baked
-  Finite Skills Revision remains a launch-blocking gap.
+- Runtime image build path for the Agent Runtime, packaging `finitechat`, the
+  Hermes `finitechat` plugin, `fsite`, `fbrain`, and the required bundled Finite
+  Skills baseline.
 
-Primary dashboard loop:
+Primary web design loop:
 
 ```bash
 cd finitecomputer-v2/apps/dashboard
 npm ci
-npm run dev
+cd ../../..
+just dev web-design
 ```
 
 Open:
 
 ```text
-http://localhost:3000
+http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat
 ```
+
+This launches the real dashboard components and routes. Only Core and the
+Hosted Device are deterministic local fixtures. The seeded chat is durable
+across fixture restarts under `.local-state/web-design-fixture/`. In a second
+terminal, exercise recovery states or explicitly reset only that fixture:
+
+```bash
+just dev web-design-state unavailable
+just dev web-design-state recovering
+just dev web-design-state healthy
+just dev web-design-reset
+```
+
+The machine overview's **Recover chat** action also moves the fixture into the
+bounded `recovering` state. It fails the first two state attempts before
+returning to healthy behavior, so retry and recovery UI can be designed without
+inventing a second dashboard implementation.
+
+For dashboard work that needs real environment-backed Core or WorkOS behavior,
+run `npm run dev` from `finitecomputer-v2/apps/dashboard` instead.
 
 Documented checks:
 
 ```bash
-cd finitecomputer-v2
-cargo test --workspace
-cd apps/dashboard
-npm test
-npm run lint
-npm run build
+just web-check
 ```
+
+`just web-check` runs the lockfile install, dashboard unit tests, lint, and
+production build. It does not claim runtime or production-browser acceptance.
 
 Product/runtime proof:
 
-- Follow `docs/hermes-runtime-test-matrix.md`.
+- Run `just dev saas-smoke` for the canonical full local acceptance.
+- Follow `finitecomputer-v2/docs/hermes-runtime-test-matrix.md` for the deeper
+  promotion ladder.
 - Rung order is local real-Hermes adapter, runtime image in local Docker,
   runtime image in Kata, then a Phala CVM, then dashboard-controlled SaaS
   launch.
@@ -92,16 +114,16 @@ Friction:
 
 - This repo was just split from the SaaS branch and intentionally starts too
   large. `docs/carry-over-manifest.md` is the active cleanup map.
-- There is no root `just` facade or Nix shell visible yet. The current local
-  loops are Cargo, dashboard npm scripts, and deployment/runtime runbooks.
+- The root `just` facade now exposes the deterministic web design loop and the
+  dashboard check. Full runtime proof remains a separate, heavier lane.
 - The dashboard still has carry-over machine/control-plane routes and labels in
   code, even though v2 vocabulary should say Project, Agent Runtime, Runner,
   Hosted Pairing, and Finite Chat Invite.
 - `deploy/finite-computer` and the runtime template still carry legacy
   `finitec`/relay/gateway assumptions. Treat those as bridge code with delete
   conditions, not the final v2 product contract.
-- Full SaaS launch proof is not a single local command yet; use the runtime
-  matrix to avoid overclaiming dashboard-only checks.
+- Full SaaS launch proof is the credential-gated `just dev saas-smoke`; it is a
+  deliberately heavier lane than dashboard-only checks.
 
 ### `finitecomputer` legacy
 
@@ -441,8 +463,8 @@ Friction:
 
 The current fragmentation falls into a few concrete buckets:
 
-1. There is no checked-in top-level workspace contract. `/Users/alex/Projects/finite`
-   is a folder of repos, not a repo with a `justfile`, tool pins, or bootstrap.
+1. The monorepo now has a checked-in root `just` facade and pinned Nix
+   environment. Some component-specific onboarding still bypasses that facade.
 2. Command runners differ by repo. Legacy `finitecomputer` and `finite-search`
    use `just`; `finitecomputer-v2` currently uses Cargo, npm scripts, and
    deployment shell scripts; `finite-brain` currently uses Cargo plus
@@ -451,7 +473,7 @@ The current fragmentation falls into a few concrete buckets:
 3. Toolchain pinning is uneven. Legacy `finitecomputer` has a Nix dev shell and
    package-age guardrails. `finitechat` states Rust 1.88 and pins CI, but the
    local checkout does not enforce it. `finitecomputer-v2` has Rust and npm
-   lockfiles but no root contributor facade yet. `finite-nostr` uses ambient
+   lockfiles plus root web contributor commands. `finite-nostr` uses ambient
    stable Rust.
 4. Contributor loops and operator loops are mixed. This is most visible in
    legacy `finitecomputer`, where local chat recipes and production fleet
@@ -534,16 +556,16 @@ commands as:
 - maintainer: runtime image, local relay, MicroSandbox internals;
 - operator: fleet deploy, backups, host secrets, production SSH.
 
-For `finitecomputer-v2`, add a small root facade once the runtime matrix
-commands are stable enough to wrap. The first-run path should never require
-choosing between hosted deploy docs and dashboard UI docs.
+For `finitecomputer-v2`, keep extending the existing root facade only when a
+command has a stable contributor contract. The first-run path should never
+require choosing between hosted deploy docs and dashboard UI docs.
 
 ### 5. Provide A Real Remote Design Sandbox
 
-The legacy dashboard designer loop is high fidelity but heavy, and the v2
-dashboard loop does not yet prove the real runtime. Add a hosted or
-remote-runner design sandbox for people who cannot run the full runtime stack
-locally.
+The deterministic v2 dashboard fixture now provides a low-cost canonical UI
+loop, but deliberately does not prove the real runtime. A future hosted or
+remote-runner sandbox can cover full-path design work for people who cannot run
+the runtime stack locally.
 
 Target shape:
 
@@ -593,8 +615,8 @@ should not require reading workflow YAML.
 
 Suggested first-pass targets:
 
-- `finitecomputer-v2`: `just check` or equivalent for Cargo tests, dashboard
-  lint/tests/build, and a clearly named runtime-matrix smoke when available.
+- `finitecomputer-v2`: `just web-check` for the dashboard's locked unit,
+  lint, and build gate; Cargo and runtime-matrix gates remain separately named.
 - Legacy `finitecomputer`: `just check` for `nix fmt --check` or `nix fmt`,
   Cargo tests, dashboard lint/tests/build.
 - `finitechat`: `just check` for Cargo fmt/clippy/tests plus Python lint/tests.
@@ -608,11 +630,10 @@ Suggested first-pass targets:
 
 ## Suggested Cleanup Order
 
-1. Fix conflicting contributor docs first: `finitecomputer-v2` dashboard docs
-   should use `npm ci`, point runtime acceptance to
-   `docs/hermes-runtime-test-matrix.md`, and say dashboard chat is out of scope.
-   Legacy dashboard docs should point chat UI contributors to
-   `docs/chat-local-dev.md`.
+1. Keep contributor docs aligned: `finitecomputer-v2` dashboard docs use
+   `npm ci`, route UI work to `just dev web-design`, and reserve runtime
+   acceptance for `docs/hermes-runtime-test-matrix.md`. Legacy dashboard docs
+   should point only legacy chat UI contributors to `docs/chat-local-dev.md`.
 2. Add `just doctor`, `just setup`, and `just check` to every repo, even if the
    first implementation is thin.
 3. Add local toolchain pins for Rust, Node/npm, and Python where docs or CI

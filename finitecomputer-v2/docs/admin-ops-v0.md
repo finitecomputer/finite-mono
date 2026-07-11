@@ -14,14 +14,14 @@ recover any of them, and manage Finite Private (issue friend keys, rotate
 keys, reset burst windows) from the dashboard.
 
 The hard requirement is that admin-ness is enforced by Core, not by the
-dashboard. Before Admin Ops v0, Core trusted the dashboard's service token for
-the finite-private operator endpoints. Every new mutating admin endpoint is
-now authorized by Core itself against its own allowlist, and every mutating
-admin action writes an audit event with the admin's verified email as actor.
+dashboard. Core validates the standard WorkOS access-token JWT and requires
+the configured internal operator `org_id` for every administrator route. Every
+mutating admin action writes an audit event with the operator's verified email
+as actor.
 
 ## Product Flow
 
-1. A dashboard admin (per the dashboard's existing `isAdmin` gate) opens
+1. An Account Auth member of Finite's configured operator organization opens
    `/dashboard/admin`. Non-admins get a 404.
 2. The page shows the provisioned-boxes table from
    `GET /api/core/v1/admin/runtimes`: project, owner email, source host and
@@ -39,18 +39,20 @@ admin action writes an audit event with the admin's verified email as actor.
    once with a copy button and a "you will not see this again" note. The raw
    key lives only in the action response and the page's in-memory state; Core
    stores only the hash and never logs the raw value.
-6. Every dashboard server action sends the admin's verified WorkOS identity
-   headers to Core (the existing `coreIdentityHeaders` mechanism). Core
-   checks the identity against `FC_CORE_ADMIN_EMAILS` before doing anything.
+6. Every dashboard server action forwards the WorkOS access token. Core
+   independently validates its signature, issuer, client id, expiry, subject,
+   verified user record, and exact operator `org_id` before doing anything.
 
 ## Route Table
 
-All routes require `require_admin_identity` (service token + verified WorkOS
-identity headers + email in the Core admin allowlist):
+All routes require `require_admin_identity` (validated WorkOS access token with
+the exact configured operator organization):
 
 | Method | Route | Action |
 | --- | --- | --- |
 | GET | `/api/core/v1/admin/runtimes` | Provisioned-boxes overview |
+| GET/POST | `/api/core/v1/admin/launch-code-batches` | List metadata or issue one named exact-size batch |
+| POST | `/api/core/v1/admin/launch-code-batches/{batch_id}/revoke` | Revoke remaining unredeemed codes |
 | POST | `/api/core/v1/admin/projects/{project_id}/runtime/restart` | Restart any project's runtime (owner check skipped) |
 | POST | `/api/core/v1/admin/projects/{project_id}/runtime/recover-known-good-chat` | Recover any project's runtime |
 | POST | `/api/core/v1/admin/finite-private/friend-keys` | Approve grant for an email and issue a key; returns raw key once |
@@ -62,33 +64,25 @@ identity headers + email in the Core admin allowlist):
 
 Core owns:
 
-- the `FC_CORE_ADMIN_EMAILS` allowlist and all admin authorization decisions
+- the `FC_WORKOS_OPERATOR_ORG_ID` predicate and all admin authorization decisions
 - runtime control requests, whichever surface created them
 - Finite Private grant/key state and burst window accounting
 - the admin audit log (`finite_private_admin_audit_events`), which now also
   records runtime admin actions with the admin's email as `actor`
 
-The dashboard owns only the UI gate (`isAdmin`) and adapter code. Its gate is
-a convenience: bypassing it still cannot mutate Core, because Core checks the
-verified identity headers against its own allowlist on every call.
+The dashboard owns only the UI gate and adapter code. Its gate is a
+convenience: bypassing it still cannot mutate Core, because Core validates the
+JWT and operator organization on every call.
 
 The CLI subcommands in `finite-saas-core` remain as the break-glass path and
 their help text points at the dashboard admin page.
 
-## FC_CORE_ADMIN_EMAILS
+## Operator organization
 
-Core reads `FC_CORE_ADMIN_EMAILS` at router construction:
-
-- comma-separated list of emails
-- entries are trimmed and lowercased; matching is case-insensitive against
-  the normalized verified WorkOS email
-- empty, missing, or whitespace-only means **no admins**: every
-  `/api/core/v1/admin/*` request fails closed with 403
-
-`../infra/hosts/lat1/k8s/core.yaml` wires it from the
-`finite-computer-config` ConfigMap (`optional: true`, empty default in
-`configmap.yaml`). Set it to the operator emails to enable Admin Ops in a
-deployment.
+Core requires `FC_WORKOS_OPERATOR_ORG_ID` at startup. The value names Finite's
+internal WorkOS organization and is never persisted or inferred as a Core
+Customer Organization. Missing, absent-from-token, or different `org_id`
+claims fail closed. Administrator authorization never checks role slugs.
 
 ## Raw Key Handling
 
@@ -113,10 +107,9 @@ adjustment ledger over reservations) before it can exist anywhere.
 
 Admin Ops v0 is accepted when:
 
-- Core tests prove `require_admin_identity` rejects missing service auth,
-  missing identity headers, unverified emails, and non-allowlisted emails,
-  and accepts allowlisted emails case-insensitively; an empty allowlist
-  rejects everyone.
+- Core tests prove `require_admin_identity` rejects missing/invalid JWTs,
+  unverified or unknown users, missing/different operator organizations, and
+  every service credential, while accepting the configured operator org.
 - Core tests prove each admin endpoint works for admins and is rejected for
   non-admins.
 - Core tests prove admin restart/recover skip the owner check but create the
@@ -144,6 +137,3 @@ Admin Ops v0 is accepted when:
   with restart/recover only). Purge User Data is explicitly not a routine Admin
   Ops control.
 - A designed weekly-limit override mechanism.
-- Whether the legacy service-token-only finite-private operator endpoints on
-  the old admin dashboard should be migrated to `require_admin_identity` and
-  retired.

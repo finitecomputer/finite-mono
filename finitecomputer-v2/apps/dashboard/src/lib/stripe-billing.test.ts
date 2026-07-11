@@ -3,26 +3,66 @@ import test from "node:test";
 
 import {
   billingSubscriptionShouldUsePortal,
+  standardAgentCheckoutMetadata,
   stripeBillingStatus,
   stripeDashboardReturnUrl,
+  stripeIdempotencyKey,
 } from "./stripe-billing";
 
-test("stripeBillingStatus requires secret key and standard price", () => {
+test("stripeBillingStatus fails closed without checkout, webhook, and return configuration", () => {
   assert.deepEqual(stripeBillingStatus({}), {
     configured: false,
-    missing: ["STRIPE_SECRET_KEY", "STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"],
+    missing: [
+      "STRIPE_SECRET_KEY",
+      "STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID",
+      "STRIPE_WEBHOOK_SECRET",
+      "FC_DASHBOARD_BASE_URL",
+    ],
   });
 
   assert.deepEqual(
     stripeBillingStatus({
       STRIPE_SECRET_KEY: "secret",
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: "price_standard",
+      STRIPE_WEBHOOK_SECRET: "webhook-secret",
+      FC_DASHBOARD_BASE_URL: "https://finite.computer",
     }),
     {
       configured: true,
       missing: [],
     }
   );
+
+  assert.deepEqual(
+    stripeBillingStatus({
+      STRIPE_SECRET_KEY: "secret",
+      STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: "price_standard",
+      STRIPE_WEBHOOK_SECRET: "webhook-secret",
+      FC_DASHBOARD_BASE_URL: "not a URL",
+    }),
+    { configured: false, missing: ["FC_DASHBOARD_BASE_URL"] }
+  );
+});
+
+test("Stripe retry keys are stable, endpoint-scoped, and do not disclose the attempt", () => {
+  const attempt = "draft-personal-onboarding-123";
+  const customer = stripeIdempotencyKey("customer", attempt);
+  const checkout = stripeIdempotencyKey("checkout", attempt);
+
+  assert.equal(customer, stripeIdempotencyKey("customer", attempt));
+  assert.notEqual(customer, checkout);
+  assert.equal(customer.includes(attempt), false);
+  assert.match(customer, /^finite-customer:[0-9a-f]{64}$/u);
+  assert.throws(() => stripeIdempotencyKey("checkout", "   "), /attempt id is invalid/);
+});
+
+test("standard Checkout stamps only the canonical Core organization id", () => {
+  assert.deepEqual(standardAgentCheckoutMetadata("org_core_canonical"), {
+    clientReferenceId: "org_core_canonical",
+    checkout: { finite_customer_org_id: "org_core_canonical" },
+    subscription: { finite_customer_org_id: "org_core_canonical" },
+  });
+  assert.throws(() => standardAgentCheckoutMetadata("  "), /organization id is required/);
 });
 
 test("stripeDashboardReturnUrl uses the public app URL", () => {

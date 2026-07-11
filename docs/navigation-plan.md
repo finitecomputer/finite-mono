@@ -1,7 +1,7 @@
 # Navigation Plan
 
-> Status: imported from `finite-eng-docs` during Phase 7 on 2026-07-06. This
-> document has not been fully revalidated after the monorepo import. Treat it as
+> Status: imported from `finite-eng-docs` during Phase 7 on 2026-07-06. Local
+> onboarding pointers were revalidated on 2026-07-11; the remaining document is
 > orientation background, not an authoritative current runbook.
 
 This doc is the entry plan for finding the right repo and the right level of
@@ -9,16 +9,18 @@ detail. It should stay short enough to scan before making a change.
 
 ## If You Are New
 
-1. Read `README.md` in this folder.
-2. Read [Architecture overview](architecture-overview.md).
-3. Read [System flow and trust boundaries](system-flow-and-trust-boundaries.md)
+1. Read the root [`CONTRIBUTING.md`](../CONTRIBUTING.md) and choose the web-design
+   or complete local SaaS loop.
+2. Read `README.md` in this folder.
+3. Read [Architecture overview](architecture-overview.md).
+4. Read [System flow and trust boundaries](system-flow-and-trust-boundaries.md)
    when you need the end-to-end user flow, data classification, key custody,
    or encryption/security boundary model.
-4. Read [Local development matrix](local-dev-matrix.md) to choose the right
+5. Read [Local development matrix](local-dev-matrix.md) to choose the right
    setup and validation loop for your task.
-5. Read [Slop audit](slop-audit.md) for a candid first-pass risk map.
-6. Read the relevant repo docs for the layer you are touching.
-7. Before changing behavior across component boundaries, write down the
+6. Read [Slop audit](slop-audit.md) for a candid first-pass risk map.
+7. Read the relevant repo docs for the layer you are touching.
+8. Before changing behavior across component boundaries, write down the
    affected folders and the expected local or deployment validation path.
 
 ## By Task
@@ -26,7 +28,7 @@ detail. It should stay short enough to scan before making a change.
 | Task | Start here | Why |
 | --- | --- | --- |
 | Understand the end-to-end user flow, front ends, security boundaries, encryption boundaries, and key custody | `system-flow-and-trust-boundaries.md` | Conversation-level map of dashboard, native chat, runtime, Core, runner, Finite Chat, FiniteBrain, Sites, Finite Private, search, TEEs, and encrypted storage |
-| Choose a local development setup | `local-dev-matrix.md` | Monorepo component map of prerequisites, first commands, checks, friction, and unification direction |
+| Choose a local development setup | root `CONTRIBUTING.md`, then `local-dev-matrix.md` | Current copy-paste web/full-stack entrypoints, followed by the broader component map |
 | Understand the self-serve hosted-agent product | `../finitecomputer-v2/README.md`, `../finitecomputer-v2/CONTEXT.md`, and `../finitecomputer-v2/docs/finite-stack-deployment.md` | v2 is the hard-cut SaaS product: WorkOS, Projects, Core, generic Runner contract, Hosted Web Device chat, narrow runtime management, and durable runtime launch |
 | Change v2 dashboard/Core UI | `../finitecomputer-v2/apps/dashboard/README.md` and `../finitecomputer-v2/docs/carry-over-manifest.md` | The v2 dashboard owns signup/launch, the canonical BoxOne-derived web chat, typed connections, Site/Brain views, and lifecycle UX; product data paths stay in their owning services |
 | Prove v2 Agent Runtime behavior | `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md` | Runtime proof climbs the resident streaming Hermes sidecar, local full-product Docker, Kata, Phala, then full SaaS product acceptance |

@@ -34,9 +34,17 @@ export function MarketingHome() {
           </h1>
         </div>
 
-        <a href={CONTACT_FORM_URL} className={styles.button} target="_blank" rel="noopener noreferrer">
-          Get in touch
-        </a>
+        <div className={styles.actions}>
+          <a href="/login?returnTo=/dashboard" className={styles.button}>
+            Sign in
+          </a>
+          <a href="/signup?returnTo=/dashboard" className={styles.secondaryButton}>
+            I have a Launch Code
+          </a>
+          <a href={CONTACT_FORM_URL} className={styles.requestAccess} target="_blank" rel="noopener noreferrer">
+            Request access
+          </a>
+        </div>
       </section>
     </main>
   );

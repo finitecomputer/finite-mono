@@ -1,20 +1,22 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
+  HeartPulseIcon,
   MessageSquareIcon,
   RotateCcwIcon,
   StopCircleIcon,
+  Trash2Icon,
 } from "lucide-react";
 
 import {
+  recoverCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
-import { CopyButton } from "@/components/copy-button";
 import { FormActionButton } from "@/components/form-action-button";
+import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
-import { fetchRuntimeAgentNpub, truncateNpub } from "@/lib/agent-contact";
 import {
   loadDashboardMachineAccess,
   type DashboardMachineAccess,
@@ -39,10 +41,13 @@ type RelayOverviewState = {
 
 export default async function MachineDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ machineId: string }>;
+  searchParams: Promise<{ removal?: string | string[] }>;
 }) {
   const { machineId } = await params;
+  const query = await searchParams;
   const access = await loadDashboardMachineAccess(machineId, {
     coreCacheMode: "swr",
   });
@@ -51,20 +56,20 @@ export default async function MachineDetailPage({
     redirect("/");
   }
 
-  // The runtime origin is reached server-side only. Devices use the Agent
-  // Principal's npub for the one canonical MLS Add + Welcome flow.
-  const agentNpub = access.coreProject?.runtime
-    ? await fetchRuntimeAgentNpub(access.primaryUrl)
-    : null;
-  return <ImportedMachineOverview access={access} agentNpub={agentNpub} />;
+  return (
+    <ImportedMachineOverview
+      access={access}
+      removalResult={firstSearchParam(query.removal)}
+    />
+  );
 }
 
 async function ImportedMachineOverview({
   access,
-  agentNpub,
+  removalResult,
 }: {
   access: DashboardMachineAccess;
-  agentNpub: string | null;
+  removalResult: string | null;
 }) {
   const overview = access.coreProject?.runtime
     ? coreRuntimeOverview(
@@ -79,13 +84,26 @@ async function ImportedMachineOverview({
 
   return (
     <div className="space-y-6">
+      {removalResult === "failed" ? (
+        <section
+          className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm"
+          role="alert"
+        >
+          We couldn&apos;t remove this agent. Please try again.
+        </section>
+      ) : null}
+      {removalResult === "unavailable" ? (
+        <section
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
+          role="status"
+        >
+          Only active Kata agents can be removed here.
+        </section>
+      ) : null}
       <section className="ocean-status-card" data-cube-state={prismState}>
         <div className="ocean-status-card__inner">
           <StatusPrism state={prismState} className="justify-self-center" />
           <div className="ocean-status-card__copy">
-            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-              {access.machineId}
-            </div>
             <h1 className="ocean-status-card__title">{access.displayName}</h1>
             <p className="ocean-status-card__description">
               {overview.description}
@@ -121,37 +139,56 @@ async function ImportedMachineOverview({
           </div>
         </div>
       </section>
-
-      {agentNpub ? <AgentContactCard agentNpub={agentNpub} /> : null}
-
+      {canControlRuntime ? (
+        <section className="rounded-xl border bg-card p-5">
+          <h2 className="font-semibold">Chat recovery</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Restarts and reconciles this agent&apos;s known-good chat services. This does
+            not restore a backup or delete chat data.
+          </p>
+          <form action={recoverCoreRuntimeAction} className="mt-4">
+            <input type="hidden" name="machineId" value={access.machineId} />
+            <input
+              type="hidden"
+              name="redirectPath"
+              value={`/dashboard/machines/${access.machineId}`}
+            />
+            <FormActionButton variant="outline" pendingLabel="Recovering chat...">
+              <HeartPulseIcon />
+              Recover chat
+            </FormActionButton>
+          </form>
+        </section>
+      ) : null}
+      {access.canRemoveKataRuntime ? (
+        <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+          <h2 className="font-semibold">Remove this agent</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            This removes the agent&apos;s compute so you can create a new agent. Your saved
+            agent data is retained.
+          </p>
+          <form
+            action={`/dashboard/machines/${encodeURIComponent(access.machineId)}/remove`}
+            method="post"
+            className="mt-4"
+          >
+            <ConfirmSubmitButton
+              variant="destructive"
+              pendingLabel="Removing..."
+              confirmMessage="Remove this agent's compute? Your saved agent data will be retained."
+            >
+              <Trash2Icon />
+              Remove agent
+            </ConfirmSubmitButton>
+          </form>
+        </section>
+      ) : null}
     </div>
   );
 }
 
-function AgentContactCard({ agentNpub }: { agentNpub: string }) {
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <MessageSquareIcon className="size-5" />
-        </span>
-        <div>
-          <h2 className="ocean-utility-card__title">Agent address</h2>
-          <p className="text-sm text-muted-foreground">
-            Use this address to connect another Finite Chat app.
-          </p>
-        </div>
-      </div>
-      <div className="grid gap-3">
-        <div className="break-all rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3 font-mono text-sm text-foreground">
-          {truncateNpub(agentNpub)}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <CopyButton value={agentNpub} label="Copy address" />
-        </div>
-      </div>
-    </section>
-  );
+function firstSearchParam(value: string | string[] | undefined) {
+  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
 function coreRuntimeOverview(
@@ -199,8 +236,8 @@ async function loadRelayOverview(
     if (!heartbeat?.lastSeenAt) {
       return {
         state: "missing",
-        label: "No relay heartbeat yet.",
-        description: "Chat relay has not checked in yet.",
+        label: "Still starting",
+        description: "Your agent is still starting.",
         lastSeenAt: null,
       };
     }
@@ -209,24 +246,24 @@ async function loadRelayOverview(
     if (!Number.isFinite(ageMs)) {
       return {
         state: "stale",
-        label: "Relay heartbeat timestamp is invalid.",
+        label: "Needs attention",
         description: "Machine status needs attention.",
         lastSeenAt: heartbeat.lastSeenAt,
       };
     }
 
-    const lastSeenLabel = `Relay last seen ${formatRelativeAge(ageMs)}.`;
+    const lastSeenLabel = `Your agent was last active ${formatRelativeAge(ageMs)}.`;
     return {
       state: ageMs <= RELAY_FRESH_MS ? "connected" : "stale",
       label: lastSeenLabel,
-      description: ageMs <= RELAY_FRESH_MS ? "Chat relay is connected." : lastSeenLabel,
+      description: ageMs <= RELAY_FRESH_MS ? "Your agent is online." : lastSeenLabel,
       lastSeenAt: heartbeat.lastSeenAt,
     };
-  } catch (error) {
+  } catch {
     return {
       state: "unavailable",
-      label: error instanceof Error ? error.message : "Relay status unavailable.",
-      description: "Machine status is unavailable.",
+      label: "Status unavailable",
+      description: "Your agent status is unavailable right now.",
       lastSeenAt: null,
     };
   }

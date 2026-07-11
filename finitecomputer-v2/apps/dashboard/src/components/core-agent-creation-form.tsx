@@ -37,7 +37,7 @@ export function CoreAgentCreationForm({
   const [step, setStep] = useState<"profile" | "access">("profile");
   const [displayName, setDisplayName] = useState(initialName ?? "");
   const [picturePreview, setPicturePreview] = useState(initialPictureUrl ?? "");
-  const [submitting, setSubmitting] = useState<"launch" | "stripe" | "promo" | null>(null);
+  const [submitting, setSubmitting] = useState<"launch" | "stripe" | "launch-code" | null>(null);
   const submittedRef = useRef(false);
 
   useEffect(() => {
@@ -73,7 +73,7 @@ export function CoreAgentCreationForm({
         const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
         const access = submitter?.value;
         window.setTimeout(
-          () => setSubmitting(access === "stripe" ? "stripe" : access === "promo" ? "promo" : "launch"),
+          () => setSubmitting(access === "stripe" ? "stripe" : access === "launch-code" ? "launch-code" : "launch"),
           0
         );
       }}
@@ -175,25 +175,29 @@ export function CoreAgentCreationForm({
       <div className={step === "access" ? "grid gap-5" : "hidden"} aria-hidden={step !== "access"}>
         <div>
           <h2 className="font-semibold text-foreground">Start {displayName.trim() || "your agent"}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Pay securely or use a promo code.</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {stripeConfigured ? "Pay securely or use a Launch Code." : "Enter your Launch Code."}
+          </p>
         </div>
 
-        <Button type="submit" name="access" value="stripe" className="w-fit" disabled={!stripeConfigured}>
-          <CreditCardIcon />
-          Continue to payment
-        </Button>
+        {stripeConfigured ? (
+          <Button type="submit" name="access" value="stripe" className="w-fit">
+            <CreditCardIcon />
+            Continue to payment
+          </Button>
+        ) : null}
 
         <div className="grid max-w-sm gap-2">
-          <Label htmlFor="coreAgentPromoCode">Promo code</Label>
+          <Label htmlFor="coreAgentLaunchCode">Launch Code</Label>
           <div className="flex gap-2">
             <Input
-              id="coreAgentPromoCode"
-              name="promoCode"
+              id="coreAgentLaunchCode"
+              name="launchCode"
               autoComplete="off"
               placeholder="Enter code"
               tabIndex={step === "access" ? 0 : -1}
             />
-            <Button type="submit" name="access" value="promo" variant="outline">
+            <Button type="submit" name="access" value="launch-code" variant="outline">
               Apply
             </Button>
           </div>

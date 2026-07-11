@@ -6,6 +6,8 @@ export const AGENT_DRAFT_COOKIE = "finite-agent-draft";
 export const AGENT_DRAFT_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_AGENT_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 
+const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exhausted";
+
 const RUNNER_CLASSES = new Set<CoreRunnerClass>([
   "local_docker",
   "apple_container",
@@ -22,7 +24,43 @@ export type AgentOnboardingDraft = {
   runnerClass: CoreRunnerClass;
   idempotencyKey: string;
   issuedAtMs: number;
+  /** Present only after this signed draft actually initiated Stripe Checkout. */
+  stripeCheckoutStartedAtMs?: number | null;
 };
+
+export type AgentCreationAccessPath =
+  | "launch-code"
+  | "stripe"
+  | "entitlement"
+  | "denied";
+
+/** Keep each onboarding submit on the access path the person explicitly chose. */
+export function resolveAgentCreationAccessPath(
+  access: FormDataEntryValue | null,
+  canCreateAgent: boolean,
+  allowExistingEntitlement = true
+): AgentCreationAccessPath {
+  if (access === "launch-code") return "launch-code";
+  if (access === "stripe") return "stripe";
+  if (access === "entitled" && canCreateAgent && allowExistingEntitlement) {
+    return "entitlement";
+  }
+  return "denied";
+}
+
+export function draftStartedStripeCheckout(
+  draft: AgentOnboardingDraft | null
+): draft is AgentOnboardingDraft & { stripeCheckoutStartedAtMs: number } {
+  return Boolean(draft && Number.isFinite(draft.stripeCheckoutStartedAtMs));
+}
+
+export function agentCreationErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Could not create agent.";
+  if (message.toLowerCase().includes(AGENT_CREATION_ENTITLEMENT_EXHAUSTED)) {
+    return "This account already has an agent. Open it from your dashboard, or ask an operator to remove it before creating another.";
+  }
+  return message;
+}
 
 export function configuredRunnerClasses(
   env: Record<string, string | undefined> = process.env
@@ -94,6 +132,10 @@ export async function unsealAgentOnboardingDraft(
       !draft.idempotencyKey?.trim() ||
       !RUNNER_CLASSES.has(draft.runnerClass) ||
       !Number.isFinite(draft.issuedAtMs) ||
+      (draft.stripeCheckoutStartedAtMs != null &&
+        (!Number.isFinite(draft.stripeCheckoutStartedAtMs) ||
+          draft.stripeCheckoutStartedAtMs < draft.issuedAtMs ||
+          draft.stripeCheckoutStartedAtMs > nowMs + 60_000)) ||
       draft.issuedAtMs > nowMs + 60_000 ||
       nowMs - draft.issuedAtMs > AGENT_DRAFT_TTL_SECONDS * 1000
     ) {

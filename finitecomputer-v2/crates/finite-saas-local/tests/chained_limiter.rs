@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use finite_saas_core::api::router as core_router;
+use finite_saas_core::auth::{CoreAuth, WorkosAuthenticator, WorkosAuthenticatorConfig};
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{ApproveFinitePrivateGrantInput, IssueFinitePrivateApiKeyInput};
 use finite_saas_local::{ChainedLimiterInputs, chained_limiter_config};
@@ -85,7 +86,23 @@ async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key(
         })
         .await
         .unwrap();
-    let core_url = spawn(core_router(core_store, "local-core-token")).await;
+    let workos = WorkosAuthenticator::new(WorkosAuthenticatorConfig {
+        client_id: "client_local_test".to_string(),
+        issuer: "https://identity.local.invalid".to_string(),
+        operator_org_id: "org_local_operator".to_string(),
+        api_key: "local-test-workos-key".to_string(),
+        api_base_url: "https://identity.local.invalid".to_string(),
+        jwks_url: "https://identity.local.invalid/jwks".to_string(),
+    })
+    .unwrap();
+    let auth = CoreAuth::new(
+        workos,
+        "local-core-token",
+        "local-runner-token",
+        "local-usage-token",
+    )
+    .unwrap();
+    let core_url = spawn(core_router(core_store, auth)).await;
 
     let upstream_calls = Arc::new(AtomicUsize::new(0));
     let deployed_limiter_url = spawn(
@@ -101,7 +118,7 @@ async fn chained_local_limiter_admits_local_keys_and_forwards_with_operator_key(
     // in agent-facing `.../v1` form and must be reduced to the host root.
     let config = chained_limiter_config(&ChainedLimiterInputs {
         core_url: core_url.clone(),
-        core_api_token: "local-core-token".to_string(),
+        finite_private_usage_api_token: "local-usage-token".to_string(),
         upstream_base_url: format!("{deployed_limiter_url}/v1"),
         upstream_api_key: Some(OPERATOR_UPSTREAM_KEY.to_string()),
         dashboard_url: "http://127.0.0.1:13002/dashboard".to_string(),

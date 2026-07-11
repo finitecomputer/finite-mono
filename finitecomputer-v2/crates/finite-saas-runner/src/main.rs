@@ -47,7 +47,7 @@ fn run_once() -> Result<()> {
 fn run_cycle() -> Result<RunOnceOutcome> {
     let queue = CoreHttpAgentCreationQueue::new(
         required_env("FC_CORE_URL")?,
-        required_env("FC_CORE_API_TOKEN")?,
+        required_env("FC_CORE_RUNNER_API_TOKEN")?,
     )?;
     let runtime_artifact_id = required_env("FC_RUNNER_RUNTIME_ARTIFACT_ID")?;
     let runtime_artifact = queue.runtime_artifact(&runtime_artifact_id)?;

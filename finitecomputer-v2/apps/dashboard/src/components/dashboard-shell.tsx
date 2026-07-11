@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import {
   BotIcon,
-  BrainIcon,
   ChevronRightIcon,
   LayoutDashboardIcon,
   Layers3Icon,
@@ -52,7 +51,8 @@ function activeMachineIdFromPath(pathname: string) {
 function sectionLinks(
   pathname: string,
   machine: MachineNavItem | null,
-  saasMode: boolean
+  saasMode: boolean,
+  isAdmin: boolean
 ): SectionLink[] {
   const machineHref = machine ? `/dashboard/machines/${machine.id}` : "/dashboard";
   const chatHref = machine ? `/dashboard/machines/${machine.id}/chat` : "/dashboard";
@@ -71,13 +71,6 @@ function sectionLinks(
         href: machine ? `${machineHref}/connections` : "/dashboard",
         icon: PlugIcon,
         active: machine ? pathname === `${machineHref}/connections` : false,
-        disabled: !machine,
-      },
-      {
-        label: "Brain",
-        href: machine ? `${machineHref}/brain` : "/dashboard",
-        icon: BrainIcon,
-        active: machine ? pathname === `${machineHref}/brain` : false,
         disabled: !machine,
       },
       {
@@ -111,12 +104,14 @@ function sectionLinks(
       active: machine ? pathname === `/dashboard/machines/${machine.id}/chat` : false,
       disabled: !machine,
     },
-    {
-      label: "Skills",
-      href: skillsHref,
-      icon: Layers3Icon,
-      active: pathname === "/dashboard/skills",
-    },
+    ...(isAdmin
+      ? [{
+          label: "Skills",
+          href: skillsHref,
+          icon: Layers3Icon,
+          active: pathname === "/dashboard/skills",
+        }]
+      : []),
   ];
 }
 
@@ -233,7 +228,7 @@ function DashboardAppSection({
   viewerEmail?: string | null;
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
-  const links = sectionLinks(pathname, selectedMachine, saasMode);
+  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin);
   const scrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => {

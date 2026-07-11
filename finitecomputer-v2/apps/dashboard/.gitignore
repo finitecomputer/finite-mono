@@ -16,7 +16,9 @@
 # next.js
 /.next/
 /.next-browser-test/
+/.next-browser-stripe-test/
 /.next-devfinity/
+/.next-web-design/
 /out/
 
 # production

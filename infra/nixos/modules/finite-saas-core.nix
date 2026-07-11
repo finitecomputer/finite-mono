@@ -25,8 +25,6 @@
       FC_CORE_ENABLE_RUNTIME_UPGRADES = "false";
       # Public Stripe price id (ConfigMap value; not a secret).
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
-      # Verified emails allowed on /api/core/v1/admin/*; empty fails closed.
-      FC_CORE_ADMIN_EMAILS = "paul@finite.vip,austin@finite.vip,skyler@finitesupply.xyz";
     };
 
     serviceConfig = {
@@ -39,8 +37,12 @@
       #   FC_CORE_DATABASE_URL  postgresql://finite:<POSTGRES_PASSWORD>@127.0.0.1:5432/finite_core
       #                         (the k8s manifest composed this from POSTGRES_PASSWORD)
       #   FC_CORE_API_TOKEN
+      #   FC_CORE_RUNNER_API_TOKEN       Runner-only lifecycle work capability
       #   FC_FINITE_PRIVATE_USAGE_API_TOKEN  (pairs with the Tinfoil-sealed
       #                         FINITE_USAGE_API_SERVICE_KEY — do NOT rotate at cutover)
+      #   WORKOS_API_KEY                 Read-only user lookup after JWT validation
+      #   WORKOS_CLIENT_ID               Expected AuthKit client_id/JWKS selector
+      #   FC_WORKOS_OPERATOR_ORG_ID      Exact org_id required by admin routes
       EnvironmentFile = "/etc/finite/core.env";
       Restart = "on-failure";
       RestartSec = 2;

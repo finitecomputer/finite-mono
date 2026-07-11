@@ -6,7 +6,9 @@ import {
   AGENT_DRAFT_COOKIE,
   AGENT_DRAFT_TTL_SECONDS,
   MAX_AGENT_PROFILE_IMAGE_BYTES,
+  agentCreationErrorMessage,
   normalizeAgentDisplayName,
+  resolveAgentCreationAccessPath,
   resolveRunnerClass,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
@@ -16,7 +18,7 @@ import {
   loadCoreBillingOverview,
   requestCoreAgentCreation,
 } from "@/lib/core-client";
-import { dashboardDevLaunchCode, getAccountAuthContext } from "@/lib/dashboard-auth";
+import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   hostedDeviceConfig,
   hostedDeviceProfileImage,
@@ -38,7 +40,7 @@ function dashboardRedirect(
     url.searchParams.set("new", "1");
     url.searchParams.set(
       "agentCreationError",
-      error instanceof Error ? error.message : "Could not create agent."
+      agentCreationErrorMessage(error)
     );
   }
   return NextResponse.redirect(url, { status: 303 });
@@ -70,41 +72,52 @@ export async function POST(request: Request) {
       runnerClass,
       idempotencyKey,
       issuedAtMs: Date.now(),
+      stripeCheckoutStartedAtMs: null,
     };
-    const sealedDraft = await sealAgentOnboardingDraft(draft);
-    const localLaunchCode = dashboardDevLaunchCode(account);
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-    const access = String(formData.get("access") ?? "");
+    const access = formData.get("access");
+    const accessPath = resolveAgentCreationAccessPath(
+      access,
+      Boolean(billing.billing?.can_create_agent),
+      process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
+    );
 
-    if (localLaunchCode || billing.billing?.can_create_agent) {
-      const creation = await launchDraft(draft, localLaunchCode);
-      const response = dashboardRedirect(request, undefined, creation.request.id);
-      clearDraftCookie(response);
-      return response;
-    }
-
-    if (access === "promo") {
-      const promoCode = String(formData.get("promoCode") ?? "").trim();
-      if (!promoCode) {
-        throw new Error("Enter your promo code.");
+    if (accessPath === "launch-code") {
+      const launchCode = String(formData.get("launchCode") ?? "").trim();
+      if (!launchCode) {
+        throw new Error("Enter your Launch Code.");
       }
-      const creation = await launchDraft(draft, promoCode);
+      const creation = await launchDraft(draft, launchCode);
       const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
 
-    if (access !== "stripe") {
-      throw new Error("Choose payment or enter a promo code.");
+    if (accessPath === "stripe") {
+      if (!stripeBillingStatus().configured) {
+        throw new Error("Payment is unavailable right now.");
+      }
+      const response = NextResponse.redirect(await billingCheckoutDestination(draft.idempotencyKey), {
+        status: 303,
+      });
+      setDraftCookie(
+        response,
+        await sealAgentOnboardingDraft({
+          ...draft,
+          stripeCheckoutStartedAtMs: Date.now(),
+        })
+      );
+      return response;
     }
-    if (!stripeBillingStatus().configured) {
-      throw new Error("Payment is unavailable right now.");
+
+    if (accessPath === "entitlement") {
+      const creation = await launchDraft(draft);
+      const response = dashboardRedirect(request, undefined, creation.request.id);
+      clearDraftCookie(response);
+      return response;
     }
-    const response = NextResponse.redirect(await billingCheckoutDestination(), {
-      status: 303,
-    });
-    setDraftCookie(response, sealedDraft);
-    return response;
+
+    throw new Error("Use a Launch Code or continue to payment.");
   } catch (error) {
     const response = dashboardRedirect(request, error);
     if (draft) {
@@ -118,7 +131,7 @@ export async function GET(request: Request) {
   return dashboardRedirect(request);
 }
 
-async function launchDraft(draft: AgentOnboardingDraft, launchCode: string) {
+async function launchDraft(draft: AgentOnboardingDraft, launchCode = "") {
   return requestCoreAgentCreation({
     displayName: draft.displayName,
     launchCode,

@@ -15,6 +15,9 @@ const eslintConfig = defineConfig([
     // Devfinity's long-lived dashboard is isolated from production and test
     // manifests for the same reason.
     ".next-devfinity/**",
+    ".next-browser-stripe-test/**",
+    // The deterministic design fixture has its own long-lived dev output.
+    ".next-web-design/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

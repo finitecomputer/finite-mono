@@ -6,13 +6,17 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:renderer": "vite --host 127.0.0.1",
-    "dev:electron": "FINITECHAT_RENDERER_URL=http://127.0.0.1:5173 electron .",
+    "dev:electron": "FINITECHAT_RENDERER_URL=http://127.0.0.1:5173 FINITECHAT_DAEMON_BINARY=../../../target/debug/finitechatd electron .",
     "build": "vite build",
-    "electron": "electron .",
-    "play": "npm run build && electron .",
-    "smoke:hermes": "npm run build && node scripts/e2e-hermes-smoke.mjs"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test electron/daemon-process.test.cjs",
+    "check": "npm run test && npm run typecheck && npm run build",
+    "electron": "FINITECHAT_DAEMON_BINARY=../../../target/debug/finitechatd electron .",
+    "play": "npm run build && npm run electron",
+    "package:mac-alpha": "npm run build && node scripts/package-macos-alpha.mjs"
   },
   "dependencies": {
+    "@finite/chat-ui": "file:../../packages/finitechat-chat-ui",
     "@vitejs/plugin-react": "^5.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

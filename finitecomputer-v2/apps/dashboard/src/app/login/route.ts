@@ -8,15 +8,12 @@ export async function GET(request: NextRequest) {
   const status = workosAuthStatus();
 
   if (!status.enabled) {
-    return NextResponse.json({ error: "WorkOS auth is not enabled" }, { status: 404 });
+    return NextResponse.json({ error: "Sign in is unavailable" }, { status: 404 });
   }
 
   if (!status.ready) {
     return NextResponse.json(
-      {
-        error: "WorkOS auth is enabled but not configured",
-        missing: status.missing,
-      },
+      { error: "Sign in is temporarily unavailable" },
       { status: 503 },
     );
   }

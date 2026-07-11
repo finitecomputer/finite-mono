@@ -1530,6 +1530,22 @@ async fn sqlite_link_session_state_machine_survives_restart_over_http() {
     let retry_claim: ClaimLinkPayloadResponse = read_json(response).await;
     assert_eq!(retry_claim.claim_token, claim.claim_token);
 
+    // Losing a successful claim response must not strand the single-use link.
+    // The exact retry survives a server restart and returns the same opaque
+    // payload and deterministic claim token.
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/link-sessions/claim",
+        &ClaimLinkPayloadRequest {
+            link_session_id: link_session_id.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed_claim: ClaimLinkPayloadResponse = read_json(response).await;
+    assert_eq!(replayed_claim, retry_claim);
+
     let response = post_json(
         app.clone(),
         "/link-sessions/ack",
@@ -1555,6 +1571,23 @@ async fn sqlite_link_session_state_machine_survives_restart_over_http() {
     assert_eq!(response.status(), StatusCode::OK);
     let ack: AckLinkPayloadResponse = read_json(response).await;
     assert!(ack.acked);
+
+    // A supervisor can lose the first successful response after the server has
+    // durably committed delivery. Replaying the exact acknowledgement must be
+    // safe across a restart so it does not erase an already-stored Device key.
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/link-sessions/ack",
+        &AckLinkPayloadRequest {
+            link_session_id: link_session_id.clone(),
+            claim_token: retry_claim.claim_token.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed_ack: AckLinkPayloadResponse = read_json(response).await;
+    assert!(replayed_ack.acked);
 
     let response = post_json(
         app.clone(),

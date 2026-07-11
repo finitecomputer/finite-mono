@@ -6,9 +6,13 @@ fast follow. Both implementations are incomplete.
 ## Decision
 
 A Runner is a generic adapter between Core's desired compute lifecycle and a
-hosting substrate. The user chooses a Runner class when creating an agent, and
-that choice is stored with the Project. It is not a process-wide environment
-switch and it does not change the dashboard or Runtime product contract.
+hosting substrate. Core assigns a Runner class from product policy when
+creating an agent and stores that placement with the Project. The user does not
+choose Kata, Phala, or another provider during onboarding. A future
+customer-facing hosting tier may select a class by promised product behavior,
+but provider names and handles remain internal. Placement is not a process-wide
+environment switch and does not change the dashboard or Runtime product
+contract.
 
 Runner interprets compute concerns only. It never implements chat, Google,
 Telegram, Sites, Brain, skills, or Hermes feature behavior.
@@ -18,7 +22,7 @@ Telegram, Sites, Brain, skills, or Hermes feature behavior.
 Core gives every Runner the same `RuntimeSpec`:
 
 - Project and Runtime ids plus an idempotent operation id;
-- selected Runner class and resource class;
+- Core-assigned Runner class and resource class;
 - one immutable Finite Product Release and Runtime image digest;
 - one durable state identity mounted at the Runtime's `/data` contract;
 - the fixed Runtime entrypoint, network endpoints, and health contract; and

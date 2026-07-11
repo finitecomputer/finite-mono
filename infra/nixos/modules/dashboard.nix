@@ -4,8 +4,8 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-07-10.4, source ef1bb99c10223b7e66a2aabfd76af1d966e42e97.
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:a3bf7f891db906ac637a40d81a38d6b51eda03054c246c4f8e1a448ab47c6268";
+    # 2026-07-11.5, source 21275a6ba6d3a3d404b638f6b778b47e779715d5.
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:879686583f298688ec22c70979845872187f9cb4077b67b7878000996f283571";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -30,7 +30,6 @@
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
-      FC_CORE_ADMIN_EMAILS = "paul@finite.vip,austin@finite.vip,skyler@finitesupply.xyz";
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s
@@ -39,6 +38,7 @@
     #   WORKOS_API_KEY
     #   WORKOS_CLIENT_ID
     #   WORKOS_COOKIE_PASSWORD
+    #   FC_WORKOS_OPERATOR_ORG_ID        UI gate only; Core revalidates org_id
     #   STRIPE_SECRET_KEY
     #   STRIPE_WEBHOOK_SECRET
     #   GOOGLE_WORKSPACE_CLIENT_ID        (optional in the manifest)

@@ -269,7 +269,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             else:
                 os.environ["FINITECHAT_BIN"] = old_bin
 
-    def test_send_translates_hermes_room_thread_and_metadata_to_bridge_json(self):
+    def test_send_preserves_hermes_route_metadata_and_notify_boolean(self):
         adapter = self.adapter()
         calls = []
 
@@ -287,6 +287,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     "conversation_id": "topic-build",
                     "thread_id": "chat-build-1",
                     "priority": "low",
+                    "notify": True,
                 },
             )
         )
@@ -301,7 +302,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(payload["reply_to_message_id"], "msg-0")
         self.assertEqual(payload["kind"], "message")
         self.assertEqual(payload["status"], "complete")
-        self.assertEqual(payload["metadata"], {"priority": "low"})
+        self.assertEqual(payload["metadata"], {"priority": "low", "notify": True})
 
     def test_edit_reuses_thread_route_from_original_send(self):
         adapter = self.adapter()

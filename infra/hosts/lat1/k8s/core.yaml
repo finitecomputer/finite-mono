@@ -62,25 +62,36 @@ spec:
                 secretKeyRef:
                   name: finite-computer-secrets
                   key: FC_CORE_API_TOKEN
+            - name: FC_CORE_RUNNER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_CORE_RUNNER_API_TOKEN
             - name: FC_FINITE_PRIVATE_USAGE_API_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: finite-computer-secrets
                   key: FC_FINITE_PRIVATE_USAGE_API_TOKEN
-                  optional: true
+            - name: WORKOS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: WORKOS_API_KEY
+            - name: WORKOS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: WORKOS_CLIENT_ID
+            - name: FC_WORKOS_OPERATOR_ORG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: finite-computer-secrets
+                  key: FC_WORKOS_OPERATOR_ORG_ID
             - name: STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID
               valueFrom:
                 configMapKeyRef:
                   name: finite-computer-config
                   key: STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID
-            # Comma-separated verified emails allowed to call /api/core/v1/admin/*.
-            # Empty (or missing key) means no admins: admin endpoints fail closed.
-            - name: FC_CORE_ADMIN_EMAILS
-              valueFrom:
-                configMapKeyRef:
-                  name: finite-computer-config
-                  key: FC_CORE_ADMIN_EMAILS
-                  optional: true
             - name: FC_CORE_RELAY_STATE_DIR
               value: /var/lib/finite-saas-core/relay
           volumeMounts:

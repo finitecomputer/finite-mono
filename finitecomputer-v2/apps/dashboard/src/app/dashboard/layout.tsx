@@ -1,5 +1,10 @@
 import { DashboardShell } from "@/components/dashboard-shell";
-import { coreProjectLabel, coreProjectMachineId, loadCoreMe } from "@/lib/core-client";
+import {
+  coreProductProjects,
+  coreProjectLabel,
+  coreProjectMachineId,
+  loadCoreMe,
+} from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 
 export default async function DashboardLayout({
@@ -13,7 +18,7 @@ export default async function DashboardLayout({
   ]);
   const machineIds = new Set<string>();
   const machines = [
-    ...(core.me?.projects ?? []).flatMap((project) => {
+    ...coreProductProjects(core.me?.projects ?? []).flatMap((project) => {
       const machineId = coreProjectMachineId(project);
       if (!machineId || machineIds.has(machineId)) {
         return [];

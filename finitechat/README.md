@@ -251,16 +251,19 @@ runtime image and provider deploy shapes.
 For team testing, run the real local SaaS from the monorepo root:
 
 ```sh
+container system start
 export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-key>
-just dev up
 just dev saas-smoke
+just dev up
 ```
 
-That path builds Hermes 0.18.2 in the canonical Runtime image, provisions a
-real Apple VM, opens the Hosted Web Device, and proves independent restart
-healing. Physical-phone and remote-Docker scripts remain historical/manual
-experiments until rewritten against the same Agent Principal + Welcome-first
-contract; they are not promotion gates.
+On a fresh checkout, the smoke command obtains local Launch Code admission,
+builds Hermes 0.18.2 in the canonical Runtime image, provisions a real Apple
+VM, opens the Hosted Web Device, and proves independent restart healing. It
+preserves the agent for the following interactive `just dev up`; skip the smoke
+on later runs with that persisted agent. Physical-phone and remote-Docker
+scripts remain historical/manual experiments until rewritten against the same
+Agent Principal + Welcome-first contract; they are not promotion gates.
 
 The normal app flow is:
 

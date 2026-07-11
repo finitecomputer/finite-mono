@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+pub mod workos_fixture;
+use workos_fixture::{
+    CLIENT_ID as WORKOS_FIXTURE_CLIENT_ID, CUSTOMER_EMAIL as WORKOS_FIXTURE_CUSTOMER_EMAIL,
+    CUSTOMER_SUBJECT as WORKOS_FIXTURE_CUSTOMER_SUBJECT, FixturePaths,
+    OPERATOR_ORG_ID as WORKOS_FIXTURE_OPERATOR_ORG_ID, prepare as prepare_workos_fixture,
+};
+
 #[derive(Debug, Clone, Copy)]
 pub enum ProcessComposeMode {
     Tui,
@@ -19,6 +26,7 @@ pub enum ProcessComposeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedProcess {
     ProcessCompose,
+    WorkosFixture,
     RustBuild,
     Postgres,
     Core,
@@ -36,8 +44,9 @@ enum ManagedProcess {
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::ProcessCompose,
+        Self::WorkosFixture,
         Self::RustBuild,
         Self::Postgres,
         Self::Core,
@@ -57,6 +66,7 @@ impl ManagedProcess {
     fn as_str(self) -> &'static str {
         match self {
             Self::ProcessCompose => "process-compose",
+            Self::WorkosFixture => "workos-fixture",
             Self::RustBuild => "rust-build",
             Self::Postgres => "postgres",
             Self::Core => "core",
@@ -130,11 +140,12 @@ impl Default for AppleHostAccess {
     }
 }
 
-const DEV_LAUNCH_CODE: &str = "off2026";
 const RUNTIME_ARTIFACT_ID: &str = "devfinity-runtime";
 const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
 const RUNNER_ID: &str = "devfinity-apple-runner";
 const RUNNER_SOURCE_HOST_ID: &str = "devfinity-apple";
+const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
+const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
 
 impl std::fmt::Display for ManagedProcess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -171,6 +182,7 @@ struct Ports {
     finitesites: u16,
     finite_brain: u16,
     finite_private_limiter: u16,
+    workos_fixture: u16,
     runtime_agent: u16,
 }
 
@@ -198,9 +210,10 @@ impl Stack {
                 finitesites: 18789,
                 finite_brain: 18790,
                 finite_private_limiter: 18002,
+                workos_fixture: 14199,
                 runtime_agent: 18080,
             },
-            core_token: "devfinity-core-token".to_string(),
+            core_token: "devfinity-core-service-token".to_string(),
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
             sites_viewer_session_token:
                 "dededededededededededededededededededededededededededededededede".to_string(),
@@ -296,6 +309,7 @@ impl Stack {
             &self.finite_home_dir(),
             &self.runtime_image_dir(),
             &self.runner_dir(),
+            &self.workos_fixture_dir(),
         ] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -321,14 +335,50 @@ impl Stack {
 
     fn write_secret_files(&self) -> Result<()> {
         self.remove_secret_files();
-        if !self.profile.includes_runtime() {
-            return Ok(());
-        }
-
         fs::create_dir_all(self.secrets_dir())
             .with_context(|| format!("failed to create {}", self.secrets_dir().display()))?;
         #[cfg(unix)]
         fs::set_permissions(self.secrets_dir(), fs::Permissions::from_mode(0o700))?;
+
+        let fixture = FixturePaths::new(self.workos_fixture_dir());
+        prepare_workos_fixture(&fixture, &self.workos_fixture_url())?;
+        let workos_api_key = fs::read_to_string(&fixture.api_key)?;
+        let customer_token = fs::read_to_string(&fixture.customer_token)?;
+        write_mode_600(
+            &self.core_secret_file(),
+            format!(
+                "export FC_CORE_API_TOKEN={}\nexport FC_CORE_RUNNER_API_TOKEN={}\nexport FC_FINITE_PRIVATE_USAGE_API_TOKEN={}\nexport WORKOS_API_KEY={}\n",
+                shell_quote(&self.core_token), shell_quote(DEVFINITY_RUNNER_TOKEN), shell_quote(DEVFINITY_USAGE_TOKEN), shell_quote(workos_api_key.trim())
+            ).as_bytes(),
+        )?;
+        write_mode_600(
+            &self.runner_auth_secret_file(),
+            format!(
+                "export FC_CORE_RUNNER_API_TOKEN={}\n",
+                shell_quote(DEVFINITY_RUNNER_TOKEN)
+            )
+            .as_bytes(),
+        )?;
+        write_mode_600(
+            &self.limiter_auth_secret_file(),
+            format!(
+                "export FC_FINITE_PRIVATE_USAGE_API_TOKEN={}\n",
+                shell_quote(DEVFINITY_USAGE_TOKEN)
+            )
+            .as_bytes(),
+        )?;
+        write_mode_600(
+            &self.dashboard_auth_secret_file(),
+            format!(
+                "export FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN={}\n",
+                shell_quote(customer_token.trim())
+            )
+            .as_bytes(),
+        )?;
+
+        if !self.profile.includes_runtime() {
+            return Ok(());
+        }
 
         match self.inference_mode {
             InferenceMode::ChainedLimiter => {
@@ -359,7 +409,14 @@ impl Stack {
     }
 
     fn remove_secret_files(&self) {
-        for path in [self.limiter_secret_file(), self.runner_secret_file()] {
+        for path in [
+            self.limiter_secret_file(),
+            self.runner_secret_file(),
+            self.core_secret_file(),
+            self.runner_auth_secret_file(),
+            self.limiter_auth_secret_file(),
+            self.dashboard_auth_secret_file(),
+        ] {
             remove_file_best_effort(&path);
         }
         if self.secrets_dir().exists()
@@ -606,6 +663,7 @@ impl Stack {
         let _ = writeln!(yaml, "log_level: info");
         let _ = writeln!(yaml, "processes:");
         self.write_rust_build(&mut yaml);
+        self.write_workos_fixture(&mut yaml);
         self.write_postgres(&mut yaml);
         self.write_core(&mut yaml);
         self.write_finitechat(&mut yaml);
@@ -686,6 +744,38 @@ impl Stack {
         self.write_probe_timing(yaml, 3, 2, 5, 30);
     }
 
+    fn write_workos_fixture(&self, yaml: &mut String) {
+        let process = ManagedProcess::WorkosFixture;
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Local read-only WorkOS JWKS and user fixture",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[format!(
+                "exec cargo run -p devfinity -- workos-fixture --listen 127.0.0.1:{} --state-dir {}",
+                self.ports.workos_fixture,
+                shell_quote(&self.workos_fixture_dir().display().to_string())
+            )],
+            &[],
+        );
+        self.write_http_probe(
+            yaml,
+            &format!("/sso/jwks/{WORKOS_FIXTURE_CLIENT_ID}"),
+            self.ports.workos_fixture,
+            1,
+            2,
+            3,
+            45,
+        );
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
+    }
+
     fn write_postgres_script(&self) -> Result<()> {
         let script = self.postgres_script_path();
         let contents = format!(
@@ -744,7 +834,13 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[String::from("exec cargo run -p finite-saas-core -- serve")],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.core_secret_file().display().to_string())
+                ),
+                String::from("exec cargo run -p finite-saas-core -- serve"),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
@@ -752,12 +848,28 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Postgres);
         let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::WorkosFixture);
+        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
             &[
                 ("FC_CORE_DATABASE_URL", self.database_url()),
-                ("FC_CORE_API_TOKEN", self.core_token.clone()),
                 ("FC_CORE_BIND", format!("127.0.0.1:{}", self.ports.core)),
+                ("WORKOS_CLIENT_ID", WORKOS_FIXTURE_CLIENT_ID.to_string()),
+                ("WORKOS_API_BASE_URL", self.workos_fixture_url()),
+                (
+                    "WORKOS_JWKS_URL",
+                    format!(
+                        "{}/sso/jwks/{}",
+                        self.workos_fixture_url(),
+                        WORKOS_FIXTURE_CLIENT_ID
+                    ),
+                ),
+                ("WORKOS_ISSUER", self.workos_fixture_url()),
+                (
+                    "FC_WORKOS_OPERATOR_ORG_ID",
+                    WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+                ),
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.core, 2, 2, 3, 45);
@@ -959,7 +1071,6 @@ wait "$postgres_pid"
                 "exec cargo run -p finite-saas-local -- finite-private-limiter-up ",
                 "--listen-addr {} ",
                 "--core-url {} ",
-                "--core-api-token {} ",
                 "--dashboard-url {} ",
                 "--agent-host {}"
             ),
@@ -969,7 +1080,6 @@ wait "$postgres_pid"
                 self.ports.finite_private_limiter
             )),
             shell_quote(&self.core_url()),
-            shell_quote(&self.core_token),
             shell_quote(&self.dashboard_url()),
             shell_quote(&self.apple_host_access.runtime_host),
         );
@@ -980,7 +1090,19 @@ wait "$postgres_pid"
             &self.repo_root,
             process,
         );
-        self.write_managed_command(yaml, process, &[source_secret, command], &[]);
+        self.write_managed_command(
+            yaml,
+            process,
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.limiter_auth_secret_file().display().to_string())
+                ),
+                source_secret,
+                command,
+            ],
+            &[],
+        );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
@@ -1088,7 +1210,10 @@ wait "$postgres_pid"
 
     fn write_runner(&self, yaml: &mut String) {
         let process = ManagedProcess::Runner;
-        let mut command = Vec::new();
+        let mut command = vec![format!(
+            ". {}",
+            shell_quote(&self.runner_auth_secret_file().display().to_string())
+        )];
         if self.inference_mode == InferenceMode::DirectKeyOverride {
             command.push(format!(
                 ". {}",
@@ -1115,7 +1240,6 @@ wait "$postgres_pid"
             &[
                 ("FC_RUNNER_CLASS", "apple_container".to_string()),
                 ("FC_CORE_URL", self.core_url()),
-                ("FC_CORE_API_TOKEN", self.core_token.clone()),
                 (
                     "FC_RUNNER_RUNTIME_ARTIFACT_ID",
                     RUNTIME_ARTIFACT_ID.to_string(),
@@ -1185,10 +1309,16 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[format!(
-                "exec npm run dev -- --hostname 127.0.0.1 --port {}",
-                self.ports.dashboard
-            )],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.dashboard_auth_secret_file().display().to_string())
+                ),
+                format!(
+                    "exec npm run dev -- --hostname 127.0.0.1 --port {}",
+                    self.ports.dashboard
+                ),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
@@ -1210,21 +1340,23 @@ wait "$postgres_pid"
             ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
             ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
             (
+                "FC_WORKOS_OPERATOR_ORG_ID",
+                WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+            ),
+            (
                 "FC_DASHBOARD_DEV_EMAIL",
-                "devfinity@finite.computer".to_string(),
+                WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
             ),
             (
                 "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                "user_devfinity".to_string(),
+                WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
             ),
-            ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
             (
                 "FC_DASHBOARD_DEFAULT_RUNNER_CLASS",
                 "apple_container".to_string(),
             ),
             ("FC_DASHBOARD_RUNNER_CLASSES", "apple_container".to_string()),
             ("FC_CORE_BASE_URL", self.core_url()),
-            ("FC_CORE_API_TOKEN", self.core_token.clone()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
             (
@@ -1732,6 +1864,9 @@ wait "$postgres_pid"
                         ManagedProcess::ProcessCompose.as_str().to_string(),
                         self.process_compose_file.display().to_string(),
                     ],
+                    ManagedProcess::WorkosFixture => {
+                        vec![String::from("devfinity"), String::from("workos-fixture")]
+                    }
                     ManagedProcess::RustBuild => vec![String::from("cargo"), String::from("build")],
                     ManagedProcess::Postgres => vec![
                         String::from("bash"),
@@ -2001,6 +2136,14 @@ wait "$postgres_pid"
         self.process_state_dir(ManagedProcess::Runner)
     }
 
+    fn workos_fixture_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::WorkosFixture)
+    }
+
+    fn workos_fixture_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.workos_fixture)
+    }
+
     fn secrets_dir(&self) -> PathBuf {
         self.run_dir.join("secrets")
     }
@@ -2011,6 +2154,19 @@ wait "$postgres_pid"
 
     fn runner_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("runner.sh")
+    }
+
+    fn core_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("core.sh")
+    }
+    fn runner_auth_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("runner-auth.sh")
+    }
+    fn limiter_auth_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("limiter-auth.sh")
+    }
+    fn dashboard_auth_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("dashboard-auth.sh")
     }
 
     fn process_state_dir(&self, process: ManagedProcess) -> PathBuf {
@@ -2038,17 +2194,19 @@ wait "$postgres_pid"
             ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
             ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
             (
+                "FC_WORKOS_OPERATOR_ORG_ID",
+                WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+            ),
+            (
                 "FC_DASHBOARD_DEV_EMAIL",
-                "devfinity@finite.computer".to_string(),
+                WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
             ),
             (
                 "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                "user_devfinity".to_string(),
+                WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
             ),
-            ("FC_DASHBOARD_DEV_LAUNCH_CODE", DEV_LAUNCH_CODE.to_string()),
             ("FC_CORE_URL", self.core_url()),
             ("FC_CORE_BASE_URL", self.core_url()),
-            ("FC_CORE_API_TOKEN", self.core_token.clone()),
             ("FC_CORE_DATABASE_URL", self.database_url()),
             ("FC_DASHBOARD_URL", self.dashboard_url()),
             ("FINITECHAT_SERVER_URL", self.finitechat_url()),
@@ -2670,7 +2828,9 @@ mod tests {
         assert!(
             yaml.contains("finitechat:\n    description: \"Local Finite Chat delivery server\"")
         );
-        assert_eq!(yaml.matches("restart: always").count(), 2);
+        assert_eq!(yaml.matches("restart: always").count(), 3);
+        assert!(yaml.contains("workos-fixture:"));
+        assert!(yaml.contains("workos-fixture --listen 127.0.0.1:14199"));
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
@@ -2699,7 +2859,9 @@ mod tests {
         assert!(yaml.contains("FC_RUNNER_CLASS=apple_container"));
         assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FINITE_SITES_API"));
-        assert!(yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE=off2026"));
+        assert!(!yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE"));
+        assert!(!yaml.contains("FC_CORE_RUNNER_API_TOKEN="));
+        assert!(!yaml.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN="));
         assert!(yaml.contains("npm ci"));
         assert!(
             yaml.contains("dashboard-deps:\n        condition: process_completed_successfully")

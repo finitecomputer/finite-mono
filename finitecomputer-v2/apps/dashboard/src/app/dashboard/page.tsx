@@ -5,7 +5,6 @@ import { randomUUID } from "node:crypto";
 import {
   ActivityIcon,
   BanIcon,
-  CheckCircle2Icon,
   CreditCardIcon,
   KeyRoundIcon,
   Loader2Icon,
@@ -18,7 +17,6 @@ import {
 import {
   approveFinitePrivateGrantAction,
   cancelFailedAgentCreationRequestAction,
-  claimCoreImportCandidatesAction,
   issueFinitePrivateApiKeyAction,
   resetFinitePrivateGrantAction,
   revokeFinitePrivateApiKeyAction,
@@ -33,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   coreAgentCreationRequestForProject,
+  coreProductProjects,
   coreProjectLocationLabel,
   coreProjectLaunchStatusLabel,
   coreProjectLabel,
@@ -44,7 +43,6 @@ import {
   type CoreFinitePrivateApiKey,
   type CoreFinitePrivateGrant,
   type CoreMeResult,
-  type CoreProjectImportCandidate,
   type CoreVisibleProject,
 } from "@/lib/core-client";
 import {
@@ -57,7 +55,6 @@ import {
 } from "@/lib/billing-return";
 import { coreProjectOverviewHref } from "@/lib/dashboard-machine-access";
 import {
-  dashboardDevLaunchCode,
   getAccountAuthContext,
   loadOptionalViewerContext,
 } from "@/lib/dashboard-auth";
@@ -65,6 +62,7 @@ import { stripeBillingStatus } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
   defaultRunnerClass,
+  draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
@@ -78,6 +76,7 @@ function shortValue(value: string | null | undefined, length = 12) {
 }
 
 type DashboardSearchParams = {
+  agentRemoval?: string | string[];
   agentCreationError?: string | string[];
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
@@ -98,6 +97,7 @@ export default async function DashboardPage({
   searchParams: Promise<DashboardSearchParams>;
 }) {
   const query = await searchParams;
+  const agentRemoval = firstSearchParam(query.agentRemoval);
   const agentCreationError = firstSearchParam(query.agentCreationError);
   const billingReturnParam = parseBillingReturnParam(firstSearchParam(query.billing));
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
@@ -121,17 +121,14 @@ export default async function DashboardPage({
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
       account.workosUserId
     );
-    const coreProjects = core.me?.projects ?? [];
+    const coreProjects = coreProductProjects(core.me?.projects ?? []);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
-    const claimableCandidates = core.me?.claimable_candidates ?? [];
     const requestedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching"
     );
     const failedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "failed"
     );
-    // Imports are intentionally hidden from the finite.computer self-serve surface for Oslo.
-    const showImportCandidates = false;
     const firstAgentHref = coreProjects
       .map((project) => coreProjectOverviewHref(project))
       .find((href): href is string => Boolean(href));
@@ -175,9 +172,14 @@ export default async function DashboardPage({
     }
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
-    const localDevelopmentLaunchCode = dashboardDevLaunchCode(account);
 
-    if (draft && billing.billing?.can_create_agent) {
+    if (
+      draftStartedStripeCheckout(draft) &&
+      billingReturnParam === "success" &&
+      billing.billing?.can_create_agent &&
+      billing.billing.customer_org.billing_class === "standard" &&
+      !billing.billing.requires_billing
+    ) {
       redirect("/dashboard/agent-creation-requests/complete");
     }
 
@@ -209,14 +211,12 @@ export default async function DashboardPage({
     return (
       <div className="ocean-page-stack">
         <PendingRefresh enabled={hasPendingAgentCreation} />
+        {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
         {coreProjects.length > 0 && !isNewAgentFlow ? (
           <CoreProjectsPanel
             projects={coreProjects}
             agentCreationRequests={agentCreationRequests}
           />
-        ) : null}
-        {showImportCandidates && claimableCandidates.length ? (
-          <CoreImportCandidatesPanel candidates={claimableCandidates} />
         ) : null}
         {pendingAgentCreationRequests.length ? (
           <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
@@ -238,7 +238,8 @@ export default async function DashboardPage({
             error={agentCreationError}
             draft={draft}
             requiresAccess={
-              !billing.billing?.can_create_agent && !localDevelopmentLaunchCode
+              process.env.FC_DASHBOARD_RUNTIME_MODE === "canary" ||
+              !billing.billing?.can_create_agent
             }
           />
         ) : null}
@@ -294,6 +295,21 @@ export default async function DashboardPage({
 
       <FinitePrivateAdminPanel result={finitePrivateAdmin} />
     </div>
+  );
+}
+
+function AgentRemovalRequestedNotice() {
+  return (
+    <section
+      className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4"
+      role="status"
+    >
+      <h2 className="font-semibold">Agent removal started</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Its compute is being removed. Saved agent data is retained. It will
+        disappear from your dashboard when removal finishes.
+      </p>
+    </section>
   );
 }
 
@@ -587,8 +603,7 @@ function CoreProjectsPanel({
         <div>
           <h1 className="ocean-utility-card__title">Agent</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your agent and open its Hosted Web Device, with Electron and native Devices
-            joining the same Finite Chat room later.
+            Manage your agent and chat with it from your dashboard.
           </p>
         </div>
       </div>
@@ -726,7 +741,7 @@ function CoreAgentCreationFailedPanel({
             <div className="min-w-0">
               <h2 className="truncate font-semibold text-foreground">{request.display_name}</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                {request.failure_message ?? "The launch failed before a runtime came online."}
+                {request.failure_message ?? "The launch failed before your agent became ready."}
               </p>
             </div>
             <FormActionButton variant="outline" pendingLabel="Resetting...">
@@ -736,62 +751,6 @@ function CoreAgentCreationFailedPanel({
           </form>
         ))}
       </div>
-    </section>
-  );
-}
-
-function CoreImportCandidatesPanel({
-  candidates,
-}: {
-  candidates: CoreProjectImportCandidate[];
-}) {
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon ocean-utility-card__icon--amber" aria-hidden>
-          <CheckCircle2Icon className="size-5" />
-        </span>
-        <div>
-          <h1 className="ocean-utility-card__title">Import existing bots</h1>
-          <p className="text-sm text-muted-foreground">
-            Add the bots already tied to this email.
-          </p>
-        </div>
-      </div>
-
-      <form action={claimCoreImportCandidatesAction} className="grid gap-4">
-        <div className="grid gap-3">
-          {candidates.map((candidate) => (
-            <label
-              key={candidate.id}
-              className="grid cursor-pointer gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[auto_minmax(0,1fr)_auto]"
-            >
-              <input
-                className="mt-1 size-4"
-                type="checkbox"
-                name="candidateId"
-                value={candidate.id}
-                defaultChecked
-              />
-              <span className="min-w-0">
-                <span className="block truncate font-semibold text-foreground">
-                  {candidate.host_facts.display_name}
-                </span>
-                <span className="mt-1 block truncate font-mono text-xs text-muted-foreground">
-                  {candidate.source_host_id} / {candidate.source_machine_id}
-                </span>
-              </span>
-              <span className="text-sm text-muted-foreground">
-                {candidate.host_facts.runtime_status}
-              </span>
-            </label>
-          ))}
-        </div>
-        <FormActionButton className="w-fit" pendingLabel="Importing...">
-          <CheckCircle2Icon />
-          Import selected
-        </FormActionButton>
-      </form>
     </section>
   );
 }
@@ -908,7 +867,7 @@ function emptyAccountMessage(core: CoreMeResult) {
   if (core.error) {
     return core.error;
   }
-  if (core.me?.projects.length === 0 && core.me.claimable_candidates.length === 0) {
+  if (coreProductProjects(core.me?.projects ?? []).length === 0) {
     return "Create your first agent to continue.";
   }
   return "Choose one of your agents to continue.";

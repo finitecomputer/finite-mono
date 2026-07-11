@@ -43,8 +43,10 @@ Every rung must exercise the same product shape:
   historical `https://kimi-k2-6.finite.containers.tinfoil.dev/v1` limiter URL
   (docs/service-dependencies.md, Finite Private Routing Debt);
 - acceptance is a human-usable conversation in the canonical BoxOne-derived
-  dashboard UI plus machine-readable evidence; local-device coverage proves
-  the same Room/AppState contract and does not define a competing UX.
+  dashboard UI. Automated rungs keep their normal test artifacts, while the
+  blessed internal production canary does not require a bespoke evidence
+  generator or report; local-device coverage proves the same Room/AppState
+  contract and does not define a competing UX.
 
 If a lower rung fails, do not climb. Fix the lowest failing contract first.
 
@@ -86,6 +88,12 @@ rows are mandatory. Destructive store/volume/key-loss, Recovery Snapshot,
 Runtime Retirement, and Purge rows are retained below as explicit post-MVP
 recovery TODOs; they do not block the trusted-cohort launch.
 
+The named internal production canary manually exercises only the normal
+dashboard-initiated Agent Runtime restart and proves a real turn before and
+after it in the same visible conversation. The shared Finite Chat server,
+Hosted Web Device, and other process restart rows stay in automated integration
+coverage; they are not manual canary steps.
+
 | Failure | Must remain usable | Required healing proof |
 | --- | --- | --- |
 | Chat server unavailable, then restarted | Each Device can preserve locally accepted outbound state; no Device becomes room authority | Server return causes ordered catch-up; every message has one stable id and appears at most once; Hermes produces no duplicate turn |
@@ -106,13 +114,13 @@ recovery TODOs; they do not block the trusted-cohort launch.
 | Runtime Retirement is requested | User access is paused without erasing recovery material | Recovery Readiness passes before compute removal; retained snapshot and user export remain available |
 | Purge User Data is requested | Nothing is deleted by stop, billing state, or retirement | Separate authorization, retention expiry, export offer, and explicit confirmation are proven before volume and snapshot deletion |
 
-Each scenario emits a JSON report containing component versions, device ids,
-Room/topic ids, pre/post cursors, stable message ids, process stop/start times,
-reconnect latency, duplicate counts, Recovery Snapshot id, Recovery Set
-manifest, key-authority path used, bundled and installed baseline checksums,
-whether an explicit skills sync was invoked, Hermes PID, pre/post data
-checksums, and preserved-state checks. A health check or screenshot alone is
-not acceptance.
+Automated scenarios may emit machine-readable artifacts when the existing
+harness naturally provides them. Missing report machinery is not itself an
+implementation gate, and deferred destructive-recovery fields do not apply to
+the internal production canary. A health check alone is still not proof of a
+human-usable chat. The production canary uses the normal product surface; if a
+worksheet, hidden diagnostic, shell, or manual state reconstruction is needed
+to decide whether it worked, the canary failed.
 
 ## Rung 1: Local Real-Hermes Sidecar And Devices
 
@@ -154,16 +162,18 @@ Operator command on Apple silicon and macOS 26 or newer:
 ```bash
 container system start
 export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<one operator-held deployed key>
+just dev saas-smoke
 just dev up
 ```
 
-`just dev saas-smoke` is the credential-gated acceptance. Devfinity builds the
-one Hermes 0.18.2 image, registers it as a promoted local artifact, runs Core
-and the generic Runner, launches an Apple VM with a durable `/data` bind mount,
-and opens the same Hosted Web Device used by the dashboard. The preferred
-chained-limiter path gives each runtime a Core-issued key while keeping the
-operator key in the local limiter process; the explicit direct Runner override
-is a fallback only.
+On a fresh checkout, `just dev saas-smoke` is both the Launch Code bootstrap and
+credential-gated acceptance; skip it on later interactive runs with a persisted
+agent. Devfinity builds the one Hermes 0.18.2 image, registers it as a promoted
+local artifact, runs Core and the generic Runner, launches an Apple VM with a
+durable `/data` bind mount, and opens the same Hosted Web Device used by the
+dashboard. The preferred chained-limiter path gives each runtime a Core-issued
+key while keeping the operator key in the local limiter process; the explicit
+direct Runner override is a fallback only.
 
 Shape:
 
@@ -282,10 +292,17 @@ configured storage size before any production decision.
 
 Purpose: prove the user-facing self-serve flow.
 
+This rung is the later customer-facing target, not the narrower internal
+production canary. The canary proves WorkOS auth, single-use Launch Code
+redemption, Kata launch, real Hosted Web chat, and same-volume Agent Runtime
+restart; it does not stand in for Stripe, customer admission, Brain, Sites
+list/share, or the backup/empty-target-restore gate below.
+
 Shape:
 
-- user signs in through Account Auth, names the agent, chooses an icon, and
-  selects an offered Runner class;
+- user signs in through Account Auth, names the agent, and chooses an icon;
+- Core assigns the standard Runner class from product policy without exposing
+  provider selection in onboarding;
 - Core creates Project, Finite Private grant, runtime record, and launch request;
 - Core routes the request to a compatible Runner without a global-queue race;
 - the Runner deploys the same promoted OCI runtime image used by every lower rung;

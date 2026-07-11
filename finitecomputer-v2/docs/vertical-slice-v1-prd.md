@@ -6,9 +6,10 @@ Date: 2026-07-09.
 
 ## Outcome
 
-Ship the shortest credible Box1-parity SaaS path: a person signs up, pays,
-names an agent, launches it, and chats with it in the dashboard. Restarting any
-one component must not strand the user or silently create a different identity.
+Ship the shortest credible Box1-parity SaaS path: a person signs up, gets an
+approved entitlement, names an agent, launches it, and chats with it in the
+dashboard. Restarting any one component must not strand the user or silently
+create a different identity.
 This slice is intentionally small enough to ship and iterate; the existing
 Finite Chat experience remains the product northstar.
 
@@ -19,9 +20,13 @@ Management, or Runner into a product control plane.
 ## Golden Path
 
 1. Sign up or log in through WorkOS and land in the personal dashboard.
-2. Complete billing, or see the already-active entitlement.
-3. Choose an agent name, icon, and Runner class. Kata is the first production
-   choice; Phala follows through the same provider-neutral contract.
+2. Redeem an approved single-use Launch Code or complete Stripe Checkout, or
+   see the already-active entitlement. Launch Codes remain the intentional
+   white-glove and sponsored-access path; the paid customer run must exercise
+   Stripe.
+3. Choose an agent name and icon. Core assigns the standard hosting class from
+   product policy; Kata is the first production Runner and Phala follows behind
+   the same provider-neutral contract.
 4. Launch one lockstep Finite Product Release. The dashboard shows bounded,
    understandable launch progress and a retryable failure state.
 5. Open **Chat** in the dashboard. Account Auth opens the user's durable Hosted
@@ -92,10 +97,11 @@ product-feature commands or payloads on Runtime Management:
 
 ## First-Slice Acceptance Criteria
 
-A fresh email user can complete WorkOS auth, billing, name/icon/Runner choice,
-launch, and a real dashboard chat turn without docs, raw JSON, Electron, or an
-operator. The user sees useful waiting and retry states at billing, launch, and
-chat connection boundaries.
+A fresh email user can complete WorkOS auth, approved entitlement,
+name/icon selection, launch, and a real dashboard chat turn without choosing
+infrastructure, reading docs or raw JSON, installing Electron, or involving an
+operator in the walkthrough. The user sees useful waiting and retry states at
+entitlement, launch, and chat connection boundaries.
 
 The same release boots with one resident Hermes sidecar and event-driven
 inbound delivery. No Hermes polling or silent CLI fallback is allowed. Agent,
@@ -105,6 +111,12 @@ browser state, argv, logs, runtime facts, or release evidence.
 
 The release manifest pins all first-party hosted services and binaries plus the
 Hermes version. Promotion rejects unversioned or drifting components.
+
+The internal production canary proves the normal path and does not pre-build a
+general stuck-launch cancellation/reconciliation system. A stuck canary is a
+failed canary and its concrete cause is fixed before retrying. A bounded user
+escape with provider-cleanup and exactly-once entitlement semantics remains a
+customer-admission gate.
 
 ## Current Status
 
@@ -123,11 +135,13 @@ Implemented in the current first-pass slice:
 
 Remaining launch gates:
 
-- [ ] Add icon selection and persist a Project-scoped Runner class from the
-  creation form through the provider-neutral RuntimeSpec (the current form
-  captures only the agent name).
-- [ ] Run one actual full-stack browser canary through auth/billing, agent
-  creation, Runner launch, Hosted Web chat, send/receive, and restart.
+- [x] Offer agent picture selection and persist the Core-assigned Runner class
+  through the sealed creation draft and provider-neutral RuntimeSpec without a
+  provider selector in onboarding.
+- [ ] Run one actual full-stack browser canary through auth, single-use Launch
+  Code redemption, agent creation, Runner launch, Hosted Web chat,
+  send/receive, and restart. Exercise Stripe separately in the paid-customer
+  run.
 - [ ] Implement and prove the generic Kata adapter on finite-lat-1; run Phala
   unchanged as the fast-follow conformance target.
 - [ ] Configure production secret references, build/promote the pinned images,
@@ -158,8 +172,14 @@ claim than the evidence supports.
 - Integration: real Finite Chat server, agent, and Hosted Device exchange
   messages before and after independent restarts with the same identities and
   Room.
-- Product canary: one machine-readable run records auth, billing, launch,
-  first chat turn, restart, recovery, component versions, and Runner evidence.
+- Product canary: the named human completes the blessed production run. Agents
+  may record facts already available during that run, but a bespoke
+  machine-readable report or new evidence instrumentation is not a gate. The
+  human uses only the normal product; needing a worksheet, debug surface, or
+  operator reconstruction is a failed canary rather than an evidence task. The
+  internal canary completes real agent turns before and after a dashboard-
+  initiated same-volume Agent Runtime restart in the same visible conversation;
+  shared-service process restarts remain automated integration coverage.
 - Architecture review: every new feature records its answers to the five-part
   thin-coupling test. A feature-specific Runtime Management or Runner change is
   a failed review, even if its demo works.

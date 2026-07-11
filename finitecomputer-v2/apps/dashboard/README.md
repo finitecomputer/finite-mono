@@ -80,13 +80,49 @@ the user's own machine.
 
 ## Run locally
 
+For day-to-day web chat and recovery design, use the real dashboard UI with the
+deterministic local Core and Hosted Device fixture:
+
 ```bash
-cd apps/dashboard
-npm install
-npm run dev
+cd finitecomputer-v2/apps/dashboard
+npm ci
+cd ../../..
+just dev web-design
 ```
 
-Then open `http://localhost:3000`.
+Open
+`http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat`. Conversation
+state survives stopping and restarting the command. In another terminal:
+
+```bash
+just dev web-design-state unavailable
+just dev web-design-state recovering
+just dev web-design-state healthy
+just dev web-design-reset
+```
+
+These commands change only the local fixture under
+`.local-state/web-design-fixture/`. They never contact a provider, Agent
+Runtime, or production service. The fixture backs the canonical dashboard
+components and routes; it is not a second UI and does not prove runtime
+acceptance.
+
+The fixture is intentionally scoped to chat, the machine overview, restart
+presentation, and bounded recovery states. Runtime-owned Stop and Connections
+behavior require the complete devfinity stack. The fixture and devfinity both
+default to port 13002, so run only one at a time or choose another fixture port:
+
+```bash
+FC_WEB_DESIGN_PORT=13003 just dev web-design
+```
+
+For environment-backed Core or WorkOS development, run `npm run dev` from this
+directory and open `http://localhost:3000`.
+
+Before handing off web changes, run `just web-check` from the repository root.
+It performs the locked dashboard install, unit tests, lint, and production
+build. `npm run test:browser` adds the Chrome-backed browser regression suite
+that CI runs; it requires a local Chrome installation.
 
 The app assumes the repo root is two directories above the app. If you ever run
 it from a different filesystem layout, set:
@@ -99,3 +135,6 @@ FC_REPO_ROOT=/absolute/path/to/finitecomputer-v2
 
 - `/` landing page
 - `/dashboard` self-serve dashboard
+- `/dashboard/machines/skyler-fixture/chat` durable design-fixture chat
+- `/dev/sticker-sheet` development-only visual source of truth for dashboard
+  tokens, typography, controls, and statuses

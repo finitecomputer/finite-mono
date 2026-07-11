@@ -11,12 +11,21 @@ name = "finitechatd"
 path = "src/main.rs"
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 clap.workspace = true
 finitechat-core = { path = "../finitechat-core" }
+finitechat-http = { path = "../finitechat-http" }
 futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+finitechat-server = { path = "../finitechat-server" }
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true

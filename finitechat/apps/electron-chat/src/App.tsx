@@ -20,41 +20,85 @@ import {
   SquarePenIcon,
   UserPlusIcon,
   UsersIcon,
+  WrenchIcon,
   XIcon,
 } from "lucide-react";
-import { FiniteBrand } from "@/components/finite-brand";
 import {
-  AppRoomMemberSummary,
-  AppRoomSummary,
-  AppState,
-  AppProfileSummary,
-  AppTopicSummary,
-  AppTypingMember,
-  ChatMediaAttachment,
-  ChatMediaKind,
-  ChatMessage,
-  OutboundAttachment,
-  dispatch,
-  getState,
+  activitiesForChat,
+  attachmentSendError,
+  beginPendingChatTurn,
+  isUserPrincipalMessage,
+  initialChatSnapshotSource,
+  liveActivityLabel,
+  messageContent,
+  messagesForChat,
+  nextChatSnapshotGeneration,
+  pendingTurnIsComplete,
+  pendingTurnMatchesSelection,
+  recordChatSnapshot,
+  roomDetailsForSelection,
+  selectedChat as selectChat,
+  shouldApplyHttpChatSnapshot,
+  shouldApplyStreamChatSnapshot,
+  streamSnapshotNeedsNewGeneration,
+  transcriptItems,
+  type AppAction,
+  type AppProfileSummary,
+  type AppRoomMemberSummary,
+  type AppRoomSummary,
+  type AppState,
+  type AppTopicSummary,
+  type AppTypingMember,
+  type ChatMediaAttachment,
+  type ChatMediaKind,
+  type ChatMessage,
+  type PendingChatTurn,
+} from "@finite/chat-ui";
+import { FiniteBrand } from "./components/finite-brand";
+import {
+  attachmentMediaUrl,
+  dispatch as daemonDispatch,
+  getState as daemonGetState,
   resolveDaemonUrl,
   subscribeToUpdates,
+  uploadAttachments as daemonUploadAttachments,
+  type AttachmentUpload,
 } from "./daemon";
-import { LegacyFiniteChatSourceMarker } from "./legacy/LegacyFiniteChatSourceMarker";
 
 type DesktopIdentityStatus = {
   secureStorageAvailable: boolean;
   hasStoredAccountSecret: boolean;
+  linking: boolean;
 };
 
 type DesktopOnboardingStatus = {
   completed: boolean;
 };
 
-const MAX_COMPOSER_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+type DesktopDeviceLinkReady = {
+  link_session_id: string;
+  target_device_id: string;
+  approval_url: string;
+};
+
+type DesktopDeviceLinkStatus =
+  | { status: "idle" }
+  | { status: "waiting"; ready: DesktopDeviceLinkReady }
+  | { status: "linked" }
+  | { status: "failed"; message: string }
+  | { status: "cancelled" };
+
+const MAX_COMPOSER_ATTACHMENTS = 8;
+const MAX_COMPOSER_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_COMPOSER_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
 const HOME_TOPIC_ID = "home";
 
-type ComposerAttachment = OutboundAttachment & {
+type ComposerAttachment = {
   id: string;
+  filename: string;
+  mime_type: string;
+  kind: ChatMediaKind;
+  bytes: ArrayBuffer;
   size: number;
 };
 
@@ -83,17 +127,22 @@ export function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [identityStatus, setIdentityStatus] = useState<DesktopIdentityStatus | null>(null);
   const [onboardingStatus, setOnboardingStatus] = useState<DesktopOnboardingStatus | null>(null);
-  const [identitySecret, setIdentitySecret] = useState("");
   const [identityBusy, setIdentityBusy] = useState(false);
+  const [deviceLinkStatus, setDeviceLinkStatus] = useState<DesktopDeviceLinkStatus>({ status: "idle" });
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [localPendingMessages, setLocalPendingMessages] = useState<LocalPendingMessage[]>([]);
-  const [awaitingReplyRoomIds, setAwaitingReplyRoomIds] = useState<string[]>([]);
+  const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const agentProfileInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
   const lastDesktopTargetUrlRef = useRef<{ url: string; timestamp: number } | null>(null);
   const typingRoomRef = useRef<string | null>(null);
   const typingStopTimerRef = useRef<number | null>(null);
+  const snapshotSourceRef = useRef(initialChatSnapshotSource());
+  const streamReconnectPendingRef = useRef(false);
+  const linkedOnboardingHandledRef = useRef(false);
+  const hasState = state !== null;
+  const daemonReadyForIdentity = !window.finiteChatDesktop || identityStatus?.hasStoredAccountSecret === true;
 
   useEffect(() => {
     let cancelled = false;
@@ -113,54 +162,100 @@ export function App() {
     };
   }, []);
 
+  const applyHttpSnapshot = useCallback((next: AppState, requestGeneration: number) => {
+    const source = snapshotSourceRef.current;
+    if (!shouldApplyHttpChatSnapshot(source, requestGeneration, next.rev)) {
+      return false;
+    }
+    snapshotSourceRef.current = recordChatSnapshot(source, next.rev, false);
+    setState(next);
+    return true;
+  }, []);
+
+  const applyStreamSnapshot = useCallback((next: AppState) => {
+    const source = snapshotSourceRef.current;
+    // Stream events are ordered. A lower revision therefore means the local
+    // daemon restarted and this event is the new authoritative baseline, even
+    // when the desktop IPC pump reconnected without surfacing a transport gap.
+    if (streamSnapshotNeedsNewGeneration(source, next.rev, streamReconnectPendingRef.current)) {
+      streamReconnectPendingRef.current = false;
+      snapshotSourceRef.current = nextChatSnapshotGeneration(source);
+    }
+    const current = snapshotSourceRef.current;
+    if (!shouldApplyStreamChatSnapshot(current, next.rev)) {
+      return false;
+    }
+    snapshotSourceRef.current = recordChatSnapshot(current, next.rev, true);
+    setState(next);
+    return true;
+  }, []);
+
   const refresh = useCallback(async () => {
-    if (!daemonUrl) {
+    if (!daemonUrl || !daemonReadyForIdentity) {
       return;
     }
+    const requestGeneration = snapshotSourceRef.current.generation;
     setBusy(true);
     setError(null);
     try {
-      setState(await getState(daemonUrl));
+      applyHttpSnapshot(asAppState(await daemonGetState(daemonUrl)), requestGeneration);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
-  }, [daemonUrl]);
+  }, [applyHttpSnapshot, daemonReadyForIdentity, daemonUrl]);
 
   useEffect(() => {
-    if (!daemonUrl) {
+    if (!daemonUrl || !daemonReadyForIdentity) {
       return;
     }
     void refresh();
+  }, [daemonReadyForIdentity, daemonUrl, refresh]);
+
+  useEffect(() => {
+    if (!daemonUrl || !daemonReadyForIdentity || !hasState) {
+      return;
+    }
+    if (!window.finiteChatDesktop) {
+      snapshotSourceRef.current = nextChatSnapshotGeneration(snapshotSourceRef.current);
+    }
     return subscribeToUpdates(
       daemonUrl,
       (next) => {
         setError(null);
-        setState(next);
+        applyStreamSnapshot(asAppState(next));
       },
-      (reason) => setError(reason.message)
+      (reason) => {
+        streamReconnectPendingRef.current = true;
+        setError(reason.message);
+      },
+      () => {
+        streamReconnectPendingRef.current = false;
+        snapshotSourceRef.current = nextChatSnapshotGeneration(snapshotSourceRef.current);
+      }
     );
-  }, [daemonUrl, refresh]);
+  }, [applyStreamSnapshot, daemonReadyForIdentity, daemonUrl, hasState]);
 
   useEffect(() => {
-    if (!daemonUrl || state) {
+    if (!daemonUrl || !daemonReadyForIdentity || state) {
       return;
     }
     const timer = window.setInterval(() => void refresh(), 1200);
     return () => window.clearInterval(timer);
-  }, [daemonUrl, refresh, state]);
+  }, [daemonReadyForIdentity, daemonUrl, refresh, state]);
 
   const run = useCallback(
-    async (action: Parameters<typeof dispatch>[1]) => {
-      if (!daemonUrl) {
+    async (action: AppAction) => {
+      if (!daemonUrl || !daemonReadyForIdentity) {
         return null;
       }
       setBusy(true);
       setError(null);
+      const requestGeneration = snapshotSourceRef.current.generation;
       try {
-        const next = await dispatch(daemonUrl, action);
-        setState(next);
+        const next = asAppState(await dispatchToDaemon(daemonUrl, action));
+        applyHttpSnapshot(next, requestGeneration);
         return next;
       } catch (reason) {
         setError(errorMessage(reason));
@@ -169,41 +264,69 @@ export function App() {
         setBusy(false);
       }
     },
-    [daemonUrl]
+    [applyHttpSnapshot, daemonReadyForIdentity, daemonUrl]
   );
 
   const runQuiet = useCallback(
-    async (action: Parameters<typeof dispatch>[1]) => {
-      if (!daemonUrl) {
+    async (action: AppAction) => {
+      if (!daemonUrl || !daemonReadyForIdentity) {
         return null;
       }
+      const requestGeneration = snapshotSourceRef.current.generation;
       try {
-        const next = await dispatch(daemonUrl, action);
-        setState(next);
+        const next = asAppState(await dispatchToDaemon(daemonUrl, action));
+        applyHttpSnapshot(next, requestGeneration);
         return next;
       } catch {
         return null;
       }
     },
-    [daemonUrl]
+    [applyHttpSnapshot, daemonReadyForIdentity, daemonUrl]
   );
 
   const runComposerAction = useCallback(
-    async (action: Parameters<typeof dispatch>[1]) => {
-      if (!daemonUrl) {
+    async (action: AppAction) => {
+      if (!daemonUrl || !daemonReadyForIdentity) {
         return null;
       }
+      const requestGeneration = snapshotSourceRef.current.generation;
       setError(null);
       try {
-        const next = await dispatch(daemonUrl, action);
-        setState(next);
+        const next = asAppState(await dispatchToDaemon(daemonUrl, action));
+        applyHttpSnapshot(next, requestGeneration);
         return next;
       } catch (reason) {
         setError(errorMessage(reason));
         return null;
       }
     },
-    [daemonUrl]
+    [applyHttpSnapshot, daemonReadyForIdentity, daemonUrl]
+  );
+
+  const runComposerAttachmentUpload = useCallback(
+    async (upload: AttachmentUpload) => {
+      if (!daemonUrl || !daemonReadyForIdentity) {
+        return null;
+      }
+      const requestGeneration = snapshotSourceRef.current.generation;
+      setError(null);
+      try {
+        const next = asAppState(await daemonUploadAttachments(daemonUrl, upload));
+        if (!applyHttpSnapshot(next, requestGeneration)) {
+          return null;
+        }
+        const sendError = attachmentSendError(next);
+        if (sendError) {
+          setError(sendError);
+          return null;
+        }
+        return next;
+      } catch (reason) {
+        setError(errorMessage(reason));
+        return null;
+      }
+    },
+    [applyHttpSnapshot, daemonReadyForIdentity, daemonUrl]
   );
 
   const loadDesktopState = useCallback(async () => {
@@ -217,11 +340,64 @@ export function App() {
     ]);
     setIdentityStatus(identity);
     setOnboardingStatus(onboarding);
+    if (!identity.hasStoredAccountSecret) {
+      snapshotSourceRef.current = initialChatSnapshotSource();
+      setState(null);
+      setPendingAgentTurns([]);
+      setError(null);
+    }
   }, []);
+
+  const completeLinkedOnboarding = useCallback(async () => {
+    const desktop = window.finiteChatDesktop;
+    if (!desktop || linkedOnboardingHandledRef.current) {
+      return;
+    }
+    linkedOnboardingHandledRef.current = true;
+    setIdentityBusy(true);
+    setError(null);
+    try {
+      const [identity, onboarding] = await Promise.all([
+        desktop.identityStatus(),
+        desktop.completeOnboarding(),
+      ]);
+      setIdentityStatus(identity);
+      setOnboardingStatus(onboarding);
+      setState(null);
+      window.setTimeout(() => void refresh(), 250);
+    } catch (reason) {
+      linkedOnboardingHandledRef.current = false;
+      setError(errorMessage(reason));
+    } finally {
+      setIdentityBusy(false);
+    }
+  }, [refresh]);
 
   useEffect(() => {
     void loadDesktopState();
   }, [loadDesktopState]);
+
+  useEffect(() => {
+    const desktop = window.finiteChatDesktop;
+    if (!desktop) return;
+    return desktop.onDeviceLinkStatus((status) => {
+      if (status.status !== "linked") {
+        linkedOnboardingHandledRef.current = false;
+      }
+      setDeviceLinkStatus(status);
+      if (status.status === "waiting") {
+        setIdentityStatus((current) => current ? { ...current, linking: true } : current);
+      } else if (status.status === "cancelled" || status.status === "failed") {
+        setIdentityStatus((current) => current ? { ...current, linking: false } : current);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (deviceLinkStatus.status === "linked") {
+      void completeLinkedOnboarding();
+    }
+  }, [completeLinkedOnboarding, deviceLinkStatus.status]);
 
   const handleDesktopTargetUrl = useCallback(
     (url: string | null | undefined) => {
@@ -241,7 +417,7 @@ export function App() {
   );
 
   useEffect(() => {
-    if (!window.finiteChatDesktop || !daemonUrl) {
+    if (!window.finiteChatDesktop || !daemonUrl || !daemonReadyForIdentity) {
       return;
     }
     const unsubscribe = window.finiteChatDesktop.onTargetUrl(handleDesktopTargetUrl);
@@ -250,23 +426,10 @@ export function App() {
       .then(handleDesktopTargetUrl)
       .catch((reason: unknown) => setError(errorMessage(reason)));
     return unsubscribe;
-  }, [daemonUrl, handleDesktopTargetUrl]);
+  }, [daemonReadyForIdentity, daemonUrl, handleDesktopTargetUrl]);
 
-  const selectedRoom = useMemo(
-    () => state?.rooms.find((room) => room.room_id === state.selected_room_id) ?? null,
-    [state]
-  );
-  const selectedTopic = useMemo(
-    () =>
-      state?.topics.find(
-        (topic) => topic.room_id === state.selected_room_id && topic.topic_id === state.selected_topic_id
-      ) ?? null,
-    [state]
-  );
-  const selectedChat = useMemo(
-    () => selectedTopic?.chats.find((chat) => chat.chat_id === state?.selected_chat_id) ?? selectedTopic?.chats[0] ?? null,
-    [selectedTopic, state?.selected_chat_id]
-  );
+  const selection = useMemo(() => selectChat(state), [state]);
+  const { room: selectedRoom, topic: selectedTopic, chat: selectedChat } = selection;
   const topicsByRoom = useMemo(() => {
     const grouped = new Map<string, AppTopicSummary[]>();
     for (const topic of state?.topics ?? []) {
@@ -294,8 +457,19 @@ export function App() {
     () => state?.profiles.find((profile) => profile.account_id === state.active_profile_id) ?? null,
     [state?.active_profile_id, state?.profiles]
   );
-  const selectedMessages = state?.messages ?? [];
-  const selectedMembers = selectedRoom?.members ?? [];
+  const selectedMessages = useMemo(
+    () => messagesForChat(state, selection),
+    [selection, state]
+  );
+  const selectedTranscript = useMemo(
+    () => transcriptItems(selectedMessages, state?.identity.account_id),
+    [selectedMessages, state?.identity.account_id]
+  );
+  const selectedRoomDetails = useMemo(
+    () => roomDetailsForSelection(state, selection),
+    [selection, state]
+  );
+  const selectedMembers = selectedRoomDetails?.members ?? [];
   const agentRooms = state?.rooms.filter((room) => room.is_agent_chat) ?? [];
   const selectedRoomHasCounterparty = selectedRoom
     ? selectedRoom.is_agent_chat || selectedMembers.some((member) => !member.current_device)
@@ -305,10 +479,12 @@ export function App() {
   const selectedRoomNeedsAgent = Boolean(selectedRoom) && !selectedRoomHasCounterparty;
   const statusText = state ? (error ?? state.flow.notice_text ?? state.toast ?? state.status) : "starting daemon";
   const shortAccount = state?.identity.account_id ? shortId(state.identity.account_id) : "not connected";
-  const showOnboarding = window.finiteChatDesktop ? onboardingStatus?.completed === false : false;
+  const showOnboarding = window.finiteChatDesktop
+    ? onboardingStatus?.completed !== true || identityStatus?.hasStoredAccountSecret !== true
+    : false;
   const selectedLiveMembers = useMemo(
-    () => state?.typing_members.filter((member) => member.room_id === selectedRoom?.room_id) ?? [],
-    [selectedRoom?.room_id, state?.typing_members]
+    () => activitiesForChat(state, selection),
+    [selection, state]
   );
   const visiblePendingMessages = useMemo(
     () =>
@@ -324,7 +500,7 @@ export function App() {
   const hasComposerContent = Boolean(composer.trim() || composerAttachments.length > 0);
   const awaitingSelectedAgent =
     Boolean(selectedRoom?.is_agent_chat) &&
-    Boolean(selectedRoom?.room_id && awaitingReplyRoomIds.includes(selectedRoom.room_id)) &&
+    pendingAgentTurns.some((turn) => pendingTurnMatchesSelection(turn, selection)) &&
     selectedLiveMembers.length === 0;
 
   const focusAgentInput = useCallback(() => {
@@ -351,26 +527,29 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!selectedRoom || selectedMessages.length === 0) {
-      return;
-    }
-    const last = selectedMessages[selectedMessages.length - 1];
-    if (!last?.is_mine) {
-      setAwaitingReplyRoomIds((roomIds) =>
-        roomIds.includes(selectedRoom.room_id) ? roomIds.filter((roomId) => roomId !== selectedRoom.room_id) : roomIds
+    if (!state) return;
+    setPendingAgentTurns((turns) => {
+      const pending = turns.filter(
+        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
       );
-    }
-  }, [selectedMessages, selectedRoom?.room_id]);
+      return pending.length === turns.length ? turns : pending;
+    });
+  }, [state]);
 
   useEffect(() => {
-    if (!selectedRoom || selectedRoom.state !== "Connected" || !selectedMessages.some((message) => !message.is_mine)) {
+    if (
+      !state
+      || !selectedRoom
+      || selectedRoom.state !== "Connected"
+      || !selectedMessages.some((message) => !isUserPrincipalMessage(message, state.identity))
+    ) {
       return;
     }
     const timer = window.setTimeout(() => {
       void runQuiet({ MarkRoomRead: { room_id: selectedRoom.room_id } });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [runQuiet, selectedMessages.length, selectedRoom?.room_id, selectedRoom?.state]);
+  }, [runQuiet, selectedMessages, selectedRoom, state]);
 
   useEffect(() => {
     return () => {
@@ -480,28 +659,30 @@ export function App() {
         created_at: "Sending",
       },
     ]);
-    if (selectedRoom.is_agent_chat) {
-      setAwaitingReplyRoomIds((roomIds) => (roomIds.includes(selectedRoom.room_id) ? roomIds : [...roomIds, selectedRoom.room_id]));
+    const pendingTurn = selectedRoom.is_agent_chat
+      ? beginPendingChatTurn(selection, selectedMessages)
+      : null;
+    if (pendingTurn) {
+      setPendingAgentTurns((turns) => [
+        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selection)),
+        pendingTurn,
+      ]);
     }
     const next = attachments.length
       ? selectedTopic && selectedChat
-        ? await runComposerAction({
-            SendChatAttachments: {
-              room_id: selectedTopic.room_id,
-              topic_id: selectedTopic.topic_id,
-              chat_id: selectedChat.chat_id,
-              attachments: attachments.map(({ filename, mime_type, kind, bytes }) => ({ filename, mime_type, kind, bytes })),
-              caption: text,
-              reply_to_message_id: null,
-            },
+        ? await runComposerAttachmentUpload({
+            room_id: selectedTopic.room_id,
+            topic_id: selectedTopic.topic_id,
+            chat_id: selectedChat.chat_id,
+            files: attachments.map(({ filename, mime_type, bytes }) => ({ filename, mime_type, bytes })),
+            caption: text,
+            reply_to_message_id: null,
           })
-        : await runComposerAction({
-            SendAttachments: {
-              room_id: selectedRoom.room_id,
-              attachments: attachments.map(({ filename, mime_type, kind, bytes }) => ({ filename, mime_type, kind, bytes })),
-              caption: text,
-              reply_to_message_id: null,
-            },
+        : await runComposerAttachmentUpload({
+            room_id: selectedRoom.room_id,
+            files: attachments.map(({ filename, mime_type, bytes }) => ({ filename, mime_type, bytes })),
+            caption: text,
+            reply_to_message_id: null,
           })
       : selectedTopic
         ? selectedChat
@@ -524,6 +705,9 @@ export function App() {
     if (next) {
       setLocalPendingMessages((messages) => messages.filter((message) => message.local_id !== pendingId));
     } else {
+      if (pendingTurn) {
+        setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
+      }
       setLocalPendingMessages((messages) =>
         messages.map((message) => (message.local_id === pendingId ? { ...message, state: "failed", created_at: "Not sent" } : message))
       );
@@ -535,12 +719,27 @@ export function App() {
       return;
     }
     const next: ComposerAttachment[] = [];
+    const availableSlots = MAX_COMPOSER_ATTACHMENTS - composerAttachments.length;
+    let totalBytes = composerAttachments.reduce((total, attachment) => total + attachment.size, 0);
     for (const file of Array.from(files)) {
+      if (next.length >= availableSlots) {
+        setError(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files at once.`);
+        break;
+      }
       if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
         setError(`${file.name} is larger than ${formatBytes(MAX_COMPOSER_ATTACHMENT_BYTES)}.`);
         continue;
       }
-      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      if (file.size === 0) {
+        setError(`${file.name} is empty.`);
+        continue;
+      }
+      if (totalBytes + file.size > MAX_COMPOSER_ATTACHMENT_TOTAL_BYTES) {
+        setError(`Attachments can total at most ${formatBytes(MAX_COMPOSER_ATTACHMENT_TOTAL_BYTES)}.`);
+        continue;
+      }
+      const bytes = await file.arrayBuffer();
+      totalBytes += bytes.byteLength;
       next.push({
         id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
         filename: file.name,
@@ -551,7 +750,7 @@ export function App() {
       });
     }
     if (next.length > 0) {
-      setComposerAttachments((attachments) => [...attachments, ...next].slice(0, 8));
+      setComposerAttachments((attachments) => [...attachments, ...next].slice(0, MAX_COMPOSER_ATTACHMENTS));
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -647,40 +846,42 @@ export function App() {
     await run({ StartRuntime: null });
   }
 
-  async function finishOnboarding() {
-    if (window.finiteChatDesktop) {
-      setOnboardingStatus(await window.finiteChatDesktop.completeOnboarding());
-    } else {
-      setOnboardingStatus({ completed: true });
-    }
-    void refresh();
-  }
-
-  async function importDesktopIdentity(secret: string) {
-    if (!window.finiteChatDesktop || !secret.trim()) {
-      return;
-    }
+  async function beginDeviceLink() {
+    const desktop = window.finiteChatDesktop;
+    if (!desktop) return;
     setIdentityBusy(true);
     setError(null);
     try {
-      setIdentityStatus(await window.finiteChatDesktop.importAccountSecret(secret));
-      setIdentitySecret("");
-      setAccountMenuOpen(false);
-      setState(null);
-      if (window.finiteChatDesktop) {
-        setOnboardingStatus(await window.finiteChatDesktop.completeOnboarding());
-      }
-      window.setTimeout(() => void refresh(), 700);
+      const ready = await desktop.beginDeviceLink();
+      setDeviceLinkStatus({ status: "waiting", ready });
+      setIdentityStatus((current) => current ? { ...current, linking: true } : current);
     } catch (reason) {
-      setError(errorMessage(reason));
+      setDeviceLinkStatus({ status: "failed", message: errorMessage(reason) });
     } finally {
       setIdentityBusy(false);
     }
   }
 
-  async function submitAccountImport(event: FormEvent) {
-    event.preventDefault();
-    await importDesktopIdentity(identitySecret);
+  async function openDeviceLinkApproval(ready: DesktopDeviceLinkReady) {
+    const opened = await window.finiteChatDesktop?.openDeviceLinkApproval(ready.approval_url);
+    if (opened === false) {
+      setError("Could not open the approval page. Try again.");
+    }
+  }
+
+  async function cancelDeviceLink() {
+    const desktop = window.finiteChatDesktop;
+    if (!desktop) return;
+    setIdentityBusy(true);
+    try {
+      await desktop.cancelDeviceLink();
+      setDeviceLinkStatus({ status: "cancelled" });
+      setIdentityStatus((current) => current ? { ...current, linking: false } : current);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setIdentityBusy(false);
+    }
   }
 
   async function clearDesktopIdentity() {
@@ -691,6 +892,9 @@ export function App() {
     setError(null);
     try {
       setIdentityStatus(await window.finiteChatDesktop.clearAccountSecret());
+      setOnboardingStatus({ completed: false });
+      setDeviceLinkStatus({ status: "idle" });
+      linkedOnboardingHandledRef.current = false;
       setState(null);
       window.setTimeout(() => void refresh(), 700);
     } catch (reason) {
@@ -702,7 +906,6 @@ export function App() {
 
   return (
     <div className="finite-chat finite-chat--electron">
-      <LegacyFiniteChatSourceMarker />
       <aside className="finite-chat__sidebar">
         <div className="finite-chat__sidebar-top">
           <div className="finite-chat__brand">
@@ -871,41 +1074,35 @@ export function App() {
             <div className="finite-chat__account-menu">
               <div className="finite-chat__account-heading">
                 <KeyRoundIcon aria-hidden />
-                <span>Desktop identity</span>
+                <span>Finite account</span>
               </div>
               <div className="finite-chat__account-id">
                 <strong>{shortAccount}</strong>
                 <small>
                   {identityStatus?.hasStoredAccountSecret
-                    ? "Imported key in secure storage"
-                    : "Local key on this Mac"}
+                    ? "Linked account in secure storage"
+                    : identityStatus?.linking
+                      ? "Link approval in progress"
+                      : "Not linked to Finite Computer"}
                 </small>
               </div>
-              <form className="finite-chat__account-import" onSubmit={submitAccountImport}>
-                <input
-                  value={identitySecret}
-                  onChange={(event) => setIdentitySecret(event.target.value)}
-                  placeholder="nsec or 64-char secret"
-                  type="password"
-                  disabled={identityBusy || identityStatus?.secureStorageAvailable === false}
-                />
-                <button
-                  type="submit"
-                  className="finite-chat__command-button"
-                  disabled={!identitySecret.trim() || identityBusy || identityStatus?.secureStorageAvailable === false}
-                >
-                  Save
-                </button>
-              </form>
               {identityStatus?.hasStoredAccountSecret ? (
-                <button
-                  className="finite-chat__account-link"
-                  type="button"
-                  onClick={() => void clearDesktopIdentity()}
-                  disabled={identityBusy}
-                >
-                  Use local identity
-                </button>
+                <>
+                  <button
+                    className="finite-chat__account-link"
+                    type="button"
+                    onClick={() => void clearDesktopIdentity()}
+                    disabled={identityBusy}
+                  >
+                    Remove account from this Mac
+                  </button>
+                  <div
+                    className="finite-chat__account-warning"
+                    title="This clears only local secure storage. Revoke this Device from the web app."
+                  >
+                    Local removal only. Revoke this Device from the web app.
+                  </div>
+                </>
               ) : null}
               {identityStatus?.secureStorageAvailable === false ? (
                 <div className="finite-chat__account-warning">Secure store unavailable</div>
@@ -983,13 +1180,23 @@ export function App() {
           <main className="finite-chat__main">
             <section className="finite-chat__scroll" ref={transcriptRef}>
               <div className="finite-chat__messages">
-                {selectedMessages.map((message) => (
-                  <MessageRow key={`${message.room_id}:${message.message_id}`} message={message} />
-                ))}
+                {selectedTranscript.map((item) =>
+                  item.type === "message" ? (
+                    <MessageRow
+                      key={`${item.message.room_id}:${item.message.message_id}`}
+                      message={item.message}
+                      ownAccountId={state?.identity.account_id ?? ""}
+                    />
+                  ) : (
+                    <ToolRollup key={item.id} messages={item.messages} />
+                  )
+                )}
                 {visiblePendingMessages.map((message) => (
                   <PendingMessageRow key={message.local_id} message={message} />
                 ))}
-                {awaitingSelectedAgent ? <LiveActivityIndicator label="Waiting for Hermes" /> : null}
+                {awaitingSelectedAgent ? (
+                  <LiveActivityIndicator label={`${selectedRoom?.display_name || "Hermes"} is working`} />
+                ) : null}
                 {selectedLiveMembers.length > 0 ? <LiveActivityIndicator members={selectedLiveMembers} /> : null}
                 {!state ? (
                   <EmptyState title="Starting daemon" busy />
@@ -1073,12 +1280,14 @@ export function App() {
 
       {showOnboarding ? (
         <DesktopOnboarding
-          accountId={shortAccount}
           busy={identityBusy || busy}
+          deviceLinkStatus={deviceLinkStatus}
           error={error}
           identityStatus={identityStatus}
-          onImport={(secret) => importDesktopIdentity(secret)}
-          onUseLocal={() => void finishOnboarding()}
+          onBeginLink={() => void beginDeviceLink()}
+          onCancelLink={() => void cancelDeviceLink()}
+          onOpenApproval={(ready) => void openDeviceLinkApproval(ready)}
+          onUseLinkedAccount={() => void completeLinkedOnboarding()}
         />
       ) : null}
     </div>
@@ -1092,26 +1301,45 @@ export function App() {
 }
 
 function DesktopOnboarding({
-  accountId,
   busy,
+  deviceLinkStatus,
   error,
   identityStatus,
-  onImport,
-  onUseLocal,
+  onBeginLink,
+  onCancelLink,
+  onOpenApproval,
+  onUseLinkedAccount,
 }: {
-  accountId: string;
   busy: boolean;
+  deviceLinkStatus: DesktopDeviceLinkStatus;
   error: string | null;
   identityStatus: DesktopIdentityStatus | null;
-  onImport: (secret: string) => Promise<void>;
-  onUseLocal: () => void;
+  onBeginLink: () => void;
+  onCancelLink: () => void;
+  onOpenApproval: (ready: DesktopDeviceLinkReady) => void;
+  onUseLinkedAccount: () => void;
 }) {
-  const [secret, setSecret] = useState("");
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    await onImport(secret);
-  }
+  const waitingReady = deviceLinkStatus.status === "waiting" ? deviceLinkStatus.ready : null;
+  const waiting = waitingReady !== null;
+  const linked = deviceLinkStatus.status === "linked";
+  const hasLinkedAccount = identityStatus?.hasStoredAccountSecret === true || linked;
+  const primaryAction = hasLinkedAccount
+    ? onUseLinkedAccount
+    : waitingReady
+      ? () => onOpenApproval(waitingReady)
+      : onBeginLink;
+  const primaryTitle = hasLinkedAccount
+    ? "Continue with linked account"
+    : waiting
+      ? "Open approval in browser"
+      : "Link with Finite Computer";
+  const primaryDetail = hasLinkedAccount
+    ? linked
+      ? "Finishing local setup and opening your existing encrypted chats"
+      : "Account key stored in this computer's secure storage"
+    : waiting
+      ? "Approve this Device from your signed-in Finite Computer account"
+      : "Use the same account and conversations as the web app";
 
   return (
     <div className="finite-chat__onboarding" role="dialog" aria-modal="true" aria-labelledby="finite-chat-onboarding-title">
@@ -1123,48 +1351,41 @@ function DesktopOnboarding({
         <div className="finite-chat__onboarding-copy">
           <h1 id="finite-chat-onboarding-title">Finite Chat</h1>
           <p>
-            This desktop keeps a Finite identity locally. New installs create one automatically; import only when
-            this device should use an existing npub.
+            Link this computer to your Finite Computer account. It becomes its own revocable Device while the
+            account key remains in local secure storage.
           </p>
         </div>
 
-        <button type="button" className="finite-chat__onboarding-choice" onClick={onUseLocal} disabled={busy}>
-          <ShieldCheckIcon aria-hidden />
+        <button
+          type="button"
+          className="finite-chat__onboarding-choice"
+          onClick={primaryAction}
+          disabled={busy || (!hasLinkedAccount && identityStatus?.secureStorageAvailable === false)}
+        >
+          {busy ? <Loader2Icon className="finite-chat__spin" aria-hidden /> : <ShieldCheckIcon aria-hidden />}
           <span>
-            <strong>{identityStatus?.hasStoredAccountSecret ? "Continue with imported account" : "Continue with this device"}</strong>
-            <small>
-              {identityStatus?.hasStoredAccountSecret ? "Key stored in macOS secure storage" : `Local identity ${accountId}`}
-            </small>
+            <strong>{primaryTitle}</strong>
+            <small>{primaryDetail}</small>
           </span>
         </button>
 
-        <form className="finite-chat__onboarding-import" onSubmit={submit}>
-          <label htmlFor="finite-chat-secret">Use an existing npub</label>
-          <div>
-            <input
-              id="finite-chat-secret"
-              value={secret}
-              onChange={(event) => setSecret(event.target.value)}
-              placeholder="nsec or 64-char secret"
-              type="password"
-              disabled={busy || identityStatus?.secureStorageAvailable === false}
-            />
-            <button
-              type="submit"
-              className="finite-chat__send-button"
-              aria-label="Import account"
-              disabled={!secret.trim() || busy || identityStatus?.secureStorageAvailable === false}
-            >
-              {busy ? <Loader2Icon className="finite-chat__spin" aria-hidden /> : <KeyRoundIcon aria-hidden />}
-            </button>
-          </div>
-          {identityStatus?.secureStorageAvailable === false ? <span>Secure store unavailable</span> : null}
-        </form>
+        {waiting ? (
+          <button type="button" className="finite-chat__account-link" onClick={onCancelLink} disabled={busy}>
+            Cancel this link request
+          </button>
+        ) : null}
 
-        {error ? (
+        {identityStatus?.secureStorageAvailable === false ? (
           <div className="finite-chat__onboarding-error">
-            <strong>Daemon</strong>
-            <span>{error}</span>
+            <strong>Secure storage is unavailable</strong>
+            <span>This computer cannot safely store a linked Finite account.</span>
+          </div>
+        ) : null}
+
+        {deviceLinkStatus.status === "failed" || error ? (
+          <div className="finite-chat__onboarding-error">
+            <strong>Device link</strong>
+            <span>{deviceLinkStatus.status === "failed" ? deviceLinkStatus.message : error}</span>
           </div>
         ) : null}
       </section>
@@ -1487,14 +1708,41 @@ function PendingMessageRow({ message }: { message: LocalPendingMessage }) {
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function ToolRollup({ messages }: { messages: ChatMessage[] }) {
+  const running = messages.some((message) => message.status === "running");
+  const steps = messages.flatMap((message) =>
+    messageContent(message).split(/\n+/u).filter(Boolean)
+  );
+  const count = steps.length || messages.length;
+  const label = running
+    ? steps.length > 0
+      ? `Working · ${steps.length} ${pluralize("step", steps.length)}`
+      : "Working"
+    : `Worked through ${count} ${pluralize("step", count)}`;
+  return (
+    <details className="finite-chat__tool-rollup" open={running || undefined}>
+      <summary>
+        {running ? <Loader2Icon className="finite-chat__spin" aria-hidden /> : <WrenchIcon aria-hidden />}
+        <span>{label}</span>
+        <ChevronRightIcon aria-hidden />
+      </summary>
+      <div className="finite-chat__tool-rollup-body">
+        {messages.map((message) => (
+          <pre key={message.message_id}>{messageContent(message) || "Done"}</pre>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function MessageRow({ message, ownAccountId }: { message: ChatMessage; ownAccountId: string }) {
   const content = message.display_content || message.text;
-  if (message.is_mine) {
+  if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
           {content ? <p>{content}</p> : null}
-          <MessageAttachments media={message.media} />
+          <MessageAttachments message={message} />
           <time className="finite-chat__message-time">{deliveryText(message) ?? message.display_timestamp}</time>
         </div>
       </article>
@@ -1505,7 +1753,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
     <article className="finite-chat__message finite-chat__message--agent">
       <div className="finite-chat__assistant-text">
         {content ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown> : null}
-        <MessageAttachments media={message.media} />
+        <MessageAttachments message={message} />
       </div>
       <time className="finite-chat__message-time">
         {message.sender_display_name} · {message.display_timestamp}
@@ -1514,22 +1762,39 @@ function MessageRow({ message }: { message: ChatMessage }) {
   );
 }
 
-function MessageAttachments({ media }: { media?: ChatMediaAttachment[] }) {
+function MessageAttachments({ message }: { message: ChatMessage }) {
+  const media = message.media;
   if (!media || media.length === 0) {
     return null;
   }
   return (
     <div className="finite-chat__message-attachments">
       {media.map((attachment) => {
-        const previewUrl = attachment.local_path ? `file://${attachment.local_path}` : attachment.url || "";
-        const canPreviewImage = attachment.kind === "Image" && previewUrl;
-        return (
-          <div key={attachment.attachment_id} className="finite-chat__message-attachment">
-            {canPreviewImage ? <img src={previewUrl} alt="" /> : attachment.kind === "Image" ? <ImageIcon aria-hidden /> : <FileIcon aria-hidden />}
+        const mediaUrl = attachmentMediaUrl(message.room_id, message.message_id, attachment.attachment_id);
+        const content = (
+          <>
+            {attachment.kind === "Image" ? <img src={mediaUrl} alt={attachment.filename} /> : <FileIcon aria-hidden />}
             <span>
               <strong>{attachment.filename}</strong>
               <small>{attachmentLabel(attachment)}</small>
             </span>
+          </>
+        );
+        if (attachment.kind !== "Image") {
+          return (
+            <a
+              key={attachment.attachment_id}
+              className="finite-chat__message-attachment"
+              href={mediaUrl}
+              download={attachment.filename}
+            >
+              {content}
+            </a>
+          );
+        }
+        return (
+          <div key={attachment.attachment_id} className="finite-chat__message-attachment">
+            {content}
           </div>
         );
       })}
@@ -1562,21 +1827,6 @@ function mediaKindForFile(file: File): ChatMediaKind {
     return "VoiceNote";
   }
   return "File";
-}
-
-function liveActivityLabel(members: AppTypingMember[]) {
-  const working = members.find((member) => member.activity_kind === "working");
-  const thinking = members.find((member) => member.activity_kind === "thinking");
-  const typing = members.find((member) => member.activity_kind === "typing");
-  const member = working ?? thinking ?? typing ?? members[0];
-  const name = member?.display_name || "Someone";
-  if (member?.activity_kind === "working") {
-    return `${name} is working`;
-  }
-  if (member?.activity_kind === "thinking") {
-    return `${name} is thinking`;
-  }
-  return `${name} is typing`;
 }
 
 function deliveryText(message: ChatMessage) {
@@ -1613,6 +1863,10 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function pluralize(word: string, count: number) {
+  return count === 1 ? word : `${word}s`;
+}
+
 function initials(value: string) {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -1634,6 +1888,19 @@ function profileFromState(state: AppState, accountId: string | null | undefined)
     return null;
   }
   return state.profiles.find((profile) => profile.account_id === accountId) ?? null;
+}
+
+function dispatchToDaemon(baseUrl: string, action: AppAction) {
+  // The local transport is being moved onto the shared model separately. The
+  // wire representation is already the same externally tagged AppAction.
+  return daemonDispatch(
+    baseUrl,
+    action as Parameters<typeof daemonDispatch>[1]
+  );
+}
+
+function asAppState(value: unknown) {
+  return value as AppState;
 }
 
 function errorMessage(reason: unknown) {

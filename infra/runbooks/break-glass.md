@@ -29,17 +29,17 @@ Postgres, chat, sites, search) as NixOS. No k3s, no kubectl. Config is
   - `journalctl -u finitechat-server` — chat (127.0.0.1:8788)
   - `journalctl -u finite-saas-sites` — finitesitesd (127.0.0.1:8787)
   - `journalctl -u finite-postgres-backup` — the 6-hourly dump timer
-  - `journalctl -u finite-saas-runner` — agent-creation runner (currently
-    DORMANT; the `phala` CLI isn't packaged yet — Phala-Cloud-API/"enclavia"
-    runner is being explored)
+  - `journalctl -u finite-saas-runner` — Kata agent-creation runner; its Nix
+    timer is enabled, but live canary readiness must be verified. Phala remains
+    a separate fast-follow adapter.
   - search: `journalctl -u podman-searxng` (up); firecrawl API (:3002) is
     currently DOWN — follow-up.
 - **Restart:**
   - `sudo systemctl restart caddy`
   - `sudo systemctl restart finite-saas-core` / `finite-saas-sites` /
     `finitechat-server` / `postgresql` / `podman-finite-saas-dashboard`
-  - Runner (dormant): the timer re-invokes it when packaged; to pause once
-    live, `FC_RUNNER_DRAIN=true` in `/etc/finite/runner.env` or
+  - Runner: the timer re-invokes it; to pause new work,
+    set `FC_RUNNER_DRAIN=true` in `/etc/finite/runner.env` or
     `sudo systemctl stop finite-saas-runner.timer`.
 - **Do NOT edit units on the box.** lat1 is declarative — a hotfix survives
   only until the next `nixos-rebuild switch` and then reverts. Fix forward in

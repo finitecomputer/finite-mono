@@ -3,9 +3,8 @@ import { test } from "node:test";
 
 import {
   accountFromWorkosSessionCookie,
-  dashboardDevLaunchCode,
+  devAccountAuthContext,
   getAccountAuthContext,
-  type AccountAuthContext,
 } from "./dashboard-auth";
 
 function unsignedJwt(payload: object) {
@@ -33,6 +32,8 @@ test("WorkOS session cookie account fallback extracts a usable verified identity
       email: "paul@finite.vip",
       workosUserId: "user_123",
       emailVerified: true,
+      accessToken: unsignedJwt({ exp: 2_000 }),
+      organizationId: null,
       source: "workos",
     }
   );
@@ -72,6 +73,8 @@ test("WorkOS session cookie account fallback keeps unverified email state explic
       email: "paul@finite.vip",
       workosUserId: "user_123",
       emailVerified: false,
+      accessToken: unsignedJwt({ exp: 2_000 }),
+      organizationId: null,
       source: "workos",
     }
   );
@@ -81,9 +84,13 @@ test("dev identity override provides a verified dev account for browser tests", 
   const previousEmail = process.env.FC_DASHBOARD_DEV_EMAIL;
   const previousUserId = process.env.FC_DASHBOARD_DEV_WORKOS_USER_ID;
   const previousWorkosEnabled = process.env.FC_WORKOS_AUTH_ENABLED;
+  const previousAllowDevAuth = process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH;
+  const previousAccessToken = process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN;
 
   process.env.FC_DASHBOARD_DEV_EMAIL = "Browser@Finite.VIP";
   process.env.FC_DASHBOARD_DEV_WORKOS_USER_ID = "user_browser";
+  process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN = unsignedJwt({ exp: 2_000 });
+  process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH = "1";
   delete process.env.FC_WORKOS_AUTH_ENABLED;
 
   try {
@@ -91,6 +98,8 @@ test("dev identity override provides a verified dev account for browser tests", 
       email: "browser@finite.vip",
       workosUserId: "user_browser",
       emailVerified: true,
+      accessToken: unsignedJwt({ exp: 2_000 }),
+      organizationId: null,
       source: "dev",
     });
   } finally {
@@ -109,36 +118,39 @@ test("dev identity override provides a verified dev account for browser tests", 
     } else {
       process.env.FC_WORKOS_AUTH_ENABLED = previousWorkosEnabled;
     }
+    if (previousAllowDevAuth === undefined) {
+      delete process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH;
+    } else {
+      process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH = previousAllowDevAuth;
+    }
+    if (previousAccessToken === undefined) {
+      delete process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN;
+    } else {
+      process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN = previousAccessToken;
+    }
   }
 });
 
-test("dev launch code requires the explicit verified dev-account boundary", () => {
-  const devAccount: AccountAuthContext = {
-    email: "developer@finite.computer",
-    workosUserId: "user_developer",
-    emailVerified: true,
-    source: "dev",
-  };
-  const enabled = {
+test("dev identity fails closed without both the explicit flag and fixture token", () => {
+  const configured = {
     FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
-    FC_DASHBOARD_DEV_LAUNCH_CODE: "  local-launch  ",
+    FC_DASHBOARD_DEV_EMAIL: "dev@finite.vip",
+    FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_dev",
+    FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: unsignedJwt({ exp: 2_000 }),
   };
 
-  assert.equal(dashboardDevLaunchCode(devAccount, enabled), "local-launch");
   assert.equal(
-    dashboardDevLaunchCode(devAccount, {
-      ...enabled,
-      FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "0",
+    devAccountAuthContext({
+      ...configured,
+      FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: undefined,
     }),
-    ""
+    null
   );
   assert.equal(
-    dashboardDevLaunchCode({ ...devAccount, emailVerified: false }, enabled),
-    ""
-  );
-  assert.equal(
-    dashboardDevLaunchCode({ ...devAccount, source: "workos" }, enabled),
-    "",
-    "a WorkOS user must never inherit the local launch entitlement"
+    devAccountAuthContext({
+      ...configured,
+      FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: undefined,
+    }),
+    null
   );
 });

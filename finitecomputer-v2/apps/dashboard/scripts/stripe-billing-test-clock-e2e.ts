@@ -51,12 +51,11 @@ const standardPriceId = requiredEnv("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID");
 const webhookSecret =
   process.env.STRIPE_WEBHOOK_SECRET?.trim() || `whsec_finite_test_${runId}`;
 const coreToken = process.env.FC_CORE_API_TOKEN?.trim() || `local-core-token-${runId}`;
-const devEmail =
-  process.env.FC_STRIPE_BILLING_E2E_EMAIL?.trim() ||
-  `stripe-clock-${runId}@finite.computer`;
-const devWorkosUserId =
-  process.env.FC_STRIPE_BILLING_E2E_WORKOS_USER_ID?.trim() ||
-  `user_stripe_clock_${runId}`;
+const runnerToken = `local-runner-token-${runId}`;
+const usageToken = `local-usage-token-${runId}`;
+const workosClientId = "client_devfinity";
+const workosOperatorOrgId = "org_devfinity_operator";
+const workosCustomerEmail = "devfinity@finite.computer";
 const postgresContainer =
   process.env.FC_STRIPE_BILLING_E2E_POSTGRES_CONTAINER?.trim() ||
   `finite-v2-stripe-e2e-${runId}`;
@@ -72,6 +71,7 @@ const stripe = new Stripe(stripeSecretKey, {
 
 let clockId: string | null = null;
 let subscriptionId: string | null = null;
+let customerJwt = "";
 const managedProcesses: ManagedProcess[] = [];
 const cleanupTasks: Array<() => Promise<void>> = [];
 
@@ -84,7 +84,10 @@ async function main() {
 
   const postgresPort = await freePort();
   const corePort = await freePort();
+  const workosPort = await freePort();
   const coreUrl = `http://127.0.0.1:${corePort}`;
+  const workosUrl = `http://127.0.0.1:${workosPort}`;
+  const workosStateRoot = path.join(runRoot, "workos-fixture");
   const databaseUrl = `postgres://finite:${postgresPassword}@127.0.0.1:${postgresPort}/${postgresDb}`;
   process.env.FC_CORE_BASE_URL = coreUrl;
   process.env.FC_DASHBOARD_BASE_URL = "http://127.0.0.1:3000";
@@ -93,8 +96,16 @@ async function main() {
   console.log(`run_id=${runId}`);
   console.log(`logs=${runRoot}`);
 
+  startWorkosFixture(workosUrl, workosStateRoot);
+  await waitForHttp(`${workosUrl}/sso/jwks/${workosClientId}`, "WorkOS fixture");
+  const workosApiKey = (await readFile(path.join(workosStateRoot, "workos-fixture-api-key"), "utf8")).trim();
+  customerJwt = (await readFile(path.join(workosStateRoot, "dashboard-customer.jwt"), "utf8")).trim();
+  if (!workosApiKey || !customerJwt) {
+    throw new Error("WorkOS fixture did not prepare its private credentials.");
+  }
+
   await startPostgres(postgresPort);
-  startCore(coreUrl, databaseUrl);
+  startCore(coreUrl, databaseUrl, workosUrl, workosApiKey);
   await waitForHttp(`${coreUrl}/healthz`, "Core");
 
   const webhook = await import("../src/app/api/stripe/webhook/route");
@@ -107,7 +118,7 @@ async function main() {
   console.log(`stripe_clock=${clock.id}`);
 
   const customer = await stripe.customers.create({
-    email: devEmail,
+    email: workosCustomerEmail,
     name: `Finite Billing E2E ${runId}`,
     test_clock: clock.id,
     metadata: {
@@ -146,11 +157,36 @@ async function main() {
   subscriptionId = subscription.id;
   console.log(`stripe_subscription=${subscription.id}`);
 
-  await postSubscriptionWebhook(
+  const eventTime = Math.floor(Date.now() / 1000);
+  await assertWebhookSignatureRejection(webhook.POST, subscription);
+  await postStripeWebhook(
+    webhook.POST,
+    "checkout.session.completed",
+    {
+      id: `cs_test_finite_${runId}`,
+      object: "checkout.session",
+      mode: "subscription",
+      customer: customer.id,
+      subscription: subscription.id,
+      metadata: { finite_customer_org_id: customerOrgId },
+    },
+    "checkout_completed",
+    eventTime
+  );
+  await assertBilling(coreUrl, {
+    label: "active checkout subscription",
+    expectedStatus: "active",
+    expectedCanCreateAgent: true,
+    expectedRequiresBilling: false,
+    expectedAllowedNewAgents: 1,
+  });
+
+  await postStripeWebhook(
     webhook.POST,
     "customer.subscription.created",
     subscription,
-    "created"
+    "created",
+    eventTime + 1
   );
   await assertBilling(coreUrl, {
     label: "active subscription",
@@ -169,11 +205,12 @@ async function main() {
     "past_due",
     "subscription did not become past_due after send_invoice due date"
   );
-  await postSubscriptionWebhook(
+  await postStripeWebhook(
     webhook.POST,
     "customer.subscription.updated",
     pastDueSubscription,
-    "past_due"
+    "past_due",
+    eventTime + 2
   );
   await assertBilling(coreUrl, {
     label: "past_due subscription",
@@ -185,11 +222,12 @@ async function main() {
   await assertAgentCreationBlocked(coreUrl);
 
   const canceledSubscription = await stripe.subscriptions.cancel(subscription.id);
-  await postSubscriptionWebhook(
+  await postStripeWebhook(
     webhook.POST,
     "customer.subscription.deleted",
     canceledSubscription,
-    "canceled"
+    "canceled",
+    eventTime + 4
   );
   await assertBilling(coreUrl, {
     label: "canceled subscription",
@@ -203,11 +241,12 @@ async function main() {
     ...canceledSubscription,
     status: "active",
   } as Stripe.Subscription;
-  await postSubscriptionWebhook(
+  await postStripeWebhook(
     webhook.POST,
     "customer.subscription.updated",
     staleActivePayload,
-    "stale_active_after_cancel"
+    "stale_active_after_cancel",
+    eventTime + 3
   );
   await assertBilling(coreUrl, {
     label: "stale active event after cancellation",
@@ -220,28 +259,14 @@ async function main() {
   console.log("stripe_billing_clock_e2e=passed");
 }
 
-async function postSubscriptionWebhook(
+async function postStripeWebhook(
   post: (request: Request) => Promise<Response>,
   type: string,
-  subscription: Stripe.Subscription,
-  label: string
+  object: unknown,
+  label: string,
+  created: number
 ) {
-  const payload = JSON.stringify({
-    id: `evt_finite_${runId}_${label}`,
-    object: "event",
-    api_version: "2025-12-15.clover",
-    created: Math.floor(Date.now() / 1000),
-    data: {
-      object: subscription,
-    },
-    livemode: false,
-    pending_webhooks: 1,
-    request: {
-      id: null,
-      idempotency_key: null,
-    },
-    type,
-  });
+  const payload = stripeEventPayload(type, object, label, created);
   const signature = stripe.webhooks.generateTestHeaderString({
     payload,
     secret: webhookSecret,
@@ -261,6 +286,60 @@ async function postSubscriptionWebhook(
     throw new Error(`webhook ${type}/${label} failed: ${response.status} ${body}`);
   }
   console.log(`webhook_${label}=ok`);
+}
+
+function stripeEventPayload(type: string, object: unknown, label: string, created: number) {
+  return JSON.stringify({
+    id: `evt_finite_${runId}_${label}`,
+    object: "event",
+    api_version: "2025-12-15.clover",
+    created,
+    data: {
+      object,
+    },
+    livemode: false,
+    pending_webhooks: 1,
+    request: {
+      id: null,
+      idempotency_key: null,
+    },
+    type,
+  });
+}
+
+async function assertWebhookSignatureRejection(
+  post: (request: Request) => Promise<Response>,
+  object: unknown
+) {
+  const payload = stripeEventPayload(
+    "customer.subscription.created",
+    object,
+    "signature_negative",
+    Math.floor(Date.now() / 1000)
+  );
+  const missing = await post(
+    new Request("http://127.0.0.1/api/stripe/webhook", {
+      method: "POST",
+      body: payload,
+      headers: { "content-type": "application/json" },
+    })
+  );
+  assertEqual(missing.status, 400, "missing Stripe signature");
+  const invalid = await post(
+    new Request("http://127.0.0.1/api/stripe/webhook", {
+      method: "POST",
+      body: payload,
+      headers: {
+        "content-type": "application/json",
+        "stripe-signature": "invalid-signature",
+      },
+    })
+  );
+  assertEqual(invalid.status, 400, "invalid Stripe signature");
+  if (missing.ok || invalid.ok) {
+    throw new Error("Stripe webhook signature checks failed open.");
+  }
+  console.log("webhook_signature_negative=ok");
 }
 
 async function assertBilling(
@@ -319,6 +398,7 @@ async function assertAgentCreationBlocked(coreUrl: string) {
         displayName: "Blocked Billing E2E Agent",
         launchCode: "",
         idempotencyKey: `stripe-e2e-blocked-${runId}`,
+        runnerClass: "kata",
       }),
     }
   );
@@ -353,11 +433,8 @@ async function coreIdentityFetchRaw(
   return fetch(new URL(pathname, coreUrl), {
     ...init,
     headers: {
-      authorization: `Bearer ${coreToken}`,
+      authorization: `Bearer ${customerJwt}`,
       "content-type": "application/json",
-      "x-finite-workos-user-id": devWorkosUserId,
-      "x-finite-workos-email": devEmail,
-      "x-finite-workos-email-verified": "true",
       ...Object.fromEntries(new Headers(init.headers).entries()),
     },
   });
@@ -432,7 +509,33 @@ async function startPostgres(port: number) {
   throw new Error("Postgres did not become ready.");
 }
 
-function startCore(coreUrl: string, databaseUrl: string) {
+function startWorkosFixture(workosUrl: string, fixtureStateRoot: string) {
+  const fixtureLogPath = path.join(runRoot, "workos-fixture.log");
+  const child = spawn(
+    "cargo",
+    [
+      "run",
+      "-p",
+      "devfinity",
+      "--",
+      "workos-fixture",
+      "--listen",
+      new URL(workosUrl).host,
+      "--state-dir",
+      fixtureStateRoot,
+    ],
+    { cwd: repoRoot, env: process.env }
+  );
+  managedProcesses.push({ child, name: "workos-fixture", logPath: fixtureLogPath });
+  pipeProcessLog(child, fixtureLogPath);
+}
+
+function startCore(
+  coreUrl: string,
+  databaseUrl: string,
+  workosUrl: string,
+  workosApiKey: string
+) {
   const coreLogPath = path.join(runRoot, "core.log");
   const child = spawn("cargo", ["run", "-p", "finite-saas-core", "--", "serve"], {
     cwd: repoRoot,
@@ -440,8 +543,16 @@ function startCore(coreUrl: string, databaseUrl: string) {
       ...process.env,
       FC_CORE_DATABASE_URL: databaseUrl,
       FC_CORE_API_TOKEN: coreToken,
+      FC_CORE_RUNNER_API_TOKEN: runnerToken,
+      FC_FINITE_PRIVATE_USAGE_API_TOKEN: usageToken,
       FC_CORE_BIND: new URL(coreUrl).host,
       FC_CORE_STANDARD_STRIPE_PRICE_ID: standardPriceId,
+      WORKOS_API_KEY: workosApiKey,
+      WORKOS_CLIENT_ID: workosClientId,
+      WORKOS_API_BASE_URL: workosUrl,
+      WORKOS_JWKS_URL: `${workosUrl}/sso/jwks/${workosClientId}`,
+      WORKOS_ISSUER: workosUrl,
+      FC_WORKOS_OPERATOR_ORG_ID: workosOperatorOrgId,
     },
   });
   managedProcesses.push({

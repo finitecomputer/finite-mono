@@ -9,9 +9,13 @@
     "lint": "eslint",
     "test": "node --import tsx --test src/**/*.test.ts",
     "test:browser": "node --import tsx --test --test-concurrency=1 browser/**/*.browser.ts",
+    "design": "node --import tsx scripts/web-design-fixture.ts serve",
+    "design:reset": "node --import tsx scripts/web-design-fixture.ts reset",
+    "design:state": "node --import tsx scripts/web-design-fixture.ts set-scenario",
     "test:stripe-billing-clock": "tsx scripts/stripe-billing-test-clock-e2e.ts"
   },
   "dependencies": {
+    "@finite/chat-ui": "file:../../../finitechat/packages/finitechat-chat-ui",
     "@workos-inc/authkit-nextjs": "^4.0.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

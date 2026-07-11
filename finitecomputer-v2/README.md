@@ -4,8 +4,7 @@ Hard-cut self-serve SaaS codebase for Finite Computer.
 
 This repo is for the product we are building now:
 
-1. A user signs in through Account Auth, names their agent, selects an icon,
-   and chooses a Runner class.
+1. A user signs in through Account Auth, names their agent, and selects an icon.
 2. Core creates a Project and Finite Private grant state.
 3. The selected Runner launches a real Hermes Agent Runtime.
 4. A newly initialized Runtime copies the Product Release's bundled Finite
@@ -118,20 +117,24 @@ silicon and macOS 26 or newer:
 ```bash
 container system start
 export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-finite-private-key>
+just dev saas-smoke
 just dev up
 ```
 
-Open <http://127.0.0.1:13002/dashboard>, name an agent, launch it, and use the
-Hosted Web Device. This creates a real Core Project and lease, builds the
-canonical Hermes 0.18.2 Runtime image, starts it through the generic Apple
-Container provider, and preserves its bind-mounted `/data` across restarts and
-image replacement. The runtime publishes generic `/healthz` readiness and an
-Agent Principal `/contact` document; Finite Chat Devices own
-KeyPackage/Add/Welcome admission.
+On a fresh checkout, `just dev saas-smoke` obtains and redeems a local Launch
+Code, creates the real Core Project and lease, launches the canonical Hermes
+Runtime through the generic Apple Container provider, and proves chat/restart
+healing. It preserves the local agent for the following interactive
+`just dev up`; skip the smoke on later runs with that persisted agent.
 
-Run the credential-gated end-to-end acceptance with `just dev saas-smoke`.
-It requires real Hermes replies and proves chat-server, Hosted Web Device, and
-Agent Runtime restart recovery. See
+Open <http://127.0.0.1:13002/dashboard> and use the Hosted Web Device. The
+runtime preserves its bind-mounted `/data` across restarts and image
+replacement. It publishes generic `/healthz` readiness and an Agent Principal
+`/contact` document; Finite Chat Devices own KeyPackage/Add/Welcome admission.
+
+Rerun the credential-gated `just dev saas-smoke` acceptance whenever the real
+launch path changes. It requires real Hermes replies and proves chat-server,
+Hosted Web Device, and Agent Runtime restart recovery. See
 [`docs/local-integration-harness.md`](../docs/local-integration-harness.md) for
 networking, key handling, services-only CI, and recovery details.
 
@@ -147,8 +150,9 @@ rename deployment paths from `finite-computer` to v2.
 ## SaaS Runner
 
 Docker is the local preflight backend. Kata is the first production Runner;
-Phala is the confidential fast-follow candidate. Placement is Project-selected
-and workers advertise exactly one supported adapter class:
+Phala is the confidential fast-follow candidate. Core assigns placement from
+product policy, persists it with the Project, and does not expose provider
+selection in onboarding. Workers advertise exactly one supported adapter class:
 
 ```text
 RuntimeSpec.runner_class = "kata"

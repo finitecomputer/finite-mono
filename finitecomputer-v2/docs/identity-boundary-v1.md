@@ -35,6 +35,32 @@ code and one key per Finite Home—not a secret shared between a human and agent
   be brought by the user.
 - WorkOS gates SaaS access but is not a Nostr signer and does not authenticate
   agentic product mutations.
+- Dashboard user requests carry the standard WorkOS AuthKit access token to
+  Core. Core validates the JWT signature against the WorkOS JWKS and checks
+  issuer, client id, expiry, and subject on every user-scoped request; caller-
+  supplied identity headers are not authentication.
+- The standard AuthKit access token does not carry email. After validating its
+  `sub`, Core resolves that exact WorkOS user through the read-only User
+  Management API and requires its email to be verified. Core does not require a
+  custom JWT template or trust an email forwarded by Dashboard.
+- Core consumes standard WorkOS session claims instead of minting a parallel
+  Finite session token. Account Auth remains an adapter that can be replaced
+  without changing Project, Agent Runtime, Principal, or product-grant
+  semantics.
+- Finite operators belong to one internal WorkOS operator organization. Core
+  requires that exact validated `org_id` for every administrator request. The
+  internal canary has one operator predicate across admin routes; named
+  permissions and split duties are deferred until customer admission needs
+  them.
+- The WorkOS operator organization and Core Customer Organizations are
+  different objects. Customer ownership, billing, Projects, and entitlements
+  remain Core concepts, and ordinary customer/canary accounts do not become
+  operator-organization members.
+- Runner and other services use separate, route-scoped service credentials.
+  A Runner credential cannot call user or administrator routes, assert a
+  WorkOS subject, or elevate a user. Core reads the Runner capability from
+  `FC_CORE_RUNNER_API_TOKEN`; the non-Runner service and Finite Private usage
+  capabilities remain separate and all three configured values must differ.
 - The Hosted Web Device is authorized by Account Auth but participates as a
   Finite Chat Device; it is not the agent and not room authority.
 - Agent operations are attributable to the agent npub by default. Acting as the
@@ -109,6 +135,16 @@ human-agent signer.
   independent device stores.
 - WorkOS logout blocks dashboard/Hosted Web access without revoking agent keys
   or stopping Nostr-authenticated agent operations.
+- Core rejects an expired, wrong-issuer, wrong-client, or invalidly signed
+  WorkOS access token and derives the acting user only from validated claims.
+- Core rejects caller-supplied identity headers without a valid matching
+  WorkOS access token, and a Runner credential is rejected on every user and
+  administrator route.
+- Core accepts every administrator route only when the validated token has the
+  configured operator `org_id`; a missing or different organization fails
+  closed.
+- The internal WorkOS operator organization id is never persisted as or
+  inferred to be a Core Customer Organization id.
 - Core/Runner logs, facts, release evidence, and Runtime Management messages
   contain no user or agent nsec.
 - A Sites Email Access Delegation lets the agent satisfy matching Sites email

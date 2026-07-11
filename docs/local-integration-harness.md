@@ -3,8 +3,10 @@
 `devfinity` is the Finite monorepo local integration harness. The default
 profile is the real local SaaS: it builds the canonical Agent Runtime image,
 runs the generic Runner against Apple Container, and connects that runtime to
-the same local Core, Finite Chat, Hosted Web Device, Sites, and dashboard used
-by automated integration tests.
+the local WorkOS fixture, Postgres, Core, Finite Chat, Hosted Web Device, Sites,
+Brain, and dashboard used by automated integration tests. This is the complete
+browser-product spine, not every unrelated service in the monorepo; Search, for
+example, is not part of this profile.
 
 `process-compose` remains the process supervisor and log/TUI surface.
 Devfinity owns topology, generated state, prerequisite checks, and explicit
@@ -17,14 +19,22 @@ On an Apple silicon Mac running macOS 26 or newer:
 ```sh
 container system start
 export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-finite-private-key>
+just dev saas-smoke
 just dev up
 ```
 
+On later runs with a persisted agent, skip `just dev saas-smoke`. On a fresh
+checkout, the smoke command is the one-time acceptance bootstrap: it obtains
+and redeems a single-use Launch Code through the local operator fixture,
+launches the agent, proves real chat and restart healing, and preserves the
+agent for the following interactive `just dev up`. The smoke command owns the
+default stack while it runs, so do not run it alongside `just dev up` or the
+web-design fixture.
+
 Then open <http://127.0.0.1:13002/dashboard>. The local account bypasses WorkOS
-and Stripe only at their external boundaries. Naming and launching the agent
-still creates the real Core entitlement, Project, creation request, promoted
-Runtime artifact, Runner lease, Apple container, Agent Principal, and Hosted Web
-Device chat.
+and Stripe only at their external boundaries. The bootstrap still uses the real
+Core entitlement, Project, creation request, promoted Runtime artifact, Runner
+lease, Apple container, Agent Principal, and Hosted Web Device chat.
 
 The preferred inference setup is
 `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`. Devfinity then runs the in-tree chained
@@ -34,13 +44,12 @@ operator key. For an explicit direct-key fallback:
 
 ```sh
 export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=<finite-private-key>
-just dev up
 ```
 
 Devfinity fails before starting the stack when neither credential is present.
 It will not present a chat UI whose model calls are known to fail.
 
-Run the real launch/chat/restart acceptance test with:
+Rerun the real launch/chat/restart acceptance test at any time with:
 
 ```sh
 just dev saas-smoke
@@ -50,6 +59,9 @@ That check creates or reuses the local Project, waits for the Apple runtime,
 opens the real Hosted Web Device chat, requires a real Hermes response, restarts
 the chat server and Hosted Web Device, requires another response, restarts the
 Agent Runtime through Core and Runner, and requires a final response.
+
+`just dev up` does not silently grant an empty account agent admission; use the
+fresh-checkout sequence above instead.
 
 ## Portable services-only profile
 
@@ -107,6 +119,24 @@ tears down the supervised host processes afterward.
 trees. Detached Apple Agent Runtimes intentionally remain alive so local Chat
 can exercise real service interruption and stream healing. Use the dashboard's
 generic Stop operation when the runtime itself should stop.
+
+## Common recovery
+
+- If port 13002 is busy, stop the web-design loop or other devfinity instance.
+  The design fixture can instead use
+  `FC_WEB_DESIGN_PORT=13003 just dev web-design`.
+- If a previous full stack exited badly, run `just dev status`, inspect
+  `.local-state/devfinity/runs/default/logs/`, then run `just dev cleanup` and
+  start it again. Cleanup preserves databases, chat state, and Runtime data.
+- If Apple Container is unavailable, verify `container --version`, then run
+  `container system start`. Host-network failures include the exact bridge
+  remediation described below.
+- If startup reports a missing inference credential, obtain the approved local
+  development value from a Finite operator over the team's secret-sharing
+  channel and export one of the two documented variable names. Never write it
+  into this repository or a committed `.env` file.
+- If a long-running local sign-in expires, restart the supervised stack to
+  remint the local WorkOS fixture token; persisted product state remains.
 
 ## State and key handling
 

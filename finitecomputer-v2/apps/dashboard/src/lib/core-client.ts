@@ -208,6 +208,40 @@ export type CoreAdminRuntimesResult = CoreBridgeStatus & {
   error: string | null;
 };
 
+export type CoreLaunchCodeBatch = {
+  id: string;
+  name: string;
+  code_count: number;
+  expires_at: string;
+  revoked_at?: string | null;
+  revoked_by_workos_user_id?: string | null;
+  created_by_workos_user_id: string;
+  created_at: string;
+};
+
+/** Metadata-only code status returned by later reads and revocation. */
+export type CoreLaunchCodeStatus = {
+  id: string;
+  redeemed_customer_org_id?: string | null;
+  redeemed_at?: string | null;
+};
+
+export type CoreLaunchCodeBatchDetails = {
+  batch: CoreLaunchCodeBatch;
+  codes: CoreLaunchCodeStatus[];
+};
+
+/** Plaintext values exist only in the immediate issuance response. */
+export type CoreIssuedLaunchCodeBatch = {
+  batch: CoreLaunchCodeBatch;
+  codes: Array<{ id: string; code: string }>;
+};
+
+export type CoreLaunchCodeBatchesResult = CoreBridgeStatus & {
+  batches: CoreLaunchCodeBatchDetails[] | null;
+  error: string | null;
+};
+
 /** Raw key is present exactly once in this response and is never persisted. */
 export type CoreAdminIssuedFinitePrivateKey = {
   grant?: CoreFinitePrivateGrant | null;
@@ -230,7 +264,7 @@ export type CoreCustomerOrganization = {
   id: string;
   owner_user_id: string;
   name: string;
-  billing_class: "grandfathered" | "off2026" | "standard";
+  billing_class: "grandfathered" | "sponsored" | "standard";
   created_at: string;
   updated_at: string;
 };
@@ -287,7 +321,8 @@ export type CoreMeResult = {
   error: string | null;
 };
 
-const REQUIRED_CORE_ENV = ["FC_CORE_BASE_URL", "FC_CORE_API_TOKEN"] as const;
+const REQUIRED_CORE_ENV = ["FC_CORE_BASE_URL"] as const;
+const REQUIRED_CORE_SERVICE_ENV = ["FC_CORE_BASE_URL", "FC_CORE_API_TOKEN"] as const;
 const CORE_CACHE_PREFIX = "core:";
 const CORE_ME_FRESH_MS = 5_000;
 const CORE_ME_STALE_MS = 30_000;
@@ -302,6 +337,14 @@ export type CoreReadOptions = {
 
 export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
   const missing = REQUIRED_CORE_ENV.filter((name) => !env[name]?.trim());
+  return {
+    configured: missing.length === 0,
+    missing,
+  };
+}
+
+function coreServiceBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
+  const missing = REQUIRED_CORE_SERVICE_ENV.filter((name) => !env[name]?.trim());
   return {
     configured: missing.length === 0,
     missing,
@@ -325,7 +368,7 @@ export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeR
       ...status,
       account,
       me: null,
-      error: "A verified WorkOS account is required for Core project imports.",
+      error: "Sign in again to view your projects.",
     };
   }
 
@@ -373,7 +416,7 @@ export async function loadCoreBillingOverview(
       ...status,
       account,
       billing: null,
-      error: "A verified WorkOS account is required for billing.",
+      error: "Sign in again to view billing.",
     };
   }
 
@@ -402,34 +445,6 @@ export async function loadCoreBillingOverview(
   }
 }
 
-export async function claimCoreImportCandidates(selectedCandidateIds: string[]) {
-  const status = coreBridgeStatus();
-  if (!status.configured) {
-    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
-  }
-  const account = await getAccountAuthContext();
-  if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to claim imported bots.");
-  }
-  const cleanIds = selectedCandidateIds.map((id) => id.trim()).filter(Boolean);
-  if (cleanIds.length === 0) {
-    throw new Error("Select at least one bot to import.");
-  }
-
-  const result = await coreFetch<{
-    claimed_project_ids: string[];
-    already_claimed_project_ids: string[];
-    denied_candidate_ids: string[];
-  }>("/api/core/v1/me/import-candidates/claim", account, {
-    method: "POST",
-    body: JSON.stringify({
-      selectedCandidateIds: cleanIds,
-    }),
-  });
-  invalidateCoreReadCache();
-  return result;
-}
-
 export async function requestCoreAgentCreation(input: {
   displayName: string;
   launchCode: string;
@@ -443,7 +458,7 @@ export async function requestCoreAgentCreation(input: {
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to create an agent.");
+    throw new Error("Sign in again to create an agent.");
   }
 
   const result = await coreFetch<CoreAgentCreationResult>(
@@ -468,7 +483,7 @@ export async function linkCoreStripeCustomer(stripeCustomerId: string) {
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required for billing.");
+    throw new Error("Sign in again to manage billing.");
   }
   const result = await coreFetch<CoreCustomerBillingAccount>(
     "/api/core/v1/me/billing/stripe-customer",
@@ -526,7 +541,7 @@ export async function requestCoreRuntimeRestart(projectId: string) {
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to restart hosted agents.");
+    throw new Error("Sign in again to restart your agent.");
   }
 
   const result = await coreFetch<CoreRuntimeControlRequest>(
@@ -548,7 +563,7 @@ export async function requestCoreRuntimeRecoverKnownGoodChat(projectId: string) 
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to recover hosted agents.");
+    throw new Error("Sign in again to recover your agent.");
   }
 
   const result = await coreFetch<CoreRuntimeControlRequest>(
@@ -570,7 +585,7 @@ export async function requestCoreRuntimeStop(projectId: string) {
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to stop hosted agents.");
+    throw new Error("Sign in again to stop your agent.");
   }
 
   const result = await coreFetch<CoreRuntimeControlRequest>(
@@ -592,7 +607,7 @@ export async function requestCoreRuntimeDestroy(projectId: string) {
   }
   const account = await getAccountAuthContext();
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required to destroy hosted agents.");
+    throw new Error("Sign in again to manage your agent.");
   }
 
   const result = await coreFetch<CoreRuntimeControlRequest>(
@@ -632,11 +647,7 @@ export async function findCoreProjectByMachineId(
   if (!result.me) {
     return null;
   }
-  return (
-    result.me.projects.find(
-      (project) => project.runtime?.source_machine_id === machineId
-    ) ?? null
-  );
+  return coreProductProjectForMachineId(result.me.projects, machineId);
 }
 
 export async function loadCoreSourceHostRelayEndpoint(
@@ -647,7 +658,7 @@ export async function loadCoreSourceHostRelayEndpoint(
   if (!hostId) {
     return null;
   }
-  const status = coreBridgeStatus();
+  const status = coreServiceBridgeStatus();
   if (!status.configured) {
     return null;
   }
@@ -683,16 +694,13 @@ export async function loadCoreFinitePrivateAdminState(
   }
 
   try {
-    const load = () =>
-      coreServiceFetch<CoreFinitePrivateAdminState>(
-        "/api/core/v1/finite-private/admin-state"
-      );
+    const load = () => coreAdminFetch<CoreFinitePrivateAdminState>("/api/core/v1/finite-private/admin-state");
     return {
       ...status,
       state:
         options.cacheMode === "swr"
           ? await readThroughServerSwr(
-              `${CORE_CACHE_PREFIX}finite-private-admin:${coreCacheFingerprint(coreServiceCacheParts())}`,
+              `${CORE_CACHE_PREFIX}finite-private-admin:${coreCacheFingerprint(accountCacheParts(await getAccountAuthContext()))}`,
               { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
               load
             )
@@ -713,7 +721,7 @@ export async function approveCoreFinitePrivateGrant(input: {
   workosUserId?: string | null;
   limitProfileId?: string | null;
 }) {
-  const result = await coreServiceFetch<CoreFinitePrivateGrant>("/api/core/v1/finite-private/grants", {
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>("/api/core/v1/finite-private/grants", {
     method: "POST",
     body: JSON.stringify({
       verifiedEmail: requiredString(input.verifiedEmail, "Verified email is required."),
@@ -732,7 +740,7 @@ export async function issueCoreFinitePrivateApiKey(input: {
   agentRuntimeId?: string | null;
 }) {
   const grantId = requiredString(input.grantId, "Grant id is required.");
-  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+  const result = await coreAdminFetch<CoreFinitePrivateApiKey>(
     `/api/core/v1/finite-private/grants/${encodeURIComponent(grantId)}/api-keys`,
     {
       method: "POST",
@@ -748,7 +756,7 @@ export async function issueCoreFinitePrivateApiKey(input: {
 }
 
 export async function resetCoreFinitePrivateGrant(grantId: string) {
-  const result = await coreServiceFetch<CoreFinitePrivateGrant>(
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>(
     `/api/core/v1/finite-private/grants/${encodeURIComponent(
       requiredString(grantId, "Grant id is required.")
     )}/reset`,
@@ -762,7 +770,7 @@ export async function resetCoreFinitePrivateGrant(grantId: string) {
 }
 
 export async function revokeCoreFinitePrivateGrant(grantId: string) {
-  const result = await coreServiceFetch<CoreFinitePrivateGrant>(
+  const result = await coreAdminFetch<CoreFinitePrivateGrant>(
     `/api/core/v1/finite-private/grants/${encodeURIComponent(
       requiredString(grantId, "Grant id is required.")
     )}/revoke`,
@@ -780,7 +788,7 @@ export async function rotateCoreFinitePrivateApiKey(input: {
   rawKey: string;
 }) {
   const keyId = requiredString(input.keyId, "API key id is required.");
-  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+  const result = await coreAdminFetch<CoreFinitePrivateApiKey>(
     `/api/core/v1/finite-private/api-keys/${encodeURIComponent(keyId)}/rotate`,
     {
       method: "POST",
@@ -794,7 +802,7 @@ export async function rotateCoreFinitePrivateApiKey(input: {
 }
 
 export async function revokeCoreFinitePrivateApiKey(keyId: string) {
-  const result = await coreServiceFetch<CoreFinitePrivateApiKey>(
+  const result = await coreAdminFetch<CoreFinitePrivateApiKey>(
     `/api/core/v1/finite-private/api-keys/${encodeURIComponent(
       requiredString(keyId, "API key id is required.")
     )}/revoke`,
@@ -807,11 +815,10 @@ export async function revokeCoreFinitePrivateApiKey(keyId: string) {
   return result;
 }
 
-// --- Admin Ops (Core-enforced via FC_CORE_ADMIN_EMAILS) ---
+// --- Admin Ops ---
 //
-// These calls send the signed-in admin's verified identity headers; Core
-// authorizes them against its own allowlist. The dashboard isAdmin gate is
-// only a UI convenience.
+// Core validates the signed-in administrator's WorkOS AuthKit access token and
+// operator organization. The dashboard isAdmin gate is only a UI convenience.
 
 async function coreAdminFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
   const status = coreBridgeStatus();
@@ -843,6 +850,60 @@ export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> 
       error: error instanceof Error ? error.message : "Finite Core is unavailable.",
     };
   }
+}
+
+export async function loadCoreLaunchCodeBatches(): Promise<CoreLaunchCodeBatchesResult> {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    return { ...status, batches: null, error: null };
+  }
+
+  try {
+    return {
+      ...status,
+      batches: await coreAdminFetch<CoreLaunchCodeBatchDetails[]>(
+        "/api/core/v1/admin/launch-code-batches"
+      ),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...status,
+      batches: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function adminIssueCoreLaunchCodeBatch(input: {
+  name: string;
+  codeCount: number;
+  expiresInHours?: number | null;
+}) {
+  const result = await coreAdminFetch<CoreIssuedLaunchCodeBatch>(
+    "/api/core/v1/admin/launch-code-batches",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        name: requiredString(input.name, "Batch name is required."),
+        codeCount: input.codeCount,
+        expiresInHours: input.expiresInHours ?? undefined,
+      }),
+    }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
+export async function adminRevokeCoreLaunchCodeBatch(batchId: string) {
+  const result = await coreAdminFetch<CoreLaunchCodeBatchDetails>(
+    `/api/core/v1/admin/launch-code-batches/${encodeURIComponent(
+      requiredString(batchId, "Launch Code batch id is required.")
+    )}/revoke`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
 }
 
 export async function adminRestartCoreRuntime(projectId: string) {
@@ -942,6 +1003,22 @@ export function coreProjectMachineId(project: CoreVisibleProject) {
   return project.runtime?.source_machine_id?.trim() || null;
 }
 
+/** Projects created by this product; imported whiteglove history is not user-facing. */
+export function coreProductProjects(projects: CoreVisibleProject[]) {
+  return projects.filter((project) => project.project.import_candidate_id == null);
+}
+
+export function coreProductProjectForMachineId(
+  projects: CoreVisibleProject[],
+  machineId: string
+) {
+  return (
+    coreProductProjects(projects).find(
+      (project) => project.runtime?.source_machine_id === machineId
+    ) ?? null
+  );
+}
+
 export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {
   return Boolean(project.runtime?.runtime_artifact_id?.trim());
 }
@@ -953,7 +1030,7 @@ export function coreProjectLabel(project: CoreVisibleProject) {
     project.project.display_name.trim() ||
     project.runtime?.host_facts.display_name.trim() ||
     project.runtime?.source_machine_id ||
-    "Imported bot"
+    "Imported agent"
   );
 }
 
@@ -1002,13 +1079,13 @@ export function coreProjectLocationLabel(
   request: CoreAgentCreationRequestSummary | null
 ) {
   if (project.runtime) {
-    return `${project.runtime.source_host_id} / ${project.runtime.source_machine_id}`;
+    return "Ready to use";
   }
   if (request?.status === "requested") {
     return "Waiting for launch";
   }
   if (request?.status === "launching") {
-    return "Starting your bot";
+    return "Starting your agent";
   }
   if (request?.status === "failed") {
     return "Launch failed";
@@ -1016,17 +1093,14 @@ export function coreProjectLocationLabel(
   return "Waiting for launch";
 }
 
-export function coreIdentityHeaders(account: AccountAuthContext, token: string) {
+export function coreIdentityHeaders(account: AccountAuthContext) {
   if (!coreAccountReady(account)) {
-    throw new Error("A verified WorkOS account is required for Finite Core.");
+    throw new Error("Sign in again to continue.");
   }
 
   return {
-    authorization: `Bearer ${token}`,
+    authorization: `Bearer ${account.accessToken}`,
     "content-type": "application/json",
-    "x-finite-workos-user-id": account.workosUserId,
-    "x-finite-workos-email": account.email,
-    "x-finite-workos-email-verified": account.emailVerified ? "true" : "false",
   };
 }
 
@@ -1036,13 +1110,14 @@ function coreAccountReady(
   email: string;
   workosUserId: string;
   emailVerified: true;
+  accessToken: string;
 } {
-  const devAccountAllowed = process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH === "1";
   return Boolean(
     account.email &&
       account.workosUserId &&
       account.emailVerified &&
-      (account.source === "workos" || (account.source === "dev" && devAccountAllowed))
+      (account.source === "workos" || account.source === "dev") &&
+      account.accessToken
   );
 }
 
@@ -1052,8 +1127,7 @@ async function coreFetch<T>(
   init: RequestInit = {}
 ): Promise<T> {
   const baseUrl = process.env.FC_CORE_BASE_URL?.trim();
-  const token = process.env.FC_CORE_API_TOKEN?.trim();
-  if (!baseUrl || !token) {
+  if (!baseUrl) {
     throw new Error("Finite Core is not configured.");
   }
 
@@ -1061,7 +1135,7 @@ async function coreFetch<T>(
     ...init,
     cache: "no-store",
     headers: {
-      ...coreIdentityHeaders(account, token),
+      ...coreIdentityHeaders(account),
       ...headersRecord(init.headers),
     },
   });
@@ -1153,8 +1227,8 @@ export function invalidateCoreReadCache() {
 function accountCacheParts(account: AccountAuthContext) {
   return [
     process.env.FC_CORE_BASE_URL?.trim() ?? "",
-    process.env.FC_CORE_API_TOKEN?.trim() ?? "",
     account.source,
+    account.accessToken ?? "",
     account.workosUserId ?? "",
     account.email ?? "",
     account.emailVerified ? "verified" : "unverified",

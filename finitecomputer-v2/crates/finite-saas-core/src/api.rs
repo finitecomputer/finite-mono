@@ -1,3 +1,7 @@
+use crate::auth::{CoreAuth, WorkosAuthError};
+use crate::launch_codes::{
+    IssueLaunchCodeBatchInput, LaunchCodeBatchDetails, RevokeLaunchCodeBatchInput,
+};
 use crate::store::{CoreStore, VisibleProject};
 use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
@@ -39,7 +43,7 @@ use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::env;
 use std::path::PathBuf;
@@ -58,12 +62,8 @@ const RELAY_MAX_REQUEST_BODY_BYTES: usize = 48 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CoreApiState {
     store: CoreStore,
-    api_token: String,
-    finite_private_usage_api_token: String,
+    auth: CoreAuth,
     standard_stripe_price_id: Option<String>,
-    /// Normalized emails allowed to call `/api/core/v1/admin/*`. Empty means
-    /// no admins: every admin endpoint fails closed with 403.
-    admin_emails: Arc<BTreeSet<String>>,
     /// First-use deployment gate. Persisting `kind = 'upgrade'` crosses the
     /// rollback boundary for Core generations that predate that value.
     runtime_upgrades_enabled: bool,
@@ -97,7 +97,7 @@ pub struct ClaimImportsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRequest {
     pub display_name: String,
     pub launch_code: String,
@@ -106,7 +106,14 @@ pub struct CreateAgentRequest {
     pub runner_class: RunnerClass,
     #[serde(default)]
     pub profile_picture_url: Option<String>,
-    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IssueLaunchCodeBatchRequest {
+    pub name: String,
+    pub code_count: u32,
+    pub expires_in_hours: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +204,7 @@ pub struct FailAgentCreationRequest {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    pub provisioned_finite_private_api_key_id: Option<String>,
     pub now: Option<String>,
 }
 
@@ -486,69 +494,33 @@ impl From<AgentCreationRequest> for AgentCreationRequestSummary {
     }
 }
 
-pub fn router(store: CoreStore, api_token: impl Into<String>) -> Router {
-    router_with_relay_state_dir(store, api_token, default_relay_state_dir())
+pub fn router(store: CoreStore, auth: CoreAuth) -> Router {
+    router_with_relay_state_dir(store, auth, default_relay_state_dir())
 }
 
 pub fn router_with_relay_state_dir(
     store: CoreStore,
-    api_token: impl Into<String>,
+    auth: CoreAuth,
     relay_state_dir: impl Into<PathBuf>,
-) -> Router {
-    router_with_admin_emails(
-        store,
-        api_token,
-        relay_state_dir,
-        env::var("FC_CORE_ADMIN_EMAILS").unwrap_or_default(),
-    )
-}
-
-pub fn router_with_admin_emails(
-    store: CoreStore,
-    api_token: impl Into<String>,
-    relay_state_dir: impl Into<PathBuf>,
-    admin_emails: impl AsRef<str>,
 ) -> Router {
     let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
-    router_with_admin_emails_and_runtime_upgrades(
-        store,
-        api_token,
-        relay_state_dir,
-        admin_emails,
-        runtime_upgrades_enabled,
-    )
+    router_with_runtime_upgrades(store, auth, relay_state_dir, runtime_upgrades_enabled)
 }
 
-pub fn router_with_admin_emails_and_runtime_upgrades(
+pub fn router_with_runtime_upgrades(
     store: CoreStore,
-    api_token: impl Into<String>,
+    auth: CoreAuth,
     relay_state_dir: impl Into<PathBuf>,
-    admin_emails: impl AsRef<str>,
     runtime_upgrades_enabled: bool,
 ) -> Router {
-    let api_token = api_token.into();
-    let admin_emails = parse_admin_email_allowlist(admin_emails.as_ref());
-    let finite_private_usage_api_token = env::var("FC_FINITE_PRIVATE_USAGE_API_TOKEN")
-        .ok()
-        .and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .unwrap_or_else(|| api_token.clone());
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
         .or_else(|| optional_env_value("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"));
     let state = CoreApiState {
         store,
-        api_token,
-        finite_private_usage_api_token,
+        auth,
         standard_stripe_price_id,
-        admin_emails: Arc::new(admin_emails),
         runtime_upgrades_enabled,
         relay_store: RelayStore::new(relay_state_dir.into()),
         result_waiters: RelayWaiters::default(),
@@ -615,6 +587,14 @@ pub fn router_with_admin_emails_and_runtime_upgrades(
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(
+            "/api/core/v1/admin/launch-code-batches",
+            get(admin_list_launch_code_batches).post(admin_issue_launch_code_batch),
+        )
+        .route(
+            "/api/core/v1/admin/launch-code-batches/{batch_id}/revoke",
+            post(admin_revoke_launch_code_batch),
+        )
+        .route(
             "/api/core/v1/admin/projects/{project_id}/runtime/restart",
             post(admin_request_runtime_restart),
         )
@@ -660,6 +640,10 @@ pub fn router_with_admin_emails_and_runtime_upgrades(
         .route(
             "/api/core/v1/me/agent-creation-requests",
             post(create_agent_request),
+        )
+        .route(
+            "/api/core/v1/me/projects/{project_id}/archive",
+            post(archive_imported_project),
         )
         .route(
             "/api/core/v1/me/projects/{project_id}/runtime/restart",
@@ -863,7 +847,7 @@ async fn runtime_artifact(
     headers: HeaderMap,
     Path(artifact_id): Path<String>,
 ) -> Result<Json<RuntimeArtifact>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     let Some(artifact) = state.store.runtime_artifact(&artifact_id).await? else {
         return Err(ApiError::not_found("runtime artifact is not configured"));
     };
@@ -903,7 +887,7 @@ async fn approve_finite_private_grant(
     headers: HeaderMap,
     Json(input): Json<ApproveFinitePrivateGrantRequest>,
 ) -> Result<Json<FinitePrivateGrant>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -923,7 +907,7 @@ async fn issue_finite_private_api_key(
     Path(grant_id): Path<String>,
     Json(input): Json<IssueFinitePrivateApiKeyRequest>,
 ) -> Result<Json<FinitePrivateApiKey>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -944,7 +928,7 @@ async fn revoke_finite_private_grant(
     Path(grant_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<FinitePrivateGrant>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -962,7 +946,7 @@ async fn reset_finite_private_usage_window(
     Path(grant_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<FinitePrivateGrant>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -980,7 +964,7 @@ async fn revoke_finite_private_api_key(
     Path(key_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<FinitePrivateApiKey>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -998,7 +982,7 @@ async fn rotate_finite_private_api_key(
     Path(key_id): Path<String>,
     Json(input): Json<RotateFinitePrivateApiKeyRequest>,
 ) -> Result<Json<FinitePrivateApiKey>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1015,7 +999,7 @@ async fn finite_private_admin_audit_events(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FinitePrivateAdminAuditEvent>>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.finite_private_admin_audit_events().await?))
 }
 
@@ -1023,7 +1007,7 @@ async fn finite_private_admin_state(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<FinitePrivateAdminState>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.finite_private_admin_state().await?))
 }
 
@@ -1031,8 +1015,58 @@ async fn admin_runtimes(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AdminRuntimeOverview>>, ApiError> {
-    require_admin_identity(&state, &headers)?;
+    require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.admin_runtime_overviews().await?))
+}
+
+async fn admin_list_launch_code_batches(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<LaunchCodeBatchDetails>>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(state.store.list_launch_code_batches().await?))
+}
+
+async fn admin_issue_launch_code_batch(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<IssueLaunchCodeBatchRequest>,
+) -> Result<Response, ApiError> {
+    let identity = require_admin_identity(&state, &headers).await?;
+    let issued = state
+        .store
+        .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+            name: input.name,
+            code_count: input.code_count,
+            expires_in_hours: input.expires_in_hours,
+            created_by_workos_user_id: identity.workos_user_id,
+            now: None,
+        })
+        .await?;
+    let mut response = Json(issued).into_response();
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("no-store, private"),
+    );
+    Ok(response)
+}
+
+async fn admin_revoke_launch_code_batch(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Result<Json<LaunchCodeBatchDetails>, ApiError> {
+    let identity = require_admin_identity(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .revoke_launch_code_batch(RevokeLaunchCodeBatchInput {
+                batch_id,
+                revoked_by_workos_user_id: identity.workos_user_id,
+                now: None,
+            })
+            .await?,
+    ))
 }
 
 async fn admin_request_runtime_restart(
@@ -1041,7 +1075,7 @@ async fn admin_request_runtime_restart(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     let request = state
         .store
         .admin_request_runtime_restart(AdminRuntimeControlInput {
@@ -1060,7 +1094,7 @@ async fn admin_request_runtime_recover_known_good_chat(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     let request = state
         .store
         .admin_request_runtime_recover_known_good_chat(AdminRuntimeControlInput {
@@ -1079,7 +1113,7 @@ async fn admin_request_runtime_upgrade(
     Path(project_id): Path<String>,
     Json(input): Json<AdminRuntimeUpgradeRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     if !state.runtime_upgrades_enabled {
         return Err(CoreError::RuntimeUpgradeNotEnabled.into());
     }
@@ -1101,7 +1135,7 @@ async fn admin_issue_finite_private_friend_key(
     headers: HeaderMap,
     Json(input): Json<AdminIssueFinitePrivateFriendKeyRequest>,
 ) -> Result<Json<AdminIssuedFinitePrivateKeyResponse>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     let raw_api_key = crate::generate_finite_private_api_key()?;
     let AdminIssuedFinitePrivateKey { grant, api_key } = state
         .store
@@ -1127,7 +1161,7 @@ async fn admin_rotate_finite_private_api_key(
     Path(key_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<AdminIssuedFinitePrivateKeyResponse>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     let raw_api_key = crate::generate_finite_private_api_key()?;
     let api_key = state
         .store
@@ -1152,7 +1186,7 @@ async fn admin_revoke_finite_private_api_key(
     Path(key_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<FinitePrivateApiKey>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1171,7 +1205,7 @@ async fn admin_reset_finite_private_usage_window(
     Path(grant_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<FinitePrivateGrant>, ApiError> {
-    let identity = require_admin_identity(&state, &headers)?;
+    let identity = require_admin_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1249,7 +1283,7 @@ async fn me(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<MeResponse>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     state
         .store
         .link_verified_user(LinkVerifiedUserInput {
@@ -1286,7 +1320,7 @@ async fn billing_overview(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<BillingOverview>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1304,7 +1338,7 @@ async fn link_stripe_customer(
     headers: HeaderMap,
     Json(input): Json<LinkStripeCustomerRequest>,
 ) -> Result<Json<CustomerBillingAccount>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1348,7 +1382,7 @@ async fn import_candidates(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProjectImportCandidate>>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1362,7 +1396,7 @@ async fn claim_import_candidates(
     headers: HeaderMap,
     Json(input): Json<ClaimImportsRequest>,
 ) -> Result<Json<ClaimProjectImportsResult>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     let result = state
         .store
         .claim_project_imports(ClaimProjectImportsInput {
@@ -1380,7 +1414,7 @@ async fn create_agent_request(
     headers: HeaderMap,
     Json(input): Json<CreateAgentRequest>,
 ) -> Result<Json<RequestAgentCreationResult>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -1391,7 +1425,7 @@ async fn create_agent_request(
                     display_name: input.display_name,
                     launch_code: input.launch_code,
                     idempotency_key: input.idempotency_key,
-                    now: input.now,
+                    now: None,
                 },
                 AgentCreationConfiguration {
                     runner_class: input.runner_class,
@@ -1408,7 +1442,7 @@ async fn request_runtime_restart(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     let request = state
         .store
         .request_runtime_restart(RequestRuntimeRestartInput {
@@ -1427,7 +1461,7 @@ async fn request_runtime_recover_known_good_chat(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     let request = state
         .store
         .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
@@ -1446,7 +1480,7 @@ async fn request_runtime_stop(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     let request = state
         .store
         .request_runtime_stop(crate::RequestRuntimeStopInput {
@@ -1465,7 +1499,7 @@ async fn request_runtime_destroy(
     Path(project_id): Path<String>,
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     let request = state
         .store
         .request_runtime_destroy(crate::RequestRuntimeDestroyInput {
@@ -1478,12 +1512,31 @@ async fn request_runtime_destroy(
     Ok(Json(RuntimeControlRequestView::from(request)))
 }
 
+async fn archive_imported_project(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(input): Json<TimestampRequest>,
+) -> Result<StatusCode, ApiError> {
+    let identity = require_verified_identity(&state, &headers).await?;
+    state
+        .store
+        .archive_imported_project(crate::ArchiveImportedProjectInput {
+            verified_email: identity.email,
+            workos_user_id: identity.workos_user_id,
+            project_id,
+            now: input.now,
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn lease_agent_creation_request(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
     Json(input): Json<LeaseAgentCreationRequest>,
 ) -> Result<Json<Option<AgentCreationLease>>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1504,7 +1557,7 @@ async fn lease_runtime_control_request(
     headers: HeaderMap,
     Json(input): Json<LeaseRuntimeControlRequest>,
 ) -> Result<Json<Option<crate::RuntimeControlLease>>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1526,7 +1579,7 @@ async fn complete_runtime_control_request(
     Path(request_id): Path<String>,
     Json(input): Json<CompleteRuntimeControlRequest>,
 ) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1550,7 +1603,7 @@ async fn fail_runtime_control_request(
     Path(request_id): Path<String>,
     Json(input): Json<FailRuntimeControlRequest>,
 ) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1571,7 +1624,7 @@ async fn complete_agent_creation_request(
     Path(request_id): Path<String>,
     Json(input): Json<CompleteAgentCreationRequest>,
 ) -> Result<Json<AgentCreationLease>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1602,7 +1655,7 @@ async fn register_agent_creation_runtime(
     Path(request_id): Path<String>,
     Json(input): Json<RegisterAgentCreationRuntimeRequest>,
 ) -> Result<Json<AgentCreationLease>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1634,7 +1687,7 @@ async fn provision_finite_private_runtime_key(
     Path(request_id): Path<String>,
     Json(input): Json<ProvisionFinitePrivateRuntimeKeyRequest>,
 ) -> Result<Json<ProvisionFinitePrivateRuntimeKeyResult>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1656,7 +1709,7 @@ async fn fail_agent_creation_request(
     Path(request_id): Path<String>,
     Json(input): Json<FailAgentCreationRequest>,
 ) -> Result<Json<AgentCreationRequest>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -1665,6 +1718,7 @@ async fn fail_agent_creation_request(
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 failure_message: input.failure_message,
+                provisioned_finite_private_api_key_id: input.provisioned_finite_private_api_key_id,
                 now: input.now,
             })
             .await?,
@@ -1821,7 +1875,7 @@ async fn runtime_heartbeat_for_machine(
     headers: HeaderMap,
     Path(machine_id): Path<String>,
 ) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    require_service_auth(&state, &headers)?;
+    require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -2030,7 +2084,7 @@ async fn projects(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<VisibleProject>>, ApiError> {
-    let identity = require_verified_identity(&state, &headers)?;
+    let identity = require_verified_identity(&state, &headers).await?;
     Ok(Json(
         state
             .store
@@ -2287,36 +2341,58 @@ impl ChatWatchers {
 struct VerifiedIdentity {
     email: String,
     workos_user_id: String,
+    workos_organization_id: Option<String>,
 }
 
-fn require_verified_identity(
+async fn require_verified_identity(
     state: &CoreApiState,
     headers: &HeaderMap,
 ) -> Result<VerifiedIdentity, ApiError> {
-    require_service_auth(state, headers)?;
-    let workos_user_id = required_header(headers, WORKOS_USER_ID_HEADER)?;
-    let email = normalize_owner_email(Some(&required_header(headers, WORKOS_EMAIL_HEADER)?))
-        .ok_or_else(|| ApiError::bad_request("verified email is required"))?;
-    let email_verified = required_header(headers, WORKOS_EMAIL_VERIFIED_HEADER)?;
-    if !matches!(email_verified.as_str(), "1" | "true" | "yes") {
-        return Err(ApiError::forbidden("verified WorkOS email is required"));
+    if [
+        WORKOS_USER_ID_HEADER,
+        WORKOS_EMAIL_HEADER,
+        WORKOS_EMAIL_VERIFIED_HEADER,
+    ]
+    .into_iter()
+    .any(|name| headers.contains_key(name))
+    {
+        return Err(ApiError::unauthorized(
+            "caller-supplied identity headers are not accepted",
+        ));
     }
 
+    let access_token =
+        bearer_token(headers).ok_or_else(|| ApiError::unauthorized("sign in is required"))?;
+    let session = state
+        .auth
+        .workos()
+        .verify_access_token(&access_token)
+        .await
+        .map_err(|error| workos_api_error_at("access_token", error))?;
+    let user = state
+        .auth
+        .workos()
+        .verified_user(&session.subject)
+        .await
+        .map_err(|error| workos_api_error_at("user_lookup", error))?;
+    let email = normalize_owner_email(Some(&user.email))
+        .ok_or_else(|| ApiError::unauthorized("invalid account"))?;
     Ok(VerifiedIdentity {
         email,
-        workos_user_id,
+        workos_user_id: session.subject,
+        workos_organization_id: session.organization_id,
     })
 }
 
-/// Core-side admin authorization. Requires a verified WorkOS identity whose
-/// normalized email is in the `FC_CORE_ADMIN_EMAILS` allowlist. Core is the
-/// enforcement point: the dashboard's own admin gate is UI-only.
-fn require_admin_identity(
+/// Core-side operator authorization. The WorkOS organization claim is an
+/// identity-provider predicate only and is never used as a Core Customer
+/// Organization id.
+async fn require_admin_identity(
     state: &CoreApiState,
     headers: &HeaderMap,
 ) -> Result<VerifiedIdentity, ApiError> {
-    let identity = require_verified_identity(state, headers)?;
-    if !state.admin_emails.contains(&identity.email) {
+    let identity = require_verified_identity(state, headers).await?;
+    if identity.workos_organization_id.as_deref() != Some(state.auth.workos().operator_org_id()) {
         return Err(ApiError::forbidden(
             "admin access is required for this endpoint",
         ));
@@ -2324,17 +2400,45 @@ fn require_admin_identity(
     Ok(identity)
 }
 
-/// Parse the comma-separated `FC_CORE_ADMIN_EMAILS` allowlist into normalized
-/// (trimmed, lowercased) emails. Empty or whitespace-only input yields an
-/// empty allowlist, which means no admins.
-fn parse_admin_email_allowlist(raw: &str) -> BTreeSet<String> {
-    raw.split(',')
-        .filter_map(|email| crate::normalize_owner_email(Some(email)))
-        .collect()
+fn workos_api_error_at(stage: &'static str, error: WorkosAuthError) -> ApiError {
+    tracing::warn!(stage, error = %error, "WorkOS authentication rejected");
+    workos_api_error(error)
+}
+
+fn workos_api_error(error: WorkosAuthError) -> ApiError {
+    match error {
+        WorkosAuthError::UnverifiedUser => ApiError::forbidden("a verified email is required"),
+        WorkosAuthError::Unavailable => {
+            ApiError::service_unavailable("account authentication is temporarily unavailable")
+        }
+        WorkosAuthError::InvalidToken
+        | WorkosAuthError::UnknownUser
+        | WorkosAuthError::InvalidUser => ApiError::unauthorized("invalid account session"),
+    }
 }
 
 fn require_service_auth(state: &CoreApiState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let expected = format!("Bearer {}", state.api_token);
+    require_route_credential(
+        headers,
+        state.auth.service_api_token(),
+        "invalid service credential",
+    )
+}
+
+fn require_runner_auth(state: &CoreApiState, headers: &HeaderMap) -> Result<(), ApiError> {
+    require_route_credential(
+        headers,
+        state.auth.runner_api_token(),
+        "invalid Runner credential",
+    )
+}
+
+fn require_route_credential(
+    headers: &HeaderMap,
+    expected_token: &str,
+    error_message: &'static str,
+) -> Result<(), ApiError> {
+    let expected = format!("Bearer {expected_token}");
     if header_value(headers, SERVICE_AUTH_HEADER)
         .as_deref()
         .is_some_and(|presented| constant_time_token_eq(presented, &expected))
@@ -2342,24 +2446,18 @@ fn require_service_auth(state: &CoreApiState, headers: &HeaderMap) -> Result<(),
         return Ok(());
     }
 
-    Err(ApiError::unauthorized("invalid service token"))
+    Err(ApiError::unauthorized(error_message))
 }
 
 fn require_finite_private_usage_auth(
     state: &CoreApiState,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
-    let expected = format!("Bearer {}", state.finite_private_usage_api_token);
-    if header_value(headers, SERVICE_AUTH_HEADER)
-        .as_deref()
-        .is_some_and(|presented| constant_time_token_eq(presented, &expected))
-    {
-        return Ok(());
-    }
-
-    Err(ApiError::unauthorized(
+    require_route_credential(
+        headers,
+        state.auth.finite_private_usage_api_token(),
         "invalid finite private usage service token",
-    ))
+    )
 }
 
 fn constant_time_token_eq(presented: &str, expected: &str) -> bool {
@@ -2375,11 +2473,6 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_string)
-}
-
-fn required_header(headers: &HeaderMap, name: &str) -> Result<String, ApiError> {
-    header_value(headers, name)
-        .ok_or_else(|| ApiError::bad_request(format!("missing {name} header")))
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -2419,6 +2512,14 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            correlation_id: None,
+        }
+    }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
             correlation_id: None,
         }
@@ -2487,6 +2588,10 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingAgentCreationIdempotencyKey
             | CoreError::MissingLaunchCode
             | CoreError::InvalidLaunchCode
+            | CoreError::MissingLaunchCodeBatchName
+            | CoreError::InvalidLaunchCodeBatchName
+            | CoreError::InvalidLaunchCodeBatchSize
+            | CoreError::InvalidLaunchCodeBatchExpiry
             | CoreError::MissingStripeCustomerId
             | CoreError::MissingStripeSubscriptionId
             | CoreError::InvalidBillingSubscriptionStatus
@@ -2520,7 +2625,8 @@ impl From<CoreError> for ApiError {
             | CoreError::BillingAccountNotFound
             | CoreError::FinitePrivateGrantNotFound
             | CoreError::FinitePrivateLimitProfileNotFound
-            | CoreError::FinitePrivateReservationNotFound => Self::not_found(error.to_string()),
+            | CoreError::FinitePrivateReservationNotFound
+            | CoreError::LaunchCodeBatchNotFound => Self::not_found(error.to_string()),
             CoreError::InvalidRuntimeRelayToken | CoreError::InvalidFinitePrivateApiKey => {
                 Self::unauthorized(error.to_string())
             }
@@ -2622,11 +2728,57 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::test_support::{
+        OPERATOR_ORG_ID, access_token, access_token_with_subject, core_auth, shared_route_core_auth,
+    };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     const TOKEN: &str = "core-token";
+
+    fn test_auth() -> CoreAuth {
+        shared_route_core_auth(TOKEN)
+    }
+
+    fn scoped_token(scope: &str) -> String {
+        let digest = Sha256::digest(format!("{TOKEN}:{scope}").as_bytes());
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn scoped_test_auth() -> CoreAuth {
+        core_auth(
+            TOKEN,
+            scoped_token("runner"),
+            scoped_token("finite-private-usage"),
+        )
+    }
+
+    fn runner_authorization() -> String {
+        format!("Bearer {}", scoped_token("runner"))
+    }
+
+    fn usage_authorization() -> String {
+        format!("Bearer {}", scoped_token("finite-private-usage"))
+    }
+
+    async fn issue_test_launch_code(store: &CoreStore) -> String {
+        store
+            .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
+                name: "Core API test batch".to_string(),
+                code_count: 1,
+                expires_in_hours: Some(crate::launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                created_by_workos_user_id: "workos-test-operator".to_string(),
+                now: None,
+            })
+            .await
+            .expect("test Launch Code batch should issue")
+            .codes
+            .into_iter()
+            .next()
+            .expect("one test Launch Code should be returned")
+            .code
+    }
 
     #[test]
     fn runtime_control_request_view_redacts_runner_lease_fields() {
@@ -2658,7 +2810,7 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_reconciles_claims_and_lists_visible_projects() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let app = router(CoreStore::memory(), test_auth());
         let reconcile = serde_json::to_vec(&ReconcileImportsRequest {
             records: vec![ExistingHostProjectImport {
                 source_host_id: "smoke".to_string(),
@@ -2699,10 +2851,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_test")
-                    .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2735,10 +2895,18 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/import-candidates/claim")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_test")
-                    .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(claim))
                     .unwrap(),
@@ -2758,10 +2926,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me/projects")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_test")
-                    .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2782,10 +2958,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_prod_google")
-                    .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_prod_google",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2810,7 +2994,7 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_stores_source_host_relay_endpoints_behind_service_auth() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let app = router(CoreStore::memory(), test_auth());
         let response = app
             .clone()
             .oneshot(
@@ -2867,7 +3051,16 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_serves_finite_private_operator_grant_and_key_lifecycle() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let app = router(CoreStore::memory(), test_auth());
+        let operator_authorization = format!(
+            "Bearer {}",
+            access_token_with_subject(
+                "operator_finite_private",
+                "admin@finite.vip",
+                true,
+                Some(OPERATOR_ORG_ID),
+            )
+        );
 
         let response = app
             .clone()
@@ -2896,7 +3089,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/finite-private/grants")
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -2926,7 +3119,7 @@ mod tests {
                         "/api/core/v1/finite-private/grants/{}/api-keys",
                         grant.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -2993,7 +3186,7 @@ mod tests {
                         "/api/core/v1/finite-private/grants/{}/reset",
                         grant.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3021,7 +3214,7 @@ mod tests {
                         "/api/core/v1/finite-private/api-keys/{}/rotate",
                         old_key.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3086,7 +3279,7 @@ mod tests {
                         "/api/core/v1/finite-private/api-keys/{}/revoke",
                         new_key.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3114,7 +3307,13 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/api/core/v1/finite-private/admin-audit-events")
-                    .header("authorization", "Bearer core-token")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3141,7 +3340,13 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/api/core/v1/finite-private/admin-state")
-                    .header("authorization", "Bearer core-token")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3170,7 +3375,7 @@ mod tests {
                         "/api/core/v1/finite-private/grants/{}/revoke",
                         grant.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", &operator_authorization)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3215,7 +3420,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let app = router(store, TOKEN);
+        let app = router(store, test_auth());
 
         let response = app
             .clone()
@@ -3330,14 +3535,15 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_creates_self_serve_agent_request_with_launch_code() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router(store, test_auth());
         let create = serde_json::to_vec(&CreateAgentRequest {
             display_name: "Oslo Agent".to_string(),
-            launch_code: "off2026".to_string(),
+            launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
             runner_class: RunnerClass::Kata,
             profile_picture_url: Some("https://chat.finite.computer/v1/blobs/profile".to_string()),
-            now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();
 
@@ -3347,10 +3553,18 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(create.clone()))
                     .unwrap(),
@@ -3377,10 +3591,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3411,10 +3633,18 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(create))
                     .unwrap(),
@@ -3431,11 +3661,10 @@ mod tests {
 
         let second = serde_json::to_vec(&CreateAgentRequest {
             display_name: "Second Agent".to_string(),
-            launch_code: "off2026".to_string(),
+            launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-2".to_string(),
             runner_class: RunnerClass::Phala,
             profile_picture_url: None,
-            now: Some("2026-05-25T13:00:00Z".to_string()),
         })
         .unwrap();
         let response = app
@@ -3443,22 +3672,82 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(second))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn core_api_uses_server_time_for_launch_code_expiry() {
+        let store = CoreStore::memory();
+        let issued = store
+            .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
+                name: "Expired browser code".to_string(),
+                code_count: 1,
+                expires_in_hours: Some(1),
+                created_by_workos_user_id: "workos-test-operator".to_string(),
+                now: Some("2020-01-01T00:00:00Z".to_string()),
+            })
+            .await
+            .expect("expired test batch should issue");
+        let plaintext = issued.codes[0].code.clone();
+        let app = router(store.clone(), test_auth());
+        let user = identity_headers("expired-code@finite.vip", "true");
+        let request = serde_json::json!({
+            "displayName": "Expired Agent",
+            "launchCode": plaintext,
+            "idempotencyKey": "expired-browser-submit"
+        });
+
+        let mut forged = request.clone();
+        forged["now"] = serde_json::json!("2020-01-01T00:30:00Z");
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/me/agent-creation-requests",
+            &user,
+            Some(forged),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/me/agent-creation-requests",
+            &user,
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let batches = store.list_launch_code_batches().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].codes[0].redeemed_at.is_none());
+        assert!(batches[0].codes[0].redeemed_customer_org_id.is_none());
     }
 
     #[tokio::test]
     async fn core_api_lets_runner_lease_and_complete_agent_creation_request() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router(store, scoped_test_auth());
         let response = app
             .clone()
             .oneshot(
@@ -3487,11 +3776,10 @@ mod tests {
 
         let create = serde_json::to_vec(&CreateAgentRequest {
             display_name: "Oslo Agent".to_string(),
-            launch_code: "off2026".to_string(),
+            launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
             runner_class: RunnerClass::Phala,
             profile_picture_url: None,
-            now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();
         let response = app
@@ -3500,10 +3788,18 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(create))
                     .unwrap(),
@@ -3518,7 +3814,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", runner_authorization())
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3550,10 +3846,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3579,7 +3883,7 @@ mod tests {
                         "/api/core/v1/agent-creation-requests/{}/complete",
                         lease.request.id
                     ))
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", runner_authorization())
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -3617,10 +3921,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me/projects")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3640,7 +3952,9 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_skips_full_or_draining_runner_without_blocking_other_runner() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router(store, test_auth());
         let response = app
             .clone()
             .oneshot(
@@ -3673,17 +3987,24 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
                             "displayName": "Oslo Agent",
-                            "launchCode": "off2026",
-                            "idempotencyKey": "browser-submit-1",
-                            "now": "2026-05-25T12:00:00Z"
+                            "launchCode": launch_code.clone(),
+                            "idempotencyKey": "browser-submit-1"
                         })
                         .to_string(),
                     ))
@@ -3774,14 +4095,15 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_lets_operator_cancel_failed_agent_creation_request() {
-        let app = router(CoreStore::memory(), TOKEN);
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router(store, test_auth());
         let create = serde_json::to_vec(&CreateAgentRequest {
             display_name: "Oslo Agent".to_string(),
-            launch_code: "off2026".to_string(),
+            launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
             runner_class: RunnerClass::Phala,
             profile_picture_url: None,
-            now: Some("2026-05-25T12:00:00Z".to_string()),
         })
         .unwrap();
         let response = app
@@ -3790,10 +4112,18 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(create))
                     .unwrap(),
@@ -3885,10 +4215,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me/projects")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_new")
-                    .header(WORKOS_EMAIL_HEADER, "new@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3905,7 +4243,9 @@ mod tests {
     #[tokio::test]
     async fn core_api_serves_runtime_chat_relay_endpoints() {
         let relay_dir = tempfile::tempdir().unwrap();
-        let app = router_with_relay_state_dir(CoreStore::memory(), TOKEN, relay_dir.path());
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router_with_relay_state_dir(store, test_auth(), relay_dir.path());
 
         let response = app
             .clone()
@@ -3939,17 +4279,24 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/me/agent-creation-requests")
-                    .header("authorization", "Bearer core-token")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_chat")
-                    .header(WORKOS_EMAIL_HEADER, "chat@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_chat",
+                                "chat@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
                             "displayName": "Chat Agent",
-                            "launchCode": "off2026",
-                            "idempotencyKey": "chat-submit-1",
-                            "now": "2026-05-25T12:00:00Z"
+                            "launchCode": launch_code.clone(),
+                            "idempotencyKey": "chat-submit-1"
                         })
                         .to_string(),
                     ))
@@ -4118,8 +4465,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_api_rejects_missing_service_auth() {
-        let app = router(CoreStore::memory(), TOKEN);
+    async fn core_api_rejects_spoofed_legacy_identity_headers() {
+        let app = router(CoreStore::memory(), test_auth());
         let response = app
             .oneshot(
                 Request::builder()
@@ -4136,38 +4483,288 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[test]
-    fn admin_email_allowlist_is_normalized_and_empty_means_no_admins() {
-        let allowlist = parse_admin_email_allowlist(" Admin@Finite.VIP , second@finite.vip ,, ,\t");
-        assert_eq!(allowlist.len(), 2);
-        assert!(allowlist.contains("admin@finite.vip"));
-        assert!(allowlist.contains("second@finite.vip"));
-        assert!(!allowlist.contains("Admin@Finite.VIP"));
+    #[tokio::test]
+    async fn core_api_rejects_mismatched_identity_headers_even_with_valid_jwt() {
+        let app = router(CoreStore::memory(), test_auth());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/me")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject("user_real", "real@finite.vip", true, None,)
+                        ),
+                    )
+                    .header(WORKOS_USER_ID_HEADER, "user_spoofed")
+                    .header(WORKOS_EMAIL_HEADER, "spoofed@finite.vip")
+                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        assert!(parse_admin_email_allowlist("").is_empty());
-        assert!(parse_admin_email_allowlist("  ,  ").is_empty());
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn route_scoped_credentials_cannot_cross_user_admin_or_runner_boundaries() {
+        let app = router(CoreStore::memory(), scoped_test_auth());
+        let runner = vec![("authorization".to_string(), runner_authorization())];
+        let service = vec![("authorization".to_string(), "Bearer core-token".to_string())];
+        let usage = vec![("authorization".to_string(), usage_authorization())];
+
+        for uri in ["/api/core/v1/me", "/api/core/v1/admin/runtimes"] {
+            for (credential, headers) in [
+                ("service", &service),
+                ("Runner", &runner),
+                ("usage", &usage),
+            ] {
+                let (status, _) = send_json(&app, "GET", uri, headers, None).await;
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "{credential} credential entered {uri}"
+                );
+            }
+        }
+
+        let runner_routes = [
+            (
+                "/api/core/v1/agent-creation-requests/lease",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "leaseSeconds": 60
+                }),
+            ),
+            (
+                "/api/core/v1/runtime-control-requests/lease",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "leaseSeconds": 60
+                }),
+            ),
+            (
+                "/api/core/v1/runtime-control-requests/missing/complete",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary"
+                }),
+            ),
+            (
+                "/api/core/v1/runtime-control-requests/missing/fail",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "failureMessage": "boundary test"
+                }),
+            ),
+            (
+                "/api/core/v1/agent-creation-requests/missing/complete",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "sourceHostId": "source-auth-boundary",
+                    "sourceMachineId": "machine-auth-boundary",
+                    "publishedAppUrls": []
+                }),
+            ),
+            (
+                "/api/core/v1/agent-creation-requests/missing/runtime",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "sourceHostId": "source-auth-boundary",
+                    "sourceMachineId": "machine-auth-boundary",
+                    "runtimeRelayTokenHash": "hash-auth-boundary",
+                    "publishedAppUrls": []
+                }),
+            ),
+            (
+                "/api/core/v1/agent-creation-requests/missing/finite-private-key",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary"
+                }),
+            ),
+            (
+                "/api/core/v1/agent-creation-requests/missing/fail",
+                serde_json::json!({
+                    "runnerId": "runner-auth-boundary",
+                    "leaseToken": "lease-auth-boundary",
+                    "failureMessage": "boundary test"
+                }),
+            ),
+        ];
+        for (uri, body) in &runner_routes {
+            for (credential, headers) in [("service", &service), ("usage", &usage)] {
+                let (status, _) = send_json(&app, "POST", uri, headers, Some(body.clone())).await;
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "{credential} credential entered {uri}"
+                );
+            }
+        }
+
+        for headers in [&runner, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/source-host-relays/missing",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = send_json(
+            &app,
+            "GET",
+            "/api/core/v1/source-host-relays/missing",
+            &service,
+            None,
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send_json(
+            &app,
+            "PUT",
+            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+            &service,
+            Some(serde_json::json!({
+                "kind": "oci_image",
+                "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "versionLabel": "auth-boundary",
+                "stateSchemaVersion": "state-v1",
+                "baseImage": "python:3.13-trixie",
+                "promoted": true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for headers in [&service, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, artifact) = send_json(
+            &app,
+            "GET",
+            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+            &runner,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artifact["id"], "artifact-auth-boundary");
+
+        for headers in [&runner, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "PUT",
+                "/api/core/v1/runtime-artifacts/forbidden-artifact",
+                headers,
+                Some(serde_json::json!({
+                    "kind": "oci_image",
+                    "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "versionLabel": "forbidden",
+                    "stateSchemaVersion": "state-v1",
+                    "baseImage": "python:3.13-trixie",
+                    "promoted": true
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+
+        for headers in [&service, &usage] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/finite/v1/machines/missing/heartbeat",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = send_json(
+            &app,
+            "GET",
+            "/api/finite/v1/machines/missing/heartbeat",
+            &runner,
+            None,
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+
+        for headers in [&service, &runner] {
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/internal/finite-private/v1/health",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = send_json(
+            &app,
+            "GET",
+            "/internal/finite-private/v1/health",
+            &usage,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/agent-creation-requests/lease",
+            &runner,
+            Some(runner_routes[0].1.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_null(), "empty Runner queue should return null");
     }
 
     fn admin_router(store: CoreStore) -> Router {
-        router_with_admin_emails_and_runtime_upgrades(
-            store,
-            TOKEN,
-            default_relay_state_dir(),
-            " Admin@Finite.VIP , second@finite.vip ",
-            true,
-        )
+        router_with_runtime_upgrades(store, test_auth(), default_relay_state_dir(), true)
     }
 
     fn identity_headers(email: &str, verified: &str) -> Vec<(String, String)> {
-        vec![
-            ("authorization".to_string(), "Bearer core-token".to_string()),
-            (WORKOS_USER_ID_HEADER.to_string(), format!("user_{email}")),
-            (WORKOS_EMAIL_HEADER.to_string(), email.to_string()),
-            (
-                WORKOS_EMAIL_VERIFIED_HEADER.to_string(),
-                verified.to_string(),
-            ),
-        ]
+        workos_headers(email, matches!(verified, "1" | "true" | "yes"), None)
+    }
+
+    fn operator_identity_headers(email: &str) -> Vec<(String, String)> {
+        workos_headers(email, true, Some(OPERATOR_ORG_ID))
+    }
+
+    fn workos_headers(
+        email: &str,
+        verified: bool,
+        organization_id: Option<&str>,
+    ) -> Vec<(String, String)> {
+        vec![(
+            "authorization".to_string(),
+            format!("Bearer {}", access_token(email, verified, organization_id)),
+        )]
     }
 
     async fn send_json(
@@ -4196,21 +4793,21 @@ mod tests {
         let json = if bytes.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_slice(&bytes).unwrap()
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| serde_json::json!({ "raw": String::from_utf8_lossy(&bytes) }))
         };
         (status, json)
     }
 
     #[tokio::test]
     async fn runtime_upgrade_first_use_gate_is_fail_closed_without_blocking_restart() {
-        let app = router_with_admin_emails_and_runtime_upgrades(
+        let app = router_with_runtime_upgrades(
             CoreStore::memory(),
-            TOKEN,
+            test_auth(),
             default_relay_state_dir(),
-            "admin@finite.vip",
             false,
         );
-        let admin = identity_headers("admin@finite.vip", "true");
+        let admin = operator_identity_headers("admin@finite.vip");
         let (upgrade_status, upgrade_body) = send_json(
             &app,
             "POST",
@@ -4240,7 +4837,7 @@ mod tests {
 
     /// Provision one hosted agent through the same HTTP flow the dashboard and
     /// runner use, returning (project_id, agent_runtime_id).
-    async fn provision_hosted_agent(app: &Router) -> (String, String) {
+    async fn provision_hosted_agent(app: &Router, launch_code: &str) -> (String, String) {
         let service = [("authorization".to_string(), "Bearer core-token".to_string())];
         let (status, _) = send_json(
             app,
@@ -4268,10 +4865,9 @@ mod tests {
             &owner,
             Some(serde_json::json!({
                 "displayName": "Oslo Agent",
-                "launchCode": "off2026",
+                "launchCode": launch_code,
                 "idempotencyKey": "browser-submit-1",
-                "runnerClass": "kata",
-                "now": "2026-05-25T12:00:00Z"
+                "runnerClass": "kata"
             })),
         )
         .await;
@@ -4324,20 +4920,157 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_api_admin_endpoints_require_core_side_admin_allowlist() {
+    async fn launch_code_admin_api_derives_operator_and_returns_plaintext_once() {
+        let app = admin_router(CoreStore::memory());
+        let operator_subject = "workos_operator_subject";
+        let operator = vec![(
+            "authorization".to_string(),
+            format!(
+                "Bearer {}",
+                access_token_with_subject(
+                    operator_subject,
+                    "admin@finite.vip",
+                    true,
+                    Some(OPERATOR_ORG_ID),
+                )
+            ),
+        )];
+        let (status, issued) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/admin/launch-code-batches",
+            &operator,
+            Some(serde_json::json!({
+                "name": "Twelve-person training",
+                "codeCount": 12,
+                "expiresInHours": 24
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(issued["batch"]["code_count"], 12);
+        assert_eq!(
+            issued["batch"]["created_by_workos_user_id"],
+            operator_subject
+        );
+        let codes = issued["codes"].as_array().unwrap();
+        assert_eq!(codes.len(), 12);
+        let plaintext = codes[0]["code"].as_str().unwrap().to_string();
+        let batch_id = issued["batch"]["id"].as_str().unwrap().to_string();
+
+        let (status, listed) = send_json(
+            &app,
+            "GET",
+            "/api/core/v1/admin/launch-code-batches",
+            &operator,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(!listed.to_string().contains(&plaintext));
+        assert!(listed[0]["codes"][0].get("code").is_none());
+
+        let (status, revoked) = send_json(
+            &app,
+            "POST",
+            &format!("/api/core/v1/admin/launch-code-batches/{batch_id}/revoke"),
+            &operator,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            revoked["batch"]["revoked_by_workos_user_id"],
+            operator_subject
+        );
+        assert!(!revoked.to_string().contains(&plaintext));
+
+        let ordinary_user = identity_headers("member@finite.vip", "true");
+        for (method, uri, body) in [
+            (
+                "GET",
+                "/api/core/v1/admin/launch-code-batches".to_string(),
+                None,
+            ),
+            (
+                "POST",
+                "/api/core/v1/admin/launch-code-batches".to_string(),
+                Some(serde_json::json!({
+                    "name": "Forbidden",
+                    "codeCount": 1,
+                    "expiresInHours": 24
+                })),
+            ),
+        ] {
+            let (status, _) = send_json(&app, method, &uri, &ordinary_user, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_code_plaintext_issuance_response_is_not_cacheable() {
+        let app = admin_router(CoreStore::memory());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/admin/launch-code-batches")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "workos_operator_no_store",
+                                "admin@finite.vip",
+                                true,
+                                Some(OPERATOR_ORG_ID),
+                            )
+                        ),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "One-time response",
+                            "codeCount": 1,
+                            "expiresInHours": 24
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, private")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let issued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(issued["codes"][0]["code"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn core_api_admin_endpoints_require_configured_operator_organization() {
         let app = admin_router(CoreStore::memory());
 
-        // Missing service token entirely.
+        // Missing WorkOS access token entirely.
         let (status, _) = send_json(&app, "GET", "/api/core/v1/admin/runtimes", &[], None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        // Service token but no identity headers.
+        // A service credential cannot enter the operator boundary.
         let service = [("authorization".to_string(), "Bearer core-token".to_string())];
         let (status, _) =
             send_json(&app, "GET", "/api/core/v1/admin/runtimes", &service, None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        // Verified identity that is not allowlisted.
+        // A valid user without an organization is not an operator.
         let (status, body) = send_json(
             &app,
             "GET",
@@ -4349,31 +5082,101 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(body["error"].as_str().unwrap().contains("admin access"));
 
-        // Allowlisted email but unverified.
+        // Operator organization membership cannot bypass email verification.
         let (status, _) = send_json(
             &app,
             "GET",
             "/api/core/v1/admin/runtimes",
-            &identity_headers("admin@finite.vip", "false"),
+            &workos_headers("admin@finite.vip", false, Some(OPERATOR_ORG_ID)),
             None,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // Allowlisted and verified, case-insensitively.
+        // The configured operator organization is accepted.
         let (status, body) = send_json(
             &app,
             "GET",
             "/api/core/v1/admin/runtimes",
-            &identity_headers("ADMIN@finite.vip", "true"),
+            &operator_identity_headers("admin@finite.vip"),
             None,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.as_array().unwrap().is_empty());
 
-        // Every mutating admin endpoint rejects non-admins the same way.
+        // Account Auth's operator organization is never reused as a Core
+        // Customer Organization, even when an operator uses a user route.
+        let operator = operator_identity_headers("admin@finite.vip");
+        let (status, _) = send_json(&app, "GET", "/api/core/v1/me", &operator, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, billing) =
+            send_json(&app, "GET", "/api/core/v1/me/billing", &operator, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(billing["customer_org"]["id"], OPERATOR_ORG_ID);
+
+        // Every mutating admin endpoint rejects a valid user without the
+        // configured operator organization.
         for (method, uri, body) in [
+            (
+                "GET",
+                "/api/core/v1/finite-private/admin-audit-events".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "GET",
+                "/api/core/v1/finite-private/admin-state".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/grants".to_string(),
+                serde_json::json!({ "verifiedEmail": "friend@finite.vip" }),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/grants/grant_x/api-keys".to_string(),
+                serde_json::json!({ "rawKey": "test-key-never-stored" }),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/grants/grant_x/revoke".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/grants/grant_x/reset".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/api-keys/key_x/revoke".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/finite-private/api-keys/key_x/rotate".to_string(),
+                serde_json::json!({ "rawKey": "replacement-test-key-never-stored" }),
+            ),
+            (
+                "GET",
+                "/api/core/v1/admin/launch-code-batches".to_string(),
+                serde_json::json!({}),
+            ),
+            (
+                "POST",
+                "/api/core/v1/admin/launch-code-batches".to_string(),
+                serde_json::json!({
+                    "name": "Forbidden",
+                    "codeCount": 1,
+                    "expiresInHours": 24
+                }),
+            ),
+            (
+                "POST",
+                "/api/core/v1/admin/launch-code-batches/batch_x/revoke".to_string(),
+                serde_json::json!({}),
+            ),
             (
                 "POST",
                 "/api/core/v1/admin/projects/project_x/runtime/restart".to_string(),
@@ -4410,25 +5213,21 @@ mod tests {
                 serde_json::json!({}),
             ),
         ] {
-            let (status, _) = send_json(
-                &app,
-                method,
-                &uri,
-                &identity_headers("stranger@finite.vip", "true"),
-                Some(body),
-            )
-            .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} must be admin-gated");
+            for headers in [
+                identity_headers("stranger@finite.vip", "true"),
+                workos_headers("member@finite.vip", true, Some("workos_org_not_operator")),
+            ] {
+                let (status, _) = send_json(&app, method, &uri, &headers, Some(body.clone())).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{uri} must be admin-gated");
+            }
         }
 
-        // A router with no allowlist has no admins at all.
-        let closed =
-            router_with_admin_emails(CoreStore::memory(), TOKEN, default_relay_state_dir(), "");
+        // A different WorkOS organization fails closed as well.
         let (status, _) = send_json(
-            &closed,
+            &app,
             "GET",
             "/api/core/v1/admin/runtimes",
-            &identity_headers("admin@finite.vip", "true"),
+            &workos_headers("admin@finite.vip", true, Some("workos_org_customer")),
             None,
         )
         .await;
@@ -4437,9 +5236,11 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_admin_runtimes_and_runtime_control_feed_the_runner_queue() {
-        let app = admin_router(CoreStore::memory());
-        let (project_id, runtime_id) = provision_hosted_agent(&app).await;
-        let admin = identity_headers("admin@finite.vip", "true");
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = admin_router(store);
+        let (project_id, runtime_id) = provision_hosted_agent(&app, &launch_code).await;
+        let admin = operator_identity_headers("admin@finite.vip");
         let service = [("authorization".to_string(), "Bearer core-token".to_string())];
 
         let (status, runtimes) =
@@ -4597,7 +5398,7 @@ mod tests {
             &app,
             "GET",
             "/api/core/v1/finite-private/admin-audit-events",
-            &service,
+            &admin,
             None,
         )
         .await;
@@ -4616,8 +5417,7 @@ mod tests {
     #[tokio::test]
     async fn core_api_admin_friend_key_lifecycle_returns_raw_key_exactly_once() {
         let app = admin_router(CoreStore::memory());
-        let admin = identity_headers("admin@finite.vip", "true");
-        let service = [("authorization".to_string(), "Bearer core-token".to_string())];
+        let admin = operator_identity_headers("admin@finite.vip");
 
         let (status, issued) = send_json(
             &app,
@@ -4651,7 +5451,7 @@ mod tests {
             &app,
             "GET",
             "/api/core/v1/finite-private/admin-state",
-            &service,
+            &admin,
             None,
         )
         .await;
@@ -4679,7 +5479,7 @@ mod tests {
             &app,
             "GET",
             "/api/core/v1/finite-private/admin-state",
-            &service,
+            &admin,
             None,
         )
         .await;
@@ -4737,7 +5537,7 @@ mod tests {
             &app,
             "GET",
             "/api/core/v1/finite-private/admin-audit-events",
-            &service,
+            &admin,
             None,
         )
         .await;

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import Stripe from "stripe";
 
 export type StripeBillingStatus = {
@@ -8,12 +9,19 @@ export type StripeBillingStatus = {
 const REQUIRED_STRIPE_ENV = [
   "STRIPE_SECRET_KEY",
   "STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID",
+  "STRIPE_WEBHOOK_SECRET",
 ] as const;
+const STRIPE_RETURN_ORIGIN_ENV = "FC_DASHBOARD_BASE_URL";
 
 let stripeClient: Stripe | null = null;
 
 export function stripeBillingStatus(env: Record<string, string | undefined> = process.env): StripeBillingStatus {
-  const missing = REQUIRED_STRIPE_ENV.filter((name) => !env[name]?.trim());
+  const missing: string[] = REQUIRED_STRIPE_ENV.filter((name) => !env[name]?.trim());
+  try {
+    stripeDashboardReturnUrl("/dashboard", env);
+  } catch {
+    missing.push(STRIPE_RETURN_ORIGIN_ENV);
+  }
   return {
     configured: missing.length === 0,
     missing,
@@ -43,24 +51,52 @@ export function stripeWebhookSecret() {
   return requiredEnv("STRIPE_WEBHOOK_SECRET");
 }
 
-export function stripeDashboardReturnUrl(pathname = "/dashboard") {
+export function stripeDashboardReturnUrl(
+  pathname = "/dashboard",
+  env: Record<string, string | undefined> = process.env
+) {
   const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-    process.env.FC_DASHBOARD_PUBLIC_URL?.trim() ||
-    process.env.FC_DASHBOARD_BASE_URL?.trim();
+    env.NEXT_PUBLIC_APP_URL?.trim() ||
+    env.FC_DASHBOARD_PUBLIC_URL?.trim() ||
+    env.FC_DASHBOARD_BASE_URL?.trim();
   if (!baseUrl) {
     throw new Error(
       "Stripe return URL requires NEXT_PUBLIC_APP_URL, FC_DASHBOARD_PUBLIC_URL, or FC_DASHBOARD_BASE_URL."
     );
   }
-  const url = new URL(pathname, baseUrl);
-  if (!["http:", "https:"].includes(url.protocol)) {
+  const base = new URL(baseUrl);
+  if (!["http:", "https:"].includes(base.protocol) || base.username || base.password) {
     throw new Error("Stripe return URL base must use http or https.");
   }
-  if (process.env.NODE_ENV === "production" && url.hostname === "localhost") {
+  if (env.NODE_ENV === "production" && base.hostname === "localhost") {
     throw new Error("Stripe return URL must not point at localhost in production.");
   }
+  const url = new URL(pathname, `${base.origin}/`);
   return url.toString();
+}
+
+export function stripeIdempotencyKey(
+  operation: "customer" | "checkout",
+  stableAttemptId: string
+) {
+  const attempt = stableAttemptId.trim();
+  if (!attempt || attempt.length > 512 || /[\u0000-\u001f\u007f]/u.test(attempt)) {
+    throw new Error("Stripe checkout attempt id is invalid.");
+  }
+  const digest = createHash("sha256").update(attempt, "utf8").digest("hex");
+  return `finite-${operation}:${digest}`;
+}
+
+export function standardAgentCheckoutMetadata(customerOrgId: string) {
+  const id = customerOrgId.trim();
+  if (!id) {
+    throw new Error("Core customer organization id is required.");
+  }
+  return {
+    clientReferenceId: id,
+    checkout: { finite_customer_org_id: id },
+    subscription: { finite_customer_org_id: id },
+  };
 }
 
 export function billingSubscriptionShouldUsePortal(

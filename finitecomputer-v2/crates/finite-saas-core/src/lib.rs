@@ -1,4 +1,6 @@
 pub mod api;
+pub mod auth;
+pub mod launch_codes;
 pub mod store;
 
 use serde::{Deserialize, Serialize};
@@ -11,11 +13,14 @@ use time::{Duration, OffsetDateTime};
 pub const CORE_SCHEMA_SQL: &str = concat!(
     include_str!("../migrations/0001_core.sql"),
     "\n",
-    include_str!("../migrations/0002_runtime_upgrade.sql")
+    include_str!("../migrations/0002_runtime_upgrade.sql"),
+    "\n",
+    include_str!("../migrations/0003_launch_codes.sql"),
+    "\n",
+    include_str!("../migrations/0004_membership_archive.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
-const FIRST_SELF_SERVE_LAUNCH_CODE: &str = "off2026";
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous";
@@ -28,7 +33,7 @@ const FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 #[serde(rename_all = "snake_case")]
 pub enum BillingClass {
     Grandfathered,
-    Off2026,
+    Sponsored,
     Standard,
 }
 
@@ -173,6 +178,16 @@ pub enum CoreError {
     MissingLaunchCode,
     #[error("launch code is invalid")]
     InvalidLaunchCode,
+    #[error("launch code batch name is required")]
+    MissingLaunchCodeBatchName,
+    #[error("launch code batch name is invalid")]
+    InvalidLaunchCodeBatchName,
+    #[error("launch code batch size is invalid")]
+    InvalidLaunchCodeBatchSize,
+    #[error("launch code batch expiry must be between one hour and 30 days")]
+    InvalidLaunchCodeBatchExpiry,
+    #[error("launch code batch was not found")]
+    LaunchCodeBatchNotFound,
     #[error("agent creation entitlement is exhausted")]
     AgentCreationEntitlementExhausted,
     #[error("billing is required before creating an agent")]
@@ -499,6 +514,16 @@ pub struct ProjectRoomMembership {
     pub chat_identity_id: String,
     pub role: ProjectMembershipRole,
     pub created_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveImportedProjectInput {
+    pub verified_email: String,
+    pub workos_user_id: String,
+    pub project_id: String,
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -877,6 +902,9 @@ pub struct BridgeCoreState {
     pub project_room_memberships: BTreeMap<String, ProjectRoomMembership>,
     pub agent_creation_entitlements: BTreeMap<String, AgentCreationEntitlement>,
     pub agent_creation_requests: BTreeMap<String, AgentCreationRequest>,
+    pub launch_code_batches: BTreeMap<String, launch_codes::LaunchCodeBatch>,
+    #[serde(skip)]
+    pub(crate) launch_codes: BTreeMap<String, launch_codes::LaunchCodeRecord>,
     pub runtime_control_requests: BTreeMap<String, RuntimeControlRequest>,
     pub source_host_relays: BTreeMap<String, SourceHostRelayEndpoint>,
     pub finite_private_limit_profiles: BTreeMap<String, FinitePrivateLimitProfile>,
@@ -1220,6 +1248,7 @@ pub struct FailAgentCreationRequestInput {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
+    pub provisioned_finite_private_api_key_id: Option<String>,
     pub now: Option<String>,
 }
 
@@ -1427,7 +1456,7 @@ impl BridgeCoreState {
             normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
         let launch_code = trim_to_option(Some(&input.launch_code));
         let billing_class = if launch_code.is_some() {
-            BillingClass::Off2026
+            BillingClass::Sponsored
         } else {
             BillingClass::Standard
         };
@@ -1439,17 +1468,43 @@ impl BridgeCoreState {
             .find_user_by_email(&verified_email)
             .and_then(|user| self.find_personal_org_by_owner(&user.id))
             .map(|org| org.id);
-        if let Some(code) = launch_code.as_deref() {
-            self.validate_agent_creation_launch_code(
-                existing_org_id.as_deref().unwrap_or_default(),
-                code,
-            )?;
+        let selected_launch_code = if let Some(code) = launch_code.as_deref() {
+            let code_hash = launch_codes::hash_launch_code(code)?;
+            let selected = self
+                .launch_codes
+                .values()
+                .find(|record| record.code_hash == code_hash)
+                .cloned()
+                .ok_or(CoreError::InvalidLaunchCode)?;
+            let batch = self
+                .launch_code_batches
+                .get(&selected.batch_id)
+                .ok_or(CoreError::InvalidLaunchCode)?;
+            if selected.redeemed_customer_org_id.is_none()
+                && (batch.revoked_at.is_some()
+                    || parse_time(&now)? >= parse_time(&batch.expires_at)?)
+            {
+                return Err(CoreError::InvalidLaunchCode);
+            }
+            match (
+                selected.redeemed_customer_org_id.as_deref(),
+                selected.redemption_idempotency_key.as_deref(),
+            ) {
+                (None, None) => {}
+                (Some(redeemed_org_id), Some(redeemed_key))
+                    if existing_org_id.as_deref() == Some(redeemed_org_id)
+                        && idempotency_key == redeemed_key => {}
+                _ => return Err(CoreError::InvalidLaunchCode),
+            }
+            Some(selected)
         } else if !existing_org_id
             .as_deref()
             .is_some_and(|org_id| self.customer_org_has_active_billing(org_id))
         {
             return Err(CoreError::BillingRequired);
-        }
+        } else {
+            None
+        };
 
         let user = self.ensure_linked_user_with_billing_class(
             &verified_email,
@@ -1465,6 +1520,15 @@ impl BridgeCoreState {
         if let Some(existing_request) =
             self.find_agent_creation_request_by_idempotency(&user.id, &idempotency_key)
         {
+            if let Some(selected) = selected_launch_code.as_ref()
+                && (selected.redeemed_customer_org_id.as_deref() != Some(org.id.as_str())
+                    || selected.redemption_idempotency_key.as_deref()
+                        != Some(idempotency_key.as_str())
+                    || existing_request.requested_launch_code.as_deref()
+                        != Some(selected.id.as_str()))
+            {
+                return Err(CoreError::InvalidLaunchCode);
+            }
             let Some(project) = self.projects.get(&existing_request.project_id).cloned() else {
                 return Err(CoreError::Store(format!(
                     "agent creation request {} references missing project {}",
@@ -1479,16 +1543,51 @@ impl BridgeCoreState {
             });
         }
 
-        let entitlement =
-            self.ensure_agent_creation_entitlement(&org.id, launch_code.as_deref(), &now)?;
+        let current_allowed_new_agent_runtimes = self
+            .agent_creation_entitlements
+            .values()
+            .find(|entitlement| entitlement.customer_org_id == org.id)
+            .map(|entitlement| entitlement.allowed_new_agent_runtimes)
+            .unwrap_or(0);
+        let allowed_new_agent_runtimes = if selected_launch_code
+            .as_ref()
+            .is_some_and(|record| record.redeemed_customer_org_id.is_none())
+        {
+            current_allowed_new_agent_runtimes.saturating_add(1)
+        } else if selected_launch_code.is_some() {
+            current_allowed_new_agent_runtimes
+        } else {
+            current_allowed_new_agent_runtimes.max(1)
+        };
         let active_request_count = self.active_agent_creation_entitlement_count(&org.id);
-        if active_request_count >= entitlement.allowed_new_agent_runtimes {
+        if active_request_count >= allowed_new_agent_runtimes {
             return Err(CoreError::AgentCreationEntitlementExhausted);
+        }
+        // Generate every fallible identifier before mutating the entitlement
+        // or redemption records so the in-memory store preserves the same
+        // all-or-nothing Launch Code behavior as the Postgres transaction.
+        let request_id = new_agent_creation_request_id()?;
+        let project_id = new_self_service_project_id()?;
+        if let Some(selected) = selected_launch_code.as_ref() {
+            if selected.redeemed_customer_org_id.is_none() {
+                self.grant_launch_code_agent_creation_entitlement(&org.id, &selected.id, &now);
+            }
+        } else {
+            self.ensure_agent_creation_entitlement(&org.id, None, &now)?;
+        }
+        if let Some(selected) = selected_launch_code.as_ref()
+            && selected.redeemed_customer_org_id.is_none()
+        {
+            let record = self
+                .launch_codes
+                .get_mut(&selected.id)
+                .ok_or(CoreError::InvalidLaunchCode)?;
+            record.redeemed_customer_org_id = Some(org.id.clone());
+            record.redemption_idempotency_key = Some(idempotency_key.clone());
+            record.redeemed_at = Some(now.clone());
         }
 
         // Fresh surrogate ids for the new request and its project.
-        let request_id = new_agent_creation_request_id()?;
-        let project_id = new_self_service_project_id()?;
         let project = Project {
             id: project_id.clone(),
             customer_org_id: org.id.clone(),
@@ -1508,7 +1607,7 @@ impl BridgeCoreState {
             runner_class: configuration.runner_class,
             profile_picture_url,
             status: AgentCreationRequestStatus::Requested,
-            requested_launch_code: launch_code,
+            requested_launch_code: selected_launch_code.map(|record| record.id),
             agent_runtime_id: None,
             runner_id: None,
             lease_token: None,
@@ -1774,9 +1873,8 @@ impl BridgeCoreState {
 
     /// Admin variant of `request_runtime_control`: the acting user does not
     /// have to own the project, and the action is written to the admin audit
-    /// log with the admin's verified email as actor. Core-side admin
-    /// authorization (`FC_CORE_ADMIN_EMAILS`) happens in the API layer before
-    /// this is reachable.
+    /// log with the admin's verified email as actor. The API layer requires
+    /// the validated WorkOS operator organization before this is reachable.
     fn admin_request_runtime_control(
         &mut self,
         input: AdminRuntimeControlInput,
@@ -2497,11 +2595,27 @@ impl BridgeCoreState {
         let now = input.now.unwrap_or(current_time_iso()?);
         let failure_message = trim_to_option(Some(&input.failure_message))
             .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
-        self.verified_launching_request(&input.request_id, &input.runner_id, &input.lease_token)?;
-        let provisional_runtime_id = self
-            .agent_creation_requests
-            .get(&input.request_id)
-            .and_then(|request| request.agent_runtime_id.clone());
+        let verified = self.verified_launching_request(
+            &input.request_id,
+            &input.runner_id,
+            &input.lease_token,
+        )?;
+        let provisional_runtime_id = verified.agent_runtime_id.clone();
+        if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
+            let key_id =
+                trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+            let key = self
+                .finite_private_api_keys
+                .get(&key_id)
+                .ok_or(CoreError::InvalidFinitePrivateApiKey)?;
+            if key.project_id.as_deref() != Some(verified.project_id.as_str()) {
+                return Err(CoreError::InvalidFinitePrivateApiKey);
+            }
+            self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
+                key_id,
+                now: Some(now.clone()),
+            })?;
+        }
         let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
             return Err(CoreError::AgentCreationRequestNotFound);
         };
@@ -2771,7 +2885,9 @@ impl BridgeCoreState {
         let project_ids = self
             .project_room_memberships
             .values()
-            .filter(|membership| membership.chat_identity_id == identity.id)
+            .filter(|membership| {
+                membership.chat_identity_id == identity.id && membership.archived_at.is_none()
+            })
             .map(|membership| membership.project_id.as_str())
             .collect::<BTreeSet<_>>();
 
@@ -2961,18 +3077,48 @@ impl BridgeCoreState {
                 chat_identity_id: identity_id,
                 role: ProjectMembershipRole::Owner,
                 created_at: now.to_string(),
+                archived_at: None,
             });
+    }
+
+    pub fn archive_imported_project(
+        &mut self,
+        input: ArchiveImportedProjectInput,
+    ) -> CoreResult<()> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let user = self.ensure_linked_user(&input.verified_email, &input.workos_user_id, &now)?;
+        let project = self
+            .projects
+            .get(&input.project_id)
+            .ok_or(CoreError::ProjectNotFound)?;
+        if project.owner_user_id != user.id || project.import_candidate_id.is_none() {
+            return Err(CoreError::ProjectNotFound);
+        }
+        let identity_ids = self
+            .chat_identities
+            .values()
+            .filter(|identity| identity.user_id == user.id)
+            .map(|identity| identity.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let membership = self
+            .project_room_memberships
+            .values_mut()
+            .find(|membership| {
+                membership.project_id == input.project_id
+                    && identity_ids.contains(membership.chat_identity_id.as_str())
+            })
+            .ok_or(CoreError::ProjectNotFound)?;
+        membership.archived_at = Some(now);
+        Ok(())
     }
 
     fn ensure_agent_creation_entitlement(
         &mut self,
         customer_org_id: &str,
-        launch_code: Option<&str>,
+        launch_code_id: Option<&str>,
         now: &str,
     ) -> CoreResult<AgentCreationEntitlement> {
-        if let Some(code) = launch_code {
-            self.validate_agent_creation_launch_code(customer_org_id, code)?;
-        } else if !self.customer_org_has_active_billing(customer_org_id) {
+        if launch_code_id.is_none() && !self.customer_org_has_active_billing(customer_org_id) {
             return Err(CoreError::BillingRequired);
         }
 
@@ -2982,40 +3128,42 @@ impl BridgeCoreState {
             .find(|entitlement| entitlement.customer_org_id == customer_org_id)
             .cloned()
         {
+            if let Some(code_id) = launch_code_id
+                && existing.launch_code.as_deref() != Some(code_id)
+            {
+                return Err(CoreError::InvalidLaunchCode);
+            }
             return Ok(existing);
         }
 
         Ok(self.upsert_agent_creation_entitlement(
             customer_org_id,
             1,
-            launch_code.map(|_| FIRST_SELF_SERVE_LAUNCH_CODE.to_string()),
+            launch_code_id.map(str::to_string),
             now,
         ))
     }
 
-    fn validate_agent_creation_launch_code(
-        &self,
+    fn grant_launch_code_agent_creation_entitlement(
+        &mut self,
         customer_org_id: &str,
-        launch_code: &str,
-    ) -> CoreResult<()> {
-        if let Some(existing) = self
-            .agent_creation_entitlements
-            .values()
-            .find(|entitlement| entitlement.customer_org_id == customer_org_id)
-        {
-            if let Some(expected_code) = existing.launch_code.as_deref()
-                && launch_code != expected_code
-            {
-                return Err(CoreError::InvalidLaunchCode);
-            }
-            return Ok(());
+        launch_code_id: &str,
+        now: &str,
+    ) -> AgentCreationEntitlement {
+        let id = agent_creation_entitlement_id_for(customer_org_id);
+        if let Some(existing) = self.agent_creation_entitlements.get_mut(&id) {
+            existing.allowed_new_agent_runtimes =
+                existing.allowed_new_agent_runtimes.saturating_add(1);
+            existing.launch_code = Some(launch_code_id.to_string());
+            existing.updated_at = now.to_string();
+            return existing.clone();
         }
-
-        if launch_code == FIRST_SELF_SERVE_LAUNCH_CODE {
-            Ok(())
-        } else {
-            Err(CoreError::InvalidLaunchCode)
-        }
+        self.upsert_agent_creation_entitlement(
+            customer_org_id,
+            1,
+            Some(launch_code_id.to_string()),
+            now,
+        )
     }
 
     fn upsert_agent_creation_entitlement(
@@ -3105,7 +3253,7 @@ impl BridgeCoreState {
             })
             && (self.customer_org_has_active_billing(&org.id)
                 || org.billing_class == BillingClass::Grandfathered
-                || org.billing_class == BillingClass::Off2026);
+                || org.billing_class == BillingClass::Sponsored);
         BillingOverview {
             customer_org: org.clone(),
             billing_account,
@@ -3172,6 +3320,21 @@ impl BridgeCoreState {
     }
 
     fn offboard_destroyed_runtime(&mut self, request: &RuntimeControlRequest) {
+        if self
+            .projects
+            .get(&request.project_id)
+            .is_some_and(|project| project.import_candidate_id.is_none())
+        {
+            for membership in self
+                .project_room_memberships
+                .values_mut()
+                .filter(|membership| membership.project_id == request.project_id)
+            {
+                if membership.archived_at.is_none() {
+                    membership.archived_at = Some(request.updated_at.clone());
+                }
+            }
+        }
         for link in self
             .project_runtime_links
             .values_mut()
@@ -4145,7 +4308,7 @@ impl BillingClass {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Grandfathered => "grandfathered",
-            Self::Off2026 => "off2026",
+            Self::Sponsored => "sponsored",
             Self::Standard => "standard",
         }
     }
@@ -4345,7 +4508,7 @@ pub fn parse_runner_class(value: &str) -> Option<RunnerClass> {
 pub fn parse_billing_class(value: &str) -> Option<BillingClass> {
     match value {
         "grandfathered" => Some(BillingClass::Grandfathered),
-        "off2026" => Some(BillingClass::Off2026),
+        "sponsored" => Some(BillingClass::Sponsored),
         "standard" => Some(BillingClass::Standard),
         _ => None,
     }
@@ -4889,6 +5052,37 @@ mod tests {
     const NOW: &str = "2026-05-25T12:00:00Z";
     const LATER: &str = "2026-05-25T13:00:00Z";
 
+    fn issue_test_launch_code(state: &mut BridgeCoreState) -> String {
+        let prepared =
+            launch_codes::prepare_launch_code_batch(launch_codes::IssueLaunchCodeBatchInput {
+                name: "Test batch".to_string(),
+                code_count: 1,
+                expires_in_hours: Some(launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                created_by_workos_user_id: "workos-test-operator".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let plaintext = prepared.issued_codes[0].code.clone();
+        state
+            .launch_code_batches
+            .insert(prepared.batch.id.clone(), prepared.batch);
+        for record in prepared.records {
+            state.launch_codes.insert(record.id.clone(), record);
+        }
+        plaintext
+    }
+
+    fn issued_launch_code_id(state: &BridgeCoreState, plaintext: &str) -> String {
+        let hash = launch_codes::hash_launch_code(plaintext).unwrap();
+        state
+            .launch_codes
+            .values()
+            .find(|record| record.code_hash == hash)
+            .unwrap()
+            .id
+            .clone()
+    }
+
     #[test]
     fn existing_host_import_creates_multiple_claimable_candidates_without_visible_projects() {
         let mut state = BridgeCoreState::default();
@@ -5163,13 +5357,14 @@ mod tests {
     #[test]
     fn launch_code_creates_one_self_serve_agent_request_and_visible_project() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
 
         let first = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -5179,7 +5374,7 @@ mod tests {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent duplicate submit".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(LATER.to_string()),
             })
@@ -5194,7 +5389,7 @@ mod tests {
         assert_eq!(state.agent_creation_requests.len(), 1);
         let user = state.users.values().next().unwrap();
         let org = state.customer_orgs.values().next().unwrap();
-        assert_eq!(org.billing_class, BillingClass::Off2026);
+        assert_eq!(org.billing_class, BillingClass::Sponsored);
         assert_eq!(
             state.visible_projects_for_user(&user.id),
             vec![first.project]
@@ -5204,6 +5399,7 @@ mod tests {
     #[test]
     fn project_selected_runner_class_routes_to_a_matching_worker() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation_configured(
@@ -5211,7 +5407,7 @@ mod tests {
                     verified_email: "kata@finite.vip".to_string(),
                     workos_user_id: "user_workos_kata".to_string(),
                     display_name: "Kata Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "kata-submit".to_string(),
                     now: Some(NOW.to_string()),
                 },
@@ -5260,13 +5456,14 @@ mod tests {
     #[test]
     fn runner_leases_and_completes_self_serve_agent_request() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -5485,6 +5682,7 @@ mod tests {
     #[test]
     fn self_serve_agent_creation_requires_promoted_runtime_artifact() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         state
             .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                 id: "artifact-v1".to_string(),
@@ -5506,7 +5704,7 @@ mod tests {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -5554,13 +5752,14 @@ mod tests {
     #[test]
     fn self_serve_runtime_must_publish_relay_heartbeat_before_running() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -5816,6 +6015,26 @@ mod tests {
             "2026-05-25T13:02:00Z",
         );
         let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let unrelated_runtime_id = complete_self_serve_agent(
+            &mut state,
+            "new@finite.vip",
+            "user_workos_new",
+            "second-submit",
+            "oslo-agent-002",
+            "artifact-v1",
+            "2026-05-25T13:02:10Z",
+        );
+        let unrelated_project_id = state.agent_runtimes[&unrelated_runtime_id]
+            .project_id
+            .clone();
+        let user_id = state
+            .users
+            .values()
+            .find(|user| user.workos_user_id.as_deref() == Some("user_workos_new"))
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(state.visible_projects_for_user(&user_id).len(), 2);
         state.runtime_relay_credentials.insert(
             runtime_id.clone(),
             RuntimeRelayCredential {
@@ -5896,7 +6115,7 @@ mod tests {
             .request_runtime_destroy(RequestRuntimeDestroyInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
-                project_id,
+                project_id: project_id.clone(),
                 now: Some("2026-05-25T13:06:00Z".to_string()),
             })
             .unwrap();
@@ -5949,6 +6168,45 @@ mod tests {
                 .values()
                 .any(|event| event.action == "finite_private.runtime.destroy_revoke_keys")
         );
+        let visible_project_ids = state
+            .visible_projects_for_user(&user_id)
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            visible_project_ids,
+            BTreeSet::from([unrelated_project_id.clone()]),
+            "destroyed project is hidden without affecting unrelated membership"
+        );
+        assert!(
+            state.projects.contains_key(&project_id),
+            "destroy retains the project row"
+        );
+        assert!(
+            state.agent_runtimes.contains_key(&runtime_id),
+            "destroy retains the runtime row"
+        );
+        assert_eq!(
+            state
+                .project_room_memberships
+                .values()
+                .find(|membership| membership.project_id == project_id)
+                .unwrap()
+                .archived_at
+                .as_deref(),
+            Some("2026-05-25T13:08:00Z")
+        );
+        assert!(
+            state
+                .project_room_memberships
+                .values()
+                .find(|membership| membership.project_id == unrelated_project_id)
+                .unwrap()
+                .archived_at
+                .is_none(),
+            "unrelated membership remains active"
+        );
+        assert!(state.agent_runtimes.contains_key(&unrelated_runtime_id));
     }
 
     #[test]
@@ -6022,13 +6280,14 @@ mod tests {
     #[test]
     fn runner_lease_can_expire_and_reassign_but_completion_requires_current_token() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6086,12 +6345,13 @@ mod tests {
     #[test]
     fn runner_can_mark_agent_creation_request_failed_without_runtime() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6113,6 +6373,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runner capacity unavailable".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
             .unwrap();
@@ -6127,14 +6388,15 @@ mod tests {
     }
 
     #[test]
-    fn operator_can_cancel_failed_creation_request_and_user_can_retry() {
+    fn cancelled_request_does_not_make_a_redeemed_launch_code_reusable() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6155,6 +6417,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runner capacity unavailable".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
             .unwrap();
@@ -6174,32 +6437,30 @@ mod tests {
                 .is_empty()
         );
 
-        let retried = state
+        let retry = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Retry Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "second-submit".to_string(),
                 now: Some("2026-05-25T13:04:00Z".to_string()),
             })
-            .unwrap();
-        assert_eq!(
-            retried.request.status,
-            AgentCreationRequestStatus::Requested
-        );
+            .unwrap_err();
+        assert!(matches!(retry, CoreError::InvalidLaunchCode));
     }
 
     #[test]
     fn failed_self_serve_launch_removes_provisional_runtime() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6246,6 +6507,7 @@ mod tests {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
                 failure_message: "runtime did not publish a relay heartbeat".to_string(),
+                provisioned_finite_private_api_key_id: None,
                 now: Some("2026-05-25T13:03:00Z".to_string()),
             })
             .unwrap();
@@ -6263,8 +6525,9 @@ mod tests {
     }
 
     #[test]
-    fn self_serve_agent_creation_rejects_bad_code_and_exhausted_entitlement() {
+    fn fresh_launch_code_adds_one_creation_to_an_exhausted_entitlement() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
 
         let bad = state
             .request_agent_creation(RequestAgentCreationInput {
@@ -6286,30 +6549,59 @@ mod tests {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
             .unwrap();
-        let exhausted = state
+        let unused_launch_code = issue_test_launch_code(&mut state);
+        let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
+        let second = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Second Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: unused_launch_code.clone(),
                 idempotency_key: "second-submit".to_string(),
                 now: Some(LATER.to_string()),
             })
-            .unwrap_err();
-        assert!(matches!(
-            exhausted,
-            CoreError::AgentCreationEntitlementExhausted
-        ));
+            .unwrap();
+        assert!(!second.reused);
+        assert!(
+            state.launch_codes[&unused_launch_code_id]
+                .redeemed_at
+                .is_some(),
+            "the top-up code must be consumed"
+        );
+        let entitlement = state
+            .agent_creation_entitlements
+            .values()
+            .find(|entitlement| entitlement.customer_org_id == second.project.customer_org_id)
+            .unwrap();
+        assert_eq!(entitlement.allowed_new_agent_runtimes, 2);
+        let entitlement_id = entitlement.id.clone();
+
+        let retry = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "new@finite.vip".to_string(),
+                workos_user_id: "user_workos_new".to_string(),
+                display_name: "Second Agent".to_string(),
+                launch_code: unused_launch_code,
+                idempotency_key: "second-submit".to_string(),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert!(retry.reused);
+        assert_eq!(
+            state.agent_creation_entitlements[&entitlement_id].allowed_new_agent_runtimes, 2,
+            "an identical retry must not apply the top-up twice"
+        );
     }
 
     #[test]
     fn imported_runtime_does_not_consume_self_serve_launch_entitlement() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         let email = "import-with-launch@finite.vip";
         let workos_user_id = "user_workos_import_with_launch";
 
@@ -6353,29 +6645,33 @@ mod tests {
                 verified_email: email.to_string(),
                 workos_user_id: workos_user_id.to_string(),
                 display_name: "New Hosted Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-self-serve-submit".to_string(),
                 now: Some("2026-05-25T14:00:00Z".to_string()),
             })
             .expect("an imported runtime must not consume the hosted launch");
         assert!(created.project.import_candidate_id.is_none());
 
-        let exhausted = state
+        let unused_launch_code = issue_test_launch_code(&mut state);
+        let unused_launch_code_id = issued_launch_code_id(&state, &unused_launch_code);
+        let second = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: email.to_string(),
                 workos_user_id: workos_user_id.to_string(),
                 display_name: "Another Hosted Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: unused_launch_code,
                 idempotency_key: "second-self-serve-submit".to_string(),
                 now: Some("2026-05-25T15:00:00Z".to_string()),
             })
-            .unwrap_err();
-        assert!(matches!(
-            exhausted,
-            CoreError::AgentCreationEntitlementExhausted
-        ));
+            .expect("a second fresh code grants one more hosted agent");
+        assert!(!second.reused);
+        assert!(
+            state.launch_codes[&unused_launch_code_id]
+                .redeemed_at
+                .is_some()
+        );
 
-        assert_eq!(state.agent_creation_requests.len(), 1);
+        assert_eq!(state.agent_creation_requests.len(), 2);
         assert_eq!(
             state.project_import_candidates[&candidate_id],
             imported_candidate
@@ -6386,6 +6682,81 @@ mod tests {
             state.project_runtime_links[&imported_link.id],
             imported_link
         );
+    }
+
+    #[test]
+    fn owner_can_archive_imported_project_without_deleting_runtime_history() {
+        let mut state = BridgeCoreState::default();
+        let email = "archive-import@finite.vip";
+        let workos_user_id = "user_workos_archive_import";
+        let reconciled = state
+            .reconcile_existing_host_imports(
+                &[import(
+                    "legacy-host",
+                    "legacy-agent-archive",
+                    "Old Agent",
+                    Some(email),
+                )],
+                options([email], NOW),
+            )
+            .unwrap();
+        let claimed = state
+            .claim_project_imports(ClaimProjectImportsInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                selected_candidate_ids: reconciled.created_candidates,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        let project_id = claimed.claimed_project_ids[0].clone();
+        let runtime_count = state.agent_runtimes.len();
+        let link_count = state.project_runtime_links.len();
+
+        state
+            .archive_imported_project(ArchiveImportedProjectInput {
+                verified_email: email.to_string(),
+                workos_user_id: workos_user_id.to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-05-25T16:00:00Z".to_string()),
+            })
+            .unwrap();
+
+        assert!(
+            state
+                .visible_projects_for_user(&state.find_user_by_email(email).unwrap().id)
+                .is_empty()
+        );
+        assert!(state.projects.contains_key(&project_id));
+        assert_eq!(state.agent_runtimes.len(), runtime_count);
+        assert_eq!(state.project_runtime_links.len(), link_count);
+        assert!(state.project_room_memberships.values().any(|membership| {
+            membership.project_id == project_id && membership.archived_at.is_some()
+        }));
+    }
+
+    #[test]
+    fn hosted_project_cannot_use_import_archive_path() {
+        let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
+        let created = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "hosted-archive@finite.vip".to_string(),
+                workos_user_id: "user_workos_hosted_archive".to_string(),
+                display_name: "Hosted Agent".to_string(),
+                launch_code,
+                idempotency_key: "hosted-archive".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let error = state
+            .archive_imported_project(ArchiveImportedProjectInput {
+                verified_email: "hosted-archive@finite.vip".to_string(),
+                workos_user_id: "user_workos_hosted_archive".to_string(),
+                project_id: created.project.id,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ProjectNotFound));
     }
 
     #[test]
@@ -6789,12 +7160,14 @@ mod tests {
     #[test]
     fn stripe_subscription_lapse_preserves_launch_code_entitlement() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
+        let launch_code_id = issued_launch_code_id(&state, &launch_code);
         state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "bridge@finite.vip".to_string(),
                 workos_user_id: "user_workos_bridge".to_string(),
                 display_name: "Bridge Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "bridge-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6809,7 +7182,7 @@ mod tests {
                 .values()
                 .find(|entitlement| entitlement.customer_org_id == org_id)
                 .and_then(|entitlement| entitlement.launch_code.as_deref()),
-            Some("off2026")
+            Some(launch_code_id.as_str())
         );
 
         state
@@ -6831,7 +7204,7 @@ mod tests {
             state.agent_creation_entitlements[&agent_creation_entitlement_id_for(&org_id)]
                 .launch_code
                 .as_deref(),
-            Some("off2026")
+            Some(launch_code_id.as_str())
         );
 
         state
@@ -6851,20 +7224,24 @@ mod tests {
             .unwrap();
         let entitlement =
             &state.agent_creation_entitlements[&agent_creation_entitlement_id_for(&org_id)];
-        assert_eq!(entitlement.launch_code.as_deref(), Some("off2026"));
+        assert_eq!(
+            entitlement.launch_code.as_deref(),
+            Some(launch_code_id.as_str())
+        );
         assert_eq!(entitlement.allowed_new_agent_runtimes, 1);
     }
 
     #[test]
     fn finite_private_runtime_key_provisioning_is_bound_to_launching_request() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: "first-submit".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -6907,7 +7284,7 @@ mod tests {
 
         let wrong_lease = state
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
-                request_id: lease.request.id,
+                request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "wrong-token".to_string(),
                 source_host_id: Some("oslo-host-1".to_string()),
@@ -6919,6 +7296,55 @@ mod tests {
             wrong_lease,
             CoreError::AgentCreationRequestLeaseConflict
         ));
+
+        let unrelated_key = state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: provisioned.grant.id.clone(),
+                raw_key: "fpk_live_unrelated_project_key".to_string(),
+                project_id: Some("project-unrelated".to_string()),
+                agent_runtime_id: None,
+                now: Some("2026-05-25T13:01:30Z".to_string()),
+            })
+            .unwrap();
+        let mismatched = state
+            .fail_agent_creation_request(FailAgentCreationRequestInput {
+                request_id: lease.request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "lease-token-1".to_string(),
+                failure_message: "runtime failed".to_string(),
+                provisioned_finite_private_api_key_id: Some(unrelated_key.id.clone()),
+                now: Some("2026-05-25T13:02:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(mismatched, CoreError::InvalidFinitePrivateApiKey));
+        assert_eq!(
+            state.agent_creation_requests[&lease.request.id].status,
+            AgentCreationRequestStatus::Launching
+        );
+        assert_eq!(
+            state.finite_private_api_keys[&unrelated_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
+
+        let failed = state
+            .fail_agent_creation_request(FailAgentCreationRequestInput {
+                request_id: lease.request.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "lease-token-1".to_string(),
+                failure_message: "runtime failed".to_string(),
+                provisioned_finite_private_api_key_id: Some(provisioned.api_key.id.clone()),
+                now: Some("2026-05-25T13:02:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+        assert_eq!(
+            state.finite_private_api_keys[&provisioned.api_key.id].status,
+            FinitePrivateApiKeyStatus::Revoked
+        );
+        assert_eq!(
+            state.finite_private_api_keys[&unrelated_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
     }
 
     #[test]
@@ -7658,6 +8084,7 @@ mod tests {
     #[test]
     fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_facts_atomically() {
         let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
         let requested = state
             .request_agent_creation_configured(
@@ -7665,7 +8092,7 @@ mod tests {
                     verified_email: "upgrade@finite.vip".to_string(),
                     workos_user_id: "workos-upgrade".to_string(),
                     display_name: "Upgrade Agent".to_string(),
-                    launch_code: "off2026".to_string(),
+                    launch_code: launch_code.clone(),
                     idempotency_key: "upgrade-agent".to_string(),
                     now: Some(NOW.to_string()),
                 },
@@ -8042,12 +8469,13 @@ mod tests {
         artifact_id: &str,
         now: &str,
     ) -> String {
+        let launch_code = issue_test_launch_code(state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: email.to_string(),
                 workos_user_id: workos_user_id.to_string(),
                 display_name: source_machine_id.to_string(),
-                launch_code: "off2026".to_string(),
+                launch_code: launch_code.clone(),
                 idempotency_key: idempotency_key.to_string(),
                 now: Some(NOW.to_string()),
             })

@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+declare -a sensitive_files=()
+
+cleanup_sensitive_files() {
+  if (( ${#sensitive_files[@]} > 0 )); then
+    rm -f -- "${sensitive_files[@]}"
+  fi
+}
+
+track_sensitive_file() {
+  sensitive_files+=("$1")
+}
+
+trap cleanup_sensitive_files EXIT
+
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "missing required command: $1" >&2
@@ -24,8 +38,22 @@ wait_http() {
 }
 
 read_core_me() {
-  curl -fsS "${core_identity_headers[@]}" \
-    "$core_url/api/core/v1/me" >"$me_json"
+  curl_customer "$core_url/api/core/v1/me" >"$me_json"
+}
+
+curl_customer() {
+  local config_file="$state_dir/saas-smoke-curl-auth-$$-$RANDOM.conf"
+  track_sensitive_file "$config_file"
+  umask 077
+  printf 'header = "authorization: Bearer %s"\n' \
+    "$(tr -d '\n' <"$state_dir/workos-fixture/dashboard-customer.jwt")" >"$config_file"
+  local status=0
+  curl -fsS --config "$config_file" "$@" || status=$?
+  if (( status != 0 )); then
+    rm -f "$config_file"
+    return "$status"
+  fi
+  rm -f "$config_file"
 }
 
 runtime_fields() {
@@ -282,14 +310,6 @@ me_json="$state_dir/saas-smoke-core-me.json"
 chat_state_json="$state_dir/saas-smoke-chat-state.json"
 chat_action_json="$state_dir/saas-smoke-chat-action.json"
 
-core_identity_headers=(
-  -H "authorization: Bearer ${FC_CORE_API_TOKEN:?}"
-  -H "content-type: application/json"
-  -H "x-finite-workos-user-id: ${FC_DASHBOARD_DEV_WORKOS_USER_ID:?}"
-  -H "x-finite-workos-email: ${FC_DASHBOARD_DEV_EMAIL:?}"
-  -H "x-finite-workos-email-verified: true"
-)
-
 read_core_me
 if ! runtime_fields >/dev/null 2>&1; then
   if node - "$me_json" <<'JS'
@@ -301,12 +321,36 @@ JS
     echo "waiting for the existing real agent launch"
   else
     run_id="$(date +%s)-$$"
+    issue_json="$state_dir/saas-smoke-issued-launch-code.json"
+    launch_code_file="$state_dir/saas-smoke-launch-code.txt"
+    track_sensitive_file "$issue_json"
+    track_sensitive_file "$launch_code_file"
+    umask 077
+    operator_config="$state_dir/saas-smoke-operator-auth-$$-$RANDOM.conf"
+    track_sensitive_file "$operator_config"
+    printf 'header = "authorization: Bearer %s"\n' \
+      "$(tr -d '\n' <"$state_dir/workos-fixture/operator.jwt")" >"$operator_config"
+    curl -fsS --config "$operator_config" \
+      -H 'content-type: application/json' \
+      --data '{"name":"Devfinity Apple smoke","codeCount":1,"expiresInHours":24}' \
+      "$core_url/api/core/v1/admin/launch-code-batches" >"$issue_json"
+    rm -f "$operator_config"
+    node - "$issue_json" "$launch_code_file" <<'JS'
+const fs = require("node:fs");
+const code = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))?.codes?.[0]?.code;
+if (typeof code !== "string" || !code) throw new Error("Core did not return a smoke Launch Code");
+fs.writeFileSync(process.argv[3], code, { mode: 0o600 });
+JS
+    rm -f "$issue_json"
     curl -fsS \
       -o /dev/null \
       -X POST \
       --data-urlencode "displayName=Devfinity Apple Agent $run_id" \
+      --data-urlencode "access=launch-code" \
+      --data-urlencode "launchCode@$launch_code_file" \
       --data-urlencode "idempotencyKey=devfinity-apple-$run_id" \
       "$dashboard_url/agent-creation-requests"
+    rm -f "$launch_code_file"
     echo "submitted the dashboard agent form"
   fi
 fi
@@ -326,8 +370,8 @@ send_and_require_reply "Reply briefly with: chat services healed"
 
 runtime_started_before="$(container_started_at)"
 agent_npub_before="$(runtime_agent_npub)"
-curl -fsS \
-  "${core_identity_headers[@]}" \
+curl_customer \
+  -H 'content-type: application/json' \
   -X POST \
   --data '{}' \
   "$core_url/api/core/v1/me/projects/$project_id/runtime/restart" \

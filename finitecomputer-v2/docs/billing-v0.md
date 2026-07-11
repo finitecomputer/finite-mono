@@ -7,17 +7,18 @@ Date: 2026-07-02.
 ## Problem Statement
 
 finitecomputer-v2 needs a real money path before the dashboard can be a
-self-serve SaaS product. Billing v0 should let a WorkOS-authenticated user pay
-$200/month for one hosted Hermes agent, use Stripe promo codes for whiteglove
-or org-sponsored seats, and make Core enforce agent creation and Finite Private
-limits.
+self-serve SaaS product, plus a deliberate non-Stripe access path for
+white-glove training and other approved sponsored use. Billing v0 should let a
+WorkOS-authenticated user pay $200/month for one hosted Hermes agent or redeem
+a Core-owned Launch Code, while Core enforces agent creation and Finite Private
+limits for both paths.
 
 Billing must not become a second runtime control plane. Stripe owns payment
-methods, invoices, coupons, promo codes, and subscription lifecycle events.
-Core owns customer organization state, entitlements, runtime-scoped Finite
-Private keys, and usage decisions.
+methods, invoices, coupons, promotion codes, and subscription lifecycle
+events. Core owns Launch Codes, customer organization state, entitlements,
+runtime-scoped Finite Private keys, and usage decisions.
 
-## Product Flow
+## Paid Customer Flow
 
 1. User signs in through WorkOS.
 2. Dashboard asks Core for `/api/core/v1/me/billing`.
@@ -37,6 +38,33 @@ Private keys, and usage decisions.
    `paused`. New agent creation is blocked, and any deeper account action must
    go through a human-reviewed grace/support process.
 
+## Sponsored Launch Code Flow
+
+1. A dashboard administrator whose validated WorkOS session selects Finite's
+   configured internal operator organization asks Core
+   to generate a named Launch Code Batch containing the exact number of
+   individually single-use codes needed for the sponsored cohort and an
+   explicit expiry.
+2. Core records the batch, stores only the material needed to verify future
+   redemptions, and returns the plaintext codes once.
+3. The dashboard offers a one-time copy/download handoff. Later admin views
+   show batch metadata, revocation state, and redemption status but never the
+   plaintext codes. The organizer distributes the codes outside Finite; this
+   flow does not maintain a participant roster or send invitations.
+4. The user signs in through WorkOS.
+5. The dashboard accepts one Launch Code and sends it to Core with
+   the agent-creation request.
+6. Core atomically binds the first successful redemption to one Account Auth
+   organization and records the resulting sponsored agent-creation
+   entitlement. A retry of the same idempotent creation request returns the
+   same result; another organization cannot redeem that code.
+7. The entitlement permits the same bounded agent-creation workflow as the
+   paid path without creating or implying a Stripe customer, subscription,
+   payment, coupon, or promotion.
+8. The resulting Agent Runtime follows the same product, lifecycle, data, and
+   recovery contracts as a paid runtime. Launch Code access is not a second
+   runtime architecture.
+
 ## Source Of Truth
 
 Stripe owns:
@@ -50,6 +78,7 @@ Stripe owns:
 
 Core owns:
 
+- Launch Code Batch issuance, validation, revocation, and sponsored-access audit
 - `customer_orgs`
 - `customer_billing_accounts`
 - `agent_creation_entitlements`
@@ -109,27 +138,34 @@ STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID=<stripe-test-price-id> \
 npm run test:stripe-billing-clock
 ```
 
-The harness starts disposable Postgres and Core services locally, creates a
-Stripe test clock, creates a send-invoice subscription against the configured
+The harness starts the local WorkOS fixture plus disposable Postgres and Core
+services, authenticates customer routes with a fixture AuthKit JWT, creates a
+Stripe test clock and send-invoice subscription against the configured
 hosted-agent Price, sends signed webhook payloads through the real dashboard
 webhook route, and asserts Core billing state after:
 
+- `checkout.session.completed`
 - `active`
 - `past_due`
 - `canceled`
 - a deliberately stale active update arriving after cancellation
+
+It also proves missing and invalid webhook signatures fail closed. The
+synthetic Checkout event exercises the real handler and fresh Subscription
+lookup; one real browser Checkout remains a separate paid-run acceptance step.
 
 It is intentionally opt-in because it creates Stripe test-mode objects and
 requires the test secret key. By default the harness deletes its Stripe test
 clock and local services. Set `FC_STRIPE_BILLING_E2E_KEEP_SERVICES=1` or
 `FC_STRIPE_BILLING_E2E_KEEP_STRIPE=1` only while debugging.
 
-## Promo Codes
+## Stripe Promotion Codes
 
-Stripe Checkout is created with `allow_promotion_codes: true`. Whiteglove or
-org-paid seats should use Stripe coupons and promotion codes, including 100%
-off codes when appropriate, so the user still sees the product value and Stripe
-remains the billing ledger.
+Stripe Checkout is created with `allow_promotion_codes: true`. Stripe coupons
+and promotion codes discount a paid-customer subscription, including 100% off
+when the relationship still belongs in the Stripe billing ledger. They are
+distinct from Core Launch Codes and are not required for white-glove training
+or other approved sponsored access.
 
 ## Webhook Contract
 
@@ -187,12 +223,47 @@ not issue stop, Runtime Retirement, recover, Purge User Data, provider volume
 deletion, Finite Private key revocation, or data retention actions from Stripe
 status alone.
 
-Legacy `off2026` launch-code creation remains only for explicit bridge paths.
-The normal v2 dashboard create-agent flow sends no launch code and requires
-active billing. Subscription lapses must not delete an existing launch-code
-entitlement for a bridge org.
+Launch Code creation is a supported path for white-glove training and other
+approved sponsored access. The paid-customer path sends no Launch Code and
+requires active billing. A Launch Code never represents paid billing, and a
+Stripe subscription lapse must not silently delete an independently granted
+Launch Code entitlement.
+
+Every Launch Code belongs to a named batch, is individually single-use, and is
+bound to one Account Auth organization on first successful redemption. Only a
+WorkOS-authenticated administrator in Finite's configured internal operator
+organization may ask Core to issue or revoke a batch. The operator
+organization is not a Core Customer Organization. A batch has an explicit code
+count and expiry, defaults to seven days, and may be configured for at most 30
+days. Indefinite batches are not allowed; the internal canary uses a 24-hour
+batch. A batch may revoke its remaining unredeemed codes. Expiry or revocation
+never stops an existing Agent Runtime or removes an already redeemed
+entitlement. Core returns plaintext codes only in the issuance response, then
+exposes only batch identity, redemption time, and the receiving organization;
+plaintext code values never appear in source, logs, later reads, or ordinary
+audit output. An optional operator CLI may call the same Core API, but database
+edits and provider shell access are not issuance paths.
+
+Keep this implementation deliberately small: Core needs only the batch facts,
+single-use code verification/redemption facts, issuance/list/revoke operations,
+and the existing agent-creation path. Do not build a campaign engine,
+participant directory, invitation mailer, scheduling system, analytics stack,
+or separate entitlement service for Launch Codes.
+
+Core implements this contract with named, exact-size batches, hashed
+individually single-use codes, bounded expiry, operator-only issuance and
+revocation, and redemption in the same transaction as the creation request.
+Plaintext is returned only by the issuance response; persisted entitlement and
+request rows reference the opaque code record id rather than retaining the
+plaintext value.
 
 ## Finite Private Limits
+
+Finite Private limits are a runaway guard, not a price meter or customer
+budget. Their purpose is to interrupt an agent that loops on inference
+continuously instead of allowing it to hammer the shared service indefinitely.
+Launch and billing decisions do not attempt to translate usage units into
+dollars.
 
 Core creates the default `finite-private-generous` profile with:
 
