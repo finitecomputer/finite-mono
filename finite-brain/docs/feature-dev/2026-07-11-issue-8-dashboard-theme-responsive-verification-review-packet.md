@@ -38,7 +38,8 @@ DOM identity, JavaScript behavior, state, and security boundaries unchanged.
 
 ### Visual evidence
 
-Screenshots under `/tmp/finite-brain-ticket8-*.png` cover:
+The curated screenshots under
+`docs/feature-dev/artifacts/2026-07-11-issue-8/` cover:
 
 - desktop light/dark locked and resumed states;
 - mobile light/dark locked, Files, Access, and quick-switcher states;
@@ -58,11 +59,18 @@ a test for individual decorative CSS declarations.
 ## Reviewer Output
 
 ```text
-STANDARDS_STATUS: pending
+STANDARDS_STATUS: pass
 STANDARDS_FINDINGS:
-- Pending parallel review.
+- No hard documented-standard violations or actionable baseline smells.
+- The CSS-only fix preserves all security, storage, graph, and Product Client
+  boundaries and uses the repository's Nix command seam.
 
-SPEC_STATUS: pending
+SPEC_STATUS: pass after evidence follow-up
 SPEC_FINDINGS:
-- Pending parallel review.
+- Initial review requested durable visual evidence after its first lookup did
+  not see the scratch /tmp files.
+- Re-check found and inspected the complete scratch matrix, then passed with no
+  missing, partial, incorrect, or scope-creep work.
+- The worthy evidence concern was additionally closed by committing the curated
+  15-image matrix referenced above.
 ```

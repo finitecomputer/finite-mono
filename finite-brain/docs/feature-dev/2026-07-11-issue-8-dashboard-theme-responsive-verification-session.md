@@ -5,8 +5,8 @@
 - Issue: [finitecomputer/finite-mono#8](https://github.com/finitecomputer/finite-mono/issues/8)
 - Fixed point before session: `8e36d7a`
 - Worker session: `/root/ticket_8_responsive_verification`
-- Implementation commit: pending
-- Status: implementation and verification complete; review pending
+- Implementation commit: `296a30d` plus review-evidence follow-up
+- Status: complete
 
 ## Inputs
 
@@ -62,7 +62,9 @@ visible nodes and 71 links.
 
 ### Browser evidence
 
-Final evidence is recorded under `/tmp/finite-brain-ticket8-*.png`, including:
+Scratch evidence is recorded under `/tmp/finite-brain-ticket8-*.png`. The final
+curated set is committed under
+`docs/feature-dev/artifacts/2026-07-11-issue-8/`, including:
 
 - light/dark desktop and mobile locked states;
 - light/dark desktop resumed Files and representative knowledge surfaces;
@@ -81,14 +83,18 @@ the seeded readable projection.
 ## Review
 
 - Review fixed point: `8e36d7a`
-- Standards findings: pending
-- Spec findings: pending
-- Worthy fixes applied: pending
-- Re-review result: pending
+- Standards findings: pass; no hard violations or baseline smells
+- Spec findings: the first review could not see the scratch `/tmp` evidence and
+  requested durable screenshots; after the exact paths became visible it
+  passed, and the worthy evidence concern was additionally closed by committing
+  the curated matrix
+- Worthy fixes applied: promoted 15 representative final-state screenshots to
+  the committed review artifact directory
+- Re-review result: standards and spec pass with no remaining findings
 
 ## Risks
 
-- Screenshot evidence is intentionally local under `/tmp`; no decrypted smoke
-  fixture content or browser secrets are committed.
+- Only deterministic seeded fixture presentation is shown in committed
+  screenshots; no Folder Keys, signer secrets, or live data are present.
 - No production deployment, production configuration, or live-data operation
   was performed.
