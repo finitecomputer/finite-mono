@@ -17,10 +17,11 @@ use finitechat_blob::{
 use finitechat_client::{
     AppliedLogEntry, ClientError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
     HttpRuntimeDeliveryError, PreparedCommit, ReqwestHttpRuntimeTransport,
-    ReqwestHttpRuntimeTransportError, RuntimeDelivery, RuntimeSyncOptions, SqliteClientStore,
-    SqliteClientStoreOptions, StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom,
-    StoredAppRoomState, StoredAppState, StoredOutboundLocalState, StoredOutboundMessage,
-    StoredOutboundServerDeliveryState, generate_account_secret, run_room_server_sync_tick,
+    ReqwestHttpRuntimeTransportError, RuntimeDelivery, RuntimeLinkFanoutOptions,
+    RuntimeSyncOptions, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
+    StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState, StoredAppState,
+    StoredOutboundLocalState, StoredOutboundMessage, StoredOutboundServerDeliveryState,
+    generate_account_secret, run_link_fanout_tick, run_room_server_sync_tick,
     run_runtime_sync_tick,
 };
 use finitechat_hermes::{
@@ -561,6 +562,16 @@ pub struct AppBridgeSync {
     pub events: Vec<AppBridgeAppliedEvent>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkFanoutReport {
+    pub fanout_id: String,
+    pub target_account_id: String,
+    pub target_device_id: String,
+    pub fanout_complete: bool,
+    pub room_count: u32,
+    pub active_room_count: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AppState {
     pub rev: u64,
@@ -840,6 +851,11 @@ enum AppRuntimeCommand {
     },
     DebugOutbox {
         response: mpsc::SyncSender<Result<Vec<AppOutboxDebugRow>, FiniteChatCoreError>>,
+    },
+    LinkDevice {
+        fanout_id: String,
+        target_device_id: String,
+        response: mpsc::SyncSender<Result<DeviceLinkFanoutReport, FiniteChatCoreError>>,
     },
     #[cfg(test)]
     TestLoadOutbox {
@@ -1178,6 +1194,31 @@ impl FiniteChatRuntime {
 }
 
 impl FiniteChatRuntime {
+    /// Advance the crash-safe account-room fanout for one already-created
+    /// Device. The target must use this runtime's account id and publish its
+    /// own KeyPackages before fanout can make progress.
+    pub fn link_device_and_wait(
+        &self,
+        fanout_id: String,
+        target_device_id: String,
+    ) -> Result<DeviceLinkFanoutReport, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::LinkDevice {
+                fanout_id,
+                target_device_id,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before advancing device linking".to_owned(),
+            })?
+    }
+
     fn wait_plan(&self, timeout_millis: u64) -> Result<AppRuntimeWaitPlan, FiniteChatCoreError> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.command_tx
@@ -1650,6 +1691,19 @@ fn spawn_app_runtime_worker(
                 }
                 AppRuntimeCommand::DebugOutbox { response } => {
                     let _ = response.send(state.app_outbox_debug_rows());
+                }
+                AppRuntimeCommand::LinkDevice {
+                    fanout_id,
+                    target_device_id,
+                    response,
+                } => {
+                    let result = state.link_device(fanout_id, target_device_id);
+                    if result.is_ok() {
+                        state.bump_rev();
+                        let snapshot = state.app.clone();
+                        publish_app_update(&snapshot, &shared_state, &reconciler);
+                    }
+                    let _ = response.send(result);
                 }
                 #[cfg(test)]
                 AppRuntimeCommand::TestLoadOutbox { response } => {
@@ -4272,6 +4326,90 @@ impl AppRuntimeState {
         self.sync_selected_room_details();
         self.app.status = "devices refreshed".to_owned();
         Ok(())
+    }
+
+    fn link_device(
+        &mut self,
+        fanout_id: String,
+        target_device_id: String,
+    ) -> Result<DeviceLinkFanoutReport, FiniteChatCoreError> {
+        validate_string_bytes("device_link.fanout_id", &fanout_id, MAX_OBJECT_ID_BYTES)
+            .map_err(client_error)?;
+        validate_string_bytes(
+            "device_link.target_device_id",
+            &target_device_id,
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(client_error)?;
+        let owner = self.core.device.device_ref().clone();
+        if target_device_id == owner.device_id {
+            return Err(FiniteChatCoreError::Client {
+                reason: "linked Device must be distinct from the current Device".to_owned(),
+            });
+        }
+        let target = DeviceRef {
+            account_id: owner.account_id.clone(),
+            device_id: target_device_id.clone(),
+        };
+        target.validate_limits().map_err(client_error)?;
+
+        let existing = self
+            .core
+            .device
+            .export_state()
+            .map_err(client_error)?
+            .link_fanouts
+            .into_iter()
+            .find(|fanout| fanout.fanout_id == fanout_id);
+        match existing {
+            Some(existing) if existing.target_device != target => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "device-link fanout id is already bound to another Device".to_owned(),
+                });
+            }
+            Some(_) => {}
+            None => self
+                .core
+                .store
+                .start_link_fanout_and_save(
+                    &mut self.core.device,
+                    fanout_id.clone(),
+                    target.clone(),
+                )
+                .map_err(store_error)?,
+        }
+
+        let mut delivery = self.core.home_delivery();
+        let fanout = run_link_fanout_tick(
+            &mut self.core.store,
+            &mut self.core.device,
+            &mut delivery,
+            &fanout_id,
+            &RuntimeLinkFanoutOptions {
+                max_discovery_pages_per_tick: 16,
+                max_commit_rooms_per_tick: 4,
+                max_completion_sync_pages_per_room: DEFAULT_MAX_SYNC_PAGES_PER_ROOM,
+            },
+        )
+        .map_err(runtime_error)?;
+        let (room_count, active_room_count) =
+            device_room_counts(&mut delivery, &target).map_err(delivery_error)?;
+        self.refresh_devices()?;
+        self.app.status = if fanout.complete && room_count == active_room_count {
+            "device linked".to_owned()
+        } else if fanout.complete {
+            "device joining".to_owned()
+        } else {
+            "waiting for linked device".to_owned()
+        };
+        Ok(DeviceLinkFanoutReport {
+            fanout_id,
+            target_account_id: owner.account_id,
+            target_device_id,
+            fanout_complete: fanout.complete,
+            room_count,
+            active_room_count,
+        })
     }
 
     fn revoke_device(
@@ -8974,6 +9112,41 @@ fn nostr_identity_from_secret(
 
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
     HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url))
+}
+
+fn device_room_counts<D: RuntimeDelivery>(
+    delivery: &mut D,
+    target: &DeviceRef,
+) -> Result<(u32, u32), D::Error> {
+    let mut after_room_id = None;
+    let mut room_count = 0_u32;
+    let mut active_room_count = 0_u32;
+    for _ in 0..16 {
+        let page = delivery.list_account_rooms(ListAccountRoomsRequest {
+            account_id: target.account_id.clone(),
+            after_room_id: after_room_id.clone(),
+            limit: 100,
+        })?;
+        for room in page.rooms {
+            if let Some(device) = room.devices.iter().find(|device| device.device == *target) {
+                room_count = room_count.saturating_add(1);
+                if device.active {
+                    active_room_count = active_room_count.saturating_add(1);
+                }
+            }
+        }
+        if !page.has_more {
+            break;
+        }
+        let Some(next) = page.next_after_room_id else {
+            break;
+        };
+        if after_room_id.as_ref() == Some(&next) {
+            break;
+        }
+        after_room_id = Some(next);
+    }
+    Ok((room_count, active_room_count))
 }
 
 fn verify_server_contract(server_url: &str) -> Result<(), FiniteChatCoreError> {
@@ -14584,6 +14757,98 @@ mod tests {
                 .iter()
                 .any(|message| message.text == "second agent message"),
             "app should decrypt the second Hermes message after sending a read receipt"
+        );
+    }
+
+    #[test]
+    fn runtime_device_link_fanout_enrolls_same_account_device_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let hosted = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("hosted").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let hosted_state = hosted
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Device Parity".to_owned(),
+            })
+            .unwrap();
+        let room_id = hosted_state.rooms[0].room_id.clone();
+        add_runtime_member_named(&hosted, &agent, &room_id, "Agent");
+
+        let hosted_identity = hosted.state().unwrap().identity;
+        let electron = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("electron").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "electron-alpha".to_owned(),
+            account_secret_hex: Some(hosted_identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        electron
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("Electron publishes KeyPackages");
+
+        let first = hosted
+            .link_device_and_wait("link-alpha".to_owned(), "electron-alpha".to_owned())
+            .unwrap();
+        assert!(first.fanout_complete);
+        assert_eq!(first.room_count, 1);
+        assert_eq!(first.active_room_count, 0);
+
+        let electron_state = electron
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("Electron activates its Welcome");
+        assert_eq!(
+            app_room(&electron_state, &room_id).state,
+            AppRoomState::Connected
+        );
+
+        let completed = hosted
+            .link_device_and_wait("link-alpha".to_owned(), "electron-alpha".to_owned())
+            .unwrap();
+        assert!(completed.fanout_complete);
+        assert_eq!(completed.room_count, 1);
+        assert_eq!(completed.active_room_count, 1);
+
+        let mismatch = hosted
+            .link_device_and_wait("link-alpha".to_owned(), "electron-other".to_owned())
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("another Device"));
+
+        electron
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: room_id.clone(),
+                text: "from the local Device".to_owned(),
+            })
+            .unwrap();
+        let hosted_state = hosted.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let message = hosted_state
+            .messages
+            .iter()
+            .find(|message| message.text == "from the local Device")
+            .unwrap();
+        assert!(message.is_mine);
+        assert_eq!(message.sender_device_id, "electron-alpha");
+        assert_eq!(message.outbound_delivery, None);
+        let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert!(
+            agent_state
+                .messages
+                .iter()
+                .any(|message| message.text == "from the local Device" && !message.is_mine)
         );
     }
 
