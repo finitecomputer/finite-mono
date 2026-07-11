@@ -30,20 +30,16 @@ Current v1 capabilities:
 
 ## Official URLs
 
-Current hosted smoke service:
+Current production service:
 
-- API and Product Client origin: `https://brain.smoke.finite.computer`
-- Product Client: `https://brain.smoke.finite.computer/client`
-- Health check: `https://brain.smoke.finite.computer/health`
-- Client config: `https://brain.smoke.finite.computer/client/config.json`
+- API and Product Client origin: `https://finite.computer`
+- Product Client: `https://finite.computer/client`
+- Client config: `https://finite.computer/client/config.json`
 
 Repository and releases:
 
-- Source: `https://github.com/finitecomputer/finite-brain`
+- Source: `https://github.com/finitecomputer/finite-mono/tree/main/finite-brain`
 - Release downloads: `https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/` (rolling alias; versioned tags are `fbrain/vX.Y.Z`)
-
-No production FiniteBrain URL is canonized in this repository yet. Do not
-invent one in docs, skills, tests, or agent instructions.
 
 ## Crate Layout
 
@@ -169,7 +165,9 @@ cargo build --locked --release --package finite-brain-cli --bin fbrain
 
 ## Release Shape
 
-Tags named `v*` trigger `.github/workflows/release.yml`.
+Component tags named `fbrain/vX.Y.Z` trigger
+`.github/workflows/release-fbrain.yml` from the monorepo root. The workflow
+publishes the versioned release and refreshes the `fbrain-latest` rolling alias.
 
 The GitHub release packages `fbrain` binaries for:
 
@@ -179,8 +177,9 @@ The GitHub release packages `fbrain` binaries for:
 
 Each asset is uploaded as `.tar.gz` with a matching `.sha256` file.
 
-The `finite-brain` server binary is built through Cargo/Nix for hosted
-deployments. It is not currently a GitHub release asset.
+The Linux `finite-brain` server binary is also published as
+`finite-brain-linux-x86_64.tar.gz` for the smoke bridge. Normal production
+deployment builds the server through Nix from the exact monorepo revision.
 
 Before tagging:
 
