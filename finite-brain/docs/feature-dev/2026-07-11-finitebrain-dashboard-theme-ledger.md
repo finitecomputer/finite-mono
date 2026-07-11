@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: ticket #5 complete; ticket #6 in review; ticket #7 unblocked
+- Current status: tickets #5 and #6 complete; ticket #7 unblocked
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -51,9 +51,9 @@ overall visual character in a high-quality, elegant, surgical way.
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
 | #5 | AFK | complete | `/root/ticket_5_theme_foundation` | browser-found light workspace defect and review command-record finding fixed | full ticket suite and four-state visual pass |
-| #6 | AFK | in review | `/root/ticket_6_knowledge_workspace` | screenshot-found Graph label/statistics contrast fixed | targeted suite and resumed desktop light/dark visual pass |
+| #6 | AFK | complete | `/root/ticket_6_knowledge_workspace` | review-found Graph contrast and CSS test coupling fixed | full ticket suite and resumed desktop light/dark visual pass repeated after fixes |
 | #7 | AFK | ready | — | — | — |
-| #8 | AFK | blocked by #6 and #7 | — | — | — |
+| #8 | AFK | blocked by #7 | — | — | — |
 
 ## Parked HITL Slices
 
@@ -66,7 +66,7 @@ overall visual character in a high-quality, elegant, surgical way.
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
 | #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | `aa3b7a1` plus review fix follow-up | standards/spec pass after one command-record fix | Rust server suite, JS, seeded verifier, format, Clippy, build, diff, and browser pass |
-| #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | pending | standards/spec review pending | Product Client deterministic suite, seeded verifier, focused Rust asset test, diff, and resumed desktop light/dark browser pass |
+| #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | `8ee9129` plus review-fix follow-up | standards pass; two spec findings fixed; spec re-review pass | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
 
 ## Open Questions
 

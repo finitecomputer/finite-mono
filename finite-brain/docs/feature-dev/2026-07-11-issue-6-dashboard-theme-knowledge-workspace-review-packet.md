@@ -26,11 +26,13 @@ DOM hooks, JavaScript, data flow, and security behavior are unchanged.
 ## Implementation Evidence
 
 - `implement` session: `/root/ticket_6_knowledge_workspace`
-- `tdd` used: yes, at the approved Product Client stylesheet asset contract
-- Red test, if applicable: the deterministic Product Client suite failed on
-  the missing semantic knowledge tokens and consumer selectors
-- Green implementation, if applicable: the same suite passes with the shared
-  knowledge token contract while retaining every existing workflow assertion
+- `tdd` used: attempted at the approved Product Client asset seam; no new CSS
+  declaration test is retained
+- Red test, if applicable: an initial semantic-token/consumer-selector contract
+  failed before implementation
+- Green implementation, if applicable: the CSS assertions passed, but spec
+  review correctly identified them as implementation-coupled decoration tests,
+  so they were removed; the pre-existing behavior/DOM suite remains green
 - Refactor, if applicable: no behavior refactor; knowledge-specific colors were
   consolidated into the ticket #5 token layer and consumed by the existing
   selectors
@@ -39,6 +41,10 @@ DOM hooks, JavaScript, data flow, and security behavior are unchanged.
   - `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
   - `scripts/with-dev-env node finite-brain/scripts/verify-obsidian-product-client.mjs`
   - `scripts/with-dev-env cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`
+  - `scripts/with-dev-env cargo test -p finite-brain-server` (40 passed)
+  - `scripts/with-dev-env cargo fmt --all --check`
+  - `scripts/with-dev-env cargo clippy -p finite-brain-server --all-targets -- -D warnings`
+  - `scripts/with-dev-env cargo build -p finite-brain-app`
   - `git diff --check`
 
 Seeded verifier result: 11 Folders, 54 encrypted/readable Pages, 54 projected
@@ -79,11 +85,13 @@ Check:
 ## Reviewer Output
 
 ```text
-STANDARDS_STATUS: pending
+STANDARDS_STATUS: pass
 STANDARDS_FINDINGS:
-- Pending parallel review.
+- No hard documented-standard violations or actionable baseline smells.
 
-SPEC_STATUS: pending
+SPEC_STATUS: pass after fixes
 SPEC_FINDINGS:
-- Pending parallel review.
+- Fixed: ordinary Graph labels, statistics, and controls were too low contrast.
+- Fixed: the new CSS regex assertions coupled tests to decorative declarations.
+- Re-review found no remaining missing, partial, incorrect, or scope-creep work.
 ```
