@@ -6,7 +6,7 @@ Open questions are context, not queue. Agents may append dated evidence, but do 
 
 ## Hosted Web Device continuity (opened 2026-07-10)
 
-Wrong: A Hosted Web Device depends on a Finite-operated identity and MLS store. Ordinary restart preserves that state, but loss or corruption of the store has no proven path back to a usable Device plus retained history or a usable export. The current web flow starts the runtime when the dashboard opens; autonomous continuity without an active browser is not an established product contract.
+Wrong: A Hosted Web Device depends on a Finite-operated identity and MLS store. Ordinary restart preserves that state, but loss or corruption of the store has no proven path back to a usable Device plus retained history or a usable export. Retained state and the typed `agent.owner.claim` path do not require Hermes to be interactive; Hermes is required only to produce a new model reply. Autonomous continuity without an active browser is not an established product contract.
 
 Rejected so far: Silently minting an unrelated chat account, or treating server-held ciphertext as recovered user data, is unacceptable. Restoring an nsec and linking a replacement Device restores account authority, not prior MLS history.
 
@@ -16,6 +16,10 @@ Notes:
 
 - 2026-07-10: `finitechat-hosted-device` tests ordinary restart, transcript, and attachment survival, but not lost/corrupt-store or replacement-Device recovery; [the architecture document](../finitechat/docs/architecture.md) says those recovery paths are not built.
 - 2026-07-10: [the recovery plan](../finitecomputer-v2/docs/runtime-recovery-and-observability-plan.md) records no proven path for the relevant store/history/key-loss cases.
+- 2026-07-11: lat1 runs one loopback `finitechat-hosted-device` process. It keeps an in-memory runtime map keyed by verified WorkOS user ID; each entry opens a distinct identity and encrypted `client.sqlite3` beneath a hashed per-user directory. This is logical and cryptographic tenant separation inside one process, not a process or Unix-user boundary. Each Agent Runtime is separately isolated in its Kata guest and keeps its Agent Device store plus `finite-agentd` ledger under that guest's `/data/agent`.
+- 2026-07-11: the dashboard state bootstrap was incorrectly coupled to a remote owner-claim round trip, so a non-responsive Agent could hide already retained history. State now loads first and claim is a separate typed operation; Chat sending and Connections still fail closed until claim succeeds. A previously successful exact claim can be replayed from the Hosted Device's durable encrypted log after an ordinary service restart.
+- 2026-07-11: ordinary restart, same-identity reopening, transcript and attachment survival, exact owner-claim replay, cross-user timeout isolation, and partial-state handling have focused coverage. If exactly one of the identity or SQLite store remains, the service now returns recovery-required instead of silently minting a replacement identity. There is still no destructive-loss/off-host restore proof or automated live lat1-plus-Kata composition gate.
+- 2026-07-11: the shared Hosted Device runtime map has no eviction policy, and one process plus one service credential creates a wider operational blast radius than per-user processes would. These are observed limits, not authorization to redesign the service. The local Hermes CI step runs its encrypted flow test, but when the test report hook is absent the wrapper synthesizes the passing evidence file; compatibility fallbacks and aliases also remain. Those evidence and hard-cut cleanups are outstanding under [the repository engineering style](../finite-brain/docs/engineering-style.md), not proof that the internal browser canary failed.
 
 ## Operator-blindness without user lockout (opened 2026-07-10)
 
