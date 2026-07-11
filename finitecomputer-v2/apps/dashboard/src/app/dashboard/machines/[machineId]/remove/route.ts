@@ -5,6 +5,11 @@ import {
   coreProjectSupportsHostedRestart,
   requestCoreRuntimeDestroy,
 } from "@/lib/core-client";
+import {
+  requestHasExactOrigin,
+  requestOriginMatchesHost,
+} from "@/lib/http-headers";
+import { workosBaseUrl } from "@/lib/workos-auth";
 
 type RouteContext = {
   params: Promise<{ machineId: string }>;
@@ -12,6 +17,14 @@ type RouteContext = {
 
 export async function POST(request: Request, context: RouteContext) {
   const { machineId } = await context.params;
+  const configuredBaseUrl = workosBaseUrl();
+  if (
+    !requestOriginMatchesHost(request) &&
+    !requestHasExactOrigin(request) &&
+    (!configuredBaseUrl || !requestHasExactOrigin(request, configuredBaseUrl))
+  ) {
+    return machineRedirect(request, machineId, "unavailable");
+  }
   const access = await loadDashboardMachineAccess(machineId);
 
   if (

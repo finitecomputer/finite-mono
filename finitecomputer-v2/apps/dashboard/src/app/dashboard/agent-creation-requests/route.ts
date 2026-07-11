@@ -72,13 +72,14 @@ export async function POST(request: Request) {
       runnerClass,
       idempotencyKey,
       issuedAtMs: Date.now(),
+      stripeCheckoutStartedAtMs: null,
     };
-    const sealedDraft = await sealAgentOnboardingDraft(draft);
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     const access = formData.get("access");
     const accessPath = resolveAgentCreationAccessPath(
       access,
-      Boolean(billing.billing?.can_create_agent)
+      Boolean(billing.billing?.can_create_agent),
+      process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
     );
 
     if (accessPath === "launch-code") {
@@ -99,7 +100,13 @@ export async function POST(request: Request) {
       const response = NextResponse.redirect(await billingCheckoutDestination(), {
         status: 303,
       });
-      setDraftCookie(response, sealedDraft);
+      setDraftCookie(
+        response,
+        await sealAgentOnboardingDraft({
+          ...draft,
+          stripeCheckoutStartedAtMs: Date.now(),
+        })
+      );
       return response;
     }
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   AGENT_DRAFT_COOKIE,
+  draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
 import {
@@ -24,11 +25,17 @@ export async function GET(request: Request) {
     account.workosUserId
   );
   const dashboard = new URL("/dashboard", workosBaseUrl() ?? request.url);
-  if (!draft) return NextResponse.redirect(dashboard, { status: 303 });
+  if (!draftStartedStripeCheckout(draft)) {
+    return NextResponse.redirect(dashboard, { status: 303 });
+  }
 
   try {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-    if (!billing.billing?.can_create_agent) {
+    if (
+      !billing.billing?.can_create_agent ||
+      billing.billing.customer_org.billing_class !== "standard" ||
+      billing.billing.requires_billing
+    ) {
       dashboard.searchParams.set("new", "1");
       dashboard.searchParams.set("billing", "success");
       return NextResponse.redirect(dashboard, { status: 303 });

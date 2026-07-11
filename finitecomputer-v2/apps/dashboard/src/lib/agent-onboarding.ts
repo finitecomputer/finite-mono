@@ -24,6 +24,8 @@ export type AgentOnboardingDraft = {
   runnerClass: CoreRunnerClass;
   idempotencyKey: string;
   issuedAtMs: number;
+  /** Present only after this signed draft actually initiated Stripe Checkout. */
+  stripeCheckoutStartedAtMs?: number | null;
 };
 
 export type AgentCreationAccessPath =
@@ -35,12 +37,21 @@ export type AgentCreationAccessPath =
 /** Keep each onboarding submit on the access path the person explicitly chose. */
 export function resolveAgentCreationAccessPath(
   access: FormDataEntryValue | null,
-  canCreateAgent: boolean
+  canCreateAgent: boolean,
+  allowExistingEntitlement = true
 ): AgentCreationAccessPath {
   if (access === "launch-code") return "launch-code";
   if (access === "stripe") return "stripe";
-  if (access === "entitled" && canCreateAgent) return "entitlement";
+  if (access === "entitled" && canCreateAgent && allowExistingEntitlement) {
+    return "entitlement";
+  }
   return "denied";
+}
+
+export function draftStartedStripeCheckout(
+  draft: AgentOnboardingDraft | null
+): draft is AgentOnboardingDraft & { stripeCheckoutStartedAtMs: number } {
+  return Boolean(draft && Number.isFinite(draft.stripeCheckoutStartedAtMs));
 }
 
 export function agentCreationErrorMessage(error: unknown): string {
@@ -121,6 +132,10 @@ export async function unsealAgentOnboardingDraft(
       !draft.idempotencyKey?.trim() ||
       !RUNNER_CLASSES.has(draft.runnerClass) ||
       !Number.isFinite(draft.issuedAtMs) ||
+      (draft.stripeCheckoutStartedAtMs != null &&
+        (!Number.isFinite(draft.stripeCheckoutStartedAtMs) ||
+          draft.stripeCheckoutStartedAtMs < draft.issuedAtMs ||
+          draft.stripeCheckoutStartedAtMs > nowMs + 60_000)) ||
       draft.issuedAtMs > nowMs + 60_000 ||
       nowMs - draft.issuedAtMs > AGENT_DRAFT_TTL_SECONDS * 1000
     ) {

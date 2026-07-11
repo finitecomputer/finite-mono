@@ -5,6 +5,7 @@ import {
   agentCreationErrorMessage,
   configuredRunnerClasses,
   defaultRunnerClass,
+  draftStartedStripeCheckout,
   normalizeAgentDisplayName,
   resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
@@ -15,8 +16,27 @@ test("agent access follows the explicitly submitted path", () => {
   assert.equal(resolveAgentCreationAccessPath("launch-code", true), "launch-code");
   assert.equal(resolveAgentCreationAccessPath("stripe", true), "stripe");
   assert.equal(resolveAgentCreationAccessPath("entitled", true), "entitlement");
+  assert.equal(resolveAgentCreationAccessPath("entitled", true, false), "denied");
   assert.equal(resolveAgentCreationAccessPath("entitled", false), "denied");
   assert.equal(resolveAgentCreationAccessPath(null, true), "denied");
+});
+
+test("only a signed draft that initiated Stripe is eligible for checkout completion", () => {
+  const draft = {
+    version: 1 as const,
+    workosUserId: "user-a",
+    displayName: "Moss",
+    profilePictureUrl: null,
+    runnerClass: "kata" as const,
+    idempotencyKey: "idem-checkout",
+    issuedAtMs: 1_000,
+  };
+
+  assert.equal(draftStartedStripeCheckout(draft), false);
+  assert.equal(
+    draftStartedStripeCheckout({ ...draft, stripeCheckoutStartedAtMs: 1_001 }),
+    true
+  );
 });
 
 test("agent creation exhaustion is explained in customer language", () => {

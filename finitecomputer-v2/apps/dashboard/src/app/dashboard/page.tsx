@@ -62,6 +62,7 @@ import { stripeBillingStatus } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
   defaultRunnerClass,
+  draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
@@ -173,9 +174,11 @@ export default async function DashboardPage({
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
 
     if (
-      draft &&
+      draftStartedStripeCheckout(draft) &&
       billingReturnParam === "success" &&
-      billing.billing?.can_create_agent
+      billing.billing?.can_create_agent &&
+      billing.billing.customer_org.billing_class === "standard" &&
+      !billing.billing.requires_billing
     ) {
       redirect("/dashboard/agent-creation-requests/complete");
     }
