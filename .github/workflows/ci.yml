@@ -94,7 +94,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - uses: Swatinem/rust-cache@v2
 
       - name: Device parity and process gates
@@ -176,7 +175,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - name: Skills check
         run: nix develop --command just skills check
       - name: Search check
@@ -190,7 +188,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
       - uses: Swatinem/rust-cache@v2
       - name: Prebuild stack binaries
         # devfinity's readiness window is shorter than a cold compile of the
