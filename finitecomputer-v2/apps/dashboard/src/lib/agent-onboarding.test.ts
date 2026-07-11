@@ -6,9 +6,18 @@ import {
   configuredRunnerClasses,
   defaultRunnerClass,
   normalizeAgentDisplayName,
+  resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
+
+test("agent access follows the explicitly submitted path", () => {
+  assert.equal(resolveAgentCreationAccessPath("launch-code", true), "launch-code");
+  assert.equal(resolveAgentCreationAccessPath("stripe", true), "stripe");
+  assert.equal(resolveAgentCreationAccessPath("entitled", true), "entitlement");
+  assert.equal(resolveAgentCreationAccessPath("entitled", false), "denied");
+  assert.equal(resolveAgentCreationAccessPath(null, true), "denied");
+});
 
 test("agent creation exhaustion is explained in customer language", () => {
   const expected =

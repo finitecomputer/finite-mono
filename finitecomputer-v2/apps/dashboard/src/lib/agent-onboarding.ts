@@ -26,6 +26,23 @@ export type AgentOnboardingDraft = {
   issuedAtMs: number;
 };
 
+export type AgentCreationAccessPath =
+  | "launch-code"
+  | "stripe"
+  | "entitlement"
+  | "denied";
+
+/** Keep each onboarding submit on the access path the person explicitly chose. */
+export function resolveAgentCreationAccessPath(
+  access: FormDataEntryValue | null,
+  canCreateAgent: boolean
+): AgentCreationAccessPath {
+  if (access === "launch-code") return "launch-code";
+  if (access === "stripe") return "stripe";
+  if (access === "entitled" && canCreateAgent) return "entitlement";
+  return "denied";
+}
+
 export function agentCreationErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "Could not create agent.";
   if (message.toLowerCase().includes(AGENT_CREATION_ENTITLEMENT_EXHAUSTED)) {

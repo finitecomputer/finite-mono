@@ -8,6 +8,7 @@ import {
   MAX_AGENT_PROFILE_IMAGE_BYTES,
   agentCreationErrorMessage,
   normalizeAgentDisplayName,
+  resolveAgentCreationAccessPath,
   resolveRunnerClass,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
@@ -74,9 +75,13 @@ export async function POST(request: Request) {
     };
     const sealedDraft = await sealAgentOnboardingDraft(draft);
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-    const access = String(formData.get("access") ?? "");
+    const access = formData.get("access");
+    const accessPath = resolveAgentCreationAccessPath(
+      access,
+      Boolean(billing.billing?.can_create_agent)
+    );
 
-    if (access === "launch-code") {
+    if (accessPath === "launch-code") {
       const launchCode = String(formData.get("launchCode") ?? "").trim();
       if (!launchCode) {
         throw new Error("Enter your Launch Code.");
@@ -87,24 +92,25 @@ export async function POST(request: Request) {
       return response;
     }
 
-    if (billing.billing?.can_create_agent) {
+    if (accessPath === "stripe") {
+      if (!stripeBillingStatus().configured) {
+        throw new Error("Payment is unavailable right now.");
+      }
+      const response = NextResponse.redirect(await billingCheckoutDestination(), {
+        status: 303,
+      });
+      setDraftCookie(response, sealedDraft);
+      return response;
+    }
+
+    if (accessPath === "entitlement") {
       const creation = await launchDraft(draft);
       const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;
     }
 
-    if (access !== "stripe") {
-      throw new Error("Enter a Launch Code to continue.");
-    }
-    if (!stripeBillingStatus().configured) {
-      throw new Error("Payment is unavailable right now.");
-    }
-    const response = NextResponse.redirect(await billingCheckoutDestination(), {
-      status: 303,
-    });
-    setDraftCookie(response, sealedDraft);
-    return response;
+    throw new Error("Use a Launch Code or continue to payment.");
   } catch (error) {
     const response = dashboardRedirect(request, error);
     if (draft) {

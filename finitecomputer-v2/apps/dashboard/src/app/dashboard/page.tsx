@@ -766,9 +766,7 @@ function CoreAgentCreationPanel({
         initialPictureUrl={draft?.profilePictureUrl}
         runnerClass={draft?.runnerClass ?? defaultRunnerClass()}
         requiresAccess={requiresAccess}
-        stripeConfigured={
-          stripeBillingStatus().configured && process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
-        }
+        stripeConfigured={stripeBillingStatus().configured}
       />
     </section>
   );
