@@ -76,19 +76,19 @@ export async function POST(request: Request) {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     const access = String(formData.get("access") ?? "");
 
-    if (billing.billing?.can_create_agent) {
-      const creation = await launchDraft(draft);
-      const response = dashboardRedirect(request, undefined, creation.request.id);
-      clearDraftCookie(response);
-      return response;
-    }
-
     if (access === "launch-code") {
       const launchCode = String(formData.get("launchCode") ?? "").trim();
       if (!launchCode) {
         throw new Error("Enter your Launch Code.");
       }
       const creation = await launchDraft(draft, launchCode);
+      const response = dashboardRedirect(request, undefined, creation.request.id);
+      clearDraftCookie(response);
+      return response;
+    }
+
+    if (billing.billing?.can_create_agent) {
+      const creation = await launchDraft(draft);
       const response = dashboardRedirect(request, undefined, creation.request.id);
       clearDraftCookie(response);
       return response;

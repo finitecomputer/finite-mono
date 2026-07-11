@@ -67,6 +67,8 @@ type CoreState = {
   creationPosts: unknown[];
   cancelPosts: string[];
   createDelayMs: number;
+  canCreateAgent: boolean;
+  creationError: string | null;
 };
 
 type FakeHostedChatState = {
@@ -271,6 +273,30 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(core.state.creationPosts.length, 1);
+    });
+
+    core.reset({
+      canCreateAgent: true,
+      creationError: "billing is required before creating an agent",
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+      await page.getByLabel("Agent name").fill("Fresh Code Bot");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Launch Code").fill("fresh-top-up-code");
+      await page.getByRole("button", { name: "Apply" }).click();
+      await expectVisibleText(page, "billing is required before creating an agent");
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      assert.equal(
+        core.state.creationPosts.length,
+        1,
+        "a failed launch must return to the form instead of resubmitting the saved draft"
+      );
+      assert.equal(
+        (core.state.creationPosts[0] as Record<string, unknown>).launchCode,
+        "fresh-top-up-code",
+        "an explicitly submitted Launch Code must win over stale entitlement capacity"
+      );
     });
 
     core.reset({
@@ -661,6 +687,7 @@ function startDashboard(
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "fixture-browser-access-token",
+        FC_DASHBOARD_RUNTIME_MODE: "canary",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_DIST_DIR: ".next-browser-test",
@@ -1204,7 +1231,7 @@ async function handleCoreRequest(
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
-      can_create_agent: false,
+      can_create_agent: state.canCreateAgent,
       requires_billing: true,
     });
     return;
@@ -1213,6 +1240,10 @@ async function handleCoreRequest(
   if (request.method === "POST" && request.url === "/api/core/v1/me/agent-creation-requests") {
     const body = await readJson(request);
     state.creationPosts.push(body);
+    if (state.creationError) {
+      writeJson(response, 402, { error: state.creationError });
+      return;
+    }
     if (state.createDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, state.createDelayMs));
     }
@@ -1288,6 +1319,8 @@ function emptyCoreState(): CoreState {
     creationPosts: [],
     cancelPosts: [],
     createDelayMs: 0,
+    canCreateAgent: false,
+    creationError: null,
   };
 }
 
