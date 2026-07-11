@@ -22,8 +22,9 @@ install_url = "https://github.com/finitecomputer/finite-mono/releases/download/f
 notes = "v0.4.0 is the first mono-cut release (also ships finitesitesd-linux for the server deploy)."
 
 [field.fbrain-cli]
-released = ["v0.1.2"]
-notes = "v0.1.2 (2026-07-08) is the first public fbrain release, cut from mono; also ships the finite-brain server binary for the smoke nix bridge."
+released = ["v0.1.2", "v0.1.3"]
+install_url = "https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest/"
+notes = "v0.1.3 hard-cuts durable CLI unlock state, scopes raw Folder Keys to operations, enforces private Vault Working Tree control paths, and adds Product Client Session Lock. The release also ships the finite-brain server binary for the smoke bridge."
 
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.

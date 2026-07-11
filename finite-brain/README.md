@@ -9,8 +9,8 @@ first, edit ordinary markdown in readable Folders, then sync encrypted changes
 back. Each key-using operation reopens encrypted Folder Key Grants in memory;
 there is no durable CLI unlock state.
 
-The current hosted smoke service is `https://brain.smoke.finite.computer`.
-Use `https://brain.smoke.finite.computer/client` for the Product Client.
+The production service is reached through `https://finite.computer`.
+Use `https://finite.computer/client` for the Product Client.
 
 ## Install `fbrain`
 
@@ -19,7 +19,6 @@ Install the latest release binary:
 ```sh
 set -eu
 
-repo="finitecomputer/finite-brain"
 tmp="$(mktemp -d)"
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -31,7 +30,7 @@ case "$os:$arch" in
   *) echo "unsupported platform: $os $arch" >&2; exit 1 ;;
 esac
 
-base="https://github.com/$repo/releases/latest/download"
+base="https://github.com/finitecomputer/finite-mono/releases/download/fbrain-latest"
 curl -fsSL "$base/$asset.tar.gz" -o "$tmp/$asset.tar.gz"
 curl -fsSL "$base/$asset.tar.gz.sha256" -o "$tmp/$asset.tar.gz.sha256"
 
@@ -55,7 +54,7 @@ Start by asking `fbrain` what it can do:
 
 ```sh
 fbrain --help
-fbrain doctor --server https://brain.smoke.finite.computer
+fbrain doctor --server https://finite.computer
 fbrain auth status --json
 ```
 
@@ -130,7 +129,7 @@ depend on shell persistence (the identity itself always resolves from the
 shared location above):
 
 ```sh
-export FINITE_BRAIN_SERVER_URL=https://brain.smoke.finite.computer
+export FINITE_BRAIN_SERVER_URL=https://finite.computer
 export FBRAIN_CONFIG_DIR="$HOME/.config/finitebrain"
 
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" auth status --json

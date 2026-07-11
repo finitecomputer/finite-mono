@@ -6,6 +6,8 @@ const REQUEST_HEADERS = [
   "content-type",
   "if-modified-since",
   "if-none-match",
+  "x-finitebrain-nostr",
+  "x-nostr-authorization",
 ] as const;
 
 const RESPONSE_HEADERS = [
@@ -36,9 +38,18 @@ export function brainUpstreamOrigin(value = process.env.FC_BRAIN_UPSTREAM_URL) {
   }
 }
 
+export function brainProxyRequestHeaders(source: Pick<Headers, "get">) {
+  const headers = new Headers();
+  for (const name of REQUEST_HEADERS) {
+    const value = source.get(name);
+    if (value) headers.set(name, value);
+  }
+  return headers;
+}
+
 export async function proxyBrainRequest(
   request: NextRequest,
-  prefix: "/client" | "/_admin",
+  prefix: "/client" | "/_admin" | "/health",
   path: string[] = [],
 ) {
   const baseUrl = brainUpstreamOrigin();
@@ -50,11 +61,7 @@ export async function proxyBrainRequest(
   const upstream = new URL(suffix ? `${prefix}/${suffix}` : prefix, baseUrl);
   upstream.search = request.nextUrl.search;
 
-  const headers = new Headers();
-  for (const name of REQUEST_HEADERS) {
-    const value = request.headers.get(name);
-    if (value) headers.set(name, value);
-  }
+  const headers = brainProxyRequestHeaders(request.headers);
 
   const controller = new AbortController();
   const abortForClient = () => controller.abort();

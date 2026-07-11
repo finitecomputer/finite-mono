@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-app"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "axum",
  "finite-brain-server",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64",
  "finite-brain-core",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-server"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "axum",
  "base64",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-store"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "finite-brain-core",
  "rusqlite",

@@ -22,8 +22,8 @@ regardless of `--config-dir`.
 
 ```sh
 FBRAIN_CONFIG="$HOME/.config/finitebrain"
-SERVER="https://brain.smoke.finite.computer"
-VAULT="smoke"
+SERVER="https://finite.computer"
+VAULT="replace-with-vault-id"
 TREE="$HOME/finitebrain/$VAULT"
 
 fbrain --config-dir "$FBRAIN_CONFIG" doctor --server "$SERVER"
@@ -33,6 +33,13 @@ cd "$TREE"
 fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG" conflicts --json
 ```
+
+A Working Tree remembers the server it was opened against. Before reusing an
+existing tree, inspect `status --json`; a tree that names
+`brain.smoke.finite.computer` remains smoke-pinned even after this skill's
+default changes. Do not treat the servers as replicas or silently move that
+tree. Preserve it until its Vault is deliberately reconciled, then reopen the
+intended Vault with an explicit production `--server`.
 
 Read [fbrain-cli.md](references/fbrain-cli.md) when a command fails, when using
 daemon/watch, access, vault, folder, permission, invite, or share commands, or
