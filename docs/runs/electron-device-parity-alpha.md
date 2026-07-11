@@ -98,6 +98,27 @@ Work top-down. Every retained item is required.
 - Public release signing/notarization beyond what blocks installing the
   internal alpha.
 
+## Implementation checkpoint — 2026-07-11
+
+- Hosted Web and Electron now render the same `@finite/chat-ui/react`
+  `ChatProduct`; their remaining code is authentication/linking plus typed
+  HTTP/EventSource or local-daemon IPC transport.
+- Device Link sends a bounded, target-bound MLS-encrypted bootstrap after Add,
+  and an already-paired pre-alpha Device can request the same repair without
+  deleting state or pairing again. The snapshot keeps current route metadata,
+  recent transcript, and agent profile hints while the server remains blind to
+  plaintext.
+- The parity regression links into both a legacy room and the canonical agent
+  room, restores pre-link topic/chat history, sends through the selected
+  Electron route, receives the routed agent reply on both Devices, repairs an
+  existing pairing, and preserves later explicit selection across restart.
+- Rust, Hosted Device, daemon, Electron, shared UI, dashboard unit/lint, and
+  dashboard production-build gates are green. Final alpha acceptance remains
+  Paul's browser/Electron check; this run stays ACTIVE until that check.
+- Paul separately authorized the exact-revision Hosted Device/dashboard deploy
+  needed for this acceptance. That authorization does not add customer
+  admission, Stripe validation, limiter changes, or runtime authority here.
+
 ## Governing documents
 
 - [`docs/monorepo-doctrine.md`](../monorepo-doctrine.md)
@@ -106,4 +127,3 @@ Work top-down. Every retained item is required.
 - [`finitechat/docs/adr/0011-hosted-web-chat-uses-a-revocable-device.md`](../../finitechat/docs/adr/0011-hosted-web-chat-uses-a-revocable-device.md)
 - [`finitechat/docs/room-topics-electron-daemon-plan.md`](../../finitechat/docs/room-topics-electron-daemon-plan.md)
 - [`finitecomputer-v2/docs/identity-boundary-v1.md`](../../finitecomputer-v2/docs/identity-boundary-v1.md)
-
