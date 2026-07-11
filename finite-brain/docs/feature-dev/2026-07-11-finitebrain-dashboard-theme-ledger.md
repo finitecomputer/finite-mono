@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: local CodeRabbit clean; ready to push and open the non-draft PR
+- Current status: non-draft PR open; PR CodeRabbit review pending
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -42,7 +42,7 @@ overall visual character in a high-quality, elegant, surgical way.
   `finite-brain/docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-review-packet.md`;
   `finite-brain/docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-review-packet.md`
 - Local CodeRabbit report: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-local-coderabbit-round.md`
-- PR URL: pending
+- PR URL: [finitecomputer/finite-mono#9](https://github.com/finitecomputer/finite-mono/pull/9)
 
 ## Commands
 
