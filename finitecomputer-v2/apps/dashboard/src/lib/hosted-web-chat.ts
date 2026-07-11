@@ -42,9 +42,22 @@ export async function bootstrapHostedWebChat(machineId: string) {
     throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
   }
   state = await connectAgentProfile(context, state, agentNpub);
-  await claimAgentOwner(context, state, agentNpub);
 
   return state;
+}
+
+export async function claimHostedWebChatOwner(machineId: string) {
+  const context = await hostedWebChatContext(machineId);
+  let state = await hostedDeviceState(context.config, context.account);
+  state = await ensureRuntimeStarted(context, state);
+
+  const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
+  if (!agentNpub) {
+    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
+  }
+  state = await connectAgentProfile(context, state, agentNpub);
+  await claimAgentOwner(context, state, agentNpub);
+  return { claimed: true as const };
 }
 
 export async function dispatchHostedWebChatAction(machineId: string, payload: unknown) {
@@ -139,6 +152,7 @@ async function claimAgentOwner(
     resource_key: "agent.connections",
     schema: EMPTY_SCHEMA,
     body: {},
+    reuse_succeeded_owner_claim: true,
     wait_millis: 45_000,
   });
   assertCommandSucceeded(response);

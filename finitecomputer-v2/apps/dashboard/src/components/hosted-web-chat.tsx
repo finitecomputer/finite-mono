@@ -85,6 +85,11 @@ import {
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
 import {
+  runInitialHostedChatRetries,
+  shouldRetryHostedChatRequest,
+  type HostedChatRetryAttempt,
+} from "@/lib/hosted-web-chat-retry";
+import {
   beginPendingChatTurn,
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
@@ -138,6 +143,7 @@ export function HostedWebChat({
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
+  const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -162,6 +168,8 @@ export function HostedWebChat({
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const markedReadSeqRef = useRef(new Map<string, number>());
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
+  const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
+  const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   const hasState = state !== null;
 
@@ -175,16 +183,48 @@ export function HostedWebChat({
     return true;
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(() => {
+    if (stateLoadRef.current) return stateLoadRef.current;
     const requestGeneration = snapshotSourceRef.current.generation;
-    try {
-      const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
-      applyHttpSnapshot(next, requestGeneration);
-      setError(null);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
+    const pending = (async (): Promise<HostedChatRetryAttempt> => {
+      try {
+        const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
+        applyHttpSnapshot(next, requestGeneration);
+        setError(null);
+        return "succeeded";
+      } catch (caught) {
+        setError(errorMessage(caught));
+        const status = caught instanceof HostedChatHttpError ? caught.status : null;
+        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+      }
+    })();
+    stateLoadRef.current = pending;
+    void pending.finally(() => {
+      if (stateLoadRef.current === pending) stateLoadRef.current = null;
+    });
+    return pending;
   }, [apiBase, applyHttpSnapshot]);
+
+  const claimOwner = useCallback(() => {
+    if (ownerClaimRef.current) return ownerClaimRef.current;
+    const pending = (async (): Promise<HostedChatRetryAttempt> => {
+      try {
+        await chatRequest<{ claimed: true }>(`${apiBase}/claim`, { method: "POST" });
+        setOwnerClaimed(true);
+        setError(null);
+        return "succeeded";
+      } catch (caught) {
+        setError(errorMessage(caught));
+        const status = caught instanceof HostedChatHttpError ? caught.status : null;
+        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+      }
+    })();
+    ownerClaimRef.current = pending;
+    void pending.finally(() => {
+      if (ownerClaimRef.current === pending) ownerClaimRef.current = null;
+    });
+    return pending;
+  }, [apiBase]);
 
   const dispatch = useCallback(
     async (action: HostedChatAction) => {
@@ -211,8 +251,18 @@ export function HostedWebChat({
   );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (hasState) return;
+    const controller = new AbortController();
+    void runInitialHostedChatRetries(load, controller.signal);
+    return () => controller.abort();
+  }, [hasState, load]);
+
+  useEffect(() => {
+    if (!hasState || ownerClaimed) return;
+    const controller = new AbortController();
+    void runInitialHostedChatRetries(claimOwner, controller.signal);
+    return () => controller.abort();
+  }, [claimOwner, hasState, ownerClaimed]);
 
   useEffect(() => {
     if (!hasState) {
@@ -665,7 +715,8 @@ export function HostedWebChat({
     }
   }
 
-  const connected = selectedRoom?.state === "Connected";
+  const connected = ownerClaimed && selectedRoom?.state === "Connected";
+  const availableConnectionsHref = ownerClaimed ? connectionsHref : null;
   const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
 
   return (
@@ -680,7 +731,7 @@ export function HostedWebChat({
         selectedTopic={selectedTopic}
         selectedChat={selectedChat}
         liveMembers={state?.typing_members ?? []}
-        connectionsHref={connectionsHref}
+        connectionsHref={availableConnectionsHref}
         showSkills={showSkills}
         onCreateChat={(topic) => void createChat(topic)}
         onCreateTopic={() => setCreateTopicOpen(true)}
@@ -732,7 +783,7 @@ export function HostedWebChat({
             {!streamConnected && state ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
-            <ProductNavButton href={connectionsHref} icon={PlugIcon} label="Connections" />
+            <ProductNavButton href={availableConnectionsHref} icon={PlugIcon} label="Connections" />
             <Button type="button" variant="ghost" size="sm" onClick={() => void openDevices()}>
               <MonitorSmartphoneIcon />
               <span>Devices</span>
@@ -829,7 +880,12 @@ export function HostedWebChat({
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
                   <span>{error}</span>
-                  <Button type="button" variant="outline" size="sm" onClick={() => void load()}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load())}
+                  >
                     <RotateCcwIcon />
                     Retry
                   </Button>
@@ -1566,13 +1622,27 @@ async function chatRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
     const text = await response.text();
     try {
       const parsed = JSON.parse(text) as { error?: string };
-      throw new Error(parsed.error || text || `Chat returned ${response.status}`);
+      throw new HostedChatHttpError(
+        parsed.error || text || `Chat returned ${response.status}`,
+        response.status
+      );
     } catch (error) {
-      if (error instanceof SyntaxError) throw new Error(text || `Chat returned ${response.status}`);
+      if (error instanceof SyntaxError) {
+        throw new HostedChatHttpError(text || `Chat returned ${response.status}`, response.status);
+      }
       throw error;
     }
   }
   return response.json() as Promise<T>;
+}
+
+class HostedChatHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+  }
 }
 
 function errorMessage(error: unknown) {

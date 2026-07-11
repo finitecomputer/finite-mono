@@ -209,6 +209,7 @@ export type HostedRuntimeCommand = {
   resource_key?: string | null;
   schema: string;
   body: unknown;
+  reuse_succeeded_owner_claim?: boolean;
   wait_millis?: number;
 };
 

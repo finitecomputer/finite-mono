@@ -15,6 +15,11 @@ use finitechat_http::{
     ClaimLinkPayloadResponse, CreateLinkSessionRequest, GetLinkSessionRequest,
     HttpLinkSessionRecord, HttpLinkSessionState,
 };
+use finitechat_proto::{
+    DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
+    RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
+    RuntimeCommandTerminalStatusV1,
+};
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -462,6 +467,20 @@ async fn users_get_isolated_devices_and_restart_reopens_the_same_identity() {
     assert_eq!(paul["identity"]["device_id"], "hosted-web");
     assert_eq!(paul["identity"]["account_secret_hex"], "");
 
+    let paul_store = root
+        .path()
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(b"user_paul")))
+        .join("chat/client.sqlite3");
+    let alice_store = root
+        .path()
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(b"user_alice")))
+        .join("chat/client.sqlite3");
+    assert!(paul_store.is_file());
+    assert!(alice_store.is_file());
+    assert_ne!(paul_store, alice_store);
+
     let restarted_app = test_app(&root);
     let paul_after_restart = state_for(restarted_app, "user_paul").await;
     assert_eq!(
@@ -471,6 +490,38 @@ async fn users_get_isolated_devices_and_restart_reopens_the_same_identity() {
     assert_eq!(
         paul["identity"]["device_id"],
         paul_after_restart["identity"]["device_id"]
+    );
+}
+
+#[tokio::test]
+async fn partial_hosted_device_state_loss_fails_closed_without_minting_a_replacement() {
+    let root = TempDir::new().unwrap();
+    let before = state_for(test_app(&root), "user_paul").await;
+    let user_root = root
+        .path()
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(b"user_paul")));
+    let identity_path = user_root.join("finite-home/identity/identity.json");
+    let store_path = user_root.join("chat/client.sqlite3");
+    let identity_bytes = fs::read(&identity_path).unwrap();
+
+    fs::remove_file(&identity_path).unwrap();
+    let missing_identity = state_response_for(test_app(&root), "user_paul").await;
+    assert_eq!(missing_identity.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        !identity_path.exists(),
+        "a missing identity must never be silently replaced beside retained chat state"
+    );
+
+    fs::write(&identity_path, &identity_bytes).unwrap();
+    fs::remove_file(&store_path).unwrap();
+    let missing_store = state_response_for(test_app(&root), "user_paul").await;
+    assert_eq!(missing_store.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_eq!(
+        before["identity"]["account_id"].as_str().unwrap().len(),
+        64,
+        "the original account identity was established before simulating loss"
     );
 }
 
@@ -531,6 +582,261 @@ async fn update_stream_flushes_current_state_without_waiting_for_remote_activity
     let first = String::from_utf8(first.to_vec()).unwrap();
     assert!(first.contains("event: state"), "{first:?}");
     assert!(first.contains("data: {"), "{first:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_users_timed_out_agent_command_does_not_block_another_users_state() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("command-isolation-server.sqlite3"), None).await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("command-isolation-agent")),
+        "finitechat-hosted-device-test/command-isolation-agent",
+    )
+    .unwrap();
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("command-isolation-agent-chat")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let agent_account_id = agent_state.identity.account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+
+    let hosted = app(HostedDeviceConfig {
+        data_root: root.path().join("command-isolation-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    });
+    action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    let connected = action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({
+            "StartProfileChat": {
+                "profile": {
+                    "account_id": agent_account_id,
+                    "npub": agent_npub,
+                    "display_name": "Unresponsive Agent",
+                    "about": "Does not process platform commands in this test",
+                    "picture": null,
+                    "stale": false,
+                    "is_agent": true
+                },
+                "display_name": "Chat with Unresponsive Agent"
+            }
+        }),
+    )
+    .await;
+    let room_id = connected["selected_room_id"].as_str().unwrap().to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+    let stalled_hosted = hosted.clone();
+    let stalled_agent_account_id = agent_account_id.clone();
+    let stalled = tokio::spawn(async move {
+        runtime_command_for(
+            stalled_hosted,
+            "user_paul",
+            serde_json::json!({
+                "room_id": room_id,
+                "target_account_id": stalled_agent_account_id,
+                "command": "agent.owner.claim",
+                "resource_key": "agent.connections",
+                "schema": "finite.agent.empty.request.v1",
+                "body": {},
+                "wait_millis": 1_000
+            }),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let alice = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        state_for(hosted, "user_alice"),
+    )
+    .await
+    .expect("one user's agent timeout must not block another user's local state");
+    assert_eq!(alice["identity"]["device_id"], "hosted-web");
+
+    let stalled_response = stalled.await.unwrap();
+    assert_eq!(stalled_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn succeeded_owner_claim_is_replayed_from_the_durable_device_log_after_restart() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("owner-claim-server.sqlite3"), None).await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("owner-claim-agent")),
+        "finitechat-hosted-device-test/owner-claim-agent",
+    )
+    .unwrap();
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("owner-claim-agent-chat")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let agent_account_id = agent_state.identity.account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("owner-claim-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app(config.clone());
+    action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    let connected = action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({
+            "StartProfileChat": {
+                "profile": {
+                    "account_id": agent_account_id,
+                    "npub": agent_npub,
+                    "display_name": "Claim Agent",
+                    "about": "Returns one owner claim result",
+                    "picture": null,
+                    "stale": false,
+                    "is_agent": true
+                },
+                "display_name": "Chat with Claim Agent"
+            }
+        }),
+    )
+    .await;
+    let room_id = connected["selected_room_id"].as_str().unwrap().to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+    let first_hosted = hosted.clone();
+    let first_room_id = room_id.clone();
+    let first_agent_account_id = agent_account_id.clone();
+    let first = tokio::spawn(async move {
+        runtime_command_for(
+            first_hosted,
+            "user_paul",
+            serde_json::json!({
+                "room_id": first_room_id,
+                "target_account_id": first_agent_account_id,
+                "command": "agent.owner.claim",
+                "resource_key": "agent.connections",
+                "schema": "finite.agent.empty.request.v1",
+                "body": {},
+                "reuse_succeeded_owner_claim": true,
+                "wait_millis": 5_000
+            }),
+        )
+        .await
+    });
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let bridge = agent.agent_bridge_poll_once().unwrap();
+            if let Some(request) = bridge.events.into_iter().find_map(|stored| {
+                let event =
+                    serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+                        .ok()?;
+                if event.kind != DurableAppEventKind::RuntimeCommandRequest {
+                    return None;
+                }
+                let request =
+                    serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload).ok()?;
+                (request.command == "agent.owner.claim").then_some(request)
+            }) {
+                break request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("agent must receive the first owner claim");
+    let first_request_id = request.request_id.clone();
+    let result = RuntimeCommandResultV1 {
+        payload_kind: RuntimeCommandPayloadKindV1::Result,
+        request_id: request.request_id,
+        status: RuntimeCommandTerminalStatusV1::Succeeded,
+        body: Some(RuntimeCommandJsonPayloadV1 {
+            schema: "finite.agent.command.result.v1".to_owned(),
+            json_payload: serde_json::to_vec(&serde_json::json!({ "connected": true })).unwrap(),
+        }),
+        error: None,
+        clears_activity: Vec::new(),
+    };
+    agent
+        .send_runtime_command_result_and_wait(
+            room_id.clone(),
+            None,
+            serde_json::to_vec(&result).unwrap(),
+        )
+        .unwrap();
+
+    let first_response = first.await.unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = first_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let first_json: Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_json["request_id"], first_request_id);
+    drop(hosted);
+
+    let restarted = app(config);
+    let replay = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        runtime_command_for(
+            restarted,
+            "user_paul",
+            serde_json::json!({
+                "room_id": room_id,
+                "target_account_id": agent_account_id,
+                "command": "agent.owner.claim",
+                "resource_key": "agent.connections",
+                "schema": "finite.agent.empty.request.v1",
+                "body": {},
+                "reuse_succeeded_owner_claim": true,
+                "wait_millis": 1_000
+            }),
+        ),
+    )
+    .await
+    .expect("durable successful claim replay must not wait for the agent");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = replay.into_body().collect().await.unwrap().to_bytes();
+    let replay_json: Value = serde_json::from_slice(&replay_body).unwrap();
+    assert_eq!(replay_json["request_id"], first_request_id);
+    assert_eq!(replay_json["body"]["connected"], true);
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -872,19 +1178,22 @@ fn test_app(root: &TempDir) -> axum::Router {
 }
 
 async fn state_for(app: axum::Router, user_id: &str) -> Value {
-    let response = app
-        .oneshot(
-            Request::get("/v1/app/state")
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .header(WORKOS_USER_HEADER, user_id)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = state_response_for(app, user_id).await;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn state_response_for(app: axum::Router, user_id: &str) -> axum::response::Response {
+    app.oneshot(
+        Request::get("/v1/app/state")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, user_id)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn action_for(app: axum::Router, user_id: &str, action: Value) -> Value {
@@ -908,6 +1217,23 @@ async fn action_for(app: axum::Router, user_id: &str, action: Value) -> Value {
         String::from_utf8_lossy(&bytes)
     );
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn runtime_command_for(
+    app: axum::Router,
+    user_id: &str,
+    command: Value,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::post("/v1/app/runtime-commands")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, user_id)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&command).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 struct MultipartFile {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
@@ -60,6 +60,8 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_ATTACHMENT_MIME_TYPE_BYTES: usize = 128;
 const MAX_RUNTIME_COMMAND_WAIT_MILLIS: u64 = 60_000;
 const RECENT_RUNTIME_EVENT_LIMIT: u32 = 512;
+const OWNER_CLAIM_EVENT_LIMIT: u32 = 5_000;
+const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 pub const MAX_HOSTED_PROFILE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const DEVICE_LINK_RECORD_VERSION: u16 = 1;
 const DEVICE_LINK_CREATED_BY: &str = "finitechat-hosted-device";
@@ -117,9 +119,18 @@ impl HostedDeviceState {
         let user_root = self.user_root(user_id);
         let finite_home = user_root.join("finite-home");
         let identity_paths = IdentityPaths::with_finite_home(&finite_home);
-        let identity = FiniteIdentity::load_or_generate(&identity_paths, CREATED_BY)?;
-        let account_secret_hex = hex::encode(identity.expose_secret_bytes());
         let chat_data = user_root.join("chat");
+        let identity_exists = path_exists(&identity_paths.identity_file())?;
+        let store_exists = path_exists(&chat_data.join("client.sqlite3"))?;
+        if identity_exists != store_exists {
+            return Err(HostedDeviceError::IncompleteUserState);
+        }
+        let identity = if identity_exists {
+            FiniteIdentity::load(&identity_paths)?
+        } else {
+            FiniteIdentity::load_or_generate(&identity_paths, CREATED_BY)?
+        };
+        let account_secret_hex = hex::encode(identity.expose_secret_bytes());
         let runtime = FiniteChatRuntime::open(OpenOptions {
             data_dir: chat_data.to_string_lossy().into_owned(),
             server_url: self.config.server_url.clone(),
@@ -160,6 +171,10 @@ pub enum HostedDeviceError {
     DeviceLinkService(String),
     #[error("hosted device runtime cache lock poisoned")]
     LockPoisoned,
+    #[error("hosted chat state is incomplete; recovery is required")]
+    IncompleteUserState,
+    #[error("hosted chat state could not be inspected: {0}")]
+    Io(#[from] std::io::Error),
     #[error("hosted device task failed: {0}")]
     Task(String),
     #[error(transparent)]
@@ -183,6 +198,7 @@ impl IntoResponse for HostedDeviceError {
             Self::InvalidDeviceLink(_) => StatusCode::BAD_REQUEST,
             Self::DeviceLinkService(_) => StatusCode::BAD_GATEWAY,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
+            Self::IncompleteUserState => StatusCode::SERVICE_UNAVAILABLE,
             Self::Core(FiniteChatCoreError::Client { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::Profile { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::ServerRejected { .. })
@@ -192,6 +208,7 @@ impl IntoResponse for HostedDeviceError {
             | Self::Serialize(_)
             | Self::UnsafeAttachmentPath
             | Self::LockPoisoned
+            | Self::Io(_)
             | Self::Task(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
@@ -855,6 +872,8 @@ struct HostedRuntimeCommandRequest {
     resource_key: Option<String>,
     schema: String,
     body: Value,
+    #[serde(default)]
+    reuse_succeeded_owner_claim: bool,
     #[serde(default = "default_runtime_command_wait_millis")]
     wait_millis: u64,
 }
@@ -884,6 +903,12 @@ fn send_runtime_command(
     runtime: &FiniteChatRuntime,
     input: HostedRuntimeCommandRequest,
 ) -> Result<HostedRuntimeCommandResponse, HostedDeviceError> {
+    if input.reuse_succeeded_owner_claim
+        && input.command == OWNER_CLAIM_COMMAND
+        && let Some(result) = find_succeeded_owner_claim(runtime, &input)?
+    {
+        return hosted_runtime_command_response(result);
+    }
     let request_id = random_runtime_request_id()?;
     let body = serde_json::to_vec(&input.body)?;
     let request = RuntimeCommandRequestV1 {
@@ -921,17 +946,7 @@ fn send_runtime_command(
             &input.target_account_id,
             &request_id,
         )? {
-            let decoded_body = result
-                .body
-                .as_ref()
-                .map(|body| serde_json::from_slice::<Value>(&body.json_payload))
-                .transpose()?;
-            return Ok(HostedRuntimeCommandResponse {
-                request_id,
-                status: result.status,
-                body: decoded_body,
-                error: result.error,
-            });
+            return hosted_runtime_command_response(result);
         }
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_millis(wait_millis) {
@@ -946,6 +961,81 @@ fn send_runtime_command(
                 .min(u128::from(DEFAULT_UPDATE_TIMEOUT_MILLIS)) as u64,
         )?;
     }
+}
+
+fn hosted_runtime_command_response(
+    result: RuntimeCommandResultV1,
+) -> Result<HostedRuntimeCommandResponse, HostedDeviceError> {
+    let decoded_body = result
+        .body
+        .as_ref()
+        .map(|body| serde_json::from_slice::<Value>(&body.json_payload))
+        .transpose()?;
+    Ok(HostedRuntimeCommandResponse {
+        request_id: result.request_id,
+        status: result.status,
+        body: decoded_body,
+        error: result.error,
+    })
+}
+
+fn find_succeeded_owner_claim(
+    runtime: &FiniteChatRuntime,
+    input: &HostedRuntimeCommandRequest,
+) -> Result<Option<RuntimeCommandResultV1>, HostedDeviceError> {
+    let local_account_id = runtime.state()?.identity.account_id;
+    let mut matching_requests = HashSet::new();
+
+    for stored in runtime.recent_bridge_events(OWNER_CLAIM_EVENT_LIMIT)? {
+        if stored.room_id != input.room_id {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+        else {
+            continue;
+        };
+        if event.conversation_id.as_deref() != input.conversation_id.as_deref() {
+            continue;
+        }
+        match event.kind {
+            DurableAppEventKind::RuntimeCommandRequest
+                if stored.sender_account_id == local_account_id =>
+            {
+                let Ok(request) = serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload)
+                else {
+                    continue;
+                };
+                let body_matches = serde_json::from_slice::<Value>(&request.body.json_payload)
+                    .is_ok_and(|body| body == input.body);
+                if request.validate_structure().is_ok()
+                    && request.command == OWNER_CLAIM_COMMAND
+                    && request.target.account_id == input.target_account_id
+                    && request.target.device_id.is_none()
+                    && request.resource_key == input.resource_key
+                    && request.body.schema == input.schema
+                    && body_matches
+                {
+                    matching_requests.insert(request.request_id);
+                }
+            }
+            DurableAppEventKind::RuntimeCommandResult
+                if stored.sender_account_id == input.target_account_id =>
+            {
+                let Ok(result) = serde_json::from_slice::<RuntimeCommandResultV1>(&event.payload)
+                else {
+                    continue;
+                };
+                if result.validate_structure().is_ok()
+                    && result.status == RuntimeCommandTerminalStatusV1::Succeeded
+                    && matching_requests.contains(&result.request_id)
+                {
+                    return Ok(Some(result));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 fn find_runtime_command_result(
@@ -1571,6 +1661,14 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 fn user_storage_id(user_id: &str) -> String {
     let digest = Sha256::digest(user_id.as_bytes());
     hex::encode(digest)
+}
+
+fn path_exists(path: &std::path::Path) -> Result<bool, HostedDeviceError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn redacted_state(mut state: AppState) -> AppState {

@@ -143,6 +143,40 @@ test("runtime commands use the narrow hosted-device endpoint", async (context) =
   assert.match(observedBody, /agent\.connections\.status/u);
 });
 
+test("owner claim replay is an explicit narrow request", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedBody = "";
+  global.fetch = (async (_input, init) => {
+    observedBody = String(init?.body);
+    return Response.json({
+      request_id: "owner-claim-a",
+      status: "succeeded",
+      body: { connected: true },
+      error: null,
+    });
+  }) as typeof fetch;
+
+  await hostedDeviceRuntimeCommand(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    {
+      room_id: "room-a",
+      target_account_id: "agent-a",
+      command: "agent.owner.claim",
+      resource_key: "agent.connections",
+      schema: "finite.agent.empty.request.v1",
+      body: {},
+      reuse_succeeded_owner_claim: true,
+    }
+  );
+
+  assert.match(observedBody, /"command":"agent\.owner\.claim"/u);
+  assert.match(observedBody, /"reuse_succeeded_owner_claim":true/u);
+});
+
 test("device linking stays server-side and projects only public progress", async (context) => {
   const originalFetch = global.fetch;
   context.after(() => {
