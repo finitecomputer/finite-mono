@@ -5214,9 +5214,11 @@ where
     Ok(request)
 }
 
-/// Row-scoped `offboard_destroyed_runtime`: deactivate the runtime's links, drop
-/// its relay credential, revoke every active Finite Private key bound to the
-/// runtime or its project, and audit the revocation.
+/// Row-scoped `offboard_destroyed_runtime`: hide the normal project from its
+/// room members, deactivate the runtime's links, drop its relay credential,
+/// revoke every active Finite Private key bound to the runtime or its project,
+/// and audit the revocation. Project, membership, runtime, and link rows remain
+/// retained for recovery and audit.
 async fn postgres_offboard_destroyed_runtime<C>(
     client: &C,
     request: &RuntimeControlRequest,
@@ -5225,6 +5227,22 @@ async fn postgres_offboard_destroyed_runtime<C>(
 where
     C: GenericClient + Sync,
 {
+    client
+        .execute(
+            "UPDATE project_room_memberships AS membership
+             SET archived_at = $2::text::timestamptz
+             WHERE membership.project_id = $1
+               AND membership.archived_at IS NULL
+               AND EXISTS (
+                 SELECT 1
+                 FROM projects AS project
+                 WHERE project.id = $1
+                   AND project.import_candidate_id IS NULL
+               )",
+            &[&request.project_id, &now],
+        )
+        .await
+        .map_err(store_error)?;
     client
         .execute(
             "UPDATE project_runtime_links SET active = FALSE WHERE agent_runtime_id = $1",
@@ -6883,6 +6901,7 @@ mod tests {
     use super::*;
     use crate::{FinitePrivateApiKeyStatus, RuntimeArtifactKind};
     use futures_util::FutureExt;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Ephemeral-Postgres-per-test harness.
@@ -8089,6 +8108,53 @@ mod tests {
                 .unwrap();
             let project_id = completed.project.id.clone();
             let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
+            let unrelated_project_id = format!("project-unrelated-{run}");
+            let unrelated_membership_id = format!("membership-unrelated-{run}");
+            let (raw, raw_connection) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_connection = tokio::spawn(async move {
+                let _ = raw_connection.await;
+            });
+            raw.execute(
+                "INSERT INTO projects (
+                   id, customer_org_id, owner_user_id, display_name, created_at, updated_at
+                 )
+                 SELECT $2, customer_org_id, owner_user_id, 'Unrelated Agent',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM projects WHERE id = $1",
+                &[&project_id, &unrelated_project_id],
+            )
+            .await
+            .unwrap();
+            raw.execute(
+                "INSERT INTO project_room_memberships (
+                   id, project_id, chat_identity_id, role, created_at
+                 )
+                 SELECT $2, $3, chat_identity_id, role, CURRENT_TIMESTAMP
+                 FROM project_room_memberships
+                 WHERE project_id = $1 AND archived_at IS NULL
+                 LIMIT 1",
+                &[
+                    &project_id,
+                    &unrelated_membership_id,
+                    &unrelated_project_id,
+                ],
+            )
+            .await
+            .unwrap();
+            drop(raw);
+            raw_connection.abort();
+            let visible_before_destroy = store
+                .visible_projects_for_workos_user(&workos)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|visible| visible.project.id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                visible_before_destroy,
+                BTreeSet::from([project_id.clone(), unrelated_project_id.clone()])
+            );
 
             let exact_artifact_retry = UpsertRuntimeArtifactInput {
                 id: "artifact-rc-v1".to_string(),
@@ -8395,7 +8461,7 @@ mod tests {
                     verified_email: email.clone(),
                     workos_user_id: workos.clone(),
                     project_id: project_id.clone(),
-                    now: None,
+                    now: Some("2026-07-10T12:04:00Z".to_string()),
                 })
                 .await
                 .unwrap();
@@ -8406,7 +8472,7 @@ mod tests {
                     lease_seconds: Some(60),
                     source_host_id: Some(host.to_string()),
                     runner_capacity: None,
-                    now: None,
+                    now: Some("2026-07-10T12:04:30Z".to_string()),
                 })
                 .await
                 .unwrap()
@@ -8420,7 +8486,7 @@ mod tests {
                     state_schema_version: None,
                     runtime_host: None,
                     published_app_urls: None,
-                    now: None,
+                    now: Some("2026-07-10T12:05:00Z".to_string()),
                 })
                 .await
                 .unwrap();
@@ -8448,10 +8514,46 @@ mod tests {
                 .visible_projects_for_workos_user(&workos)
                 .await
                 .unwrap();
-            assert!(
-                visible[0].runtime.is_none(),
-                "offboarded runtime is no longer active for the project"
-            );
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0].project.id, unrelated_project_id);
+            assert!(visible[0].runtime.is_none());
+
+            let (raw, raw_connection) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_connection = tokio::spawn(async move {
+                let _ = raw_connection.await;
+            });
+            let retained = raw
+                .query_one(
+                    "SELECT
+                       EXISTS (SELECT 1 FROM projects WHERE id = $1) AS project_saved,
+                       EXISTS (SELECT 1 FROM agent_runtimes WHERE id = $2) AS runtime_saved,
+                       EXISTS (
+                         SELECT 1 FROM project_room_memberships
+                         WHERE project_id = $1
+                           AND archived_at = $3::text::timestamptz
+                       ) AS removed_membership_archived_at_completion,
+                       EXISTS (
+                         SELECT 1 FROM project_room_memberships
+                         WHERE project_id = $4 AND archived_at IS NULL
+                       ) AS unrelated_membership_active",
+                    &[
+                        &project_id,
+                        &runtime_id,
+                        &"2026-07-10T12:05:00Z",
+                        &unrelated_project_id,
+                    ],
+                )
+                .await
+                .unwrap();
+            assert!(retained.get::<_, bool>("project_saved"));
+            assert!(retained.get::<_, bool>("runtime_saved"));
+            assert!(retained.get::<_, bool>(
+                "removed_membership_archived_at_completion"
+            ));
+            assert!(retained.get::<_, bool>("unrelated_membership_active"));
+            drop(raw);
+            raw_connection.abort();
         })
         .await;
     }

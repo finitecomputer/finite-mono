@@ -3320,6 +3320,21 @@ impl BridgeCoreState {
     }
 
     fn offboard_destroyed_runtime(&mut self, request: &RuntimeControlRequest) {
+        if self
+            .projects
+            .get(&request.project_id)
+            .is_some_and(|project| project.import_candidate_id.is_none())
+        {
+            for membership in self
+                .project_room_memberships
+                .values_mut()
+                .filter(|membership| membership.project_id == request.project_id)
+            {
+                if membership.archived_at.is_none() {
+                    membership.archived_at = Some(request.updated_at.clone());
+                }
+            }
+        }
         for link in self
             .project_runtime_links
             .values_mut()
@@ -6000,6 +6015,26 @@ mod tests {
             "2026-05-25T13:02:00Z",
         );
         let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let unrelated_runtime_id = complete_self_serve_agent(
+            &mut state,
+            "new@finite.vip",
+            "user_workos_new",
+            "second-submit",
+            "oslo-agent-002",
+            "artifact-v1",
+            "2026-05-25T13:02:10Z",
+        );
+        let unrelated_project_id = state.agent_runtimes[&unrelated_runtime_id]
+            .project_id
+            .clone();
+        let user_id = state
+            .users
+            .values()
+            .find(|user| user.workos_user_id.as_deref() == Some("user_workos_new"))
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(state.visible_projects_for_user(&user_id).len(), 2);
         state.runtime_relay_credentials.insert(
             runtime_id.clone(),
             RuntimeRelayCredential {
@@ -6080,7 +6115,7 @@ mod tests {
             .request_runtime_destroy(RequestRuntimeDestroyInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
-                project_id,
+                project_id: project_id.clone(),
                 now: Some("2026-05-25T13:06:00Z".to_string()),
             })
             .unwrap();
@@ -6133,6 +6168,45 @@ mod tests {
                 .values()
                 .any(|event| event.action == "finite_private.runtime.destroy_revoke_keys")
         );
+        let visible_project_ids = state
+            .visible_projects_for_user(&user_id)
+            .into_iter()
+            .map(|project| project.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            visible_project_ids,
+            BTreeSet::from([unrelated_project_id.clone()]),
+            "destroyed project is hidden without affecting unrelated membership"
+        );
+        assert!(
+            state.projects.contains_key(&project_id),
+            "destroy retains the project row"
+        );
+        assert!(
+            state.agent_runtimes.contains_key(&runtime_id),
+            "destroy retains the runtime row"
+        );
+        assert_eq!(
+            state
+                .project_room_memberships
+                .values()
+                .find(|membership| membership.project_id == project_id)
+                .unwrap()
+                .archived_at
+                .as_deref(),
+            Some("2026-05-25T13:08:00Z")
+        );
+        assert!(
+            state
+                .project_room_memberships
+                .values()
+                .find(|membership| membership.project_id == unrelated_project_id)
+                .unwrap()
+                .archived_at
+                .is_none(),
+            "unrelated membership remains active"
+        );
+        assert!(state.agent_runtimes.contains_key(&unrelated_runtime_id));
     }
 
     #[test]
