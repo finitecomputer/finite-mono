@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: ticket #5 implementation and review
+- Current status: ticket #5 complete; tickets #6 and #7 unblocked
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -38,8 +38,8 @@ overall visual character in a high-quality, elegant, surgical way.
 ## Commands
 
 - Install: repository dependencies are Nix-managed; no system install. Use `scripts/with-dev-env` for direct commands.
-- Typecheck: not applicable to the dependency-free Product Client; use `node --check finite-brain/crates/finite-brain-server/src/product-client.js`
-- Test: `node finite-brain/crates/finite-brain-server/src/product-client.test.js`; `scripts/with-dev-env cargo test -p finite-brain-server`
+- Typecheck: not applicable to the dependency-free Product Client; use `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+- Test: `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`; `scripts/with-dev-env cargo test -p finite-brain-server`
 - Build: `scripts/with-dev-env cargo build -p finite-brain-app`
 - Visual verification: seed the smoke fixture, run `finite-brain/scripts/verify-obsidian-product-client.mjs`, serve `finite-brain-app`, and inspect `/client` at desktop and mobile widths with screenshots
 
@@ -47,9 +47,9 @@ overall visual character in a high-quality, elegant, surgical way.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| #5 | AFK | review pending | `/root/ticket_5_theme_foundation` | browser-found light workspace defect fixed | targeted checks and four-state visual pass |
-| #6 | AFK | blocked by #5 | — | — | — |
-| #7 | AFK | blocked by #5 | — | — | — |
+| #5 | AFK | complete | `/root/ticket_5_theme_foundation` | browser-found light workspace defect and review command-record finding fixed | full ticket suite and four-state visual pass |
+| #6 | AFK | ready | — | — | — |
+| #7 | AFK | ready | — | — | — |
 | #8 | AFK | blocked by #6 and #7 | — | — | — |
 
 ## Parked HITL Slices
@@ -62,7 +62,7 @@ overall visual character in a high-quality, elegant, surgical way.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | this ticket commit | pending two-axis review | targeted Rust, JS, seeded verifier, and browser pass |
+| #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | `aa3b7a1` plus review fix follow-up | standards/spec pass after one command-record fix | Rust server suite, JS, seeded verifier, format, Clippy, build, diff, and browser pass |
 
 ## Open Questions
 

@@ -36,11 +36,17 @@ their established DOM and behavior.
   for later themed surfaces
 - Commands run:
   - `scripts/with-dev-env cargo test -p finite-brain-server product_client_serves_ -- --nocapture`
-  - `node --check finite-brain/crates/finite-brain-server/src/product-client.js`
-  - `node finite-brain/crates/finite-brain-server/src/product-client.test.js`
+  - `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+  - `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`
   - `scripts/with-dev-env node finite-brain/scripts/verify-obsidian-product-client.mjs`
   - `git diff --check`
-  - final focused suite, formatting, Clippy, and build recorded after review
+  - `scripts/with-dev-env cargo test -p finite-brain-server` (40 passed)
+  - `scripts/with-dev-env cargo fmt --all --check`
+  - `scripts/with-dev-env cargo clippy -p finite-brain-server --all-targets -- -D warnings`
+  - `scripts/with-dev-env cargo build -p finite-brain-app`
+  - `git diff --check`
+
+All final checks passed after the review fix.
 
 ### Visual evidence
 
@@ -71,11 +77,13 @@ Check:
 ## Reviewer Output
 
 ```text
-STANDARDS_STATUS: pending
+STANDARDS_STATUS: pass
 STANDARDS_FINDINGS:
-- Pending two-axis review.
+- Fixed: repeatable Node command records now use the required Nix wrapper.
+- Judgement call retained: explicit handlers/routes for the bounded ten-font
+  allowlist prioritize direct public contracts over dynamic path dispatch.
 
-SPEC_STATUS: pending
+SPEC_STATUS: pass
 SPEC_FINDINGS:
-- Pending two-axis review.
+- None.
 ```
