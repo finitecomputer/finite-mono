@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
+use std::future::Future;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -164,7 +165,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     );
 
     wait_for_bridge(&bridge).await?;
-    let (delivery_tx, mut delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
+    let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
     let executor = CommandExecutor {
         identity,
@@ -176,29 +177,43 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         supervisor: supervisor.clone(),
     };
 
+    let delivery_worker =
+        run_delivery_loop(delivery_rx, |delivery| executor.handle_delivery(delivery));
+    tokio::pin!(delivery_worker);
+    tokio::select! {
+        result = &mut delivery_worker => {
+            result
+        }
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            supervisor.shutdown().await;
+            Ok(())
+        }
+    }
+}
+
+async fn run_delivery_loop<H, F>(
+    mut delivery_rx: mpsc::Receiver<RuntimeCommandDeliveryV1>,
+    mut handle_delivery: H,
+) -> Result<(), AgentdError>
+where
+    H: FnMut(RuntimeCommandDeliveryV1) -> F,
+    F: Future<Output = Result<(), AgentdError>>,
+{
     loop {
-        tokio::select! {
-            delivery = delivery_rx.recv() => {
-                let Some(delivery) = delivery else {
-                    return Err(AgentdError::Transport("command delivery worker stopped".to_owned()));
-                };
-                let mut retry = Duration::from_millis(250);
-                loop {
-                    match executor.handle_delivery(delivery.clone()).await {
-                        Ok(()) => break,
-                        Err(error) => {
-                            eprintln!("finite-agentd: command delivery will retry: {}", error.public_message());
-                            tokio::time::sleep(retry).await;
-                            retry = (retry * 2).min(Duration::from_secs(5));
-                        }
-                    }
-                }
-            }
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                supervisor.shutdown().await;
-                return Ok(());
-            }
+        let Some(delivery) = delivery_rx.recv().await else {
+            return Err(AgentdError::Transport(
+                "command delivery worker stopped".to_owned(),
+            ));
+        };
+        if let Err(error) = handle_delivery(delivery).await {
+            // handle_delivery acknowledges only after its result has been
+            // accepted. On failure, leave this item in the resident durable
+            // inbox for redelivery, but do not let it block later commands.
+            eprintln!(
+                "finite-agentd: command delivery remains queued for redelivery: {}",
+                error.public_message()
+            );
         }
     }
 }
@@ -654,4 +669,86 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
+
+    use super::*;
+
+    fn delivery(message_id: &str, seq: u64) -> RuntimeCommandDeliveryV1 {
+        RuntimeCommandDeliveryV1 {
+            room_id: "room-main".to_owned(),
+            conversation_id: Some("conversation-main".to_owned()),
+            seq,
+            message_id: message_id.to_owned(),
+            sender: DeviceRef::new("user-account", "hosted-web"),
+            payload: RuntimeCommandInboundPayloadV1::Cancel(RuntimeCommandCancelV1 {
+                payload_kind: RuntimeCommandPayloadKindV1::Cancel,
+                request_id: format!("request-{seq}"),
+                reason: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_does_not_block_later_delivery_and_remains_retryable() {
+        let (delivery_tx, delivery_rx) = mpsc::channel(3);
+        let failed = delivery("delivery-failed", 1);
+        delivery_tx.send(failed.clone()).await.unwrap();
+        delivery_tx
+            .send(delivery("delivery-later", 2))
+            .await
+            .unwrap();
+        delivery_tx
+            .send(failed)
+            .await
+            .expect("the durable inbox may redeliver an unacknowledged item");
+        drop(delivery_tx);
+
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let failed_attempts = Arc::new(AtomicUsize::new(0));
+
+        let result = run_delivery_loop(delivery_rx, {
+            let attempts = Arc::clone(&attempts);
+            let completed = Arc::clone(&completed);
+            let failed_attempts = Arc::clone(&failed_attempts);
+            move |delivery| {
+                let attempts = Arc::clone(&attempts);
+                let completed = Arc::clone(&completed);
+                let failed_attempts = Arc::clone(&failed_attempts);
+                async move {
+                    let message_id = delivery.message_id;
+                    attempts.lock().unwrap().push(message_id.clone());
+                    if message_id == "delivery-failed"
+                        && failed_attempts.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        return Err(AgentdError::Transport(
+                            "injected result delivery failure".to_owned(),
+                        ));
+                    }
+                    completed.lock().unwrap().push(message_id);
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(AgentdError::Transport(_))));
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            ["delivery-failed", "delivery-later", "delivery-failed"],
+            "a failed item must not monopolize the single delivery loop"
+        );
+        assert_eq!(
+            *completed.lock().unwrap(),
+            ["delivery-later", "delivery-failed"],
+            "the later item completes before durable redelivery retries the failed item"
+        );
+    }
 }
