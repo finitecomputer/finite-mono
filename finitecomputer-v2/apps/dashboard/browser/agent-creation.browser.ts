@@ -637,11 +637,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
-      await main.getByRole("button", { name: "Restart agent" }).click();
+      const restartAgent = main.getByRole("button", { name: "Restart agent" });
+      await restartAgent.click();
       await waitFor(() => core.state.restartPosts.includes("project_running"));
+      await restartAgent.waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.unavailable, true, "restart must not fake chat recovery");
-      await main.getByRole("button", { name: "Recover chat" }).click();
+      const recoverChat = main.getByRole("button", { name: "Recover chat" });
+      await recoverChat.click();
       await waitFor(() => core.state.recoverPosts.includes("project_running"));
+      await recoverChat.waitFor({ state: "visible" });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
       );
