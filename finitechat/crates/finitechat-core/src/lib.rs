@@ -54,6 +54,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
+pub mod device_link;
+
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
 const LOCAL_ROOM_CONNECTED_TEXT: &str = "Connected";
@@ -6709,7 +6711,11 @@ fn project_chat_message(
     owner: &DeviceRef,
 ) -> Option<ChatMessage> {
     let projection = chat_projection_payload_from_application_plaintext(&plaintext)?;
-    let is_mine = sender == *owner;
+    // Product authorship is account-scoped: another Device enrolled under the
+    // same Principal is still "you". Delivery state, however, belongs only to
+    // the Device that actually authored this local outbound message.
+    let is_mine = sender.account_id == owner.account_id;
+    let authored_by_current_device = sender == *owner;
     let sender_npub = npub_encode(&sender.account_id).ok();
     let rich_text_json = chat_rich_text_json(chat_message_body_text(
         &projection.text,
@@ -6739,7 +6745,7 @@ fn project_chat_message(
         payload: plaintext,
         reply_to_message_id: projection.reply_to_message_id,
         is_mine,
-        outbound_delivery: is_mine.then(outbound_delivered),
+        outbound_delivery: authored_by_current_device.then(outbound_delivered),
         reactions: Vec::new(),
         media: projection.media,
         read_receipt: None,
@@ -10106,6 +10112,47 @@ mod tests {
         assert_eq!(raw.status, ChatMessageStatus::Complete);
         assert!(!raw.final_delivery);
         assert_eq!(raw.edit_of_message_id, None);
+    }
+
+    #[test]
+    fn same_account_other_device_is_mine_without_local_outbound_delivery() {
+        let owner = DeviceRef {
+            account_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_owned(),
+            device_id: "hosted-web".to_owned(),
+        };
+        let electron = DeviceRef {
+            account_id: owner.account_id.clone(),
+            device_id: "electron-alpha".to_owned(),
+        };
+        let message = project_chat_message(
+            "room-main".to_owned(),
+            10,
+            "message-electron".to_owned(),
+            electron,
+            b"sent from Electron".to_vec(),
+            NOW,
+            &owner,
+        )
+        .unwrap();
+
+        assert!(message.is_mine);
+        assert_eq!(message.sender_display_name, "You");
+        assert_eq!(message.sender_device_id, "electron-alpha");
+        assert_eq!(message.outbound_delivery, None);
+
+        let current_device = project_chat_message(
+            "room-main".to_owned(),
+            11,
+            "message-hosted".to_owned(),
+            owner.clone(),
+            b"sent from Hosted Web".to_vec(),
+            NOW,
+            &owner,
+        )
+        .unwrap();
+        assert!(current_device.is_mine);
+        assert_eq!(current_device.outbound_delivery, Some(outbound_delivered()));
     }
 
     #[test]
