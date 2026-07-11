@@ -117,6 +117,32 @@
   --status-error-bg: rgba(239, 68, 68, 0.08);
   --status-error-border: rgba(239, 68, 68, 0.35);
 
+  /* Access and collaboration surfaces share one semantic presentation layer. */
+  --access-canvas: var(--sidebar);
+  --access-surface: var(--surface);
+  --access-surface-soft: var(--surface-soft);
+  --access-surface-raised: var(--surface-raised);
+  --access-surface-hover: var(--surface-hover);
+  --access-surface-active: var(--surface-active);
+  --access-input: var(--input-bg);
+  --access-border: var(--line);
+  --access-border-strong: var(--line-strong);
+  --access-text: var(--text);
+  --access-muted: var(--muted);
+  --access-soft: var(--soft);
+  --access-accent: var(--blue);
+  --access-accent-strong: var(--blue-strong);
+  --access-accent-soft: var(--blue-soft);
+  --access-success: var(--status-success);
+  --access-success-bg: var(--status-success-bg);
+  --access-success-border: var(--status-success-border);
+  --access-warning: var(--status-warning);
+  --access-warning-bg: var(--status-warning-bg);
+  --access-warning-border: var(--status-warning-border);
+  --access-danger: var(--status-error);
+  --access-danger-bg: var(--status-error-bg);
+  --access-danger-border: var(--status-error-border);
+
   --knowledge-canvas: #202120;
   --knowledge-code-bg: #1b1c1d;
   --knowledge-code-border: rgba(255, 255, 255, 0.1);
@@ -1475,12 +1501,12 @@ pre {
   gap: 10px;
   margin: 0 10px;
   border-radius: 10px;
-  background: #202020;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: var(--access-surface);
+  box-shadow: var(--shadow-access-ring);
   padding: 10px;
 }
 
-/* NEW OBSIDIAN-STYLE ACCESS UI */
+/* Dashboard-aligned access and collaboration UI */
 
 .access-view-switch {
   display: grid;
@@ -1489,8 +1515,8 @@ pre {
   margin: 0 var(--access-panel-inset) 12px;
   padding: 3px;
   border-radius: 10px;
-  background: #181818;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  background: var(--access-surface-soft);
+  box-shadow: inset 0 0 0 1px var(--access-border);
 }
 
 .access-view-switch button {
@@ -1499,7 +1525,7 @@ pre {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #9b9b9b;
+  color: var(--access-muted);
   font-size: 12px;
   font-weight: 680;
   cursor: pointer;
@@ -1509,16 +1535,14 @@ pre {
 }
 
 .access-view-switch button.active {
-  background: #2d2d2d;
-  box-shadow:
-    var(--shadow-access-ring),
-    0 1px 2px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  color: #f1f1f1;
+  background: var(--access-surface-raised);
+  box-shadow: var(--shadow-access-ring-hover);
+  color: var(--access-accent-strong);
 }
 
 .access-view-switch button:not(.active):hover {
-  color: #dadada;
+  background: var(--access-surface-hover);
+  color: var(--access-text);
 }
 
 .access-view-switch button:active {
@@ -1526,7 +1550,7 @@ pre {
 }
 
 .access-view-switch button:focus-visible {
-  outline: 2px solid rgba(124, 108, 255, 0.72);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
 
@@ -1583,7 +1607,7 @@ pre {
 
 .section-title,
 .access-selector-label.section-title {
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -1599,11 +1623,11 @@ pre {
   min-height: 52px;
   gap: 10px;
   padding: 9px 12px;
-  background: #252525;
+  background: var(--access-surface);
   border: 0;
   border-radius: 10px;
   box-shadow: var(--shadow-access-ring);
-  color: #dadada;
+  color: var(--access-text);
   font-size: 13px;
   cursor: pointer;
   transition-property: background-color, box-shadow, color, transform;
@@ -1630,7 +1654,7 @@ pre {
 }
 
 .folder-selector-button:hover {
-  background: #2b2b2b;
+  background: var(--access-surface-raised);
   box-shadow: var(--shadow-access-ring-hover);
 }
 
@@ -1658,7 +1682,7 @@ pre {
   width: 100%;
   max-height: min(220px, 42vh);
   margin-top: 8px;
-  background: #242424;
+  background: var(--access-surface-raised);
   border: 0;
   border-radius: 9px;
   box-shadow: var(--shadow-access-ring);
@@ -1681,7 +1705,7 @@ pre {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #d7d7d7;
+  color: var(--access-text);
   font-size: 12px;
   padding: 8px 10px;
   text-align: left;
@@ -1695,19 +1719,19 @@ pre {
 }
 
 .folder-option-button:hover {
-  background: rgba(255, 255, 255, 0.045);
-  color: #eeeeee;
+  background: var(--access-surface-hover);
+  color: var(--access-text);
 }
 
 .folder-option-button.active {
-  background: rgba(255, 255, 255, 0.065);
+  background: var(--access-accent-soft);
   box-shadow: var(--shadow-access-ring-hover);
-  color: #eeeeee;
+  color: var(--access-accent-strong);
 }
 
 .folder-option-button.locked,
 .folder-option-button.setup {
-  color: #f1c36f;
+  color: var(--access-warning);
 }
 
 .folder-option-title,
@@ -1726,19 +1750,19 @@ pre {
 
 .folder-option-meta {
   margin-top: 3px;
-  color: #8f8f8f;
+  color: var(--access-soft);
   font-size: 11px;
   font-weight: 560;
   line-height: 1.25;
 }
 
 .folder-option-button.active .folder-option-meta {
-  color: #b8b8b8;
+  color: var(--access-muted);
 }
 
 .folder-option-button.locked .folder-option-meta,
 .folder-option-button.setup .folder-option-meta {
-  color: #9f9a8f;
+  color: var(--access-muted);
 }
 
 /* New Access Inspector */
@@ -1776,12 +1800,12 @@ pre {
 .access-header {
   margin-bottom: 14px;
   padding-bottom: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--access-border);
 }
 
 .access-header h3 {
   margin: 0 0 4px 0;
-  color: #f1f1f1;
+  color: var(--access-text);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.3;
@@ -1790,7 +1814,7 @@ pre {
 
 .access-summary {
   margin: 0;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.4;
@@ -1826,7 +1850,7 @@ pre {
   border: 0;
   border-radius: 8px;
   box-shadow: var(--shadow-access-ring);
-  color: #7c6cff;
+  color: var(--access-accent-strong);
   font-size: 12px;
   font-weight: 650;
   cursor: pointer;
@@ -1836,8 +1860,8 @@ pre {
 }
 
 .access-inline-button:hover {
-  background: rgba(124, 108, 255, 0.1);
-  box-shadow: 0 0 0 1px rgba(124, 108, 255, 0.32);
+  background: var(--access-accent-soft);
+  box-shadow: 0 0 0 1px var(--access-accent);
 }
 
 .access-inline-button .icon {
@@ -1875,9 +1899,9 @@ pre {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--access-surface-soft);
   box-shadow: var(--shadow-access-ring);
-  color: #dadada;
+  color: var(--access-text);
   font-size: 12px;
 }
 
@@ -1886,7 +1910,7 @@ pre {
 }
 
 .access-empty-state {
-  color: #8f8f8f;
+  color: var(--access-muted);
   font-size: 12px;
   font-style: normal;
   font-weight: 540;
@@ -1898,7 +1922,7 @@ pre {
 }
 
 .access-who-has-list .empty-row {
-  color: #8f8f8f;
+  color: var(--access-muted);
   font-size: 12px;
   font-style: normal;
   font-weight: 540;
@@ -1933,7 +1957,7 @@ pre {
 
 .access-person-role {
   flex-shrink: 0;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -1951,7 +1975,7 @@ pre {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #8f8f8f;
+  color: var(--access-soft);
   cursor: pointer;
   transition-duration: 150ms;
   transition-property: background-color, color, transform;
@@ -1965,8 +1989,8 @@ pre {
 
 .access-person-info-button:hover,
 .access-person-info-button[aria-expanded="true"] {
-  background: rgba(255, 255, 255, 0.055);
-  color: #d6d2ff;
+  background: var(--access-accent-soft);
+  color: var(--access-accent-strong);
 }
 
 .access-person-info-button:not(:disabled):active {
@@ -1981,7 +2005,7 @@ pre {
   margin: 3px 0 2px 24px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--access-surface-raised);
   box-shadow: var(--shadow-access-ring);
 }
 
@@ -1996,7 +2020,7 @@ pre {
 }
 
 .access-person-detail-panel dt {
-  color: #8f8f8f;
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -2005,8 +2029,8 @@ pre {
 
 .access-person-detail-panel dd {
   min-width: 0;
-  color: #cfcfcf;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  color: var(--access-text);
+  font-family: var(--font-mono);
   font-size: 10px;
   overflow-wrap: anywhere;
 }
@@ -2018,7 +2042,7 @@ pre {
   background: transparent;
   border: none;
   border-radius: 7px;
-  color: #ff6b6b;
+  color: var(--access-danger);
   font-size: 11px;
   font-weight: 650;
   cursor: pointer;
@@ -2034,8 +2058,8 @@ pre {
 }
 
 .access-remove-person:hover {
-  background: rgba(255, 107, 107, 0.1);
-  color: #ffd2d5;
+  background: var(--access-danger-bg);
+  color: var(--access-danger);
 }
 
 /* Inline Add Person Form */
@@ -2044,7 +2068,7 @@ pre {
   gap: 10px;
   margin-top: 12px;
   padding: 12px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--access-surface-soft);
   border: 0;
   border-radius: var(--access-surface-radius);
   box-shadow: var(--shadow-access-ring);
@@ -2055,11 +2079,11 @@ pre {
 }
 
 #accessAddPersonPanel .access-inline-form.is-locked {
-  background: rgba(255, 255, 255, 0.014);
+  background: color-mix(in srgb, var(--access-surface-soft) 70%, transparent);
 }
 
 #accessAddPersonPanel .access-inline-form.is-locked input {
-  color: #8f8f8f;
+  color: var(--access-muted);
 }
 
 .access-inline-form .access-inline-field + .access-inline-field {
@@ -2082,26 +2106,26 @@ pre {
   min-height: 40px;
   margin: 0;
   padding: 7px 9px;
-  background: #1a1a1a;
+  background: var(--access-input);
   border: 0;
   border-radius: 6px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-  color: #dadada;
+  box-shadow: inset 0 0 0 1px var(--access-border);
+  color: var(--access-text);
   font-size: 12px;
 }
 
 .access-inline-field input:focus {
   outline: none;
   box-shadow:
-    inset 0 0 0 1px rgba(124, 108, 255, 0.72),
-    0 0 0 2px rgba(124, 108, 255, 0.1);
+    inset 0 0 0 1px var(--focus),
+    0 0 0 3px var(--access-accent-soft);
 }
 
 .access-add-button {
   flex-shrink: 0;
   min-height: 40px;
   padding: 7px 12px;
-  background: #7c6cff;
+  background: var(--access-accent);
   border: none;
   border-radius: 6px;
   color: #fff;
@@ -2122,8 +2146,8 @@ pre {
 }
 
 .access-add-button:hover {
-  background: #6b59e8;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: var(--access-accent-strong);
+  box-shadow: 0 0 0 3px var(--access-accent-soft);
 }
 
 .access-add-button:disabled {
@@ -2133,7 +2157,7 @@ pre {
 
 .access-field-hint {
   margin: 0;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 11px;
   line-height: 1.4;
   text-wrap: pretty;
@@ -2145,8 +2169,8 @@ pre {
   gap: 2px;
   min-width: 0;
   border-radius: 8px;
-  background: #181818;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  background: var(--access-surface-soft);
+  box-shadow: inset 0 0 0 1px var(--access-border);
   padding: 3px;
 }
 
@@ -2160,7 +2184,7 @@ pre {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #9b9b9b;
+  color: var(--access-muted);
   padding: 6px 4px;
   transition-duration: 140ms;
   transition-property: background-color, box-shadow, color, opacity, transform;
@@ -2168,13 +2192,14 @@ pre {
 }
 
 .access-segmented-control button.active {
-  background: #28302d;
-  box-shadow: 0 0 0 1px rgba(69, 212, 131, 0.26);
-  color: #e9fff2;
+  background: var(--access-success-bg);
+  box-shadow: 0 0 0 1px var(--access-success-border);
+  color: var(--access-success);
 }
 
 .access-segmented-control button:not(:disabled):hover {
-  color: #f2f2f2;
+  background: var(--access-surface-hover);
+  color: var(--access-text);
 }
 
 .access-segmented-control button:not(:disabled):active {
@@ -2210,20 +2235,20 @@ pre {
 }
 
 .access-action-row button.active {
-  border-color: rgba(123, 92, 255, 0.7);
-  background: rgba(123, 92, 255, 0.16);
-  color: #f3f0ff;
+  border-color: var(--access-accent);
+  background: var(--access-accent-soft);
+  color: var(--access-accent-strong);
 }
 
 .access-action-row .danger-action {
-  border-color: rgba(244, 109, 117, 0.42);
-  color: #ffb4b8;
+  border-color: var(--access-danger-border);
+  color: var(--access-danger);
 }
 
 .access-action-row .danger-action:not(:disabled):hover {
-  border-color: rgba(244, 109, 117, 0.72);
-  background: rgba(244, 109, 117, 0.1);
-  color: #ffd2d5;
+  border-color: var(--access-danger);
+  background: var(--access-danger-bg);
+  color: var(--access-danger);
 }
 
 .access-flow-panel {
@@ -2245,7 +2270,7 @@ pre {
 .access-pane-copy,
 .access-hint {
   margin: 0;
-  color: #969696;
+  color: var(--access-muted);
   font-size: 11px;
   line-height: 1.45;
   text-wrap: pretty;
@@ -2258,13 +2283,13 @@ pre {
 }
 
 .access-pane-heading span {
-  color: #e5e5e5;
+  color: var(--access-text);
   font-size: 12px;
   font-weight: 780;
 }
 
 .access-pane-heading small {
-  color: #8f8f8f;
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 620;
   line-height: 1.35;
@@ -2274,7 +2299,7 @@ pre {
 .access-field {
   display: grid;
   gap: 7px;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -2289,8 +2314,8 @@ pre {
   margin: 0;
   border: 0;
   border-radius: 6px;
-  background: #1a1a1a;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: var(--access-input);
+  box-shadow: inset 0 0 0 1px var(--access-border);
   font-size: 12px;
 }
 
@@ -2300,7 +2325,7 @@ pre {
   align-items: center;
   gap: 7px;
   min-height: 40px;
-  color: #bdbdbd;
+  color: var(--access-text);
   font-size: 12px;
 }
 
@@ -2312,11 +2337,11 @@ pre {
 
 .access-checkbox-hint {
   margin: -6px 0 0 23px;
-  color: #8f8f8f;
+  color: var(--access-muted);
 }
 
 .access-share-form.is-locked .access-checkbox {
-  color: #8f8f8f;
+  color: var(--access-muted);
   opacity: 0.72;
 }
 
@@ -2325,8 +2350,8 @@ pre {
   margin: 0 10px;
   overflow: hidden;
   border-radius: 10px;
-  background: #1f1f1f;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07);
+  background: var(--access-surface);
+  box-shadow: var(--shadow-access-ring);
 }
 
 .access-section summary {
@@ -2339,7 +2364,7 @@ pre {
   cursor: pointer;
   list-style: none;
   padding: 8px 10px 8px 28px;
-  color: #e2e2e2;
+  color: var(--access-text);
   font-size: 12px;
   font-weight: 780;
   text-wrap: balance;
@@ -2353,7 +2378,7 @@ pre {
   position: absolute;
   top: 50%;
   left: 11px;
-  color: #9d9d9d;
+  color: var(--access-muted);
   content: "›";
   font-size: 15px;
   line-height: 1;
@@ -2364,13 +2389,13 @@ pre {
 }
 
 .access-section[open] summary::before {
-  color: var(--green);
+  color: var(--access-accent);
   transform: translateY(-50%) rotate(90deg);
 }
 
 .access-section summary small {
   min-width: 0;
-  color: #929292;
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 650;
   line-height: 1.2;
@@ -2379,7 +2404,7 @@ pre {
 }
 
 .access-section[open] summary {
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 -1px 0 var(--access-border);
 }
 
 .access-section-body,
@@ -2418,9 +2443,9 @@ pre {
   margin: 0 12px 10px;
   overflow-wrap: anywhere;
   border-radius: 8px;
-  background: #181818;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
-  color: #cfcfcf;
+  background: var(--access-surface-raised);
+  box-shadow: 0 0 0 1px var(--access-border);
+  color: var(--access-text);
   font-size: 11px;
   line-height: 1.4;
   padding: 8px 10px;
@@ -2428,7 +2453,7 @@ pre {
 
 .access-busy-status {
   margin: 0 12px 10px;
-  color: #8f8f8f;
+  color: var(--access-muted);
   font-size: 11px;
   font-style: normal;
   font-weight: 540;
@@ -2438,21 +2463,24 @@ pre {
 }
 
 .access-result.ready {
-  box-shadow: 0 0 0 1px rgba(69, 212, 131, 0.45);
+  background: var(--access-success-bg);
+  box-shadow: 0 0 0 1px var(--access-success-border);
 }
 
 .access-result.warn {
-  box-shadow: 0 0 0 1px rgba(242, 189, 92, 0.52);
+  background: var(--access-warning-bg);
+  box-shadow: 0 0 0 1px var(--access-warning-border);
 }
 
 .access-result.error {
-  box-shadow: 0 0 0 1px rgba(244, 109, 117, 0.55);
-  color: #ffb4b8;
+  background: var(--access-danger-bg);
+  box-shadow: 0 0 0 1px var(--access-danger-border);
+  color: var(--access-danger);
 }
 
 .access-result strong {
   display: block;
-  color: #f0f0f0;
+  color: var(--access-text);
   font-size: 12px;
   margin-bottom: 2px;
 }
@@ -2470,9 +2498,9 @@ pre {
   display: inline-flex;
   align-items: center;
   min-height: 18px;
-  border: 1px solid #444444;
+  border: 1px solid var(--access-border-strong);
   border-radius: 999px;
-  color: #a8a8a8;
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 800;
   line-height: 1;
@@ -2481,18 +2509,18 @@ pre {
 }
 
 .access-badge.ready {
-  border-color: rgba(69, 212, 131, 0.42);
-  color: var(--green);
+  border-color: var(--access-success-border);
+  color: var(--access-success);
 }
 
 .access-badge.warn {
-  border-color: rgba(242, 189, 92, 0.5);
-  color: var(--amber);
+  border-color: var(--access-warning-border);
+  color: var(--access-warning);
 }
 
 .access-badge.error {
-  border-color: rgba(244, 109, 117, 0.52);
-  color: var(--red);
+  border-color: var(--access-danger-border);
+  color: var(--access-danger);
 }
 
 .sidebar-section-title {
@@ -3488,7 +3516,7 @@ pre {
   margin-top: 14px;
   border: 0;
   border-radius: var(--access-surface-radius);
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--access-surface);
   box-shadow: var(--shadow-access-ring);
   overflow: hidden;
 }
@@ -3508,7 +3536,7 @@ pre {
   align-items: center;
   column-gap: 8px;
   row-gap: 2px;
-  color: #dadada;
+  color: var(--access-text);
   font-size: 12px;
   font-weight: 500;
   list-style: none;
@@ -3524,7 +3552,7 @@ pre {
 
 .access-advanced-summary:hover,
 .access-admin-summary:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--access-surface-hover);
 }
 
 .access-advanced-summary::after,
@@ -3561,7 +3589,7 @@ pre {
 .access-admin-summary span {
   grid-area: title;
   min-width: 0;
-  color: #dadada;
+  color: var(--access-text);
   font-weight: 600;
   text-wrap: balance;
 }
@@ -3570,7 +3598,7 @@ pre {
 .access-admin-summary small {
   grid-area: meta;
   max-width: none;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 400;
   line-height: 1.25;
@@ -3580,8 +3608,8 @@ pre {
 
 .access-advanced-content {
   padding: 12px;
-  background: rgba(0, 0, 0, 0.12);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--access-surface-soft);
+  border-top: 1px solid var(--access-border);
 }
 
 #accessAddPersonPanel .access-advanced-content {
@@ -3600,7 +3628,7 @@ pre {
 
 .access-subsection-title {
   margin: 0 0 4px 0;
-  color: #f1f1f1;
+  color: var(--access-text);
   font-size: 13px;
   font-weight: 600;
   text-wrap: balance;
@@ -3608,7 +3636,7 @@ pre {
 
 .access-subsection-desc {
   margin: 0 0 12px 0;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 11px;
   line-height: 1.4;
   text-wrap: pretty;
@@ -3627,16 +3655,16 @@ pre {
 }
 
 .access-share-form.is-ready .access-share-hint {
-  color: rgba(69, 212, 131, 0.88);
+  color: var(--access-success);
 }
 
 .access-share-form.is-locked .access-share-hint {
-  color: #a6a6a6;
+  color: var(--access-muted);
 }
 
 .access-share-existing {
   padding-top: 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--access-border);
 }
 
 .access-button-row {
@@ -3659,26 +3687,26 @@ pre {
 }
 
 .access-primary-button {
-  border-color: rgba(124, 108, 255, 0.42);
-  background: rgba(124, 108, 255, 0.18);
-  color: #f3f0ff;
+  border-color: var(--access-accent);
+  background: var(--access-accent-soft);
+  color: var(--access-accent-strong);
 }
 
 .access-primary-button:not(:disabled):hover {
-  border-color: rgba(124, 108, 255, 0.72);
-  background: rgba(124, 108, 255, 0.26);
-  box-shadow: 0 0 0 1px rgba(124, 108, 255, 0.16);
+  border-color: var(--access-accent-strong);
+  background: color-mix(in srgb, var(--access-accent) 20%, transparent);
+  box-shadow: 0 0 0 3px var(--access-accent-soft);
 }
 
 .access-button-row .danger-action {
-  border-color: rgba(244, 109, 117, 0.42);
-  color: #ffb4b8;
+  border-color: var(--access-danger-border);
+  color: var(--access-danger);
 }
 
 .access-button-row .danger-action:not(:disabled):hover {
-  border-color: rgba(244, 109, 117, 0.72);
-  background: rgba(244, 109, 117, 0.1);
-  color: #ffd2d5;
+  border-color: var(--access-danger);
+  background: var(--access-danger-bg);
+  color: var(--access-danger);
 }
 
 /* Vault Management */
@@ -3687,7 +3715,7 @@ pre {
   margin: 0 var(--access-panel-inset) 14px;
   padding: 12px;
   border-radius: var(--access-surface-radius);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--access-surface);
   box-shadow: var(--shadow-access-ring);
   overflow: hidden;
 }
@@ -3733,7 +3761,7 @@ pre {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #dadada;
+  color: var(--access-text);
   text-align: left;
   cursor: pointer;
   transition-duration: 150ms;
@@ -3742,7 +3770,7 @@ pre {
 }
 
 .vault-switch-button:hover {
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--access-surface-hover);
 }
 
 .vault-switch-button:focus-visible {
@@ -3756,9 +3784,9 @@ pre {
 
 .vault-switch-button.selected,
 .vault-switch-button.loaded {
-  background: rgba(255, 255, 255, 0.055);
+  background: var(--access-accent-soft);
   box-shadow: var(--shadow-access-ring-hover);
-  color: #eeeeee;
+  color: var(--access-accent-strong);
 }
 
 .vault-switch-title,
@@ -3777,7 +3805,7 @@ pre {
 
 .vault-switch-meta {
   grid-column: 1 / 2;
-  color: #9a9a9a;
+  color: var(--access-muted);
   font-size: 11px;
   font-weight: 560;
   line-height: 1.25;
@@ -3790,7 +3818,7 @@ pre {
 
 .vault-switch-button.selected .vault-switch-meta,
 .vault-switch-button.loaded .vault-switch-meta {
-  color: #b8b8b8;
+  color: var(--access-muted);
 }
 
 .vault-quick-actions {
@@ -3806,7 +3834,7 @@ pre {
   margin: 0 var(--access-panel-inset) 14px;
   border: 0;
   border-radius: var(--access-surface-radius);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--access-surface);
   box-shadow: var(--shadow-access-ring);
   overflow: hidden;
 }
@@ -3821,7 +3849,7 @@ pre {
   justify-content: space-between;
   min-height: 40px;
   padding: 9px 12px;
-  color: #bdbdbd;
+  color: var(--access-muted);
   cursor: pointer;
   font-size: 12px;
   font-weight: 650;
@@ -3854,14 +3882,14 @@ pre {
 }
 
 .access-vault-create summary:hover {
-  background: rgba(255, 255, 255, 0.035);
-  color: #eeeeee;
+  background: var(--access-surface-hover);
+  color: var(--access-text);
 }
 
 .access-vault-create-body {
   padding: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(0, 0, 0, 0.1);
+  border-top: 1px solid var(--access-border);
+  background: var(--access-surface-soft);
 }
 
 .vault-person-action {
@@ -3922,7 +3950,7 @@ pre {
 }
 
 .vault-management-section .access-who-has-list li + li {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--access-border);
 }
 
 .vault-management-section .access-empty-state {
@@ -3939,15 +3967,15 @@ pre {
   margin: 0;
   padding: 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--access-surface-soft);
   box-shadow: var(--shadow-access-ring);
 }
 
 .vault-access-option.primary {
-  background: rgba(124, 108, 255, 0.055);
+  background: var(--access-accent-soft);
   box-shadow:
     var(--shadow-access-ring),
-    inset 3px 0 0 rgba(124, 108, 255, 0.45);
+    inset 3px 0 0 var(--access-accent);
 }
 
 .vault-access-option + .vault-access-option {
@@ -4013,7 +4041,7 @@ pre {
   border-radius: 999px;
   padding: 2px 7px;
   box-shadow: var(--shadow-access-ring);
-  color: var(--muted);
+  color: var(--access-muted);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -4024,18 +4052,21 @@ pre {
 
 .access-link-status.pending,
 .access-link-status.active {
-  box-shadow: 0 0 0 1px rgba(124, 108, 255, 0.34);
-  color: #ddd8ff;
+  background: var(--access-accent-soft);
+  box-shadow: 0 0 0 1px var(--access-accent);
+  color: var(--access-accent-strong);
 }
 
 .access-link-status.accepted {
-  box-shadow: 0 0 0 1px rgba(129, 199, 132, 0.4);
-  color: #c4e8c6;
+  background: var(--access-success-bg);
+  box-shadow: 0 0 0 1px var(--access-success-border);
+  color: var(--access-success);
 }
 
 .access-link-status.revoked {
-  box-shadow: 0 0 0 1px rgba(244, 109, 117, 0.4);
-  color: var(--red);
+  background: var(--access-danger-bg);
+  box-shadow: 0 0 0 1px var(--access-danger-border);
+  color: var(--access-danger);
 }
 
 /* Guided setup steps in the Vault tab */
@@ -4045,7 +4076,7 @@ pre {
   margin: 0;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--access-surface);
   box-shadow: var(--shadow-access-ring);
   list-style: none;
   counter-reset: vault-guide;
@@ -4056,16 +4087,16 @@ pre {
   align-items: center;
   gap: 8px;
   min-height: 24px;
-  color: #dadada;
+  color: var(--access-text);
   font-size: 12px;
   font-weight: 540;
   text-wrap: pretty;
 }
 
 .vault-guide-step.done {
-  color: #8f8f8f;
+  color: var(--access-muted);
   text-decoration: line-through;
-  text-decoration-color: rgba(143, 143, 143, 0.55);
+  text-decoration-color: var(--access-border-strong);
 }
 
 .vault-guide-marker {
@@ -4076,8 +4107,9 @@ pre {
   width: 18px;
   height: 18px;
   border-radius: 999px;
-  box-shadow: 0 0 0 1px rgba(124, 108, 255, 0.34);
-  color: #ddd8ff;
+  background: var(--access-accent-soft);
+  box-shadow: 0 0 0 1px var(--access-accent);
+  color: var(--access-accent-strong);
   counter-increment: vault-guide;
 }
 
@@ -4097,8 +4129,9 @@ pre {
 }
 
 .vault-guide-step.done .vault-guide-marker {
-  box-shadow: 0 0 0 1px rgba(129, 199, 132, 0.4);
-  color: #c4e8c6;
+  background: var(--access-success-bg);
+  box-shadow: 0 0 0 1px var(--access-success-border);
+  color: var(--access-success);
 }
 
 /* Vault Administration */
@@ -4106,15 +4139,15 @@ pre {
   margin: 14px var(--access-panel-inset) 0;
   border: 0;
   border-radius: var(--access-surface-radius);
-  background: rgba(255, 255, 255, 0.015);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.052);
+  background: var(--access-surface);
+  box-shadow: var(--shadow-access-ring);
   overflow: hidden;
 }
 
 .access-admin-content {
   padding: 12px;
-  background: rgba(0, 0, 0, 0.1);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--access-surface-soft);
+  border-top: 1px solid var(--access-border);
 }
 
 .access-admin-section {
@@ -4127,7 +4160,7 @@ pre {
 
 .access-admin-section h4 {
   margin: 0 0 8px 0;
-  color: #a6a6a6;
+  color: var(--access-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
