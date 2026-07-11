@@ -2798,6 +2798,7 @@ pre {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  gap: 12px;
   width: 100%;
   min-height: 44px;
   border: 0;
@@ -2806,6 +2807,12 @@ pre {
   color: var(--text);
   padding: 7px 10px;
   text-align: left;
+}
+
+.command-palette-row > span:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .command-palette-row:hover,
