@@ -4,6 +4,19 @@ set shell := ["../scripts/dev-shell", "-cu"]
 default:
     just --list-submodules --list
 
+# Runs the real web dashboard against a durable, deterministic local chat fixture.
+# No provider credentials, Apple Container, or Agent Runtime are required.
+web-design:
+    cd ../finitecomputer-v2/apps/dashboard && npm run design
+
+# Selects the live design fixture state: healthy, unavailable, or recovering.
+web-design-state scenario:
+    cd ../finitecomputer-v2/apps/dashboard && npm run design:state -- {{ quote(scenario) }}
+
+# Explicitly removes only the durable local web design conversation.
+web-design-reset:
+    cd ../finitecomputer-v2/apps/dashboard && npm run design:reset
+
 # Starts devfinity harness. `just dev up` or `just dev up --headless`
 up *args:
     cd .. && cargo run -p devfinity -- up {{ args }}

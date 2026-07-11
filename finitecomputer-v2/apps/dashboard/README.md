@@ -80,13 +80,39 @@ the user's own machine.
 
 ## Run locally
 
+For day-to-day web chat and recovery design, use the real dashboard UI with the
+deterministic local Core and Hosted Device fixture:
+
 ```bash
-cd apps/dashboard
-npm install
-npm run dev
+cd finitecomputer-v2/apps/dashboard
+npm ci
+cd ../../..
+just dev web-design
 ```
 
-Then open `http://localhost:3000`.
+Open
+`http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat`. Conversation
+state survives stopping and restarting the command. In another terminal:
+
+```bash
+just dev web-design-state unavailable
+just dev web-design-state recovering
+just dev web-design-state healthy
+just dev web-design-reset
+```
+
+These commands change only the local fixture under
+`.local-state/web-design-fixture/`. They never contact a provider, Agent
+Runtime, or production service. The fixture backs the canonical dashboard
+components and routes; it is not a second UI and does not prove runtime
+acceptance.
+
+For environment-backed Core or WorkOS development, run `npm run dev` from this
+directory and open `http://localhost:3000`.
+
+Before handing off web changes, run `just web-check` from the repository root.
+It performs the locked dashboard install, unit tests, lint, and production
+build.
 
 The app assumes the repo root is two directories above the app. If you ever run
 it from a different filesystem layout, set:

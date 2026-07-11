@@ -40,7 +40,9 @@
     ".next-devfinity/types/**/*.ts",
     ".next-devfinity/dev/types/**/*.ts",
     ".next-browser-stripe-test/types/**/*.ts",
-    ".next-browser-stripe-test/dev/types/**/*.ts"
+    ".next-browser-stripe-test/dev/types/**/*.ts",
+    ".next-web-design/types/**/*.ts",
+    ".next-web-design/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

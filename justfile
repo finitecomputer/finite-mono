@@ -25,6 +25,10 @@ fmt:
 test:
     cargo test --workspace --locked
 
+# Web-only contributor gate: dashboard unit tests, lint, and production build.
+web-check:
+    cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
+
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
