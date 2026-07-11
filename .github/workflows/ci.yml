@@ -109,6 +109,19 @@ jobs:
           test -f "finitechat/apps/electron-chat/release/Finite Chat.app/Contents/Resources/app/dist/index.html"
           ! rg -n 'spawn\("cargo"|cargo run' finitechat/apps/electron-chat/electron
 
+      - name: Archive internal alpha
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "finitechat/apps/electron-chat/release/Finite Chat.app" \
+            finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
+
+      - name: Publish internal alpha
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-chat-electron-alpha-macos-${{ runner.arch }}
+          path: finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
+          if-no-files-found: error
+
   hermes-bridge:
     name: finitechat Hermes bridge
     runs-on: ubuntu-latest
