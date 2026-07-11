@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
+  HeartPulseIcon,
   MessageSquareIcon,
   RotateCcwIcon,
   StopCircleIcon,
@@ -8,6 +9,7 @@ import {
 } from "lucide-react";
 
 import {
+  recoverCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
@@ -137,6 +139,27 @@ async function ImportedMachineOverview({
           </div>
         </div>
       </section>
+      {canControlRuntime ? (
+        <section className="rounded-xl border bg-card p-5">
+          <h2 className="font-semibold">Chat recovery</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Restarts and reconciles this agent&apos;s known-good chat services. This does
+            not restore a backup or delete chat data.
+          </p>
+          <form action={recoverCoreRuntimeAction} className="mt-4">
+            <input type="hidden" name="machineId" value={access.machineId} />
+            <input
+              type="hidden"
+              name="redirectPath"
+              value={`/dashboard/machines/${access.machineId}`}
+            />
+            <FormActionButton variant="outline" pendingLabel="Recovering chat...">
+              <HeartPulseIcon />
+              Recover chat
+            </FormActionButton>
+          </form>
+        </section>
+      ) : null}
       {access.canRemoveKataRuntime ? (
         <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
           <h2 className="font-semibold">Remove this agent</h2>

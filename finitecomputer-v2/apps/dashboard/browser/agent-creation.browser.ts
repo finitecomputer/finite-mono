@@ -67,6 +67,8 @@ type CoreState = {
   creationPosts: unknown[];
   cancelPosts: string[];
   destroyPosts: string[];
+  recoverPosts: string[];
+  restartPosts: string[];
   createDelayMs: number;
   canCreateAgent: boolean;
   creationError: string | null;
@@ -173,6 +175,9 @@ type HostedAuthRequest = {
 };
 
 type HostedDeviceState = {
+  unavailable: boolean;
+  ownerClaimGate: Promise<void> | null;
+  releaseOwnerClaimGate: (() => void) | null;
   app: FakeHostedChatState;
   actions: Array<Record<string, unknown>>;
   runtimeCommands: Array<Record<string, unknown>>;
@@ -211,7 +216,7 @@ type FakeSitesState = {
 
 test("dashboard agent creation browser states", { timeout: 180_000 }, async () => {
   const hostedDevice = await startFakeHostedDevice();
-  const core = await startFakeCore();
+  const core = await startFakeCore(() => hostedDevice.setAvailable(true));
   const brain = await startFakeBrain();
   const sites = await startFakeSites();
   const dashboardPort = await freePort();
@@ -461,12 +466,17 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
-      assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
+      await main.getByRole("button", { name: "Recover chat" }).waitFor({ state: "visible" });
+      await expectVisibleText(
+        page,
+        "Restarts and reconciles this agent's known-good chat services. This does not restore a backup or delete chat data."
+      );
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Destroy" }).count(), 0);
       const openWebChat = main.getByRole("link", { name: "Open chat" });
       await openWebChat.waitFor({ state: "visible" });
 
+      hostedDevice.holdOwnerClaim();
       await openWebChat.click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
       await expectVisibleText(page, "Hello from Completed Oslo Bot.");
@@ -478,12 +488,35 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("button", { name: "New chat", exact: true })
         .waitFor({ state: "visible" });
       await expectVisibleText(page, "browser@finite.vip");
-      assert(
-        hostedDevice.state.runtimeCommands.some(
-          (command) => command.command === "agent.owner.claim"
-        ),
-        "Chat became usable before the owner claim succeeded"
+      await waitFor(
+        () =>
+          hostedDevice.state.runtimeCommands.some(
+            (command) => command.command === "agent.owner.claim"
+          ),
+        5_000,
+        () => "dashboard did not request the owner claim"
       );
+      const composer = page.getByLabel("Message your agent");
+      assert.equal(
+        await composer.isDisabled(),
+        true,
+        "chat composer became usable before the owner claim succeeded"
+      );
+      assert.equal(
+        await page.getByRole("link", { name: "Connections", exact: true }).count(),
+        0,
+        "Connections became usable before the owner claim succeeded"
+      );
+      hostedDevice.releaseOwnerClaim();
+      await waitFor(
+        async () => !(await composer.isDisabled()),
+        5_000,
+        () => "chat composer did not become usable after the owner claim succeeded"
+      );
+      await page
+        .getByRole("link", { name: "Connections", exact: true })
+        .first()
+        .waitFor({ state: "visible" });
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
       await page.getByRole("link", { name: "Connections" }).click();
       await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
@@ -597,6 +630,25 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         ),
         true
       );
+
+      hostedDevice.setAvailable(false);
+      await page.reload();
+      await expectVisibleText(page, "Chat needs attention");
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
+      );
+      await main.getByRole("button", { name: "Restart agent" }).click();
+      await waitFor(() => core.state.restartPosts.includes("project_running"));
+      assert.equal(hostedDevice.state.unavailable, true, "restart must not fake chat recovery");
+      await main.getByRole("button", { name: "Recover chat" }).click();
+      await waitFor(() => core.state.recoverPosts.includes("project_running"));
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
+      );
+      await page
+        .getByRole("paragraph")
+        .filter({ hasText: message })
+        .waitFor({ state: "visible", timeout: 15_000 });
 
       await page.locator('input[type="file"]').setInputFiles({
         name: "browser-proof.png",
@@ -942,6 +994,9 @@ async function startFakeBrain() {
 
 async function startFakeHostedDevice() {
   const state: HostedDeviceState = {
+    unavailable: false,
+    ownerClaimGate: null,
+    releaseOwnerClaimGate: null,
     app: initialHostedChatState(),
     actions: [],
     runtimeCommands: [],
@@ -986,6 +1041,26 @@ async function startFakeHostedDevice() {
     state,
     url,
     runtimeStatusUrl: `${url}/runtime-status`,
+    holdOwnerClaim() {
+      if (state.ownerClaimGate) {
+        throw new Error("owner claim is already held");
+      }
+      state.ownerClaimGate = new Promise((resolve) => {
+        state.releaseOwnerClaimGate = resolve;
+      });
+    },
+    releaseOwnerClaim() {
+      state.releaseOwnerClaimGate?.();
+      state.ownerClaimGate = null;
+      state.releaseOwnerClaimGate = null;
+    },
+    setAvailable(available: boolean) {
+      state.unavailable = !available;
+      if (!available) {
+        for (const stream of streams) stream.end();
+        streams.clear();
+      }
+    },
     emit() {
       state.app.rev += 1;
       emitHostedState(streams, state.app);
@@ -1035,6 +1110,11 @@ async function handleHostedDeviceRequest(
     return;
   }
 
+  if (state.unavailable) {
+    writeJson(response, 503, { error: "hosted chat is temporarily unavailable" });
+    return;
+  }
+
   if (request.method === "GET" && path.startsWith("/v1/app/attachments/")) {
     response.writeHead(200, {
       "cache-control": "private, no-store",
@@ -1055,6 +1135,9 @@ async function handleHostedDeviceRequest(
   if (request.method === "POST" && path === "/v1/app/runtime-commands") {
     const command = (await readJson(request)) as Record<string, unknown>;
     state.runtimeCommands.push(command);
+    if (command.command === "agent.owner.claim" && state.ownerClaimGate) {
+      await state.ownerClaimGate;
+    }
     writeJson(response, 200, applyRuntimeCommand(state, command));
     return;
   }
@@ -1205,37 +1288,39 @@ function applyHostedAction(
       },
     ];
   } else if (operation === "StartProfileChat") {
-    state.rooms = [
-      {
-        room_id: "room_browser_agent",
-        display_name: "Completed Oslo Bot",
-        state: "Connected",
-        status: "Connected",
-        user_status_text: "Connected",
-        last_message_preview: "Hello from Completed Oslo Bot.",
-        unread_count: 0,
-        is_agent_chat: true,
-      },
-    ];
+    if (!state.rooms.some((room) => room.room_id === "room_browser_agent")) {
+      state.rooms = [
+        {
+          room_id: "room_browser_agent",
+          display_name: "Completed Oslo Bot",
+          state: "Connected",
+          status: "Connected",
+          user_status_text: "Connected",
+          last_message_preview: "Hello from Completed Oslo Bot.",
+          unread_count: 0,
+          is_agent_chat: true,
+        },
+      ];
+      state.topics = [
+        {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          title: "General",
+          active_chat_id: "chat_browser_agent",
+          chats: [
+            {
+              chat_id: "chat_browser_agent",
+              title: "General",
+              active: true,
+            },
+          ],
+        },
+      ];
+      state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
+    }
     state.selected_room_id = "room_browser_agent";
-    state.topics = [
-      {
-        room_id: "room_browser_agent",
-        topic_id: "topic_browser_agent",
-        title: "General",
-        active_chat_id: "chat_browser_agent",
-        chats: [
-          {
-            chat_id: "chat_browser_agent",
-            title: "General",
-            active: true,
-          },
-        ],
-      },
-    ];
     state.selected_topic_id = "topic_browser_agent";
     state.selected_chat_id = "chat_browser_agent";
-    state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
   } else if (operation === "SendChatMessage") {
     const payload = action.SendChatMessage as Record<string, unknown> | undefined;
     assert(payload);
@@ -1332,11 +1417,11 @@ function singleHeader(value: string | string[] | undefined) {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-async function startFakeCore() {
+async function startFakeCore(onRecover: () => void = () => {}) {
   let state = emptyCoreState();
   const server = http.createServer(async (request, response) => {
     try {
-      await handleCoreRequest(request, response, state);
+      await handleCoreRequest(request, response, state, onRecover);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: String(error) }));
@@ -1362,7 +1447,8 @@ async function startFakeCore() {
 async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  state: CoreState
+  state: CoreState,
+  onRecover: () => void
 ) {
   if (
     request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
@@ -1404,6 +1490,34 @@ async function handleCoreRequest(
       },
       can_create_agent: state.canCreateAgent,
       requires_billing: true,
+    });
+    return;
+  }
+
+  const runtimeControlMatch = request.url?.match(
+    /^\/api\/core\/v1\/me\/projects\/([^/]+)\/runtime\/(restart|recover-known-good-chat)$/u
+  );
+  if (request.method === "POST" && runtimeControlMatch?.[1] && runtimeControlMatch[2]) {
+    const projectId = decodeURIComponent(runtimeControlMatch[1]);
+    const kind = runtimeControlMatch[2];
+    const project = state.projects.find((candidate) => candidate.project.id === projectId);
+    if (kind === "restart") {
+      state.restartPosts.push(projectId);
+    } else {
+      state.recoverPosts.push(projectId);
+      onRecover();
+    }
+    writeJson(response, 200, {
+      id: `runtime_control_${kind}_${state.restartPosts.length + state.recoverPosts.length}`,
+      project_id: projectId,
+      agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
+      source_host_id: project?.runtime?.source_host_id ?? "oslo",
+      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      requested_by_user_id: "user_browser",
+      kind: kind === "restart" ? "restart" : "recover_known_good_chat_runtime",
+      status: "requested",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     });
     return;
   }
@@ -1514,6 +1628,8 @@ function emptyCoreState(): CoreState {
     creationPosts: [],
     cancelPosts: [],
     destroyPosts: [],
+    recoverPosts: [],
+    restartPosts: [],
     createDelayMs: 0,
     canCreateAgent: false,
     creationError: null,
