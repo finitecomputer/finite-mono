@@ -5,8 +5,8 @@
 - Issue: [finitecomputer/finite-mono#6](https://github.com/finitecomputer/finite-mono/issues/6)
 - Fixed point before session: `3ccedda`
 - Worker session: `/root/ticket_6_knowledge_workspace`
-- Commit: pending review
-- Status: implementation complete; review pending
+- Commit: `8ee9129` plus review-fix follow-up
+- Status: complete
 
 ## Inputs
 
@@ -28,10 +28,11 @@
   editing; slash commands; context menu and quick switcher; Graph View selection,
   filters, controls, labels, statistics, replay, and overlays; existing DOM and
   responsive geometry preservation
-- `tdd` used: yes. The Product Client stylesheet contract failed first because
-  the semantic knowledge-workspace tokens and token-consuming public selectors
-  did not exist. It passed after the presentation layer was introduced, while
-  the existing behavioral assertions remained green.
+- `tdd` used: attempted at the approved Product Client asset seam. The initial
+  red/green CSS contract was removed after spec review correctly found that it
+  asserted individual decorative declarations. The final retained suite covers
+  existing behavior and DOM hooks, while live browser evidence covers the
+  externally visible theme result.
 - Commands run during implementation:
   - `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`
   - `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
@@ -40,16 +41,25 @@
   - Playwright against `http://127.0.0.1:4036/client` at `1440x900`, with
     `colorScheme: light` and `colorScheme: dark`
   - `git diff --check`
-- Full suite command: pending post-review
+- Full suite command:
+  `scripts/with-dev-env cargo test -p finite-brain-server` (40 passed), with
+  Product Client syntax/behavior, seeded verifier, Rustfmt, Clippy, app build,
+  browser, and diff checks also passing after review fixes
 
 ## Review
 
 - Review fixed point: `3ccedda`
-- Standards findings: pending
-- Spec findings: pending
-- Worthy fixes applied: screenshot inspection raised Graph label and statistics
-  contrast after the first browser pass
-- Findings ignored with reasons: pending
+- Standards findings: pass; no documented-standard violations or actionable
+  baseline smells
+- Spec findings: Graph labels, statistics, and controls remained too subdued;
+  the added CSS regex assertions tested private decoration rather than visible
+  behavior or a public asset contract
+- Worthy fixes applied: raised Graph label, statistics, and control contrast in
+  both themes; removed the implementation-coupled CSS assertions; restarted the
+  Rust server so the embedded stylesheet was rebuilt; repeated light/dark Graph
+  and full knowledge-workspace browser evidence
+- Findings ignored with reasons: none
+- Re-review result: spec pass with no remaining findings
 
 ## Risks
 
