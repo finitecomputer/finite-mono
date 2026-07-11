@@ -118,3 +118,4 @@ Notes:
 
 - 2026-07-10: The internal production canary remains dashboard-only. This question repairs the run's previous dangling reference to Electron/device-unification architecture; it is not added to the active queue.
 - 2026-07-10: The current hosted UI lives in `finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx`; Electron's renderer lives in `finitechat/apps/electron-chat/src/App.tsx`.
+- 2026-07-11: Electron is parked with no active implementation work. The attempted shared-surface rollout changed the production web UI and was rolled back. The production Hosted Web UI is now the canonical, protected surface; any future Electron run must extract or reuse that surface without changing its web behavior or appearance.

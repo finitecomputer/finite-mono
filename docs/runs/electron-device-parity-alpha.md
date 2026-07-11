@@ -1,12 +1,19 @@
 # Electron Device Parity Alpha
 
-Status: ACTIVE
+Status: PARKED (2026-07-11)
 
 Owner: Paul
 
 Opened: 2026-07-10
 
-Expires: 2026-07-24
+Former expiry: 2026-07-24
+
+This run is not active. The attempted shared-surface rollout changed the
+production web UI and was rolled back. The production Hosted Web UI is the
+canonical product surface and is protected from Electron-driven changes.
+Electron work may resume only in a future, separately blessed run that first
+extracts or reuses the canonical web presentation without changing its
+behavior or appearance.
 
 Acceptance: Paul signs in to the Hosted Web Device and approves one Electron
 Device for the same Finite Chat account. The Hosted Web Device and Electron
@@ -27,9 +34,11 @@ The paid invited-customer cohort and Stripe admission remain the next run.
 This run does not admit customers, change billing, deploy production services,
 or change agent/runtime authority.
 
-## Queue
+## Parked queue
 
-Work top-down. Every retained item is required.
+No item below is active work. It is retained as historical scope for a future
+run and must not be treated as authorization to change either Electron or the
+Hosted Web UI.
 
 ### P0 — Local daemon is a product boundary
 
