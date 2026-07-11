@@ -82,6 +82,7 @@ import {
   shouldApplyHttpHostedChatSnapshot,
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
+import { hasFinalRemoteResponse } from "@/lib/hosted-web-chat-turn";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const TYPING_IDLE_MS = 2_200;
@@ -337,17 +338,11 @@ export function HostedWebChat({
   }, [activeSiteId, sites]);
 
   useEffect(() => {
-    if (liveMembers.length > 0) {
-      setAwaitingReply(false);
-    }
-  }, [liveMembers.length]);
-
-  useEffect(() => {
     const pendingSeq = pendingRemoteSeqRef.current;
     if (pendingSeq === null) {
       return;
     }
-    if (messages.some((message) => !message.is_mine && message.seq > pendingSeq)) {
+    if (hasFinalRemoteResponse(messages, pendingSeq)) {
       pendingRemoteSeqRef.current = null;
       setAwaitingReply(false);
     }
@@ -543,12 +538,19 @@ export function HostedWebChat({
     });
   }
 
+  // The pending indicator is scoped to the selected chat. Navigating starts a
+  // different view rather than carrying an unseen chat's working state into it.
+  function clearSelectedChatPendingReply() {
+    pendingRemoteSeqRef.current = null;
+    setAwaitingReply(false);
+  }
+
   async function openTopic(topic: HostedChatTopic) {
     setError(null);
     try {
       await dispatch({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
       setSidebarOpen(false);
-      setAwaitingReply(false);
+      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -561,7 +563,7 @@ export function HostedWebChat({
         OpenChat: { room_id: topic.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id },
       });
       setSidebarOpen(false);
-      setAwaitingReply(false);
+      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -575,7 +577,7 @@ export function HostedWebChat({
         StartTopicChat: { room_id: selectedRoom.room_id, topic_id: topic.topic_id, reason: null },
       });
       setSidebarOpen(false);
-      setAwaitingReply(false);
+      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -591,6 +593,7 @@ export function HostedWebChat({
       setCreateTopicTitle("");
       setCreateTopicOpen(false);
       setSidebarOpen(false);
+      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }

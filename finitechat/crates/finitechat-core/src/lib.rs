@@ -355,6 +355,11 @@ pub struct ChatMessage {
     pub kind: ChatMessageKind,
     #[serde(default)]
     pub status: ChatMessageStatus,
+    /// Hermes marks final or otherwise notify-worthy assistant deliveries
+    /// with `metadata.notify=true`. Commentary and tool progress do not carry
+    /// that marker.
+    #[serde(default)]
+    pub final_delivery: bool,
     #[serde(default)]
     pub edit_of_message_id: Option<String>,
     pub payload: Vec<u8>,
@@ -6664,6 +6669,7 @@ struct ChatProjectionPayload {
     display_content: String,
     kind: ChatMessageKind,
     status: ChatMessageStatus,
+    final_delivery: bool,
     edit_of_message_id: Option<String>,
     conversation_id: Option<String>,
     chat_id: Option<String>,
@@ -6728,6 +6734,7 @@ fn project_chat_message(
         rich_text_json,
         kind: projection.kind,
         status: projection.status,
+        final_delivery: projection.final_delivery,
         edit_of_message_id: projection.edit_of_message_id,
         payload: plaintext,
         reply_to_message_id: projection.reply_to_message_id,
@@ -6850,6 +6857,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
             text: question,
             kind: ChatMessageKind::Message,
             status: ChatMessageStatus::Complete,
+            final_delivery: false,
             edit_of_message_id: None,
             conversation_id: None,
             chat_id: None,
@@ -6865,6 +6873,11 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
             text: payload.text,
             kind: chat_message_kind(payload.kind),
             status: chat_message_status(payload.status),
+            final_delivery: payload
+                .metadata
+                .get("notify")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
             edit_of_message_id: payload.edit_of,
             conversation_id: payload.conversation_id,
             chat_id: payload.segment_id,
@@ -6885,6 +6898,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         text,
         kind: ChatMessageKind::Message,
         status: ChatMessageStatus::Complete,
+        final_delivery: false,
         edit_of_message_id: None,
         conversation_id: None,
         chat_id: None,
@@ -10060,6 +10074,7 @@ mod tests {
         .unwrap();
         assert_eq!(message.kind, ChatMessageKind::Tool);
         assert_eq!(message.status, ChatMessageStatus::Running);
+        assert!(!message.final_delivery);
         assert_eq!(
             message.edit_of_message_id.as_deref(),
             Some("tool-message-1")
@@ -10069,10 +10084,12 @@ mod tests {
         let object = legacy_json.as_object_mut().unwrap();
         object.remove("kind");
         object.remove("status");
+        object.remove("final_delivery");
         object.remove("edit_of_message_id");
         let legacy: ChatMessage = serde_json::from_value(legacy_json).unwrap();
         assert_eq!(legacy.kind, ChatMessageKind::Message);
         assert_eq!(legacy.status, ChatMessageStatus::Complete);
+        assert!(!legacy.final_delivery);
         assert_eq!(legacy.edit_of_message_id, None);
 
         let raw = project_chat_message(
@@ -10087,7 +10104,75 @@ mod tests {
         .unwrap();
         assert_eq!(raw.kind, ChatMessageKind::Message);
         assert_eq!(raw.status, ChatMessageStatus::Complete);
+        assert!(!raw.final_delivery);
         assert_eq!(raw.edit_of_message_id, None);
+    }
+
+    #[test]
+    fn chat_projection_maps_notify_to_final_delivery_for_complete_responses() {
+        let sender = DeviceRef {
+            account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            device_id: "hermes".to_owned(),
+        };
+        let owner = DeviceRef {
+            account_id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_owned(),
+            device_id: "hosted-web".to_owned(),
+        };
+        let project = |seq: u64,
+                       text: &str,
+                       kind: HermesSendKindV1,
+                       metadata: BTreeMap<String, serde_json::Value>| {
+            let payload = HermesMessagePayloadV1 {
+                payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+                conversation_id: Some("topic-build".to_owned()),
+                segment_id: Some("segment-7".to_owned()),
+                text: text.to_owned(),
+                kind,
+                status: HermesMessageStatusV1::Complete,
+                edit_of: None,
+                attachments: Vec::new(),
+                reply_to_message_id: None,
+                sender_name: Some("Hermes".to_owned()),
+                metadata,
+            }
+            .encode()
+            .unwrap();
+            project_chat_message(
+                "room-main".to_owned(),
+                seq,
+                format!("message-{seq}"),
+                sender.clone(),
+                payload,
+                NOW,
+                &owner,
+            )
+            .unwrap()
+        };
+
+        let final_message = project(
+            10,
+            "Final answer",
+            HermesSendKindV1::Message,
+            BTreeMap::from([("notify".to_owned(), serde_json::Value::Bool(true))]),
+        );
+        let commentary = project(
+            11,
+            "Still working through it",
+            HermesSendKindV1::Message,
+            BTreeMap::new(),
+        );
+        let tool = project(
+            12,
+            "cargo test complete",
+            HermesSendKindV1::Tool,
+            BTreeMap::from([("notify".to_owned(), serde_json::Value::Bool(false))]),
+        );
+
+        assert!(final_message.final_delivery);
+        assert!(!commentary.final_delivery);
+        assert!(!tool.final_delivery);
     }
 
     #[test]

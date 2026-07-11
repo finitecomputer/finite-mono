@@ -117,6 +117,7 @@ type FakeHostedChatState = {
     display_content: string;
     kind: "message" | "status" | "tool" | "media";
     status: "running" | "complete";
+    final_delivery: boolean;
     edit_of_message_id: string | null;
     is_mine: boolean;
     media: Array<{
@@ -590,12 +591,19 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
+      await expectVisibleText(page, "Completed Oslo Bot is working");
 
       hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
         "complete";
-      hostedDevice.state.app.messages.push(hostedMessage("Browser QA complete.", false, 6));
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Browser QA complete.", false, 6),
+        final_delivery: true,
+      });
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
+      await page
+        .getByText("Completed Oslo Bot is working", { exact: true })
+        .waitFor({ state: "hidden", timeout: 15_000 });
 
       const localSiteUrl = sites.siteUrl;
       hostedDevice.state.app.messages.push(
@@ -1158,6 +1166,7 @@ function hostedMessage(
     display_content: text,
     kind: "message",
     status: "complete",
+    final_delivery: false,
     edit_of_message_id: null,
     is_mine: isMine,
     media: [],

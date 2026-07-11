@@ -78,6 +78,7 @@ export type HostedChatMessage = {
   media: HostedChatMediaAttachment[];
   kind: "message" | "status" | "tool" | "media" | string;
   status: "running" | "complete" | string;
+  final_delivery: boolean;
   edit_of_message_id?: string | null;
   timestamp_unix_seconds: number;
   display_timestamp: string;
