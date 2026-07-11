@@ -118,12 +118,10 @@
   --status-error-border: rgba(239, 68, 68, 0.35);
 
   /* Access and collaboration surfaces share one semantic presentation layer. */
-  --access-canvas: var(--sidebar);
   --access-surface: var(--surface);
   --access-surface-soft: var(--surface-soft);
   --access-surface-raised: var(--surface-raised);
   --access-surface-hover: var(--surface-hover);
-  --access-surface-active: var(--surface-active);
   --access-input: var(--input-bg);
   --access-border: var(--line);
   --access-border-strong: var(--line-strong);

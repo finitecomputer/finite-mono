@@ -62,11 +62,14 @@ declaration test is being treated as a public behavior contract.
 ## Reviewer Output
 
 ```text
-STANDARDS_STATUS: pending
+STANDARDS_STATUS: pass after fixes
 STANDARDS_FINDINGS:
-- pending
+- Fixed: the session artifact referenced two stale ADR filenames.
+- Fixed: two newly declared semantic access tokens had no consumers.
+- Re-review found no remaining documented-standard violations or actionable smells.
 
-SPEC_STATUS: pending
+SPEC_STATUS: pass
 SPEC_FINDINGS:
-- pending
+- None. The presentation slice, preservation constraints, browser evidence, and
+  public-seam tests meet the ticket and parent spec.
 ```
