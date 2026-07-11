@@ -71,7 +71,10 @@ const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
 #[derive(Clone, Debug)]
 pub struct HostedDeviceConfig {
     pub data_root: PathBuf,
+    /// URL used by this process for chat and link-service HTTP transport.
     pub server_url: String,
+    /// Canonical public chat server identity bound into encrypted device links.
+    pub public_url: String,
     pub api_token: String,
 }
 
@@ -389,13 +392,13 @@ fn approve_device_link_for_user(
                     "expiry is outside the supported range".to_owned(),
                 )
             })?;
-    let server_url = normalized_link_server_url(&state.config.server_url)?;
+    let public_url = normalized_link_server_url(&state.config.public_url)?;
     let encrypted_payload = encrypt_device_link_payload(DeviceLinkEncryptInput {
         account_secret_hex: identity.account_secret_hex,
         pairing_public_key: session.pairing_public_key.clone(),
         link_session_id: input.link_session_id.clone(),
         target_device_id: input.target_device_id.clone(),
-        server_url: server_url.clone(),
+        server_url: public_url.clone(),
         issued_at_unix_seconds: now,
         expires_at_unix_seconds,
     })?;
@@ -412,7 +415,7 @@ fn approve_device_link_for_user(
         target_device_id: input.target_device_id,
         pairing_public_key: session.pairing_public_key,
         account_id: identity.account_id,
-        server_url,
+        server_url: public_url,
         issued_at_unix_seconds: now,
         expires_at_unix_seconds,
         encrypted_payload,
@@ -591,7 +594,7 @@ fn validate_pending_device_link(
             .expires_at_unix_seconds
             .saturating_sub(pending.issued_at_unix_seconds)
             > DEVICE_LINK_MAX_TTL_SECONDS
-        || pending.server_url != normalized_link_server_url(&state.config.server_url)?
+        || pending.server_url != normalized_link_server_url(&state.config.public_url)?
     {
         return Err(HostedDeviceError::InvalidDeviceLink(
             "pending record is malformed".to_owned(),

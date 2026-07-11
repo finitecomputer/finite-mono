@@ -18,6 +18,7 @@ const {
   DaemonSupervisor,
   DeviceLinkSupervisor,
   daemonRequestVersionMatches,
+  deviceLinkFailureMessage,
   loadOrCreateDeviceId,
   resolveDaemonBinary,
   startDaemonRuntime,
@@ -717,7 +718,7 @@ async function finishSuccessfulDeviceLink(link) {
   }
 }
 
-function finishFailedDeviceLink(link) {
+function finishFailedDeviceLink(link, error) {
   if (activeDeviceLink !== link) {
     return;
   }
@@ -725,7 +726,7 @@ function finishFailedDeviceLink(link) {
   discardProvisionalAccountSecret();
   deviceLinkStatus({
     status: "failed",
-    message: "This desktop could not be linked. Start a new link to try again.",
+    message: deviceLinkFailureMessage(error),
   });
 }
 
@@ -761,7 +762,7 @@ async function beginDeviceLink() {
   }
   void link.completion.then(
     () => finishSuccessfulDeviceLink(link),
-    () => finishFailedDeviceLink(link)
+    (error) => finishFailedDeviceLink(link, error)
   );
   try {
     const ready = await readyPromise;
@@ -770,9 +771,9 @@ async function beginDeviceLink() {
     }
     deviceLinkStatus({ status: "waiting", ready });
     return ready;
-  } catch {
-    finishFailedDeviceLink(link);
-    throw new Error("This desktop could not start device linking");
+  } catch (error) {
+    finishFailedDeviceLink(link, error);
+    throw new Error(deviceLinkFailureMessage(error, "This desktop could not start device linking"));
   }
 }
 

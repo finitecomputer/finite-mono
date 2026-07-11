@@ -19,6 +19,8 @@ struct Args {
     data_root: PathBuf,
     #[arg(long, env = "FINITECHAT_SERVER_URL", default_value = DEFAULT_SERVER_URL)]
     server_url: String,
+    #[arg(long, env = "FINITECHAT_PUBLIC_URL", default_value = DEFAULT_SERVER_URL)]
+    public_url: String,
 }
 
 #[tokio::main]
@@ -37,6 +39,7 @@ async fn main() -> Result<()> {
         app(HostedDeviceConfig {
             data_root: args.data_root,
             server_url: args.server_url,
+            public_url: args.public_url,
             api_token,
         }),
     )

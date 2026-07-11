@@ -31,6 +31,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 const TOKEN: &str = "hosted-device-test-token";
+const PUBLIC_SERVER_URL: &str = "https://chat.finite.computer";
 
 #[tokio::test]
 async fn state_requires_internal_authorization_and_verified_user() {
@@ -106,14 +107,16 @@ async fn state_requires_internal_authorization_and_verified_user() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workos_approved_device_link_is_isolated_durable_and_fans_out() {
+async fn device_link_uses_internal_transport_but_binds_the_public_server_url() {
     let root = TempDir::new().unwrap();
     let device_link_now = test_now_unix_seconds();
     let server_db = root.path().join("device-link-server.sqlite3");
     let (server_url, _, server_task) = spawn_chat_server(&server_db, None).await;
+    assert_ne!(server_url.as_str(), PUBLIC_SERVER_URL);
     let config = HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     };
     let hosted = app_with_fixed_device_link_now(config.clone(), device_link_now);
@@ -182,17 +185,31 @@ async fn workos_approved_device_link_is_isolated_durable_and_fans_out() {
     assert_eq!(uploaded.state, HttpLinkSessionState::PayloadUploaded);
     let encrypted_payload = uploaded.encrypted_payload.clone().unwrap();
     let pairing_secret_key_hex = pairing.secret_key_hex.clone();
+    let rejected_internal_url = decrypt_device_link_payload(DeviceLinkDecryptInput {
+        pairing_secret_key_hex: pairing_secret_key_hex.clone(),
+        encrypted_payload: encrypted_payload.clone(),
+        expected_link_session_id: link_session_id.to_owned(),
+        expected_pairing_public_key: pairing.public_key_hex.clone(),
+        expected_target_device_id: target_device_id.to_owned(),
+        expected_server_url: server_url.clone(),
+        now_unix_seconds: device_link_now + 1,
+    });
+    assert!(
+        rejected_internal_url.is_err(),
+        "transport URL must not satisfy the encrypted public server binding"
+    );
     let payload = decrypt_device_link_payload(DeviceLinkDecryptInput {
         pairing_secret_key_hex: pairing_secret_key_hex.clone(),
         encrypted_payload: encrypted_payload.clone(),
         expected_link_session_id: link_session_id.to_owned(),
         expected_pairing_public_key: pairing.public_key_hex,
         expected_target_device_id: target_device_id.to_owned(),
-        expected_server_url: server_url.clone(),
+        expected_server_url: PUBLIC_SERVER_URL.to_owned(),
         now_unix_seconds: device_link_now + 1,
     })
     .unwrap();
     assert_eq!(payload.target_device_id, target_device_id);
+    assert_eq!(payload.server_url, PUBLIC_SERVER_URL);
 
     let persisted_path = config
         .data_root
@@ -345,6 +362,7 @@ async fn expired_device_link_is_closed_and_stays_expired_after_restart() {
     let config = HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url: server_url.clone(),
+        public_url: server_url.clone(),
         api_token: TOKEN.to_owned(),
     };
     let pairing = create_device_link_pairing_key();
@@ -412,6 +430,7 @@ async fn oversized_chunked_link_service_response_is_rejected() {
     let device = app(HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url: format!("http://{address}"),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     });
     let response = device_link_for(
@@ -463,6 +482,7 @@ async fn profile_image_upload_returns_a_public_finitechat_blob_url() {
     let device = app(HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     });
 
@@ -538,6 +558,7 @@ async fn hosted_device_chats_with_an_agent_and_restarts_with_the_transcript() {
     let config = HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     };
     let first_app = app(config.clone());
@@ -661,6 +682,7 @@ async fn attachment_bytes_are_isolated_redacted_and_survive_device_restart() {
     let config = HostedDeviceConfig {
         data_root: root.path().join("hosted-devices"),
         server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     };
     let first_app = app(config.clone());
@@ -844,6 +866,7 @@ fn test_app(root: &TempDir) -> axum::Router {
     app(HostedDeviceConfig {
         data_root: root.path().to_path_buf(),
         server_url: "http://127.0.0.1:9".to_owned(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
     })
 }

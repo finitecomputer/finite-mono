@@ -9,6 +9,69 @@ const DEFAULT_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const DEVICE_LINK_LINE_LIMIT_BYTES = 4 * 1024;
 
+const DEVICE_LINK_FAILURE_MESSAGES = Object.freeze({
+  FINITECHAT_DEVICE_LINK_INVALID_CONFIGURATION:
+    "Finite Chat has an invalid device-link configuration. Restart the app and try again.",
+  FINITECHAT_DEVICE_LINK_ENTROPY:
+    "This desktop could not create a secure device link. Restart the app and try again.",
+  FINITECHAT_DEVICE_LINK_REQUEST:
+    "Finite Chat could not reach the device-link service. Check your connection and start a new link.",
+  FINITECHAT_DEVICE_LINK_SERVER_STATUS:
+    "The device-link service rejected this request. Start a new link and try again.",
+  FINITECHAT_DEVICE_LINK_INVALID_RESPONSE:
+    "The device-link service returned an invalid response. Start a new link and try again.",
+  FINITECHAT_DEVICE_LINK_EXPIRED: "This device link expired. Start a new link to try again.",
+  FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED:
+    "The approved device-link payload did not match this link. Start a new link to try again.",
+  FINITECHAT_DEVICE_LINK_RESULT_PIPE:
+    "This desktop could not securely receive the linked account. Start a new link to try again.",
+});
+
+const DEVICE_LINK_BOOTSTRAP_FAILURE_CODES = new Map([
+  ["invalid device-link configuration", "FINITECHAT_DEVICE_LINK_INVALID_CONFIGURATION"],
+  ["device-link entropy generation failed", "FINITECHAT_DEVICE_LINK_ENTROPY"],
+  ["device-link server request failed", "FINITECHAT_DEVICE_LINK_REQUEST"],
+  ["device-link server returned an invalid response", "FINITECHAT_DEVICE_LINK_INVALID_RESPONSE"],
+  ["device-link request expired", "FINITECHAT_DEVICE_LINK_EXPIRED"],
+  ["device-link payload failed authentication", "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED"],
+  ["device-link result pipe failed", "FINITECHAT_DEVICE_LINK_RESULT_PIPE"],
+]);
+
+function deviceLinkFailure(code) {
+  const message = DEVICE_LINK_FAILURE_MESSAGES[code];
+  if (!message) {
+    return null;
+  }
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+/** Classify only the daemon's bounded, public DeviceLinkBootstrapError text. */
+function parseDeviceLinkBootstrapError(line) {
+  if (typeof line !== "string" || Buffer.byteLength(line) > DEVICE_LINK_LINE_LIMIT_BYTES) {
+    return null;
+  }
+  const exactCode = DEVICE_LINK_BOOTSTRAP_FAILURE_CODES.get(line);
+  if (exactCode) {
+    return deviceLinkFailure(exactCode);
+  }
+  if (/^device-link server rejected the request \([1-9][0-9]{2}\)$/.test(line)) {
+    return deviceLinkFailure("FINITECHAT_DEVICE_LINK_SERVER_STATUS");
+  }
+  return null;
+}
+
+function deviceLinkFailureMessage(
+  error,
+  fallback = "This desktop could not be linked. Start a new link to try again."
+) {
+  const code = error?.code;
+  return typeof code === "string" && Object.prototype.hasOwnProperty.call(DEVICE_LINK_FAILURE_MESSAGES, code)
+    ? DEVICE_LINK_FAILURE_MESSAGES[code]
+    : fallback;
+}
+
 function legacyHostnameDeviceId(hostname) {
   // This intentionally matches the exact derivation used before Device ids
   // were persisted. Changing its normalization would fork an existing store.
@@ -409,6 +472,7 @@ class DeviceLinkSupervisor {
     this.sawLinked = false;
     this.secretStored = false;
     this.secretPromoted = false;
+    this.childFailure = null;
     this.privateResultPromise = null;
     this.promotionPromise = null;
     this.readers = [];
@@ -442,7 +506,6 @@ class DeviceLinkSupervisor {
       }
     );
     this.child = child;
-    child.stderr.resume();
 
     let resolveReady;
     let rejectReady;
@@ -473,6 +536,16 @@ class DeviceLinkSupervisor {
       new BoundedLineReader(child.stdio[3], {
         onLine: (line) => void this.#onPrivateLine(line),
         onFailure: fail,
+      }),
+      new BoundedLineReader(child.stderr, {
+        onLine: (line) => {
+          this.childFailure ??= parseDeviceLinkBootstrapError(line);
+        },
+        // stderr is diagnostic-only. Unknown or oversized output must neither
+        // enter renderer state nor override the generic close failure.
+        // Keep draining after the bounded classifier detaches so a noisy child
+        // cannot block while trying to exit on a full stderr pipe.
+        onFailure: () => child.stderr.resume(),
       })
     );
     child.once("error", () => fail(new Error("Finite Chat device link could not start")));
@@ -577,7 +650,9 @@ class DeviceLinkSupervisor {
       this.resolveCompletion();
       return;
     }
-    const error = new Error(`Finite Chat device link stopped before completion (${code ?? signal ?? "unknown"})`);
+    const error =
+      this.childFailure ??
+      new Error(`Finite Chat device link stopped before completion (${code ?? signal ?? "unknown"})`);
     if (!this.ready) {
       this.rejectReady(error);
     }
@@ -916,12 +991,14 @@ module.exports = {
   DaemonSupervisor,
   DeviceLinkSupervisor,
   daemonRequestVersionMatches,
+  deviceLinkFailureMessage,
   directoryHasEntries,
   legacyHostnameDeviceId,
   loadOrCreateDeviceId,
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,
+  parseDeviceLinkBootstrapError,
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,

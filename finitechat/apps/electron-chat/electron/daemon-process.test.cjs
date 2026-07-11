@@ -23,11 +23,13 @@ const {
   DaemonSupervisor,
   DeviceLinkSupervisor,
   daemonRequestVersionMatches,
+  deviceLinkFailureMessage,
   legacyHostnameDeviceId,
   loadOrCreateDeviceId,
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,
+  parseDeviceLinkBootstrapError,
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,
@@ -289,6 +291,45 @@ test("device-link public and private records are narrow and independently valida
   );
 });
 
+test("device-link child failures use a bounded exact allowlist with fixed renderer copy", () => {
+  const knownFailures = new Map([
+    ["invalid device-link configuration", "FINITECHAT_DEVICE_LINK_INVALID_CONFIGURATION"],
+    ["device-link entropy generation failed", "FINITECHAT_DEVICE_LINK_ENTROPY"],
+    ["device-link server request failed", "FINITECHAT_DEVICE_LINK_REQUEST"],
+    ["device-link server returned an invalid response", "FINITECHAT_DEVICE_LINK_INVALID_RESPONSE"],
+    ["device-link request expired", "FINITECHAT_DEVICE_LINK_EXPIRED"],
+    ["device-link payload failed authentication", "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED"],
+    ["device-link result pipe failed", "FINITECHAT_DEVICE_LINK_RESULT_PIPE"],
+  ]);
+  for (const [line, code] of knownFailures) {
+    assert.equal(parseDeviceLinkBootstrapError(line)?.code, code);
+  }
+
+  const payloadRejected = parseDeviceLinkBootstrapError("device-link payload failed authentication");
+  assert.equal(payloadRejected.code, "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED");
+  assert.equal(
+    deviceLinkFailureMessage(payloadRejected),
+    "The approved device-link payload did not match this link. Start a new link to try again."
+  );
+
+  const serverStatus = parseDeviceLinkBootstrapError("device-link server rejected the request (502)");
+  assert.equal(serverStatus.code, "FINITECHAT_DEVICE_LINK_SERVER_STATUS");
+  assert.doesNotMatch(deviceLinkFailureMessage(serverStatus), /502/);
+
+  for (const unsafe of [
+    "device-link payload failed authentication: link-public-secret",
+    '{"server_body":"private response"}',
+    "device-link server rejected the request (1234)",
+    "x".repeat(4 * 1024 + 1),
+  ]) {
+    assert.equal(parseDeviceLinkBootstrapError(unsafe), null);
+  }
+  assert.equal(
+    deviceLinkFailureMessage({ code: "toString" }),
+    "This desktop could not be linked. Start a new link to try again."
+  );
+});
+
 class FakeChild extends EventEmitter {
   constructor() {
     super();
@@ -477,6 +518,72 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
   child.exit(0);
   await completion;
   assert.deepEqual(promotions, ["promoted"]);
+});
+
+test("device link propagates an allowlisted payload rejection without reflecting other stderr", async () => {
+  const child = new FakeLinkChild();
+  const link = new DeviceLinkSupervisor({
+    spawnProcess: () => child,
+    binaryPath: "/tmp/finitechatd",
+    serverUrl: "https://chat.finite.computer",
+    dashboardUrl: "https://finite.computer",
+    deviceId: "electron-test-device",
+    cwd: "/tmp",
+    storeAccountSecret: async () => {},
+    promoteAccountSecret: async () => {},
+  });
+  const readyPromise = link.begin();
+  const completion = link.completion;
+  emitDeviceLinkReady(child);
+  await readyPromise;
+
+  const privateStderr = "link-public-private-token server-body-private";
+  child.stderr.write(`${privateStderr}\n`);
+  child.stderr.write("device-link payload failed authentication\n");
+  child.exit(1);
+
+  await assert.rejects(completion, (error) => {
+    assert.equal(error.code, "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED");
+    assert.equal(
+      error.message,
+      "The approved device-link payload did not match this link. Start a new link to try again."
+    );
+    assert.doesNotMatch(error.message, new RegExp(privateStderr));
+    return true;
+  });
+});
+
+test("device link keeps unknown child stderr behind the generic renderer failure", async () => {
+  const child = new FakeLinkChild();
+  const link = new DeviceLinkSupervisor({
+    spawnProcess: () => child,
+    binaryPath: "/tmp/finitechatd",
+    serverUrl: "https://chat.finite.computer",
+    dashboardUrl: "https://finite.computer",
+    deviceId: "electron-test-device",
+    cwd: "/tmp",
+    storeAccountSecret: async () => {},
+    promoteAccountSecret: async () => {},
+  });
+  const readyPromise = link.begin();
+  const completion = link.completion;
+  emitDeviceLinkReady(child);
+  await readyPromise;
+
+  const privateStderr = "server said link-public-private-token in a private body";
+  child.stderr.write("x".repeat(4 * 1024 + 1));
+  assert.equal(child.stderr.readableFlowing, true);
+  child.stderr.write(`${privateStderr}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(child.stderr.readableLength, 0);
+  child.exit(1);
+
+  await assert.rejects(completion, (error) => {
+    const rendererMessage = deviceLinkFailureMessage(error);
+    assert.equal(rendererMessage, "This desktop could not be linked. Start a new link to try again.");
+    assert.doesNotMatch(rendererMessage, new RegExp(privateStderr));
+    return true;
+  });
 });
 
 test("device link drains final stdout data after exit before settling on close", async () => {
