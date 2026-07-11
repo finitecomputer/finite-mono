@@ -2,6 +2,16 @@ import type { AccountAuthContext } from "@/lib/dashboard-auth";
 
 const HOSTED_DEVICE_TIMEOUT_MS = 15_000;
 
+export class HostedDeviceRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "HostedDeviceRequestError";
+  }
+}
+
 export type HostedChatRoom = {
   room_id: string;
   display_name: string;
@@ -71,7 +81,7 @@ export type HostedChatMessage = {
   sender_npub?: string | null;
   text: string;
   display_content: string;
-  rich_text_json: string;
+  rich_text_json?: string;
   reply_to_message_id?: string | null;
   is_mine: boolean;
   outbound_delivery?: HostedChatOutboundDelivery | null;
@@ -106,6 +116,15 @@ export type HostedChatProfile = {
   is_agent: boolean;
 };
 
+export type HostedChatDevice = {
+  account_id: string;
+  device_id: string;
+  active: boolean;
+  current_device: boolean;
+  revoked: boolean;
+  room_count: number;
+};
+
 export type HostedChatState = {
   rev: number;
   identity: {
@@ -122,6 +141,7 @@ export type HostedChatState = {
   toast?: string | null;
   messages: HostedChatMessage[];
   profiles: HostedChatProfile[];
+  devices: HostedChatDevice[];
   typing_members: HostedChatTypingMember[];
   flow: {
     notice_text?: string | null;
@@ -172,7 +192,9 @@ export type HostedChatAction =
     }
   | { LoadOlderMessages: { room_id: string; before_message_id: string; limit: number } }
   | { MarkRoomRead: { room_id: string } }
-  | { SetTyping: { room_id: string; is_typing: boolean } };
+  | { SetTyping: { room_id: string; is_typing: boolean } }
+  | { RefreshDevices: null }
+  | { RevokeDevice: { account_id: string; device_id: string } };
 
 export type HostedDeviceConfig = {
   baseUrl: string;
@@ -195,6 +217,25 @@ export type HostedRuntimeCommandResponse = {
   status: "succeeded" | "failed" | "cancelled";
   body?: unknown;
   error?: { code: string; message: string } | null;
+};
+
+export type HostedDeviceLinkRequest = {
+  link_session_id: string;
+  target_device_id: string;
+};
+
+export type HostedDeviceLinkStatus =
+  | "awaiting_claim"
+  | "awaiting_key_package"
+  | "joining_rooms"
+  | "ready"
+  | "expired";
+
+export type HostedDeviceLinkResponse = HostedDeviceLinkRequest & {
+  status: HostedDeviceLinkStatus;
+  expires_at_unix_seconds: number;
+  room_count: number;
+  active_room_count: number;
 };
 
 export function hostedDeviceConfig(
@@ -266,6 +307,40 @@ export async function hostedDeviceRuntimeCommand(
   );
 }
 
+export async function hostedDeviceApproveLink(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: HostedDeviceLinkRequest
+) {
+  const result = await hostedDeviceJson<unknown>(
+    config,
+    account,
+    "/v1/device-links/approve",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
+  return parseHostedDeviceLinkResponse(result, input);
+}
+
+export async function hostedDeviceLinkStatus(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: HostedDeviceLinkRequest
+) {
+  const result = await hostedDeviceJson<unknown>(
+    config,
+    account,
+    "/v1/device-links/status",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
+  return parseHostedDeviceLinkResponse(result, input);
+}
+
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -308,7 +383,7 @@ export async function hostedDeviceProfileImage(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new Error(await responseError(response));
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
   }
   const result = (await response.json()) as { image_url?: unknown };
   if (typeof result.image_url !== "string" || !result.image_url.trim()) {
@@ -349,9 +424,55 @@ async function hostedDeviceJson<T>(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    throw new Error(await responseError(response));
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
   }
   return response.json() as Promise<T>;
+}
+
+function parseHostedDeviceLinkResponse(
+  value: unknown,
+  expected: HostedDeviceLinkRequest
+): HostedDeviceLinkResponse {
+  if (!value || typeof value !== "object") {
+    throw new Error("Device-link service returned an invalid response.");
+  }
+  const record = value as Record<string, unknown>;
+  const statuses = new Set<HostedDeviceLinkStatus>([
+    "awaiting_claim",
+    "awaiting_key_package",
+    "joining_rooms",
+    "ready",
+    "expired",
+  ]);
+  const status = record.status;
+  const expiresAt = record.expires_at_unix_seconds;
+  const roomCount = record.room_count;
+  const activeRoomCount = record.active_room_count;
+  if (
+    record.link_session_id !== expected.link_session_id ||
+    record.target_device_id !== expected.target_device_id ||
+    typeof status !== "string" ||
+    !statuses.has(status as HostedDeviceLinkStatus) ||
+    !Number.isSafeInteger(expiresAt) ||
+    (expiresAt as number) < 0 ||
+    !Number.isSafeInteger(roomCount) ||
+    (roomCount as number) < 0 ||
+    !Number.isSafeInteger(activeRoomCount) ||
+    (activeRoomCount as number) < 0 ||
+    (activeRoomCount as number) > (roomCount as number)
+  ) {
+    throw new Error("Device-link service returned an invalid response.");
+  }
+  // Project an exact allowlist. Even an accidentally expanded internal
+  // response can never forward encrypted or signer material to the browser.
+  return {
+    link_session_id: expected.link_session_id,
+    target_device_id: expected.target_device_id,
+    status: status as HostedDeviceLinkStatus,
+    expires_at_unix_seconds: expiresAt as number,
+    room_count: roomCount as number,
+    active_room_count: activeRoomCount as number,
+  };
 }
 
 async function responseError(response: Response) {

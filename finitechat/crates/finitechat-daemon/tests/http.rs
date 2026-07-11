@@ -4,7 +4,8 @@ use std::path::Path;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use finitechat_core::{AppAction, AppState, FiniteChatRuntime, OpenOptions};
-use finitechat_daemon::app;
+use finitechat_daemon::app_with_data_dir;
+use finitechat_daemon::{MAX_DAEMON_ATTACHMENTS_PER_MESSAGE, MAX_DAEMON_MULTIPART_BODY_BYTES, app};
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -27,6 +28,13 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
             .header("content-type", "application/json")
             .body(Body::from("not-json"))
             .unwrap(),
+        Request::post("/v1/app/attachments")
+            .header("content-type", "not-multipart")
+            .body(Body::from("not-multipart"))
+            .unwrap(),
+        Request::get("/v1/app/attachments/room/message/attachment")
+            .body(Body::empty())
+            .unwrap(),
     ];
 
     for request in requests {
@@ -34,7 +42,12 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    for uri in ["/v1/healthz", "/v1/app/state", "/v1/app/updates"] {
+    for uri in [
+        "/v1/healthz",
+        "/v1/app/state",
+        "/v1/app/updates",
+        "/v1/app/attachments/room/message/attachment",
+    ] {
         let response = daemon
             .clone()
             .oneshot(
@@ -47,6 +60,129 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
+
+    let attachment = daemon
+        .oneshot(
+            Request::post("/v1/app/attachments")
+                .header("authorization", format!("Bearer {WRONG_TOKEN}"))
+                .header("content-type", "not-multipart")
+                .body(Body::from("not-multipart"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attachment.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_multipart_upload_dispatches_exact_attachment_bytes() {
+    let root = TempDir::new().unwrap();
+    let (server_url, server_task) = spawn_chat_server(&root.path().join("server.sqlite3")).await;
+    let daemon = test_app(&root, &server_url);
+    action(daemon.clone(), AppAction::StartRuntime).await;
+    let created = action(
+        daemon.clone(),
+        AppAction::CreateRoom {
+            display_name: "Binary attachment parity".to_owned(),
+        },
+    )
+    .await;
+    let room_id = created.selected_room_id.unwrap();
+    let topic_id = created.selected_topic_id.unwrap();
+    let chat_id = created.selected_chat_id.unwrap();
+    let plaintext = b"binary\0bytes\r\nthat are not JSON".to_vec();
+    let response = upload(
+        daemon.clone(),
+        &[
+            ("room_id", room_id.as_str()),
+            ("topic_id", topic_id.as_str()),
+            ("chat_id", chat_id.as_str()),
+            ("caption", "sent through multipart"),
+        ],
+        &[MultipartFile {
+            filename: "proof.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            bytes: plaintext.clone(),
+        }],
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let uploaded: AppState = read_json(response).await;
+    assert!(uploaded.identity.account_secret_hex.is_empty());
+    let message = uploaded
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .media
+                .iter()
+                .any(|attachment| attachment.filename == "proof.bin")
+        })
+        .expect("multipart upload must dispatch an attachment action");
+    let attachment = message
+        .media
+        .iter()
+        .find(|attachment| attachment.filename == "proof.bin")
+        .unwrap();
+    assert_eq!(attachment.mime_type, "application/octet-stream");
+    assert_eq!(attachment.local_path, None);
+    assert!(uploaded.media_gallery.as_ref().is_none_or(|gallery| {
+        gallery
+            .items
+            .iter()
+            .all(|item| item.attachment.local_path.is_none())
+    }));
+
+    let download = request(
+        daemon,
+        Request::get(format!(
+            "/v1/app/attachments/{}/{}/{}",
+            room_id, message.message_id, attachment.attachment_id
+        )),
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(
+        download.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(download.headers()["cache-control"], "private, no-store");
+    assert_eq!(
+        download.into_body().collect().await.unwrap().to_bytes(),
+        plaintext.as_slice()
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn multipart_upload_enforces_count_and_declared_request_limits_without_large_bodies() {
+    let root = TempDir::new().unwrap();
+    let daemon = test_app(&root, "http://127.0.0.1:9");
+    let files = (0..=MAX_DAEMON_ATTACHMENTS_PER_MESSAGE)
+        .map(|index| MultipartFile {
+            filename: format!("small-{index}.txt"),
+            content_type: "text/plain".to_owned(),
+            bytes: vec![b'x'],
+        })
+        .collect::<Vec<_>>();
+    let too_many = upload(daemon.clone(), &[("room_id", "room-test")], &files, None).await;
+    assert_eq!(too_many.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let declared_too_large = upload(
+        daemon,
+        &[("room_id", "room-test")],
+        &[MultipartFile {
+            filename: "tiny.txt".to_owned(),
+            content_type: "text/plain".to_owned(),
+            bytes: vec![b'x'],
+        }],
+        Some(MAX_DAEMON_MULTIPART_BODY_BYTES + 1),
+    )
+    .await;
+    assert_eq!(declared_too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
@@ -144,7 +280,8 @@ async fn authenticated_actions_and_restart_reopen_the_same_selected_chat() {
 }
 
 fn test_app(root: &TempDir, server_url: &str) -> axum::Router {
-    app(open_runtime(&root.path().join("device"), server_url), TOKEN).unwrap()
+    let data_dir = root.path().join("device");
+    app_with_data_dir(open_runtime(&data_dir, server_url), TOKEN, data_dir).unwrap()
 }
 
 fn open_runtime(data_dir: &Path, server_url: &str) -> std::sync::Arc<FiniteChatRuntime> {
@@ -198,6 +335,62 @@ async fn action(daemon: axum::Router, action: AppAction) -> AppState {
 async fn read_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+struct MultipartFile {
+    filename: String,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+async fn upload(
+    daemon: axum::Router,
+    fields: &[(&str, &str)],
+    files: &[MultipartFile],
+    declared_content_length: Option<usize>,
+) -> axum::response::Response {
+    let boundary = "finitechat-daemon-test-boundary";
+    let body = multipart_body(boundary, fields, files);
+    let mut request = Request::post("/v1/app/attachments")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        );
+    if let Some(content_length) = declared_content_length {
+        request = request.header("content-length", content_length);
+    }
+    daemon
+        .oneshot(request.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
+fn multipart_body(boundary: &str, fields: &[(&str, &str)], files: &[MultipartFile]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    for file in files {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"files\"; filename=\"{}\"\r\n",
+                file.filename
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", file.content_type).as_bytes());
+        body.extend_from_slice(&file.bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
 }
 
 async fn spawn_chat_server(database: &Path) -> (String, tokio::task::JoinHandle<()>) {

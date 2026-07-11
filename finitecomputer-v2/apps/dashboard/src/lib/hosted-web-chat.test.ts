@@ -81,9 +81,19 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
     }),
     { SetTyping: { room_id: "room-1", is_typing: true } }
   );
+
+  assert.deepEqual(parseHostedChatAction({ RefreshDevices: null }), {
+    RefreshDevices: null,
+  });
+  assert.deepEqual(
+    parseHostedChatAction({
+      RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" },
+    }),
+    { RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" } }
+  );
 });
 
-test("parseHostedChatAction keeps pairing and product management off the browser action surface", () => {
+test("parseHostedChatAction keeps pairing and unsupported operations off the browser action surface", () => {
   assert.throws(
     () => parseHostedChatAction({ ScanTarget: { value: "finite://join?secret" } }),
     (error: unknown) =>

@@ -47,24 +47,53 @@ test("own and stale final deliveries do not finish the turn", () => {
   );
 });
 
+test("a final message from another linked Device is still the user, not the agent", () => {
+  assert.equal(
+    hasFinalRemoteResponse(
+      [
+        message({
+          seq: 11,
+          kind: "message",
+          status: "complete",
+          finalDelivery: true,
+          senderAccountId: "account-me",
+        }),
+      ],
+      10,
+      "account-me"
+    ),
+    false
+  );
+  assert.equal(
+    hasFinalRemoteResponse(
+      [message({ seq: 12, kind: "message", status: "complete", finalDelivery: true })],
+      10,
+      "account-me"
+    ),
+    true
+  );
+});
+
 function message({
   seq,
   kind,
   status,
   finalDelivery = false,
   isMine = false,
+  senderAccountId,
 }: {
   seq: number;
   kind: HostedChatMessage["kind"];
   status: HostedChatMessage["status"];
   finalDelivery?: boolean;
   isMine?: boolean;
+  senderAccountId?: string;
 }): HostedChatMessage {
   return {
     room_id: "room-1",
     seq,
     message_id: `message-${seq}`,
-    sender_account_id: isMine ? "account-me" : "account-agent",
+    sender_account_id: senderAccountId ?? (isMine ? "account-me" : "account-agent"),
     sender_device_id: isMine ? "device-me" : "device-agent",
     sender_display_name: isMine ? "Me" : "Agent",
     text: "",

@@ -1661,6 +1661,65 @@ svg {
   animation: finiteChatSpin 900ms linear infinite;
 }
 
+.finite-chat__tool-rollup {
+  width: min(100%, 760px);
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+}
+
+.finite-chat__tool-rollup > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 11px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.finite-chat__tool-rollup > summary::-webkit-details-marker {
+  display: none;
+}
+
+.finite-chat__tool-rollup > summary > span {
+  flex: 1;
+}
+
+.finite-chat__tool-rollup > summary > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.finite-chat__tool-rollup > summary > svg:last-child {
+  transition: transform 140ms ease;
+}
+
+.finite-chat__tool-rollup[open] > summary > svg:last-child {
+  transform: rotate(90deg);
+}
+
+.finite-chat__tool-rollup-body {
+  display: grid;
+  gap: 6px;
+  padding: 0 11px 11px;
+}
+
+.finite-chat__tool-rollup-body pre {
+  overflow-x: auto;
+  margin: 0;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  padding: 8px;
+  color: var(--text-primary);
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+}
+
 @keyframes finiteChatPulse {
   0%,
   100% {

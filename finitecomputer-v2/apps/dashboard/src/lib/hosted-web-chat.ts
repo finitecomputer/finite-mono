@@ -292,6 +292,20 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "RefreshDevices":
+      if (input !== null) {
+        throw new HostedWebChatError("That chat action is not available.", 400);
+      }
+      return { RefreshDevices: null };
+    case "RevokeDevice": {
+      const value = objectRecord(input, operation);
+      return {
+        RevokeDevice: {
+          account_id: boundedString(value.account_id, "account_id"),
+          device_id: boundedString(value.device_id, "device_id"),
+        },
+      };
+    }
     default:
       throw new HostedWebChatError(`Unsupported chat action: ${operation}`, 400);
   }

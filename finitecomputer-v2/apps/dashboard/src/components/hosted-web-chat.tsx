@@ -27,6 +27,7 @@ import {
   Loader2Icon,
   LogOutIcon,
   MonitorIcon,
+  MonitorSmartphoneIcon,
   MoreHorizontalIcon,
   PanelLeftIcon,
   PaperclipIcon,
@@ -68,6 +69,7 @@ import {
 import { Input } from "@/components/ui/input";
 import type {
   HostedChatAction,
+  HostedChatDevice,
   HostedChatMediaAttachment,
   HostedChatMessage,
   HostedChatState,
@@ -82,7 +84,17 @@ import {
   shouldApplyHttpHostedChatSnapshot,
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
-import { hasFinalRemoteResponse } from "@/lib/hosted-web-chat-turn";
+import {
+  beginPendingChatTurn,
+  attachmentSendError,
+  liveActivityLabel as sharedLiveActivityLabel,
+  messageContent,
+  pendingTurnIsComplete,
+  pendingTurnMatchesSelection,
+  transcriptItems,
+  type ChatSelection,
+  type PendingChatTurn,
+} from "@finite/chat-ui";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const TYPING_IDLE_MS = 2_200;
@@ -91,7 +103,6 @@ const MAX_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_ATTACHMENTS = 8;
 const AUTO_FOLLOW_SCROLL_THRESHOLD_PX = 120;
 const HOME_TOPIC_ID = "home";
-const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
 
 type PendingAttachment = {
   id: string;
@@ -104,10 +115,6 @@ type PreviewSite = {
   label: string;
   url: string;
 };
-
-type TranscriptItem =
-  | { type: "message"; message: HostedChatMessage }
-  | { type: "tools"; id: string; messages: HostedChatMessage[] };
 
 export function HostedWebChat({
   connectionsHref,
@@ -131,7 +138,7 @@ export function HostedWebChat({
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
-  const [awaitingReply, setAwaitingReply] = useState(false);
+  const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -139,6 +146,9 @@ export function HostedWebChat({
   const [createTopicTitle, setCreateTopicTitle] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
+  const [devicesOpen, setDevicesOpen] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [deviceToRevoke, setDeviceToRevoke] = useState<HostedChatDevice | null>(null);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
@@ -147,7 +157,6 @@ export function HostedWebChat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingRoomRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | null>(null);
-  const pendingRemoteSeqRef = useRef<number | null>(null);
   const latestSiteIdRef = useRef<string | null>(null);
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
@@ -297,6 +306,10 @@ export function HostedWebChat({
       ?? null,
     [selectedTopic, state?.selected_chat_id]
   );
+  const selectedChatSelection = useMemo<ChatSelection>(
+    () => ({ room: selectedRoom, topic: selectedTopic, chat: selectedChat }),
+    [selectedChat, selectedRoom, selectedTopic]
+  );
   const messages = useMemo(
     () =>
       (state?.messages ?? []).filter(
@@ -307,7 +320,10 @@ export function HostedWebChat({
       ),
     [selectedChat, selectedRoom, selectedTopic, state?.messages]
   );
-  const transcript = useMemo(() => transcriptItems(messages), [messages]);
+  const transcript = useMemo(
+    () => transcriptItems(messages, state?.identity.account_id ?? null),
+    [messages, state?.identity.account_id]
+  );
   const liveMembers = useMemo(
     () =>
       (state?.typing_members ?? []).filter(
@@ -320,6 +336,9 @@ export function HostedWebChat({
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
   const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
+  const awaitingReply = pendingAgentTurns.some((turn) =>
+    pendingTurnMatchesSelection(turn, selectedChatSelection)
+  );
 
   useEffect(() => {
     if (sites.length === 0) {
@@ -338,15 +357,14 @@ export function HostedWebChat({
   }, [activeSiteId, sites]);
 
   useEffect(() => {
-    const pendingSeq = pendingRemoteSeqRef.current;
-    if (pendingSeq === null) {
-      return;
-    }
-    if (hasFinalRemoteResponse(messages, pendingSeq)) {
-      pendingRemoteSeqRef.current = null;
-      setAwaitingReply(false);
-    }
-  }, [messages]);
+    if (!state) return;
+    setPendingAgentTurns((turns) => {
+      const pending = turns.filter(
+        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      );
+      return pending.length === turns.length ? turns : pending;
+    });
+  }, [state]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -459,8 +477,13 @@ export function HostedWebChat({
     setSending(true);
     setError(null);
     stopTyping(selectedRoom.room_id);
-    pendingRemoteSeqRef.current = Math.max(0, ...messages.map((message) => message.seq));
-    setAwaitingReply(true);
+    const pendingTurn = beginPendingChatTurn(selectedChatSelection, messages);
+    if (pendingTurn) {
+      setPendingAgentTurns((turns) => [
+        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
+        pendingTurn,
+      ]);
+    }
     try {
       let next: HostedChatState;
       if (attachments.length > 0) {
@@ -476,6 +499,8 @@ export function HostedWebChat({
           body: formData,
         });
         applyHttpSnapshot(next, requestGeneration);
+        const uploadError = attachmentSendError(next);
+        if (uploadError) throw new Error(uploadError);
       } else {
         next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
@@ -486,8 +511,9 @@ export function HostedWebChat({
       });
       requestAnimationFrame(() => textareaRef.current?.focus());
     } catch (caught) {
-      setAwaitingReply(false);
-      pendingRemoteSeqRef.current = null;
+      if (pendingTurn) {
+        setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
+      }
       setError(errorMessage(caught));
     } finally {
       setSending(false);
@@ -538,19 +564,11 @@ export function HostedWebChat({
     });
   }
 
-  // The pending indicator is scoped to the selected chat. Navigating starts a
-  // different view rather than carrying an unseen chat's working state into it.
-  function clearSelectedChatPendingReply() {
-    pendingRemoteSeqRef.current = null;
-    setAwaitingReply(false);
-  }
-
   async function openTopic(topic: HostedChatTopic) {
     setError(null);
     try {
       await dispatch({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
       setSidebarOpen(false);
-      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -563,7 +581,6 @@ export function HostedWebChat({
         OpenChat: { room_id: topic.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id },
       });
       setSidebarOpen(false);
-      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -577,7 +594,6 @@ export function HostedWebChat({
         StartTopicChat: { room_id: selectedRoom.room_id, topic_id: topic.topic_id, reason: null },
       });
       setSidebarOpen(false);
-      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -593,7 +609,6 @@ export function HostedWebChat({
       setCreateTopicTitle("");
       setCreateTopicOpen(false);
       setSidebarOpen(false);
-      clearSelectedChatPendingReply();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -617,8 +632,41 @@ export function HostedWebChat({
     }
   }
 
+  async function openDevices() {
+    setDevicesOpen(true);
+    setDeviceToRevoke(null);
+    setDeviceBusy(true);
+    setError(null);
+    try {
+      await dispatch({ RefreshDevices: null });
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setDeviceBusy(false);
+    }
+  }
+
+  async function revokeDevice() {
+    if (!deviceToRevoke || deviceToRevoke.current_device || deviceToRevoke.revoked) return;
+    setDeviceBusy(true);
+    setError(null);
+    try {
+      await dispatch({
+        RevokeDevice: {
+          account_id: deviceToRevoke.account_id,
+          device_id: deviceToRevoke.device_id,
+        },
+      });
+      setDeviceToRevoke(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setDeviceBusy(false);
+    }
+  }
+
   const connected = selectedRoom?.state === "Connected";
-  const activityLabel = liveActivityLabel(liveMembers, machineLabel, awaitingReply);
+  const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
 
   return (
     <div className={sidebarCollapsed ? "finite-chat is-sidebar-collapsed" : "finite-chat"}>
@@ -685,6 +733,10 @@ export function HostedWebChat({
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
             <ProductNavButton href={connectionsHref} icon={PlugIcon} label="Connections" />
+            <Button type="button" variant="ghost" size="sm" onClick={() => void openDevices()}>
+              <MonitorSmartphoneIcon />
+              <span>Devices</span>
+            </Button>
             {sites.length > 0 ? (
               <button
                 type="button"
@@ -743,7 +795,12 @@ export function HostedWebChat({
                     ) : null}
                     {transcript.map((item) =>
                       item.type === "message" ? (
-                        <MessageRow key={item.message.message_id} apiBase={apiBase} message={item.message} />
+                        <MessageRow
+                          key={item.message.message_id}
+                          apiBase={apiBase}
+                          message={item.message}
+                          ownAccountId={state?.identity.account_id ?? ""}
+                        />
                       ) : (
                         <ToolRollup key={item.id} messages={item.messages} />
                       )
@@ -959,6 +1016,67 @@ export function HostedWebChat({
               <Button type="submit" disabled={!renameTitle.trim()}>Save</Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={devicesOpen}
+        onOpenChange={(open) => {
+          setDevicesOpen(open);
+          if (!open) setDeviceToRevoke(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{deviceToRevoke ? `Revoke ${deviceToRevoke.device_id}?` : "Your devices"}</DialogTitle>
+            <DialogDescription>
+              {deviceToRevoke
+                ? "This permanently stops that Device from sending, receiving, or linking again with the same Device identity."
+                : "Each linked browser or computer is a separate encrypted Device. Revoke one you no longer trust."}
+            </DialogDescription>
+          </DialogHeader>
+          {deviceToRevoke ? (
+            <DialogFooter>
+              <Button type="button" variant="outline" disabled={deviceBusy} onClick={() => setDeviceToRevoke(null)}>
+                Cancel
+              </Button>
+              <Button type="button" variant="destructive" disabled={deviceBusy} onClick={() => void revokeDevice()}>
+                {deviceBusy ? "Revoking…" : "Revoke Device"}
+              </Button>
+            </DialogFooter>
+          ) : (
+            <div className="grid gap-2">
+              {deviceBusy ? <ChatLoading label="Refreshing devices…" /> : null}
+              {!deviceBusy && (state?.devices ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No linked Devices are visible yet.</p>
+              ) : null}
+              {(state?.devices ?? []).map((device) => (
+                <div
+                  key={`${device.account_id}:${device.device_id}`}
+                  className="flex items-center gap-3 rounded-xl border border-border p-3"
+                >
+                  <MonitorSmartphoneIcon className="size-4 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <strong className="block truncate text-sm">{device.device_id}</strong>
+                    <span className="text-xs text-muted-foreground">
+                      {device.current_device
+                        ? "This browser"
+                        : device.revoked
+                          ? "Revoked"
+                          : device.active
+                            ? `Active in ${device.room_count} ${pluralize("room", device.room_count)}`
+                            : "Linked, not currently active"}
+                    </span>
+                  </div>
+                  {!device.current_device && !device.revoked ? (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setDeviceToRevoke(device)}>
+                      Revoke
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
@@ -1191,9 +1309,17 @@ function ToolRollup({ messages }: { messages: HostedChatMessage[] }) {
   );
 }
 
-function MessageRow({ apiBase, message }: { apiBase: string; message: HostedChatMessage }) {
+function MessageRow({
+  apiBase,
+  message,
+  ownAccountId,
+}: {
+  apiBase: string;
+  message: HostedChatMessage;
+  ownAccountId: string;
+}) {
   const content = messageContent(message);
-  if (message.is_mine) {
+  if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
@@ -1356,82 +1482,10 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function transcriptItems(messages: HostedChatMessage[]): TranscriptItem[] {
-  const projected = collapseEdits(messages);
-  const items: TranscriptItem[] = [];
-  for (const message of projected) {
-    if (!message.is_mine && messageKind(message) === "status") continue;
-    if (!message.is_mine && messageKind(message) === "tool") {
-      const previous = items[items.length - 1];
-      if (previous?.type === "tools") {
-        previous.messages.push(message);
-      } else {
-        items.push({ type: "tools", id: `tools-${message.message_id}`, messages: [message] });
-      }
-      continue;
-    }
-    const previous = items[items.length - 1];
-    if (previous?.type === "tools") {
-      previous.messages = previous.messages.map((toolMessage) => ({
-        ...toolMessage,
-        status: "complete",
-      }));
-    }
-    items.push({ type: "message", message });
-  }
-  return items;
-}
-
-function collapseEdits(messages: HostedChatMessage[]) {
-  const result: HostedChatMessage[] = [];
-  const indexById = new Map<string, number>();
-  for (const message of messages) {
-    const target = message.edit_of_message_id;
-    if (target && indexById.has(target)) {
-      const index = indexById.get(target)!;
-      const original = result[index]!;
-      result[index] = {
-        ...message,
-        kind:
-          message.kind === "message" && original.kind !== "message"
-            ? original.kind
-            : message.kind,
-        message_id: target,
-      };
-      continue;
-    }
-    indexById.set(message.message_id, result.length);
-    result.push(message);
-  }
-  return result;
-}
-
-function messageKind(message: HostedChatMessage) {
-  if (message.kind) return message.kind;
-  const lines = messageContent(message).trim().split(/\n+/u).filter(Boolean);
-  return lines.length > 0 && lines.every((line) => TOOL_LINE_RE.test(line)) ? "tool" : "message";
-}
-
-function messageContent(message: HostedChatMessage) {
-  return message.display_content || message.text || "";
-}
-
 function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
   return { SendMessage: { room_id: roomId, text } };
-}
-
-function liveActivityLabel(members: HostedChatTypingMember[], machineLabel: string, awaitingReply: boolean) {
-  const member = members.find((candidate) => candidate.activity_kind === "working")
-    ?? members.find((candidate) => candidate.activity_kind === "thinking")
-    ?? members.find((candidate) => candidate.activity_kind === "typing")
-    ?? members[0];
-  if (!member) return awaitingReply ? `${machineLabel} is working` : null;
-  const name = member.display_name || machineLabel;
-  if (member.activity_kind === "working") return `${name} is working`;
-  if (member.activity_kind === "thinking") return `${name} is thinking`;
-  return `${name} is typing`;
 }
 
 function sitesFromMessages(messages: HostedChatMessage[]) {

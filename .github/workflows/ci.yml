@@ -88,6 +88,27 @@ jobs:
       - name: Build dashboard
         run: npm run build
 
+  electron-parity:
+    name: Electron Device parity alpha
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Device parity and process gates
+        run: nix develop --command just chat-device-parity
+
+      - name: Build ad-hoc-signed internal alpha
+        run: nix develop --command just chat-electron-package
+
+      - name: Inspect packaged daemon boundary
+        run: |
+          test -x "finitechat/apps/electron-chat/release/Finite Chat.app/Contents/Resources/finitechatd"
+          test -f "finitechat/apps/electron-chat/release/Finite Chat.app/Contents/Resources/app/dist/index.html"
+          ! rg -n 'spawn\("cargo"|cargo run' finitechat/apps/electron-chat/electron
+
   hermes-bridge:
     name: finitechat Hermes bridge
     runs-on: ubuntu-latest

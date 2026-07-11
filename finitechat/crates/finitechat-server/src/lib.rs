@@ -964,25 +964,48 @@ impl HttpServerState {
                 link_session_id: request.link_session_id.clone(),
             }
         })?;
-        if session.state != HttpLinkSessionState::PayloadUploaded {
-            return Err(ServerHttpError::LinkSessionNotReady {
-                link_session_id: request.link_session_id,
-            });
-        }
+        let newly_claimed = match session.state {
+            HttpLinkSessionState::PayloadUploaded => true,
+            // The claim token is deterministic and the payload is encrypted to
+            // the linker's ephemeral pairing key. Replaying this exact claim
+            // lets a linker recover when the first successful HTTP response is
+            // lost without opening the payload to anyone new.
+            HttpLinkSessionState::Claimed => false,
+            _ => {
+                return Err(ServerHttpError::LinkSessionNotReady {
+                    link_session_id: request.link_session_id,
+                });
+            }
+        };
         let encrypted_payload = session.encrypted_payload.clone().ok_or_else(|| {
             ServerHttpError::LinkSessionNotReady {
                 link_session_id: request.link_session_id.clone(),
             }
         })?;
-        let claim_token = link_session_claim_token(session);
-        session.state = HttpLinkSessionState::Claimed;
-        session.claim_token = Some(claim_token.clone());
+        let claim_token = if newly_claimed {
+            let claim_token = link_session_claim_token(session);
+            session.state = HttpLinkSessionState::Claimed;
+            session.claim_token = Some(claim_token.clone());
+            claim_token
+        } else {
+            session
+                .claim_token
+                .clone()
+                .ok_or_else(|| ServerHttpError::LinkSessionNotReady {
+                    link_session_id: request.link_session_id.clone(),
+                })?
+        };
         let record = session.clone();
-        drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
+        if let Some(store) = &self.store
+            && let Err(error) = store.upsert_link_session(&record)
+        {
+            if newly_claimed {
+                session.state = HttpLinkSessionState::PayloadUploaded;
+                session.claim_token = None;
+            }
+            return Err(error.into());
         }
+        drop(sessions);
         Ok(ClaimLinkPayloadResponse {
             encrypted_payload,
             claim_token,
@@ -1001,23 +1024,33 @@ impl HttpServerState {
                 link_session_id: request.link_session_id.clone(),
             }
         })?;
-        if session.state != HttpLinkSessionState::Claimed {
-            return Err(ServerHttpError::LinkSessionNotReady {
-                link_session_id: request.link_session_id,
-            });
-        }
         if session.claim_token.as_deref() != Some(request.claim_token.as_str()) {
             return Err(ServerHttpError::BadLinkSessionClaimToken {
                 link_session_id: request.link_session_id,
             });
         }
-        session.state = HttpLinkSessionState::Delivered;
+        let newly_delivered = match session.state {
+            HttpLinkSessionState::Claimed => {
+                session.state = HttpLinkSessionState::Delivered;
+                true
+            }
+            HttpLinkSessionState::Delivered => false,
+            _ => {
+                return Err(ServerHttpError::LinkSessionNotReady {
+                    link_session_id: request.link_session_id,
+                });
+            }
+        };
         let record = session.clone();
-        drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
+        if let Some(store) = &self.store
+            && let Err(error) = store.upsert_link_session(&record)
+        {
+            if newly_delivered {
+                session.state = HttpLinkSessionState::Claimed;
+            }
+            return Err(error.into());
         }
+        drop(sessions);
         Ok(AckLinkPayloadResponse { acked: true })
     }
 

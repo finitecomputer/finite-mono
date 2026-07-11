@@ -8,6 +8,7 @@ import {
   shouldApplyHttpHostedChatSnapshot,
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
+import { streamSnapshotNeedsNewGeneration } from "@finite/chat-ui";
 
 test("an older HTTP snapshot cannot overwrite a newer SSE snapshot", () => {
   let source = initialHostedChatSnapshotSource();
@@ -30,4 +31,13 @@ test("the first full SSE state after reconnect establishes a lower revision base
   source = recordHostedChatSnapshot(source, 3, true);
   assert.equal(shouldApplyStreamHostedChatSnapshot(source, 3), false);
   assert.equal(shouldApplyStreamHostedChatSnapshot(source, 4), true);
+});
+
+test("a silent desktop daemon restart is detected by its lower ordered stream revision", () => {
+  let source = initialHostedChatSnapshotSource();
+  source = nextHostedChatSnapshotGeneration(source);
+  source = recordHostedChatSnapshot(source, 42, true);
+
+  assert.equal(streamSnapshotNeedsNewGeneration(source, 3), true);
+  assert.equal(streamSnapshotNeedsNewGeneration(source, 43), false);
 });

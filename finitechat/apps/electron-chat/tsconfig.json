@@ -12,10 +12,6 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "baseUrl": ".",
-    "paths": {
-      "@/*": ["../../../../finitecomputer/apps/dashboard/src/*"],
-      "next/link": ["src/shims/next-link.tsx"]
-    },
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,

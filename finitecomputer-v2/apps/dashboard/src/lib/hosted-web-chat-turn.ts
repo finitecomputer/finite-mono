@@ -1,4 +1,5 @@
 import type { HostedChatMessage } from "@/lib/hosted-web-device";
+import { hasFinalRemoteResponse as sharedHasFinalRemoteResponse } from "@finite/chat-ui";
 
 /**
  * Hermes marks a final or otherwise notify-worthy assistant delivery with
@@ -8,12 +9,8 @@ import type { HostedChatMessage } from "@/lib/hosted-web-device";
  */
 export function hasFinalRemoteResponse(
   messages: HostedChatMessage[],
-  afterSeq: number
+  afterSeq: number,
+  ownAccountId?: string | null
 ) {
-  return messages.some(
-    (message) =>
-      !message.is_mine
-      && message.seq > afterSeq
-      && message.final_delivery === true
-  );
+  return sharedHasFinalRemoteResponse(messages, afterSeq, ownAccountId);
 }
