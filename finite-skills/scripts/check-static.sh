@@ -99,6 +99,21 @@ else:
         if marker not in sites_text:
             errors.append(f"{sites_path}: missing fsite 0.4.0 contract marker {marker!r}")
 
+brain_path = root / "software-development/finitebrain/SKILL.md"
+if not brain_path.is_file():
+    errors.append(f"{brain_path}: canonical FiniteBrain skill is required")
+else:
+    brain_text = brain_path.read_text(encoding="utf-8")
+    for marker in (
+        'SERVER="https://finite.computer"',
+        'VAULT="replace-with-vault-id"',
+        "A Working Tree remembers the server",
+    ):
+        if marker not in brain_text:
+            errors.append(f"{brain_path}: missing production routing marker {marker!r}")
+    if 'SERVER="https://brain.smoke.finite.computer"' in brain_text:
+        errors.append(f"{brain_path}: active server default must not target smoke")
+
 compat_path = root / "software-development/publish-web-apps-finite/SKILL.md"
 if not compat_path.is_file():
     errors.append(f"{compat_path}: compatibility router is required")
