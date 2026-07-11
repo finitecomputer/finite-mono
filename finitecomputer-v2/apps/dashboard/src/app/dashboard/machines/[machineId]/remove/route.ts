@@ -28,7 +28,10 @@ export async function POST(request: Request, context: RouteContext) {
     return machineRedirect(request, machineId, "failed");
   }
 
-  return machineRedirect(request, machineId, "requested");
+  const destination = new URL("/dashboard", request.url);
+  destination.searchParams.set("new", "1");
+  destination.searchParams.set("agentRemoval", "requested");
+  return NextResponse.redirect(destination, { status: 303 });
 }
 
 export async function GET(request: Request, context: RouteContext) {

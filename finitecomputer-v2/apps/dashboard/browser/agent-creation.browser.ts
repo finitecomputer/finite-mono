@@ -686,7 +686,7 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       page.once("dialog", (dialog) => dialog.accept());
       await removeButton.click();
       await page.waitForURL(
-        /\/dashboard\/machines\/removable-kata-bot\?removal=requested$/u
+        /\/dashboard\?new=1&agentRemoval=requested$/u
       );
       await expectVisibleText(page, "Agent removal started");
       await expectVisibleText(

@@ -82,18 +82,6 @@ async function ImportedMachineOverview({
 
   return (
     <div className="space-y-6">
-      {removalResult === "requested" ? (
-        <section
-          className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4"
-          role="status"
-        >
-          <h2 className="font-semibold">Agent removal started</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Its compute is being removed. Saved agent data is retained. It will
-            disappear from your dashboard when removal finishes.
-          </p>
-        </section>
-      ) : null}
       {removalResult === "failed" ? (
         <section
           className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm"

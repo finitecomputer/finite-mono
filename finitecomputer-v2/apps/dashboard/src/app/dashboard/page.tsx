@@ -75,6 +75,7 @@ function shortValue(value: string | null | undefined, length = 12) {
 }
 
 type DashboardSearchParams = {
+  agentRemoval?: string | string[];
   agentCreationError?: string | string[];
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
@@ -95,6 +96,7 @@ export default async function DashboardPage({
   searchParams: Promise<DashboardSearchParams>;
 }) {
   const query = await searchParams;
+  const agentRemoval = firstSearchParam(query.agentRemoval);
   const agentCreationError = firstSearchParam(query.agentCreationError);
   const billingReturnParam = parseBillingReturnParam(firstSearchParam(query.billing));
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
@@ -206,6 +208,7 @@ export default async function DashboardPage({
     return (
       <div className="ocean-page-stack">
         <PendingRefresh enabled={hasPendingAgentCreation} />
+        {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
         {coreProjects.length > 0 && !isNewAgentFlow ? (
           <CoreProjectsPanel
             projects={coreProjects}
@@ -289,6 +292,21 @@ export default async function DashboardPage({
 
       <FinitePrivateAdminPanel result={finitePrivateAdmin} />
     </div>
+  );
+}
+
+function AgentRemovalRequestedNotice() {
+  return (
+    <section
+      className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4"
+      role="status"
+    >
+      <h2 className="font-semibold">Agent removal started</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Its compute is being removed. Saved agent data is retained. It will
+        disappear from your dashboard when removal finishes.
+      </p>
+    </section>
   );
 }
 
