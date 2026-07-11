@@ -149,6 +149,14 @@ type FakeHostedChatState = {
     stale: boolean;
     is_agent: boolean;
   }>;
+  devices: Array<{
+    account_id: string;
+    device_id: string;
+    active: boolean;
+    current_device: boolean;
+    revoked: boolean;
+    room_count: number;
+  }>;
   flow: {
     notice_text: string | null;
     notice_busy: boolean;
@@ -215,13 +223,35 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
     sites.apiUrl
   );
   const dashboardOutput = collectOutput(dashboard);
+  const paidDashboardPort = await freePort();
+  const paidDashboard = startDashboard(
+    paidDashboardPort,
+    core.url,
+    hostedDevice.url,
+    brain.url,
+    sites.apiUrl,
+    { stripeConfigured: true, distDir: ".next-browser-stripe-test" }
+  );
+  const paidDashboardOutput = collectOutput(paidDashboard);
   let browser: Browser | null = null;
 
   try {
     await waitForDashboard(dashboardPort, dashboardOutput);
+    await waitForDashboard(paidDashboardPort, paidDashboardOutput);
     browser = await chromium.launch({
       headless: true,
       ...chromeExecutable(),
+    });
+
+    core.reset();
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard`);
+      await page.getByLabel("Agent name").fill("Paid Browser Proof");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page
+        .getByRole("button", { name: "Continue to payment" })
+        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Pay securely or use a Launch Code.");
     });
 
     core.reset();
@@ -244,6 +274,11 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       });
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
       await page.getByRole("button", { name: "Continue" }).click();
+      assert.equal(
+        await page.getByRole("button", { name: "Continue to payment" }).count(),
+        0,
+        "payment must stay hidden when the webhook/return path is not fully configured"
+      );
       await page.getByLabel("Launch Code").fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await waitFor(
@@ -510,6 +545,20 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         .getByText("Browser QA", { exact: true })
         .waitFor({ state: "visible" });
 
+      await page.getByRole("button", { name: "Devices", exact: true }).click();
+      const devicesDialog = page.getByRole("dialog", { name: "Your devices" });
+      await devicesDialog.getByText("electron-browser-proof", { exact: true }).waitFor({ state: "visible" });
+      await devicesDialog.getByRole("button", { name: "Revoke", exact: true }).click();
+      await page
+        .getByRole("dialog", { name: "Revoke electron-browser-proof?" })
+        .getByRole("button", { name: "Revoke Device", exact: true })
+        .click();
+      await waitFor(() =>
+        hostedDevice.state.actions.some((action) => actionName(action) === "RevokeDevice")
+      );
+      await devicesDialog.getByText("Revoked", { exact: true }).waitFor({ state: "visible" });
+      await page.keyboard.press("Escape");
+
       const bootstrapActions = hostedDevice.state.actions.map(actionName);
       const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
       const scanTargetIndex = bootstrapActions.indexOf("ScanTarget");
@@ -706,12 +755,17 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
   } finally {
     await browser?.close().catch(() => {});
     dashboard.kill("SIGTERM");
+    paidDashboard.kill("SIGTERM");
     core.server.close();
     hostedDevice.close();
     brain.server.close();
     sites.server.close();
     await Promise.race([
       once(dashboard, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    await Promise.race([
+      once(paidDashboard, "exit"),
       new Promise((resolve) => setTimeout(resolve, 2_000)),
     ]);
   }
@@ -722,7 +776,8 @@ function startDashboard(
   coreUrl: string,
   hostedDeviceUrl: string,
   brainUrl: string,
-  sitesUrl: string
+  sitesUrl: string,
+  options: { stripeConfigured?: boolean; distDir?: string } = {}
 ) {
   return spawn(
     process.execPath,
@@ -743,10 +798,20 @@ function startDashboard(
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "fixture-browser-access-token",
-        FC_DASHBOARD_RUNTIME_MODE: "canary",
+        FC_DASHBOARD_RUNTIME_MODE: options.stripeConfigured ? "customer" : "canary",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
-        NEXT_DIST_DIR: ".next-browser-test",
+        STRIPE_SECRET_KEY: options.stripeConfigured ? "sk_test_browser_fixture" : "",
+        STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: options.stripeConfigured
+          ? "price_browser_fixture"
+          : "",
+        STRIPE_WEBHOOK_SECRET: options.stripeConfigured ? "whsec_browser_fixture" : "",
+        FC_DASHBOARD_BASE_URL: options.stripeConfigured
+          ? `http://127.0.0.1:${port}`
+          : "",
+        FC_DASHBOARD_PUBLIC_URL: "",
+        NEXT_PUBLIC_APP_URL: "",
+        NEXT_DIST_DIR: options.distDir ?? ".next-browser-test",
       },
       stdio: "pipe",
     }
@@ -1070,6 +1135,24 @@ function initialHostedChatState(): FakeHostedChatState {
     toast: null,
     messages: [],
     profiles: [],
+    devices: [
+      {
+        account_id: "browser-user-account",
+        device_id: "hosted-web",
+        active: true,
+        current_device: true,
+        revoked: false,
+        room_count: 1,
+      },
+      {
+        account_id: "browser-user-account",
+        device_id: "electron-browser-proof",
+        active: true,
+        current_device: false,
+        revoked: false,
+        room_count: 1,
+      },
+    ],
     typing_members: [],
     flow: {
       notice_text: null,
@@ -1145,6 +1228,16 @@ function applyHostedAction(
     const title = String(payload.title ?? "");
     assert(title);
     state.topics[0]!.chats[0]!.title = title;
+  } else if (operation === "RevokeDevice") {
+    const payload = action.RevokeDevice as Record<string, unknown> | undefined;
+    const device = state.devices.find(
+      (candidate) =>
+        candidate.account_id === payload?.account_id
+        && candidate.device_id === payload?.device_id
+    );
+    assert(device && !device.current_device);
+    device.active = false;
+    device.revoked = true;
   }
   state.rev += 1;
 }

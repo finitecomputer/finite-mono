@@ -97,7 +97,7 @@ export async function POST(request: Request) {
       if (!stripeBillingStatus().configured) {
         throw new Error("Payment is unavailable right now.");
       }
-      const response = NextResponse.redirect(await billingCheckoutDestination(), {
+      const response = NextResponse.redirect(await billingCheckoutDestination(draft.idempotencyKey), {
         status: 303,
       });
       setDraftCookie(

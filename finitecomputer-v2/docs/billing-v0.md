@@ -138,15 +138,21 @@ STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID=<stripe-test-price-id> \
 npm run test:stripe-billing-clock
 ```
 
-The harness starts disposable Postgres and Core services locally, creates a
-Stripe test clock, creates a send-invoice subscription against the configured
+The harness starts the local WorkOS fixture plus disposable Postgres and Core
+services, authenticates customer routes with a fixture AuthKit JWT, creates a
+Stripe test clock and send-invoice subscription against the configured
 hosted-agent Price, sends signed webhook payloads through the real dashboard
 webhook route, and asserts Core billing state after:
 
+- `checkout.session.completed`
 - `active`
 - `past_due`
 - `canceled`
 - a deliberately stale active update arriving after cancellation
+
+It also proves missing and invalid webhook signatures fail closed. The
+synthetic Checkout event exercises the real handler and fresh Subscription
+lookup; one real browser Checkout remains a separate paid-run acceptance step.
 
 It is intentionally opt-in because it creates Stripe test-mode objects and
 requires the test secret key. By default the harness deletes its Stripe test

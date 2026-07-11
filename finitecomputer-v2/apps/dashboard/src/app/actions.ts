@@ -1,4 +1,5 @@
 "use server";
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -37,9 +38,12 @@ import {
 import {
   billingSubscriptionShouldUsePortal,
   requireStripeClient,
+  standardAgentCheckoutMetadata,
   standardAgentPriceId,
   stripeDashboardReturnUrl,
+  stripeIdempotencyKey,
 } from "@/lib/stripe-billing";
+import { ensureStripeCheckoutCustomer } from "@/lib/stripe-checkout";
 
 export async function restartCoreRuntimeAction(formData: FormData) {
   const machineId = String(formData.get("machineId") ?? "");
@@ -138,29 +142,26 @@ export async function cancelFailedAgentCreationRequestAction(formData: FormData)
 }
 
 export async function startBillingCheckoutAction() {
-  redirect(await billingCheckoutDestination());
+  redirect(await billingCheckoutDestination(randomUUID()));
 }
 
-export async function billingCheckoutDestination() {
+export async function billingCheckoutDestination(attemptId: string = randomUUID()) {
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
     throw new Error(billing.error ?? "Sign in again to manage billing.");
   }
 
   const stripe = requireStripeClient();
-  let stripeCustomerId = billing.billing.billing_account?.stripe_customer_id?.trim() ?? "";
-  if (!stripeCustomerId) {
-    const customer = await stripe.customers.create({
-      email: billing.account.email,
-      name: billing.billing.customer_org.name,
-      metadata: {
-        finite_customer_org_id: billing.billing.customer_org.id,
-        finite_workos_user_id: billing.account.workosUserId,
-      },
-    });
-    stripeCustomerId = customer.id;
-    await linkCoreStripeCustomer(stripeCustomerId);
-  }
+  const { stripeCustomerId, customerOrgId } = await ensureStripeCheckoutCustomer({
+    stripe,
+    existingStripeCustomerId:
+      billing.billing.billing_account?.stripe_customer_id?.trim() ?? "",
+    provisionalCustomerOrgId: billing.billing.customer_org.id,
+    customerOrgName: billing.billing.customer_org.name,
+    email: billing.account.email,
+    workosUserId: billing.account.workosUserId,
+    linkCustomer: linkCoreStripeCustomer,
+  });
   if (
     billingSubscriptionShouldUsePortal(
       billing.billing.billing_account?.subscription_status,
@@ -170,28 +171,28 @@ export async function billingCheckoutDestination() {
     return billingPortalDestination(stripeCustomerId);
   }
 
-  const checkout = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: stripeCustomerId,
-    client_reference_id: billing.billing.customer_org.id,
-    allow_promotion_codes: true,
-    success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
-    cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
-    line_items: [
-      {
-        price: standardAgentPriceId(),
-        quantity: 1,
+  const metadata = standardAgentCheckoutMetadata(customerOrgId);
+  const checkout = await stripe.checkout.sessions.create(
+    {
+      mode: "subscription",
+      customer: stripeCustomerId,
+      client_reference_id: metadata.clientReferenceId,
+      allow_promotion_codes: true,
+      success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
+      cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
+      line_items: [
+        {
+          price: standardAgentPriceId(),
+          quantity: 1,
+        },
+      ],
+      metadata: metadata.checkout,
+      subscription_data: {
+        metadata: metadata.subscription,
       },
-    ],
-    metadata: {
-      finite_customer_org_id: billing.billing.customer_org.id,
     },
-    subscription_data: {
-      metadata: {
-        finite_customer_org_id: billing.billing.customer_org.id,
-      },
-    },
-  });
+    { idempotencyKey: stripeIdempotencyKey("checkout", attemptId) }
+  );
 
   if (!checkout.url) {
     throw new Error("Stripe did not return a Checkout URL.");

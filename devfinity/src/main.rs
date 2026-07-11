@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use devfinity::workos_fixture::{FixturePaths, serve as serve_workos_fixture};
+use devfinity::workos_fixture::{
+    FixturePaths, prepare as prepare_workos_fixture, serve as serve_workos_fixture,
+};
 use devfinity::{ProcessComposeMode, Stack, StackProfile};
 
 #[derive(Debug, Parser)]
@@ -110,8 +112,10 @@ fn run() -> anyhow::Result<ExitCode> {
         }
         Command::Cleanup => Stack::new(cli.state_dir)?.cleanup(),
         Command::WorkosFixture { listen, state_dir } => {
+            let paths = FixturePaths::new(state_dir);
+            prepare_workos_fixture(&paths, &format!("http://{listen}"))?;
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(serve_workos_fixture(listen, FixturePaths::new(state_dir)))?;
+            runtime.block_on(serve_workos_fixture(listen, paths))?;
             Ok(ExitCode::SUCCESS)
         }
     }
