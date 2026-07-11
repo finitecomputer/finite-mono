@@ -5,11 +5,16 @@ use finitechat_proto::DecryptedApplicationEventV1;
 use finitechat_server::{HttpServerState, http_router};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const USER_SECRET: [u8; NOSTR_SECRET_KEY_BYTES] = [41; NOSTR_SECRET_KEY_BYTES];
-const TEST_NOW: u64 = 1_800_000_000;
-const TEST_NOW_ARG: &str = "1800000000";
+
+fn test_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_secs()
+}
 
 fn ensure_test_finite_home() -> PathBuf {
     use std::sync::OnceLock;
@@ -73,6 +78,8 @@ fn cli_json(args: &[&str]) -> Value {
 #[test]
 fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     let dir = tempfile::tempdir().unwrap();
+    let now = test_now();
+    let now_arg = now.to_string();
     let server_url = spawn_live_http_server(&dir.path().join("server.sqlite3"));
     let agent_home = dir.path().join("agent").display().to_string();
     let user_dir = dir.path().join("user").display().to_string();
@@ -102,7 +109,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
         "--device-id",
         "agent",
         "--now",
-        TEST_NOW_ARG,
+        &now_arg,
         "create-room",
         "--display-name",
         "Hermes Welcome Room",
@@ -114,7 +121,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
         server_url: server_url.clone(),
         device_id: "ios-user".to_owned(),
         account_secret_hex: Some(hex_lower(&USER_SECRET)),
-        now_unix_seconds: Some(TEST_NOW),
+        now_unix_seconds: Some(now),
     })
     .expect("user runtime opens");
     let user_account = user.state().unwrap().identity.account_id.clone();
@@ -130,7 +137,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
         "--device-id",
         "agent",
         "--now",
-        TEST_NOW_ARG,
+        &now_arg,
         "add-member",
         "--room-id",
         &room_id,
@@ -348,6 +355,8 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
     ensure_test_finite_home();
     let dir = tempfile::tempdir().unwrap();
+    let now = test_now();
+    let now_arg = now.to_string();
     let server_url = spawn_live_http_server(&dir.path().join("server.sqlite3"));
     let alice_dir = dir.path().join("alice").display().to_string();
     let bob_dir = dir.path().join("bob").display().to_string();
@@ -357,7 +366,7 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
         server_url: server_url.clone(),
         device_id: "bob-cli".to_owned(),
         account_secret_hex: Some("42".repeat(32)),
-        now_unix_seconds: Some(TEST_NOW),
+        now_unix_seconds: Some(now),
     })
     .expect("bob runtime opens");
     let bob_account_id = bob.state().unwrap().identity.account_id.clone();
@@ -373,7 +382,7 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
         "--device-id",
         "alice-cli",
         "--now",
-        TEST_NOW_ARG,
+        &now_arg,
         "create-room",
         "--display-name",
         "CLI Add Flow",
@@ -389,7 +398,7 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
         "--device-id",
         "alice-cli",
         "--now",
-        TEST_NOW_ARG,
+        &now_arg,
         "add-member",
         "--room-id",
         &room_id,
