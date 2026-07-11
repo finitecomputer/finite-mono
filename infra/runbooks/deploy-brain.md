@@ -1,10 +1,11 @@
 # Deploying finite-brain on lat1
 
 Finite Brain runs as `finite-brain-app.service` on finite-lat-1, bound only to
-`127.0.0.1:3015`. The dashboard proxies `/client` and `/_admin/*` to that
-loopback service. WorkOS protects both paths as part of the same
-`finite.computer` session; Brain still verifies Nostr request proofs for its
-data operations. There is no second Brain vhost and no oauth2-proxy.
+`127.0.0.1:3015`. The dashboard proxies `/health`, `/client`, and `/_admin/*`
+to that loopback service. WorkOS protects the browser Product Client at
+`/client`; `/_admin/*` bypasses WorkOS so Brain can enforce its own route-level
+Nostr, invitation-proof, or other narrowly specified authorization. There is
+no second Brain vhost and no oauth2-proxy.
 
 The SQLite database is `/var/lib/private/finitebrain/finite-brain.sqlite3`.
 Compute deployment and data migration are separate operations. Never replace
@@ -48,13 +49,16 @@ tarball or legacy-repo deploy is part of the path.
 ```sh
 ssh root@64.34.82.77 systemctl is-active finite-brain-app
 ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
+curl -fsS https://finite.computer/health
 curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
 ```
 
-The public `/client` request must require a WorkOS session. In an authenticated
-browser, verify the Product Client loads and completes a real `/_admin/*`
-request through the dashboard. Then run `fbrain doctor` and a write/read proof
-from an authorized Nostr identity against `https://finite.computer`.
+The public `/health` route must report the Brain service healthy and `/client`
+must require a WorkOS session. A signed `fbrain` request to `/_admin/*` must
+reach Brain without a WorkOS session. In an authenticated browser, verify the
+Product Client loads and completes a real `/_admin/*` request through the
+dashboard. Then run `fbrain doctor` and a write/read proof from an authorized
+Nostr identity against `https://finite.computer`.
 
 ## Rollback
 

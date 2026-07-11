@@ -14,7 +14,6 @@ const REQUIRED_WORKOS_ENV = [
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 
 const PROTECTED_WORKOS_PATH_PREFIXES = [
-  "/_admin",
   "/api",
   "/client",
   "/dashboard",
@@ -37,13 +36,19 @@ const PUBLIC_WORKOS_PATH_PREFIXES = ["/api/finite"] as const;
 
 const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",
+  "/health",
   "/api/stripe/webhook",
   "/login",
   "/logout",
   "/signup",
 ]);
 
-const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/api/finite"] as const;
+// Brain's product client is a WorkOS-authenticated browser surface, while
+// /_admin uses Brain-owned route-level auth (normally a Nostr signature, with
+// narrowly scoped invitation proofs where specified). Let that API reach Brain
+// without replacing its authority with an AuthKit session. Runtime callbacks
+// likewise enforce their own protocol boundary.
+const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/_admin", "/api/finite"] as const;
 
 type EnvSource = Record<string, string | undefined>;
 

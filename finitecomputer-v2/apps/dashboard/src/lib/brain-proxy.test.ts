@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  brainProxyRequestHeaders,
   brainUpstreamOrigin,
   readBoundedBrainRequestBody,
   responseStatusHasNoBody,
@@ -14,6 +15,24 @@ test("Brain upstream accepts only a bare HTTP origin", () => {
   assert.equal(brainUpstreamOrigin("file:///tmp/brain"), null);
   assert.equal(brainUpstreamOrigin("not a URL"), null);
   assert.equal(brainUpstreamOrigin(""), null);
+});
+
+test("Brain proxy preserves signed identity headers but not browser credentials", () => {
+  const headers = brainProxyRequestHeaders(
+    new Headers({
+      authorization: "Nostr signed-event",
+      cookie: "wos-session=secret",
+      "x-finitebrain-nostr": "legacy-signed-event",
+      "x-nostr-authorization": "signed-event",
+      "x-workos-session": "secret",
+    }),
+  );
+
+  assert.equal(headers.get("authorization"), "Nostr signed-event");
+  assert.equal(headers.get("x-finitebrain-nostr"), "legacy-signed-event");
+  assert.equal(headers.get("x-nostr-authorization"), "signed-event");
+  assert.equal(headers.get("cookie"), null);
+  assert.equal(headers.get("x-workos-session"), null);
 });
 
 test("Brain proxy omits bodies for HTTP statuses that forbid them", () => {
