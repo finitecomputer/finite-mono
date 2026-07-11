@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and PRDs live in GitHub Issues for `finitecomputer/finite-brain`. See `docs/agents/issue-tracker.md`.
+Issues and PRDs live in GitHub Issues for `finitecomputer/finite-mono`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
