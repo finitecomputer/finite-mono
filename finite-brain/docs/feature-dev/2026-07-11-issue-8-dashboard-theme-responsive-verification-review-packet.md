@@ -44,10 +44,14 @@ The curated screenshots under
 - desktop light/dark locked and resumed states;
 - mobile light/dark locked, Files, Access, and quick-switcher states;
 - tablet light Files/Page state;
-- Search, Page reading/source/visual editing, slash menu, context menu;
-- Graph, replay, and filtered-empty states;
-- Vault/Folder Access, expanded forms, disabled/destructive controls;
-- the quick-switcher before and after the worthy visual fix.
+- representative desktop Files, Graph, Vault/Folder Access, and expanded
+  Access-form states;
+- the fixed quick-switcher at light desktop and dark mobile widths.
+
+The broader inspected scratch matrix under `/tmp/finite-brain-ticket8-*.png`
+additionally covers Search, source/visual editing, slash and context menus,
+Graph replay and filtered-empty states, disabled/destructive controls, and the
+pre-fix quick-switcher.
 
 ## Review Instructions
 
@@ -59,11 +63,13 @@ a test for individual decorative CSS declarations.
 ## Reviewer Output
 
 ```text
-STANDARDS_STATUS: pass
+STANDARDS_STATUS: pass after documentation fix
 STANDARDS_FINDINGS:
 - No hard documented-standard violations or actionable baseline smells.
 - The CSS-only fix preserves all security, storage, graph, and Product Client
   boundaries and uses the repository's Nix command seam.
+- Fixed: evidence inventories now distinguish the committed curated matrix from
+  additional scratch-only browser states.
 
 SPEC_STATUS: pass after evidence follow-up
 SPEC_FINDINGS:

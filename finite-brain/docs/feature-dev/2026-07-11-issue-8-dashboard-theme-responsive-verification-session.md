@@ -62,16 +62,18 @@ visible nodes and 71 links.
 
 ### Browser evidence
 
-Scratch evidence is recorded under `/tmp/finite-brain-ticket8-*.png`. The final
-curated set is committed under
-`docs/feature-dev/artifacts/2026-07-11-issue-8/`, including:
+The final curated set committed under
+`docs/feature-dev/artifacts/2026-07-11-issue-8/` includes:
 
 - light/dark desktop and mobile locked states;
-- light/dark desktop resumed Files and representative knowledge surfaces;
-- light tablet and light/dark mobile responsive Files/Access surfaces;
-- light Search, Graph, Vault and Folder Access, and expanded Access forms;
-- dark Graph, Graph empty, Access, source editor, slash menu, and context menu;
+- resumed light desktop Files, dark desktop Graph, and light/dark desktop
+  Access surfaces;
+- light tablet Files/Page and light/dark mobile Files/Access surfaces;
 - fixed light-desktop and dark-mobile quick switchers.
+
+The broader scratch matrix under `/tmp/finite-brain-ticket8-*.png` additionally
+includes Search, source editing, slash and context menus, Graph replay and
+filtered-empty states, expanded Access forms, and the pre-fix quick switcher.
 
 All matrix states had zero horizontal page overflow and zero JavaScript page
 errors. Keyboard traversal exposed visible focus outlines on ribbon, Vault,
