@@ -72,6 +72,57 @@ pub(crate) async fn product_client_js_handler() -> impl IntoResponse {
     )
 }
 
+fn product_client_font_response(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (CONTENT_TYPE, "font/ttf"),
+            (CACHE_CONTROL, PRODUCT_CLIENT_CACHE_CONTROL),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub(crate) async fn product_client_funnel_display_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-500.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_display_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-600.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_display_700_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-700.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_400_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-400.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-500.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-600.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_700_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-700.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_400_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-400.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-500.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-600.ttf"))
+}
+
 pub(crate) async fn product_client_smoke_nip07_js_handler(
     State(state): State<ServerState>,
 ) -> Response {

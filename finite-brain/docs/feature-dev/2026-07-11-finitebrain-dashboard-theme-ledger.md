@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: tracer-bullet ticket planning
+- Current status: ticket #5 implementation and review
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -25,10 +25,13 @@ overall visual character in a high-quality, elegant, surgical way.
 - ADRs: none warranted yet; this is a reversible presentation-layer change
 - Prototype source branch, if any: none planned unless visual evidence exposes an unresolved design choice
 - Spec issue: [finitecomputer/finite-mono#4](https://github.com/finitecomputer/finite-mono/issues/4)
-- Tickets: pending
-- Ticket sessions: pending
-- Agent briefs: pending
-- Review packets: pending
+- Tickets: [#5](https://github.com/finitecomputer/finite-mono/issues/5),
+  [#6](https://github.com/finitecomputer/finite-mono/issues/6),
+  [#7](https://github.com/finitecomputer/finite-mono/issues/7), and
+  [#8](https://github.com/finitecomputer/finite-mono/issues/8)
+- Ticket sessions: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`
+- Agent briefs: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`
+- Review packets: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`
 - Local CodeRabbit report: pending
 - PR URL: pending
 
@@ -44,7 +47,10 @@ overall visual character in a high-quality, elegant, surgical way.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| Pending | AFK | awaiting spec and approval | — | — | — |
+| #5 | AFK | review pending | `/root/ticket_5_theme_foundation` | browser-found light workspace defect fixed | targeted checks and four-state visual pass |
+| #6 | AFK | blocked by #5 | — | — | — |
+| #7 | AFK | blocked by #5 | — | — | — |
+| #8 | AFK | blocked by #6 and #7 | — | — | — |
 
 ## Parked HITL Slices
 
@@ -56,12 +62,11 @@ overall visual character in a high-quality, elegant, surgical way.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| Pending | Pending | Pending | Pending | Pending | Pending |
+| #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | this ticket commit | pending two-axis review | targeted Rust, JS, seeded verifier, and browser pass |
 
 ## Open Questions
 
-- Approve tracer-bullet granularity and blocking edges before ticket publication.
-- Approve tracer-bullet granularity and blocking edges before ticket publication.
+- None for ticket #5.
 
 ## Escalations
 

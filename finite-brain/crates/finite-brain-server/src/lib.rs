@@ -441,6 +441,46 @@ pub fn router_with_state(state: ServerState) -> Router {
         .route("/client/app.css", get(product_client_css_handler))
         .route("/client/app.js", get(product_client_js_handler))
         .route(
+            "/client/fonts/funnel-display-500.ttf",
+            get(product_client_funnel_display_500_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-display-600.ttf",
+            get(product_client_funnel_display_600_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-display-700.ttf",
+            get(product_client_funnel_display_700_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-400.ttf",
+            get(product_client_funnel_sans_400_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-500.ttf",
+            get(product_client_funnel_sans_500_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-600.ttf",
+            get(product_client_funnel_sans_600_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-700.ttf",
+            get(product_client_funnel_sans_700_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-400.ttf",
+            get(product_client_jetbrains_mono_400_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-500.ttf",
+            get(product_client_jetbrains_mono_500_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-600.ttf",
+            get(product_client_jetbrains_mono_600_font_handler),
+        )
+        .route(
             "/client/smoke-nip07.js",
             get(product_client_smoke_nip07_js_handler),
         )
@@ -2026,7 +2066,7 @@ mod tests {
     use axum::http::Request;
     use axum::http::header::{
         ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL,
-        ORIGIN,
+        CONTENT_TYPE, ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
@@ -2344,6 +2384,19 @@ mod tests {
             .await
             .expect("client css body");
         let css_body = std::str::from_utf8(&css_body).expect("client css utf8");
+        assert!(css_body.contains("font-family: \"Funnel Sans\""));
+        assert!(css_body.contains("font-family: \"Funnel Display\""));
+        assert!(css_body.contains("font-family: \"JetBrains Mono\""));
+        assert!(css_body.contains("/client/fonts/funnel-sans-400.ttf"));
+        assert!(css_body.contains("/client/fonts/funnel-display-600.ttf"));
+        assert!(css_body.contains("/client/fonts/jetbrains-mono-400.ttf"));
+        assert!(css_body.contains("@media (prefers-color-scheme: light)"));
+        assert!(css_body.contains("--font-sans:"));
+        assert!(css_body.contains("--font-display:"));
+        assert!(css_body.contains("--font-mono:"));
+        assert!(css_body.contains("--status-success:"));
+        assert!(css_body.contains("--status-warning:"));
+        assert!(css_body.contains("--status-error:"));
         assert!(css_body.contains(".obsidian-shell"));
         assert!(!css_body.contains(".obsidian-titlebar"));
         assert!(!css_body.contains(".traffic-light"));
@@ -2421,6 +2474,96 @@ mod tests {
             .await
             .expect("smoke signer response");
         assert_eq!(smoke_signer_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn product_client_serves_local_dashboard_fonts() {
+        let router = test_router();
+        let fonts = [
+            (
+                "/client/fonts/funnel-display-500.ttf",
+                32_880,
+                "d820e428132e2622a7d175a74a826748bff68d113e7aec79b6f3545e86ff20f2",
+            ),
+            (
+                "/client/fonts/funnel-display-600.ttf",
+                32_864,
+                "e37cbfefbb7a762fe2b69e43e12c7e840d81452d1fdc6fc3ecf0b0ec7605b3af",
+            ),
+            (
+                "/client/fonts/funnel-display-700.ttf",
+                32_812,
+                "c61b735d94ac0bcd32904da436e3003f99804d09ee81ea3bea6690b180ea7a1b",
+            ),
+            (
+                "/client/fonts/funnel-sans-400.ttf",
+                32_988,
+                "d9cd65b22ca457dee2310777973cb3b77e55d28866cc574018a77cd593d5d0d6",
+            ),
+            (
+                "/client/fonts/funnel-sans-500.ttf",
+                32_964,
+                "ed6bdb3b1d1fbe7bf38f702e64c6f99ab8b324a30bee2a4fca591da57505289c",
+            ),
+            (
+                "/client/fonts/funnel-sans-600.ttf",
+                33_004,
+                "f23f08c47901e39db4c1ae4f212c88f43ed0b6037d1252f9d589807ff6a023b5",
+            ),
+            (
+                "/client/fonts/funnel-sans-700.ttf",
+                32_892,
+                "56a1277e3f904bd9543e533e1e6656c88f2e46738e1c6d1da438709323e7e87e",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-400.ttf",
+                112_172,
+                "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-500.ttf",
+                112_204,
+                "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-600.ttf",
+                112_160,
+                "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8",
+            ),
+        ];
+
+        for (path, expected_len, expected_sha256) in fonts {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("valid font request"),
+                )
+                .await
+                .expect("font response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get(CONTENT_TYPE).unwrap(),
+                "font/ttf",
+                "{path}"
+            );
+            assert_eq!(
+                response.headers().get(CACHE_CONTROL).unwrap(),
+                "no-store, max-age=0",
+                "{path}"
+            );
+            let body = to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .expect("font body");
+            assert_eq!(body.len(), expected_len, "{path}");
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&body)),
+                expected_sha256,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
