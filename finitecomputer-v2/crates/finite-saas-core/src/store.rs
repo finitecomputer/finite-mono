@@ -1358,7 +1358,7 @@ impl PostgresCoreStore {
         let updated = tx
             .execute(
                 "UPDATE project_room_memberships AS membership
-             SET archived_at = $1::timestamptz
+             SET archived_at = $1::text::timestamptz
              FROM chat_identities AS identity, projects AS project
              WHERE membership.project_id = $2
                AND identity.id = membership.chat_identity_id
@@ -8699,6 +8699,65 @@ mod tests {
             assert_eq!(active_link_count, 1);
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_owner_can_archive_imported_project() {
+        with_isolated_postgres(|store| async move {
+            let email = "postgres-archive-import@finite.vip".to_string();
+            let workos_user_id = "workos_postgres_archive_import".to_string();
+            let reconciled = store
+                .reconcile_existing_host_imports(
+                    vec![ExistingHostProjectImport {
+                        source_host_id: "legacy-host".to_string(),
+                        source_machine_id: "legacy-agent-archive".to_string(),
+                        owner_email: Some(email.clone()),
+                        display_name: "Imported Agent".to_string(),
+                        hostname: None,
+                        runtime_host: Some("legacy-host".to_string()),
+                        runtime_status: RuntimeSummaryStatus::Online,
+                        active_inference_profile: Some("finite-private".to_string()),
+                        hermes_available: Some(true),
+                        published_app_urls: Vec::new(),
+                        known_external_channel_participants: Vec::new(),
+                        admin_visible_to_emails: Vec::new(),
+                    }],
+                    ReconcileExistingHostImportsOptions {
+                        allowlisted_owner_emails: vec![email.clone()],
+                        now: Some("2026-05-25T12:00:00Z".to_string()),
+                    },
+                )
+                .await
+                .unwrap();
+            let claimed = store
+                .claim_project_imports(ClaimProjectImportsInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos_user_id.clone(),
+                    selected_candidate_ids: reconciled.created_candidates,
+                    now: Some("2026-05-25T12:01:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+
+            store
+                .archive_imported_project(ArchiveImportedProjectInput {
+                    verified_email: email,
+                    workos_user_id: workos_user_id.clone(),
+                    project_id: claimed.claimed_project_ids[0].clone(),
+                    now: Some("2026-05-25T12:02:00Z".to_string()),
+                })
+                .await
+                .expect("timestamp text must serialize for Postgres archive");
+
+            assert!(
+                store
+                    .visible_projects_for_workos_user(&workos_user_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         })
         .await;
     }
