@@ -37,6 +37,14 @@ materialize Pages, edit content, sync changes, run local search/graph indexes,
 and perform OKF import/export. Unlike the Smoke UI, the Product Client owns the
 normal member workflow.
 
+### Dashboard-Aligned Product Theme
+
+The Product Client's presentation language derived from the Finite dashboard:
+warm neutral surfaces, blue product accents, Funnel typography, restrained
+depth, rounded controls, and the dashboard's system-driven light and dark
+appearances. It changes presentation without changing the Product Client's
+Vault workspace layout, security state, or member workflows.
+
 ### Product Client Spine
 
 The minimum trusted-client workflow that later client features build on:
