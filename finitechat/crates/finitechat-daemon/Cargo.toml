@@ -19,4 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+finitechat-server = { path = "../finitechat-server" }
+http-body-util.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tower.workspace = true
