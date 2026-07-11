@@ -18,6 +18,7 @@ export class ChatProductController {
     streamConnected: false,
   };
   private generation = 0;
+  private lifecycle = 0;
   private acceptsResetBaseline = false;
   private unsubscribeTransport: (() => void) | null = null;
   private readonly listeners = new Set<Listener>();
@@ -37,20 +38,29 @@ export class ChatProductController {
   }
 
   start() {
+    const lifecycle = ++this.lifecycle;
     this.unsubscribeTransport?.();
-    this.unsubscribeTransport = this.transport.subscribe?.(
-      (state) => this.applyState(state),
-      (error) => this.setView({ error: errorMessage(error), streamConnected: false }),
-      () => {
-        this.generation += 1;
-        this.acceptsResetBaseline = true;
-        this.setView({ streamConnected: false });
-      }
-    ) ?? null;
-    void this.refresh().catch(() => undefined);
+    this.unsubscribeTransport = null;
+    // Establish one HTTP/IPC baseline before opening the update stream. If the
+    // stream reconnects while the initial load is in flight, its generation
+    // reset can otherwise discard the only state and leave the product on its
+    // opening screen until the user happens to trigger another action.
+    void this.refresh().catch(() => undefined).finally(() => {
+      if (lifecycle !== this.lifecycle) return;
+      this.unsubscribeTransport = this.transport.subscribe?.(
+        (state) => this.applyState(state),
+        (error) => this.setView({ error: errorMessage(error), streamConnected: false }),
+        () => {
+          this.generation += 1;
+          this.acceptsResetBaseline = true;
+          this.setView({ streamConnected: false });
+        }
+      ) ?? null;
+    });
   }
 
   stop() {
+    this.lifecycle += 1;
     this.unsubscribeTransport?.();
     this.unsubscribeTransport = null;
   }

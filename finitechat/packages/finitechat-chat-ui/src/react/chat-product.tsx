@@ -839,6 +839,21 @@ function SitePreviewPanel({ onClose, onSelect, preview, site, sites }: { onClose
 }
 
 function Modal({ children, description, onClose, title }: { children: ReactNode; description: string; onClose: () => void; title: string }) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCloseRef.current();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
   return <div className="finite-chat__modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="finite-chat__modal" role="dialog" aria-modal="true" aria-label={title}><button type="button" className="finite-chat__modal-close" aria-label="Close" onClick={onClose}><XIcon /></button><h2>{title}</h2><p>{description}</p>{children}</section></div>;
 }
 

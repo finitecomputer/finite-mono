@@ -66,6 +66,27 @@ test("controller applies one ordered state stream and ignores stale snapshots", 
   assert.equal(transport.onState, null);
 });
 
+test("controller establishes its initial state before stream generation resets", async () => {
+  let resolveLoad: ((state: AppState) => void) | null = null;
+  const transport = new FakeTransport(appState(4));
+  transport.load = () =>
+    new Promise<AppState>((resolve) => {
+      resolveLoad = resolve;
+    });
+  const controller = new ChatProductController(transport);
+
+  controller.start();
+  assert.equal(transport.onReset, null, "the stream must wait for the baseline");
+  resolveLoad?.(appState(4));
+  await eventually(() => assert.equal(controller.snapshot().state?.rev, 4));
+  await eventually(() => assert.notEqual(transport.onReset, null));
+
+  transport.onReset?.();
+  transport.onState?.(appState(1));
+  assert.equal(controller.snapshot().state?.rev, 1);
+  controller.stop();
+});
+
 test("daemon generation reset accepts its first lower authoritative revision", async () => {
   const transport = new FakeTransport(appState(42));
   const controller = new ChatProductController(transport);
