@@ -2891,7 +2891,7 @@ impl Store {
                    SELECT token_hash FROM login_tokens
                    WHERE site_id = ?1 AND email = ?2
                      AND used_at IS NULL AND expires_at >= ?3
-                   ORDER BY created_at, token_hash
+                   ORDER BY created_at, rowid
                    LIMIT ?4
                  )",
                 params![site_id, email, now, remove_count],
@@ -4165,6 +4165,35 @@ mod tests {
                 .redeem_login_token(&newest, NOW + u64::from(limit) + 5)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn active_login_token_eviction_preserves_same_second_issuance_order() {
+        let mut store = store_with_site("hello");
+        let limit = finitesites_proto::limits::MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL;
+        let first = "f".repeat(64);
+        store
+            .create_login_token(&first, "site_1", "a@example.com", NOW + 900, NOW)
+            .unwrap();
+
+        for index in 0..limit {
+            store
+                .create_login_token(
+                    &format!("{index:064x}"),
+                    "site_1",
+                    "a@example.com",
+                    NOW + 900,
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            store.redeem_login_token(&first, NOW + 1),
+            Err(StoreError::NotFound("login token"))
+        ));
+        let newest = format!("{:064x}", limit - 1);
+        assert!(store.redeem_login_token(&newest, NOW + 1).is_ok());
     }
 
     #[test]
