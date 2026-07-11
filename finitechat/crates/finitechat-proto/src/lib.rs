@@ -92,6 +92,19 @@ pub const FINITECHAT_ACTIVITY_TYPING_EXPIRY_MILLIS: u64 = 30 * 1000;
 pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
 pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
+pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1: &str = "finitechat.device-link.bootstrap.v1";
+pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1: &str =
+    "finitechat.device-link.bootstrap-request.v1";
+pub const DEVICE_LINK_BOOTSTRAP_VERSION_V1: u16 = 1;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_EVENTS: u32 = 64;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_PROFILES: u32 = MAX_ACCOUNT_DEVICES_PER_ROOM;
+// The bootstrap is itself carried as a base64 payload inside a JSON
+// DecryptedApplicationEventV1. Leave room for that 4/3 expansion and the
+// outer typed-event fields beneath MAX_ENVELOPE_PAYLOAD_BYTES.
+pub const MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES: u32 = 176 * 1024;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_DISPLAY_NAME_BYTES: u32 = 128;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_ABOUT_BYTES: u32 = 4 * 1024;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_PICTURE_BYTES: u32 = 2 * 1024;
 
 const _: () = {
     assert!(MAX_ENVELOPE_PAYLOAD_BYTES > 0);
@@ -108,6 +121,13 @@ const _: () = {
     assert!(MAX_CHAT_REACTION_EMOJI_BYTES > 0);
     assert!(MAX_CHAT_TITLE_BYTES > 0);
     assert!(MAX_CHAT_TITLE_BYTES <= MAX_ENVELOPE_PAYLOAD_BYTES);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_EVENTS > 0);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_PROFILES > 0);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES > 0);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES < MAX_ENVELOPE_PAYLOAD_BYTES);
+    assert!(
+        MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES * 4 / 3 + 4 * 1024 < MAX_ENVELOPE_PAYLOAD_BYTES
+    );
     assert!(MAX_ATTACHMENT_PLAINTEXT_BYTES > MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_ATTACHMENT_CIPHERTEXT_BYTES > MAX_ATTACHMENT_PLAINTEXT_BYTES);
     assert!(MAX_ATTACHMENT_BLOB_URL_BYTES >= MAX_OBJECT_ID_BYTES);
@@ -410,6 +430,74 @@ pub struct ChatRenameV1 {
     pub topic_id: ConversationId,
     pub chat_id: ConversationSegmentId,
     pub title: String,
+}
+
+/// An account-authored snapshot sent immediately after a Device is added to a
+/// room. The enclosing application event is MLS encrypted and is accepted only
+/// by `target`; the server never sees these fields or the copied transcript.
+///
+/// History is deliberately a bounded set of the room's already-authenticated
+/// durable application events. Replaying those events into the target Device's
+/// encrypted local projection reconstructs conversation/topic/chat state
+/// without inventing a second metadata model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapV1 {
+    pub version: u16,
+    pub bootstrap_id: String,
+    pub target: DeviceRef,
+    pub room: DeviceLinkBootstrapRoomV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_selection: Option<DeviceLinkBootstrapSelectionV1>,
+    #[serde(default)]
+    pub profiles: Vec<DeviceLinkBootstrapProfileV1>,
+    #[serde(default)]
+    pub history: Vec<DeviceLinkBootstrapEventV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapRequestV1 {
+    pub version: u16,
+    pub request_id: String,
+    pub requester: DeviceRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapRoomV1 {
+    pub room_id: RoomId,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapSelectionV1 {
+    pub room_id: RoomId,
+    pub topic_id: ConversationId,
+    pub chat_id: ConversationSegmentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapProfileV1 {
+    pub account_id: String,
+    pub npub: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+    #[serde(default)]
+    pub is_agent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapEventV1 {
+    pub seq: Seq,
+    pub message_id: MessageId,
+    pub sender: DeviceRef,
+    #[serde(with = "bytes_as_vec")]
+    pub plaintext: Vec<u8>,
+    #[serde(default)]
+    pub timestamp_unix_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2406,6 +2494,173 @@ impl ChatRenameV1 {
     }
 }
 
+impl DeviceLinkBootstrapV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty(
+            "device_link_bootstrap.bootstrap_id",
+            self.bootstrap_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.bootstrap_id",
+            &self.bootstrap_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        self.target.validate_limits()?;
+        self.room.validate_limits()?;
+        if let Some(selection) = &self.canonical_selection {
+            selection.validate_limits()?;
+        }
+        validate_item_count(
+            "device_link_bootstrap.profiles",
+            self.profiles.len(),
+            MAX_DEVICE_LINK_BOOTSTRAP_PROFILES,
+        )?;
+        for profile in &self.profiles {
+            profile.validate_limits()?;
+        }
+        validate_item_count(
+            "device_link_bootstrap.history",
+            self.history.len(),
+            MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
+        )?;
+        for event in &self.history {
+            event.validate_limits()?;
+        }
+        Ok(())
+    }
+}
+
+impl DeviceLinkBootstrapRequestV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty(
+            "device_link_bootstrap_request.request_id",
+            self.request_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap_request.request_id",
+            &self.request_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        self.requester.validate_limits()
+    }
+}
+
+impl DeviceLinkBootstrapRoomV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_room_id(&self.room_id)?;
+        validate_bytes_non_empty(
+            "device_link_bootstrap.room.display_name",
+            self.display_name.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.room.display_name",
+            &self.display_name,
+            MAX_DEVICE_LINK_BOOTSTRAP_DISPLAY_NAME_BYTES,
+        )?;
+        if let Some(picture) = &self.picture {
+            validate_string_bytes(
+                "device_link_bootstrap.room.picture",
+                picture,
+                MAX_DEVICE_LINK_BOOTSTRAP_PICTURE_BYTES,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl DeviceLinkBootstrapSelectionV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_room_id(&self.room_id)?;
+        validate_bytes_non_empty(
+            "device_link_bootstrap.selection.topic_id",
+            self.topic_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.selection.topic_id",
+            &self.topic_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_bytes_non_empty(
+            "device_link_bootstrap.selection.chat_id",
+            self.chat_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.selection.chat_id",
+            &self.chat_id,
+            MAX_OBJECT_ID_BYTES,
+        )
+    }
+}
+
+impl DeviceLinkBootstrapProfileV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty(
+            "device_link_bootstrap.profile.account_id",
+            self.account_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.profile.account_id",
+            &self.account_id,
+            MAX_ACCOUNT_ID_BYTES,
+        )?;
+        validate_bytes_non_empty("device_link_bootstrap.profile.npub", self.npub.len())?;
+        validate_string_bytes(
+            "device_link_bootstrap.profile.npub",
+            &self.npub,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_bytes_non_empty(
+            "device_link_bootstrap.profile.display_name",
+            self.display_name.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.profile.display_name",
+            &self.display_name,
+            MAX_DEVICE_LINK_BOOTSTRAP_DISPLAY_NAME_BYTES,
+        )?;
+        if let Some(about) = &self.about {
+            validate_string_bytes(
+                "device_link_bootstrap.profile.about",
+                about,
+                MAX_DEVICE_LINK_BOOTSTRAP_ABOUT_BYTES,
+            )?;
+        }
+        if let Some(picture) = &self.picture {
+            validate_string_bytes(
+                "device_link_bootstrap.profile.picture",
+                picture,
+                MAX_DEVICE_LINK_BOOTSTRAP_PICTURE_BYTES,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl DeviceLinkBootstrapEventV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty(
+            "device_link_bootstrap.event.message_id",
+            self.message_id.len(),
+        )?;
+        validate_string_bytes(
+            "device_link_bootstrap.event.message_id",
+            &self.message_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        self.sender.validate_limits()?;
+        validate_bytes_non_empty(
+            "device_link_bootstrap.event.plaintext",
+            self.plaintext.len(),
+        )?;
+        validate_bytes_len(
+            "device_link_bootstrap.event.plaintext",
+            self.plaintext.len(),
+            MAX_ENVELOPE_PAYLOAD_BYTES,
+        )?;
+        Ok(())
+    }
+}
+
 impl ChatReceiptV1 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
@@ -3016,6 +3271,21 @@ mod tests {
             envelope.message_id().unwrap(),
             envelope.message_id().unwrap()
         );
+    }
+
+    #[test]
+    fn device_link_bootstrap_cap_fits_its_outer_application_event() {
+        let outer = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::Namespaced {
+                name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1.to_owned(),
+                policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+            },
+            conversation_id: None,
+            segment_id: None,
+            payload: vec![0; MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize],
+        };
+        let encoded = serde_json::to_vec(&outer).unwrap();
+        assert!(encoded.len() <= MAX_ENVELOPE_PAYLOAD_BYTES as usize);
     }
 
     #[test]

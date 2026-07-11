@@ -38,16 +38,20 @@ use finitechat_proto::{
     AttachmentBlobReferenceV1, ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1, ChatRenameV1,
     ClaimKeyPackageResult, ConversationMetadataV1, ConversationProjection,
     ConversationProjectionEntry, ConversationProjectionEventContext, ConversationSegmentStartV1,
-    CreateRoomRequest, DecryptedApplicationEventV1, DecryptedEphemeralActivityV1, DeviceRef,
-    DurableAppEventKind, EphemeralActivityAccepted, EphemeralActivityActionV1,
-    EphemeralActivityIngressContext, EphemeralActivityProjection, EphemeralActivityProjectionEntry,
-    EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
-    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_RENAME_EVENT_V1, GenericActivityKindV1,
-    ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_KEY_PACKAGES_PER_DEVICE,
-    MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1,
-    RuntimeCommandRequestV1, RuntimeCommandResultV1, RuntimeStateSnapshotV1,
-    delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
-    nsec_encode, validate_item_count, validate_string_bytes,
+    CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V1, DecryptedApplicationEventV1,
+    DecryptedEphemeralActivityV1, DeviceLinkBootstrapEventV1, DeviceLinkBootstrapProfileV1,
+    DeviceLinkBootstrapRequestV1, DeviceLinkBootstrapRoomV1, DeviceLinkBootstrapSelectionV1,
+    DeviceLinkBootstrapV1, DeviceRef, DurableAppEventKind, EphemeralActivityAccepted,
+    EphemeralActivityActionV1, EphemeralActivityIngressContext, EphemeralActivityProjection,
+    EphemeralActivityProjectionEntry, EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING,
+    FINITECHAT_ACTIVITY_KIND_TYPING, FINITECHAT_ACTIVITY_KIND_WORKING,
+    FINITECHAT_CHAT_RENAME_EVENT_V1, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1,
+    FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1, GenericActivityKindV1,
+    ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
+    MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES, MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES,
+    MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1, RuntimeCommandRequestV1,
+    RuntimeCommandResultV1, RuntimeStateSnapshotV1, delivery_member_id_for_device, nprofile_decode,
+    npub_decode, npub_encode, nsec_decode, nsec_encode, validate_item_count, validate_string_bytes,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -892,6 +896,11 @@ struct AppRuntimeState {
     downloading_attachments: BTreeSet<(String, String, String)>,
     bridge_seen_joined_account_ids: BTreeSet<String>,
     inbox_hint_after_seq: u64,
+    requested_link_bootstrap_rooms: BTreeSet<String>,
+    /// False only while a fresh Device is using the provisional first-room
+    /// selection. A device-link bootstrap may replace that provisional route
+    /// once; explicit navigation and an accepted bootstrap both lock it.
+    selection_is_explicit_or_bootstrapped: bool,
 }
 
 struct SendAttachmentInput {
@@ -1814,6 +1823,16 @@ impl AppRuntimeState {
         sort_app_rooms(&mut rooms);
         apply_room_message_projection(&mut rooms, &all_messages, &local_read_seq);
         let stored_app_state = core.store.load_app_state(&owner).map_err(store_error)?;
+        // Pre-bootstrap linked Devices persisted the first discovered room as
+        // though it were a user choice. Their generic `room_id` label is the
+        // migration signal that this selection is still provisional. Once a
+        // bootstrap hydrates room metadata, subsequent persisted navigation is
+        // treated as explicit and is never overridden.
+        let selection_is_explicit_or_bootstrapped = stored_app_state
+            .selected_room_id
+            .as_ref()
+            .and_then(|selected| rooms.iter().find(|room| room.room_id == *selected))
+            .is_some_and(|room| room.display_name != room.room_id);
         let selected_room_id = selected_room_id_from_stored(&rooms, &stored_app_state);
         let revoked_devices = stored_app_state
             .revoked_devices
@@ -1858,6 +1877,8 @@ impl AppRuntimeState {
             downloading_attachments: BTreeSet::new(),
             bridge_seen_joined_account_ids: BTreeSet::new(),
             inbox_hint_after_seq: 0,
+            requested_link_bootstrap_rooms: BTreeSet::new(),
+            selection_is_explicit_or_bootstrapped,
         };
         state.sync_chat_projection();
         if let Some(room_id) = state.app.selected_room_id.clone() {
@@ -2216,10 +2237,11 @@ impl AppRuntimeState {
     fn runtime_tick(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
-        self.apply_projection_events(synced.events);
+        self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.reload_chat_projection_from_store()?;
         self.materialize_known_connected_rooms()?;
+        self.request_missing_link_device_bootstraps()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.app.status = "ready".to_owned();
         Ok(())
@@ -2239,6 +2261,7 @@ impl AppRuntimeState {
             .map(|events| {
                 events
                     .iter()
+                    .filter(|event| !is_device_link_control_event(&event.plaintext))
                     .map(app_bridge_event_from_stored_event)
                     .collect()
             })
@@ -2263,9 +2286,10 @@ impl AppRuntimeState {
         let events = synced
             .events
             .iter()
+            .filter(|event| !is_device_link_control_event(&event.plaintext))
             .map(app_bridge_event_from_stored_event)
             .collect::<Vec<_>>();
-        self.apply_projection_events(synced.events);
+        self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
@@ -2341,6 +2365,64 @@ impl AppRuntimeState {
         Ok(())
     }
 
+    fn request_missing_link_device_bootstraps(&mut self) -> Result<(), FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        let has_agent_room = self
+            .app
+            .rooms
+            .iter()
+            .any(|room| room.state == AppRoomState::Connected && room.is_agent_chat);
+        let room_ids = self
+            .app
+            .rooms
+            .iter()
+            .filter(|room| room.state == AppRoomState::Connected)
+            .filter(|room| {
+                if has_agent_room {
+                    room.is_agent_chat && room.display_name == room.room_id
+                } else {
+                    true
+                }
+            })
+            .map(|room| room.room_id.clone())
+            .collect::<Vec<_>>();
+        for room_id in room_ids {
+            if self.requested_link_bootstrap_rooms.contains(&room_id) {
+                continue;
+            }
+            let has_other_account_device = self
+                .core
+                .device
+                .room_members(&room_id)
+                .map_err(client_error)?
+                .iter()
+                .any(|member| {
+                    member.account_id == owner.account_id && member.device_id != owner.device_id
+                });
+            if !has_other_account_device {
+                continue;
+            }
+            let request = DeviceLinkBootstrapRequestV1 {
+                version: DEVICE_LINK_BOOTSTRAP_VERSION_V1,
+                request_id: self
+                    .core
+                    .generate_object_id("device-link-bootstrap-request")?,
+                requester: owner.clone(),
+            };
+            request.validate_limits().map_err(client_error)?;
+            let payload = serde_json::to_vec(&request).map_err(client_error)?;
+            self.core.send_application_event(
+                &room_id,
+                device_link_bootstrap_request_event_kind(),
+                None,
+                &payload,
+                "device-link-bootstrap-request",
+            )?;
+            self.requested_link_bootstrap_rooms.insert(room_id);
+        }
+        Ok(())
+    }
+
     fn bridge_unseen_joined_account_ids(&mut self) -> Vec<String> {
         let own_account_id = self.core.device.device_ref().account_id.clone();
         let mut current = BTreeSet::new();
@@ -2390,6 +2472,7 @@ impl AppRuntimeState {
             );
         }
         self.persist_app_state()?;
+        self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
@@ -2419,6 +2502,7 @@ impl AppRuntimeState {
             .entry(room_id.clone())
             .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
         self.persist_app_state()?;
+        self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
@@ -2445,6 +2529,7 @@ impl AppRuntimeState {
             .entry(room_id.clone())
             .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
         self.persist_app_state()?;
+        self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
@@ -2478,7 +2563,7 @@ impl AppRuntimeState {
             &payload,
             "chat-rename",
         )?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         self.app.selected_room_id = Some(room_id);
         self.app.selected_topic_id = Some(topic_id);
         self.app.selected_chat_id = Some(chat_id);
@@ -2546,7 +2631,7 @@ impl AppRuntimeState {
             &payload,
             "topic",
         )?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         self.app.selected_room_id = Some(room_id.clone());
         self.app.selected_topic_id = Some(topic_id.clone());
         self.app.selected_chat_id = None;
@@ -2612,7 +2697,7 @@ impl AppRuntimeState {
             &payload,
             "segment",
         )?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         Ok(segment.segment_id)
     }
 
@@ -2765,7 +2850,7 @@ impl AppRuntimeState {
         }
 
         let synced = self.core.sync_with_projection()?;
-        self.apply_projection_events(synced.events);
+        self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
@@ -2908,7 +2993,7 @@ impl AppRuntimeState {
         }
 
         let synced = self.core.sync_with_projection()?;
-        self.apply_projection_events(synced.events);
+        self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
@@ -3064,7 +3149,7 @@ impl AppRuntimeState {
         }
 
         let synced = self.core.sync_with_projection()?;
-        self.apply_projection_events(synced.events);
+        self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.materialize_known_connected_rooms()?;
         self.app.selected_room_id = Some(room_id.clone());
@@ -3676,7 +3761,7 @@ impl AppRuntimeState {
         let event = self
             .core
             .send_poll_vote(&room_id, &message_id, &option_id)?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         self.app.status = "voted".to_owned();
         Ok(())
     }
@@ -3848,7 +3933,7 @@ impl AppRuntimeState {
         }
 
         let event = self.core.send_reaction(&room_id, &message_id, &emoji)?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         self.app.status = "reacted".to_owned();
         Ok(())
     }
@@ -3884,7 +3969,7 @@ impl AppRuntimeState {
             .core
             .send_read_receipt(&room_id, &message_id, seq, ChatReceiptStateV1::Read)
         {
-            Ok(event) => self.apply_projection_events(vec![event]),
+            Ok(event) => self.apply_projection_events(vec![event])?,
             Err(FiniteChatCoreError::Delivery { .. }) => {}
             Err(error) => return Err(error),
         }
@@ -4392,6 +4477,9 @@ impl AppRuntimeState {
             },
         )
         .map_err(runtime_error)?;
+        if fanout.complete {
+            self.emit_link_device_bootstraps(&fanout_id, &target)?;
+        }
         let (room_count, active_room_count) =
             device_room_counts(&mut delivery, &target).map_err(delivery_error)?;
         self.refresh_devices()?;
@@ -4410,6 +4498,213 @@ impl AppRuntimeState {
             room_count,
             active_room_count,
         })
+    }
+
+    fn emit_link_device_bootstraps(
+        &mut self,
+        bootstrap_id: &str,
+        target: &DeviceRef,
+    ) -> Result<(), FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        let stored_events = self
+            .core
+            .store
+            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
+            .map_err(store_error)?;
+        let already_sent = stored_events
+            .iter()
+            .filter_map(device_link_bootstrap_from_stored_event)
+            .filter(|bootstrap| {
+                bootstrap.bootstrap_id == bootstrap_id && bootstrap.target == *target
+            })
+            .map(|bootstrap| bootstrap.room.room_id)
+            .collect::<BTreeSet<_>>();
+        let canonical_selection = self.canonical_agent_bootstrap_selection();
+        let room_ids = self.core.known_room_ids();
+        for room_id in room_ids {
+            if already_sent.contains(&room_id) {
+                continue;
+            }
+            let target_is_member = self
+                .core
+                .device
+                .room_members(&room_id)
+                .map_err(client_error)?
+                .iter()
+                .any(|member| member == target);
+            if !target_is_member {
+                continue;
+            }
+            self.emit_link_device_bootstrap_for_room(
+                bootstrap_id,
+                target,
+                &room_id,
+                canonical_selection.clone(),
+                &stored_events,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn emit_link_device_bootstrap_for_room(
+        &mut self,
+        bootstrap_id: &str,
+        target: &DeviceRef,
+        room_id: &str,
+        canonical_selection: Option<DeviceLinkBootstrapSelectionV1>,
+        stored_events: &[StoredAppEvent],
+    ) -> Result<(), FiniteChatCoreError> {
+        let room = self
+            .room(room_id)
+            .cloned()
+            .unwrap_or_else(|| connected_app_room(room_id, room_id));
+        let member_account_ids = self
+            .core
+            .device
+            .room_members(room_id)
+            .map_err(client_error)?
+            .into_iter()
+            .map(|member| member.account_id)
+            .collect::<BTreeSet<_>>();
+        let profiles = member_account_ids
+            .into_iter()
+            .map(|account_id| {
+                self.profile_cache
+                    .get(&account_id)
+                    .cloned()
+                    .unwrap_or_else(|| placeholder_profile(&account_id))
+            })
+            .map(device_link_bootstrap_profile_from_app)
+            .collect::<Vec<_>>();
+        let canonical_selection =
+            canonical_selection.filter(|selection| selection.room_id == room_id);
+        let mut bootstrap = DeviceLinkBootstrapV1 {
+            version: DEVICE_LINK_BOOTSTRAP_VERSION_V1,
+            bootstrap_id: bootstrap_id.to_owned(),
+            target: target.clone(),
+            room: DeviceLinkBootstrapRoomV1 {
+                room_id: room_id.to_owned(),
+                display_name: room.display_name,
+                picture: room.picture,
+            },
+            canonical_selection,
+            profiles,
+            history: Vec::new(),
+        };
+        bootstrap.validate_limits().map_err(client_error)?;
+
+        let mut room_events = stored_events
+            .iter()
+            .filter(|event| event.room_id == room_id)
+            .filter(|event| !is_device_link_control_event(&event.plaintext))
+            .cloned()
+            .collect::<Vec<_>>();
+        room_events.sort_by(|left, right| {
+            right
+                .seq
+                .cmp(&left.seq)
+                .then_with(|| right.message_id.cmp(&left.message_id))
+        });
+        let mut foundation_ids = BTreeSet::new();
+        let mut foundation_kinds = BTreeSet::new();
+        if let Some(selection) = bootstrap.canonical_selection.as_ref() {
+            for event in &room_events {
+                let Some(kind) = device_link_foundation_kind(event, selection) else {
+                    continue;
+                };
+                if foundation_kinds.insert(kind) {
+                    foundation_ids.insert(event.message_id.clone());
+                }
+            }
+        }
+        let mut candidates = room_events
+            .iter()
+            .filter(|event| foundation_ids.contains(&event.message_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            left.seq
+                .cmp(&right.seq)
+                .then_with(|| left.message_id.cmp(&right.message_id))
+        });
+        candidates.extend(
+            room_events
+                .into_iter()
+                .filter(|event| !foundation_ids.contains(&event.message_id)),
+        );
+        for event in candidates {
+            if bootstrap.history.len() >= MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as usize {
+                break;
+            }
+            let history_event = DeviceLinkBootstrapEventV1 {
+                seq: event.seq,
+                message_id: event.message_id,
+                sender: event.sender,
+                plaintext: event.plaintext,
+                timestamp_unix_seconds: event.timestamp_unix_seconds,
+            };
+            history_event.validate_limits().map_err(client_error)?;
+            bootstrap.history.push(history_event);
+            let encoded = serde_json::to_vec(&bootstrap).map_err(client_error)?;
+            if encoded.len() > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize {
+                bootstrap.history.pop();
+            }
+        }
+        bootstrap.history.sort_by(|left, right| {
+            left.seq
+                .cmp(&right.seq)
+                .then_with(|| left.message_id.cmp(&right.message_id))
+        });
+        bootstrap.validate_limits().map_err(client_error)?;
+        let payload = serde_json::to_vec(&bootstrap).map_err(client_error)?;
+        if payload.len() > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize {
+            return Err(client_error("device-link bootstrap payload is too large"));
+        }
+        self.core.send_application_event(
+            room_id,
+            device_link_bootstrap_event_kind(),
+            None,
+            &payload,
+            "device-link-bootstrap",
+        )?;
+        Ok(())
+    }
+
+    fn canonical_agent_bootstrap_selection(&self) -> Option<DeviceLinkBootstrapSelectionV1> {
+        let agent_room_ids = self
+            .app
+            .rooms
+            .iter()
+            .filter(|room| room.state == AppRoomState::Connected && room.is_agent_chat)
+            .map(|room| room.room_id.clone())
+            .collect::<Vec<_>>();
+        let selected_room_id = self.app.selected_room_id.as_ref();
+        let room_id = selected_room_id
+            .filter(|selected| agent_room_ids.contains(selected))
+            .cloned()
+            .or_else(|| (agent_room_ids.len() == 1).then(|| agent_room_ids[0].clone()))?;
+        let topic_id = if selected_room_id == Some(&room_id) {
+            self.app.selected_topic_id.clone()
+        } else {
+            self.app
+                .topics
+                .iter()
+                .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+                .map(|topic| topic.topic_id.clone())
+        }?;
+        let chat_id = if selected_room_id == Some(&room_id)
+            && self.app.selected_topic_id.as_ref() == Some(&topic_id)
+        {
+            self.app.selected_chat_id.clone()
+        } else {
+            self.default_chat_id_for_topic(&room_id, &topic_id)
+        }?;
+        self.chat_exists(&room_id, &topic_id, &chat_id)
+            .then_some(DeviceLinkBootstrapSelectionV1 {
+                room_id,
+                topic_id,
+                chat_id,
+            })
     }
 
     fn revoke_device(
@@ -4477,12 +4772,28 @@ impl AppRuntimeState {
         self.sync_typing_members();
     }
 
-    fn apply_projection_events(&mut self, events: Vec<StoredAppEvent>) {
+    fn apply_projection_events(
+        &mut self,
+        events: Vec<StoredAppEvent>,
+    ) -> Result<(), FiniteChatCoreError> {
         if events.is_empty() {
-            return;
+            return Ok(());
         }
         let owner = self.core.device.device_ref().clone();
-        for event in events {
+        let mut projection_events = Vec::new();
+        let mut bootstrap_selection = None;
+        for event in &events {
+            if let Some(bootstrap) = device_link_bootstrap_from_stored_event(event) {
+                let (imported, selection) = self.accept_link_device_bootstrap(event, bootstrap)?;
+                projection_events.extend(imported);
+                bootstrap_selection = bootstrap_selection.or(selection);
+            }
+            if let Some(request) = device_link_bootstrap_request_from_stored_event(event) {
+                self.respond_to_link_device_bootstrap_request(event, request)?;
+            }
+        }
+        projection_events.extend(events);
+        for event in projection_events {
             if let Ok(app_event) =
                 serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
             {
@@ -4497,7 +4808,157 @@ impl AppRuntimeState {
             self.chat_projection.apply_event(event, &owner);
         }
         self.sync_chat_projection();
+        if let Some(selection) = bootstrap_selection {
+            self.apply_link_device_bootstrap_selection(selection)?;
+        }
         self.sync_typing_members();
+        Ok(())
+    }
+
+    fn accept_link_device_bootstrap(
+        &mut self,
+        envelope: &StoredAppEvent,
+        bootstrap: DeviceLinkBootstrapV1,
+    ) -> Result<(Vec<StoredAppEvent>, Option<DeviceLinkBootstrapSelectionV1>), FiniteChatCoreError>
+    {
+        let owner = self.core.device.device_ref().clone();
+        if envelope.sender.account_id != owner.account_id
+            || bootstrap.target != owner
+            || bootstrap.room.room_id != envelope.room_id
+            || !self.core.has_room(&envelope.room_id)
+        {
+            return Ok((Vec::new(), None));
+        }
+        let encoded = serde_json::to_vec(&bootstrap).map_err(client_error)?;
+        if encoded.len() > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize {
+            return Ok((Vec::new(), None));
+        }
+        let member_account_ids = self
+            .core
+            .device
+            .room_members(&envelope.room_id)
+            .map_err(client_error)?
+            .into_iter()
+            .map(|member| member.account_id)
+            .collect::<BTreeSet<_>>();
+        for profile in bootstrap.profiles {
+            if member_account_ids.contains(&profile.account_id) {
+                self.remember_profile_summary(app_profile_from_device_link_bootstrap(profile))?;
+            }
+        }
+        self.upsert_room(
+            &bootstrap.room.room_id,
+            &bootstrap.room.display_name,
+            bootstrap.room.picture,
+            AppRoomState::Connected,
+            "connected",
+        );
+        self.persist_room_projection(&bootstrap.room.room_id)?;
+
+        let mut seen = BTreeSet::new();
+        let mut imported = Vec::new();
+        for history in bootstrap.history {
+            if !seen.insert(history.message_id.clone())
+                || is_device_link_control_event(&history.plaintext)
+            {
+                continue;
+            }
+            let Ok(event) =
+                serde_json::from_slice::<DecryptedApplicationEventV1>(&history.plaintext)
+            else {
+                continue;
+            };
+            if event.validate_limits().is_err() {
+                continue;
+            }
+            imported.push(StoredAppEvent {
+                room_id: envelope.room_id.clone(),
+                seq: history.seq,
+                message_id: history.message_id,
+                sender: history.sender,
+                plaintext: history.plaintext,
+                timestamp_unix_seconds: history.timestamp_unix_seconds,
+            });
+        }
+        if !imported.is_empty() {
+            self.core
+                .store
+                .save_app_events(&owner, &imported, MAX_APP_MESSAGES_U32)
+                .map_err(store_error)?;
+        }
+        Ok((imported, bootstrap.canonical_selection))
+    }
+
+    fn respond_to_link_device_bootstrap_request(
+        &mut self,
+        envelope: &StoredAppEvent,
+        request: DeviceLinkBootstrapRequestV1,
+    ) -> Result<(), FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        if envelope.sender.account_id != owner.account_id
+            || request.requester.account_id != owner.account_id
+            || request.requester.device_id == owner.device_id
+        {
+            return Ok(());
+        }
+        let requester_is_member = self
+            .core
+            .device
+            .room_members(&envelope.room_id)
+            .map_err(client_error)?
+            .iter()
+            .any(|member| member == &request.requester);
+        let has_authoritative_metadata = self
+            .room(&envelope.room_id)
+            .is_some_and(|room| room.display_name != room.room_id);
+        if !requester_is_member || !has_authoritative_metadata {
+            return Ok(());
+        }
+        let stored_events = self
+            .core
+            .store
+            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
+            .map_err(store_error)?;
+        let already_sent = stored_events
+            .iter()
+            .filter_map(device_link_bootstrap_from_stored_event)
+            .any(|bootstrap| {
+                bootstrap.bootstrap_id == request.request_id
+                    && bootstrap.target == request.requester
+                    && bootstrap.room.room_id == envelope.room_id
+            });
+        if already_sent {
+            return Ok(());
+        }
+        self.emit_link_device_bootstrap_for_room(
+            &request.request_id,
+            &request.requester,
+            &envelope.room_id,
+            self.canonical_agent_bootstrap_selection(),
+            &stored_events,
+        )
+    }
+
+    fn apply_link_device_bootstrap_selection(
+        &mut self,
+        selection: DeviceLinkBootstrapSelectionV1,
+    ) -> Result<(), FiniteChatCoreError> {
+        if self.selection_is_explicit_or_bootstrapped
+            || !self.room_is_connected(&selection.room_id)
+            || !self.chat_exists(&selection.room_id, &selection.topic_id, &selection.chat_id)
+        {
+            return Ok(());
+        }
+        self.app.selected_room_id = Some(selection.room_id.clone());
+        self.app.selected_topic_id = Some(selection.topic_id);
+        self.app.selected_chat_id = Some(selection.chat_id);
+        self.loaded_message_counts
+            .entry(selection.room_id)
+            .or_insert(DEFAULT_TRANSCRIPT_WINDOW);
+        self.persist_app_state()?;
+        self.selection_is_explicit_or_bootstrapped = true;
+        self.sync_selected_room_messages();
+        Ok(())
     }
 
     fn sync_chat_projection(&mut self) {
@@ -5067,7 +5528,7 @@ impl AppRuntimeState {
             &payload,
             "home-topic",
         )?;
-        self.apply_projection_events(vec![event]);
+        self.apply_projection_events(vec![event])?;
         Ok(())
     }
 
@@ -7139,6 +7600,125 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
         | DurableAppEventKind::StreamStart
         | DurableAppEventKind::StreamFinish
         | DurableAppEventKind::Namespaced { .. } => DecodedAppEvent::Ignored,
+    }
+}
+
+fn device_link_bootstrap_event_kind() -> DurableAppEventKind {
+    DurableAppEventKind::Namespaced {
+        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1.to_owned(),
+        policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+    }
+}
+
+fn device_link_bootstrap_request_event_kind() -> DurableAppEventKind {
+    DurableAppEventKind::Namespaced {
+        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1.to_owned(),
+        policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+    }
+}
+
+fn typed_namespaced_payload(plaintext: &[u8], expected_name: &str) -> Option<Vec<u8>> {
+    let event = serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext).ok()?;
+    event.validate_limits().ok()?;
+    match event.kind {
+        DurableAppEventKind::Namespaced { name, policy }
+            if name == expected_name && policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+        {
+            (event.conversation_id.is_none() && event.segment_id.is_none()).then_some(event.payload)
+        }
+        _ => None,
+    }
+}
+
+fn device_link_bootstrap_from_stored_event(
+    event: &StoredAppEvent,
+) -> Option<DeviceLinkBootstrapV1> {
+    let payload =
+        typed_namespaced_payload(&event.plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1)?;
+    let bootstrap = serde_json::from_slice::<DeviceLinkBootstrapV1>(&payload).ok()?;
+    (bootstrap.version == DEVICE_LINK_BOOTSTRAP_VERSION_V1
+        && bootstrap.validate_limits().is_ok()
+        && bootstrap.room.room_id == event.room_id)
+        .then_some(bootstrap)
+}
+
+fn device_link_bootstrap_request_from_stored_event(
+    event: &StoredAppEvent,
+) -> Option<DeviceLinkBootstrapRequestV1> {
+    let payload = typed_namespaced_payload(
+        &event.plaintext,
+        FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1,
+    )?;
+    let request = serde_json::from_slice::<DeviceLinkBootstrapRequestV1>(&payload).ok()?;
+    (request.version == DEVICE_LINK_BOOTSTRAP_VERSION_V1
+        && request.validate_limits().is_ok()
+        && request.requester == event.sender)
+        .then_some(request)
+}
+
+fn is_device_link_control_event(plaintext: &[u8]) -> bool {
+    typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1).is_some()
+        || typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1)
+            .is_some()
+}
+
+/// Returns one stable category for each projection foundation needed by the
+/// selected route. Callers walk newest-first, retaining the latest metadata,
+/// the selected segment's start, and its latest title.
+fn device_link_foundation_kind(
+    event: &StoredAppEvent,
+    selection: &DeviceLinkBootstrapSelectionV1,
+) -> Option<u8> {
+    let app_event = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext).ok()?;
+    if app_event.validate_limits().is_err()
+        || app_event.conversation_id.as_deref() != Some(selection.topic_id.as_str())
+    {
+        return None;
+    }
+    match app_event.kind {
+        DurableAppEventKind::ConversationCreate | DurableAppEventKind::ConversationUpdate => {
+            Some(0)
+        }
+        DurableAppEventKind::ConversationSegmentStart => {
+            let segment =
+                serde_json::from_slice::<ConversationSegmentStartV1>(&app_event.payload).ok()?;
+            (segment.segment_id == selection.chat_id).then_some(1)
+        }
+        DurableAppEventKind::Namespaced { name, policy }
+            if name == FINITECHAT_CHAT_RENAME_EVENT_V1
+                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING
+                && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str()) =>
+        {
+            Some(2)
+        }
+        _ => None,
+    }
+}
+
+fn device_link_bootstrap_profile_from_app(
+    profile: AppProfileSummary,
+) -> DeviceLinkBootstrapProfileV1 {
+    DeviceLinkBootstrapProfileV1 {
+        account_id: profile.account_id,
+        npub: profile.npub,
+        display_name: profile.display_name,
+        about: profile.about,
+        picture: profile.picture,
+        is_agent: profile.is_agent,
+    }
+}
+
+fn app_profile_from_device_link_bootstrap(
+    profile: DeviceLinkBootstrapProfileV1,
+) -> AppProfileSummary {
+    AppProfileSummary {
+        account_id: profile.account_id,
+        npub: profile.npub,
+        display_name: profile.display_name,
+        about: profile.about,
+        picture: profile.picture,
+        stale: false,
+        is_agent: profile.is_agent,
     }
 }
 
