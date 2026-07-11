@@ -764,6 +764,43 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         /\/_finite\/auth\?token=/u
       );
 
+      await page
+        .getByRole("button", { name: "Remembered work", exact: true })
+        .click();
+      await page
+        .getByRole("banner")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_remembered"
+      );
+      const profileChatStartsBeforeReturn = hostedDevice.state.actions.filter(
+        (action) => actionName(action) === "StartProfileChat"
+      ).length;
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
+      );
+      await page.getByRole("main").getByRole("link", { name: "Open chat" }).click();
+      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await waitFor(
+        () =>
+          hostedDevice.state.actions.filter(
+            (action) => actionName(action) === "StartProfileChat"
+          ).length > profileChatStartsBeforeReturn,
+        5_000,
+        () => "returning to chat did not run the profile chat bootstrap"
+      );
+      await page
+        .getByRole("banner")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_remembered",
+        "profile chat bootstrap reset the remembered chat"
+      );
+
       await waitFor(() =>
         hostedDevice.state.authRequests.some(
           (request) => request.path === "/v1/app/updates"
@@ -1317,14 +1354,57 @@ function applyHostedAction(
               title: "General",
               active: true,
             },
+            {
+              chat_id: "chat_browser_remembered",
+              title: "Remembered work",
+              active: false,
+            },
           ],
         },
       ];
       state.messages = [hostedMessage("Hello from Completed Oslo Bot.", false, 1)];
     }
+    const selectedTopic = state.selected_room_id === "room_browser_agent"
+      ? state.topics.find(
+          (topic) =>
+            topic.room_id === "room_browser_agent"
+            && topic.topic_id === state.selected_topic_id
+        )
+      : undefined;
+    const selectedChatStillExists = selectedTopic?.chats.some(
+      (chat) => chat.chat_id === state.selected_chat_id
+    );
     state.selected_room_id = "room_browser_agent";
-    state.selected_topic_id = "topic_browser_agent";
-    state.selected_chat_id = "chat_browser_agent";
+    if (!selectedChatStillExists) {
+      state.selected_topic_id = "topic_browser_agent";
+      state.selected_chat_id = "chat_browser_agent";
+    }
+  } else if (operation === "OpenChat") {
+    const payload = action.OpenChat as Record<string, unknown> | undefined;
+    assert(payload);
+    const roomId = String(payload.room_id ?? "");
+    const topicId = String(payload.topic_id ?? "");
+    const chatId = String(payload.chat_id ?? "");
+    const topic = state.topics.find(
+      (candidate) => candidate.room_id === roomId && candidate.topic_id === topicId
+    );
+    const chat = topic?.chats.find((candidate) => candidate.chat_id === chatId);
+    assert(topic && chat);
+    state.selected_room_id = roomId;
+    state.selected_topic_id = topicId;
+    state.selected_chat_id = chatId;
+    state.topics = state.topics.map((candidate) =>
+      candidate.room_id === roomId && candidate.topic_id === topicId
+        ? {
+            ...candidate,
+            active_chat_id: chatId,
+            chats: candidate.chats.map((candidateChat) => ({
+              ...candidateChat,
+              active: candidateChat.chat_id === chatId,
+            })),
+          }
+        : candidate
+    );
   } else if (operation === "SendChatMessage") {
     const payload = action.SendChatMessage as Record<string, unknown> | undefined;
     assert(payload);

@@ -2771,13 +2771,31 @@ impl AppRuntimeState {
 
         if let Some(room_id) = self.existing_profile_chat_room_id(&account_id) {
             self.ensure_home_topic(&room_id)?;
-            self.app.selected_room_id = Some(room_id);
-            let selected_room_id = self.app.selected_room_id.clone().unwrap_or_default();
-            self.app.selected_topic_id = self
-                .topic_exists(&selected_room_id, HOME_TOPIC_ID)
-                .then(|| HOME_TOPIC_ID.to_owned());
-            self.app.selected_chat_id =
-                self.default_chat_id_for_topic(&selected_room_id, HOME_TOPIC_ID);
+            let selected_route = if self.app.selected_room_id.as_deref() == Some(room_id.as_str()) {
+                match (
+                    self.app.selected_topic_id.clone(),
+                    self.app.selected_chat_id.clone(),
+                ) {
+                    (Some(topic_id), Some(chat_id))
+                        if self.chat_exists(&room_id, &topic_id, &chat_id) =>
+                    {
+                        Some((topic_id, chat_id))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.app.selected_room_id = Some(room_id.clone());
+            if let Some((topic_id, chat_id)) = selected_route {
+                self.app.selected_topic_id = Some(topic_id);
+                self.app.selected_chat_id = Some(chat_id);
+            } else {
+                self.app.selected_topic_id = self
+                    .topic_exists(&room_id, HOME_TOPIC_ID)
+                    .then(|| HOME_TOPIC_ID.to_owned());
+                self.app.selected_chat_id = self.default_chat_id_for_topic(&room_id, HOME_TOPIC_ID);
+            }
             self.persist_app_state()?;
             self.sync_selected_room_messages();
             self.app.status = "chat opened".to_owned();
@@ -12717,6 +12735,41 @@ mod tests {
             Some("https://example.invalid/bob.png")
         );
 
+        let topic_state = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Remember this chat".to_owned(),
+            })
+            .unwrap();
+        let selected_topic_id = topic_state
+            .selected_topic_id
+            .expect("new topic is selected");
+        let selected_chat_id = topic_state
+            .selected_chat_id
+            .expect("new topic's first chat is selected");
+        let second_chat_state = alice
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: selected_topic_id.clone(),
+                reason: Some("selection persistence regression".to_owned()),
+            })
+            .unwrap();
+        let second_chat_id = second_chat_state
+            .selected_chat_id
+            .expect("second chat is selected");
+        assert_ne!(second_chat_id, selected_chat_id);
+        let selected_chat_state = alice
+            .dispatch_and_wait(AppAction::OpenChat {
+                room_id: room_id.clone(),
+                topic_id: selected_topic_id.clone(),
+                chat_id: selected_chat_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            selected_chat_state.selected_chat_id.as_deref(),
+            Some(selected_chat_id.as_str())
+        );
+
         let reopened_state = alice
             .dispatch_and_wait(AppAction::StartProfileChat {
                 profile: test_profile(&bob_account_id, "Bob"),
@@ -12727,6 +12780,14 @@ mod tests {
         assert_eq!(
             reopened_state.selected_room_id.as_deref(),
             Some(room_id.as_str())
+        );
+        assert_eq!(
+            reopened_state.selected_topic_id.as_deref(),
+            Some(selected_topic_id.as_str())
+        );
+        assert_eq!(
+            reopened_state.selected_chat_id.as_deref(),
+            Some(selected_chat_id.as_str())
         );
         assert_eq!(reopened_state.rooms.len(), 1);
         assert_eq!(
@@ -12743,6 +12804,15 @@ mod tests {
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
+        let cold_state = reopened_alice.state().unwrap();
+        assert_eq!(
+            cold_state.selected_topic_id.as_deref(),
+            Some(selected_topic_id.as_str())
+        );
+        assert_eq!(
+            cold_state.selected_chat_id.as_deref(),
+            Some(selected_chat_id.as_str())
+        );
         let disk_reopened_state = reopened_alice
             .dispatch_and_wait(AppAction::StartProfileChat {
                 profile: test_profile(&bob_account_id, "Bob"),
@@ -12755,8 +12825,44 @@ mod tests {
             Some(room_id.as_str())
         );
         assert_eq!(
+            disk_reopened_state.selected_topic_id.as_deref(),
+            Some(selected_topic_id.as_str())
+        );
+        assert_eq!(
+            disk_reopened_state.selected_chat_id.as_deref(),
+            Some(selected_chat_id.as_str())
+        );
+        assert_eq!(
             app_room(&disk_reopened_state, &room_id).state,
             AppRoomState::Connected
+        );
+
+        let other_room_state = reopened_alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Another room".to_owned(),
+            })
+            .unwrap();
+        assert_ne!(
+            other_room_state.selected_room_id.as_deref(),
+            Some(room_id.as_str())
+        );
+        let switched_room_state = reopened_alice
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: test_profile(&bob_account_id, "Bob"),
+                display_name: "Chat with Bob".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            switched_room_state.selected_room_id.as_deref(),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            switched_room_state.selected_topic_id.as_deref(),
+            Some(HOME_TOPIC_ID)
+        );
+        assert_eq!(
+            switched_room_state.selected_chat_id.as_deref(),
+            Some(HOME_CHAT_ID)
         );
 
         let bob_state = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
