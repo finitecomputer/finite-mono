@@ -27,7 +27,7 @@ const scenarioPath = path.join(stateDir, "scenario");
 const resetPath = path.join(stateDir, "reset-generation");
 
 function localChildEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
+  const environment: NodeJS.ProcessEnv = { NODE_ENV: "development" };
   for (const key of [
     "PATH",
     "HOME",
