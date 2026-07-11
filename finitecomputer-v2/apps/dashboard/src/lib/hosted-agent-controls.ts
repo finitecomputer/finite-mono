@@ -8,6 +8,7 @@ import {
   hostedDeviceState,
   type HostedChatProfile,
   type HostedChatState,
+  type HostedRuntimeCommand,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
 
@@ -184,7 +185,28 @@ function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile
 }
 
 async function claimOwner(context: AgentCommandContext) {
-  await sendCommand(context, OWNER_CLAIM, EMPTY_SCHEMA, {});
+  const response = await hostedDeviceRuntimeCommand(
+    context.config,
+    context.account,
+    agentOwnerClaimCommand(context.roomId, context.targetAccountId)
+  );
+  assertCommandSucceeded(response);
+}
+
+export function agentOwnerClaimCommand(
+  roomId: string,
+  targetAccountId: string
+): HostedRuntimeCommand {
+  return {
+    room_id: roomId,
+    target_account_id: targetAccountId,
+    command: OWNER_CLAIM,
+    resource_key: "agent.connections",
+    schema: EMPTY_SCHEMA,
+    body: {},
+    reuse_succeeded_owner_claim: true,
+    wait_millis: 45_000,
+  };
 }
 
 async function statusForContext(context: AgentCommandContext) {

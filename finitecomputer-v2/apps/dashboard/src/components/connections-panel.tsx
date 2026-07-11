@@ -16,6 +16,10 @@ import { Input } from "@/components/ui/input";
 import { connectionsReadiness } from "@/lib/connections-readiness";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
 
+export const CONNECTIONS_REQUEST_TIMEOUT_MS = 20_000;
+export const CONNECTIONS_TIMEOUT_MESSAGE =
+  "Your agent is taking longer than expected. Try again.";
+
 export function ConnectionsPanel({
   machineId,
   googleConfigured,
@@ -33,7 +37,7 @@ export function ConnectionsPanel({
     try {
       setStatus(await connectionRequest(endpoint));
     } catch (requestError) {
-      setError(messageForError(requestError));
+      setError(connectionErrorMessage(requestError));
     }
   }, [endpoint]);
 
@@ -53,7 +57,7 @@ export function ConnectionsPanel({
         })
       );
     } catch (requestError) {
-      setError(messageForError(requestError));
+      setError(connectionErrorMessage(requestError));
     } finally {
       setBusy(null);
     }
@@ -379,8 +383,16 @@ function inferenceLabel(status: AgentConnectionsStatus) {
   return `${service} · ${status.inference.model}`;
 }
 
-async function connectionRequest(endpoint: string, init?: RequestInit) {
-  const response = await fetch(endpoint, { ...init, cache: "no-store" });
+export async function connectionRequest(
+  endpoint: string,
+  init?: RequestInit,
+  timeoutMs = CONNECTIONS_REQUEST_TIMEOUT_MS
+) {
+  const response = await fetch(endpoint, {
+    ...init,
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   const payload = (await response.json().catch(() => ({}))) as {
     error?: unknown;
   } & Partial<AgentConnectionsStatus>;
@@ -394,6 +406,12 @@ async function connectionRequest(endpoint: string, init?: RequestInit) {
   return payload as AgentConnectionsStatus;
 }
 
-function messageForError(error: unknown) {
+export function connectionErrorMessage(error: unknown) {
+  if (
+    error instanceof Error
+    && (error.name === "TimeoutError" || error.name === "AbortError")
+  ) {
+    return CONNECTIONS_TIMEOUT_MESSAGE;
+  }
   return error instanceof Error ? error.message : "Connections are unavailable right now.";
 }
