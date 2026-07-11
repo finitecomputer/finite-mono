@@ -666,7 +666,7 @@ label,
 
 .graph-canvas text {
   fill: var(--muted);
-  font: 13px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 13px var(--font-sans);
 }
 
 .graph-canvas .edge {
@@ -4188,6 +4188,19 @@ pre {
   width: 100%;
   line-height: 1.25;
   white-space: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-delay: 0s !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-delay: 0s !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @media (max-width: 1180px) {

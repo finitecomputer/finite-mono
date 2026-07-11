@@ -14,8 +14,9 @@
 - Ticket: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-02-knowledge-workspace.md`
 - Relevant glossary terms: Dashboard-Aligned Product Theme, Product Client,
   Graph View, Graph Replay, Session Lock, Ephemeral Client Plaintext
-- Relevant ADRs: `docs/adr/0008-clear-browser-secrets-on-session-boundaries.md`,
-  `docs/adr/0015-deny-automatic-plaintext-egress.md`
+- Relevant ADRs: `docs/adr/0010-keep-opened-folder-keys-session-only.md`,
+  `docs/adr/0014-keep-browser-and-desktop-plaintext-ephemeral.md`, and
+  `docs/adr/0015-deny-plaintext-egress-by-default.md`
 - Prototype answer and source branch, if any: none; the current dashboard
   source and ticket #5 token foundation are the visual authorities
 

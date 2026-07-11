@@ -62,18 +62,32 @@ visible nodes and 71 links.
 
 ### Browser evidence
 
-The final curated set committed under
-`docs/feature-dev/artifacts/2026-07-11-issue-8/` includes:
+The final 22-image curated set committed under
+`docs/feature-dev/artifacts/2026-07-11-issue-8/` was regenerated from the final
+Rust-served client and includes:
 
-- light/dark desktop and mobile locked states;
-- resumed light desktop Files, dark desktop Graph, and light/dark desktop
-  Access surfaces;
-- light tablet Files/Page and light/dark mobile Files/Access surfaces;
-- fixed light-desktop and dark-mobile quick switchers.
-
-The broader scratch matrix under `/tmp/finite-brain-ticket8-*.png` additionally
-includes Search, source editing, slash and context menus, Graph replay and
-filtered-empty states, expanded Access forms, and the pre-fix quick switcher.
+- `light-desktop-locked.png`
+- `light-desktop-files.png`
+- `light-desktop-search.png`
+- `light-desktop-quick-switcher.png`
+- `light-desktop-graph-replay.png`
+- `light-desktop-graph-empty.png`
+- `light-desktop-access-forms.png`
+- `light-tablet-files.png`
+- `light-mobile-locked.png`
+- `light-mobile-files.png`
+- `light-mobile-access.png`
+- `dark-desktop-locked.png`
+- `dark-desktop-page-source.png`
+- `dark-desktop-context-menu.png`
+- `dark-desktop-slash-menu.png`
+- `dark-desktop-graph.png`
+- `dark-desktop-graph-empty.png`
+- `dark-desktop-access.png`
+- `dark-mobile-locked.png`
+- `dark-mobile-files.png`
+- `dark-mobile-access.png`
+- `dark-mobile-quick-switcher.png`
 
 All matrix states had zero horizontal page overflow and zero JavaScript page
 errors. Keyboard traversal exposed visible focus outlines on ribbon, Vault,
@@ -81,6 +95,12 @@ signer, and Resume controls. Mobile retained the existing 44px ribbon plus
 sidebar and intentionally hidden workspace; tablet retained the ribbon,
 sidebar, and workspace columns. Lock cleared rendered Pages and Resume restored
 the seeded readable projection.
+
+A final reduced-motion browser pass used Chromium media emulation through the
+real `/client`: `matchMedia("(prefers-reduced-motion: reduce)").matches` was
+true; representative button and Graph-node transitions and the Access-panel
+entry animation computed to `1e-05s`; Graph hover and Files navigation still
+worked; and Graph labels computed to the self-hosted `Funnel Sans` stack.
 
 ## Review
 
@@ -90,9 +110,21 @@ the seeded readable projection.
   requested durable screenshots; after the exact paths became visible it
   passed, and the worthy evidence concern was additionally closed by committing
   the curated matrix
-- Worthy fixes applied: promoted 15 representative final-state screenshots to
-  the committed review artifact directory
+- Worthy fixes applied: promoted the original representative final-state
+  screenshots, then expanded and regenerated the committed review artifact
+  directory as the 22-image matrix listed above
 - Re-review result: standards and spec pass with no remaining findings
+- PR fallback review follow-up: added a global reduced-motion presentation
+  override, moved Graph canvas text onto `var(--font-sans)`, regenerated and
+  expanded the durable screenshot matrix, and corrected stale tracker/ADR
+  references. The accepted explicit font allowlist remains intentionally
+  unchanged because FiniteBrain owns its independent font assets and the small
+  fixed route surface is clearer as an allowlist than a dynamic dispatcher.
+- PR fallback re-review: standards had no hard findings; spec found two stale
+  historical 15-image references, which were corrected to the final 22-image
+  matrix. The low-severity duplicate-inventory smell is intentionally retained
+  because the session record and review packet are independently consumed,
+  self-contained artifacts.
 
 ## Risks
 
