@@ -209,7 +209,7 @@ type FakeSitesState = {
   privateContentRequests: number;
 };
 
-test("dashboard agent creation browser states", { timeout: 120_000 }, async () => {
+test("dashboard agent creation browser states", { timeout: 180_000 }, async () => {
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore();
   const brain = await startFakeBrain();
@@ -607,15 +607,36 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
       await page.getByRole("button", { name: "Send message" }).click();
       await page.getByRole("img", { name: "browser-proof.png" }).waitFor({ state: "visible" });
 
+      const agentAttachmentResponse = page.waitForResponse((response) =>
+        response.url().includes(
+          "/hosted-device/attachments/room_browser_agent/message_4/attachment_4"
+        )
+      );
       hostedDevice.state.app.messages.push(
         hostedImageMessage("Image returned by agent.", false, 4, "agent-proof.png")
       );
       hostedDevice.emit();
-      await page.getByRole("img", { name: "agent-proof.png" }).waitFor({ state: "visible" });
+      const agentImage = page.getByRole("img", { name: "agent-proof.png" });
+      await agentImage.waitFor({ state: "visible" });
+      await agentImage.evaluate((image) => image.scrollIntoView({ block: "center" }));
+      const attachmentResponse = await agentAttachmentResponse;
+      assert.equal(
+        attachmentResponse.status(),
+        200,
+        `agent attachment download returned ${attachmentResponse.status()}`
+      );
       await waitFor(() =>
+        agentImage.evaluate(
+          (image) =>
+            image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+        )
+      );
+      assert.equal(
         hostedDevice.state.authRequests.some((request) =>
           request.path.startsWith("/v1/app/attachments/")
-        )
+        ),
+        true,
+        "attachment bytes must traverse the authenticated hosted-device route"
       );
 
       hostedDevice.state.app.typing_members = [

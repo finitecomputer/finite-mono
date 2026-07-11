@@ -46,7 +46,7 @@ jobs:
             dashboard)
               echo "name=finite-saas-dashboard" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/dashboard.Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "context=finitecomputer-v2" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
               ;;
             private-limiter)
               # mono-owned package; the legacy finite-private-limiter package is
