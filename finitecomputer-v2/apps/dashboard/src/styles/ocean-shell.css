@@ -177,9 +177,7 @@ body:has(.ocean-shell) {
 }
 
 html:has(.finite-chat),
-body:has(.finite-chat),
-html:has(.finite-chat-product),
-body:has(.finite-chat-product) {
+body:has(.finite-chat) {
   height: 100%;
   min-height: 100%;
   overflow: hidden;
@@ -188,20 +186,11 @@ body:has(.finite-chat-product) {
   color-scheme: dark;
 }
 
-.ocean-shell--chat {
-  width: 100%;
-  height: 100dvh;
-  min-height: 0;
-  overflow: hidden;
-}
-
 @media (prefers-color-scheme: light) {
   html:has(.ocean-shell),
   body:has(.ocean-shell),
   html:has(.finite-chat),
-  body:has(.finite-chat),
-  html:has(.finite-chat-product),
-  body:has(.finite-chat-product) {
+  body:has(.finite-chat) {
     color-scheme: light;
   }
 }
@@ -817,21 +806,18 @@ button.ocean-pill-button {
   padding: 38px 24px 56px;
 }
 
-.ocean-app-scroll:has(.finite-chat),
-.ocean-app-scroll:has(.finite-chat-product) {
+.ocean-app-scroll:has(.finite-chat) {
   overflow: hidden;
 }
 
-.ocean-app-content:has(.finite-chat),
-.ocean-app-content:has(.finite-chat-product) {
+.ocean-app-content:has(.finite-chat) {
   width: 100%;
   height: 100%;
   margin: 0;
   padding: 0;
 }
 
-.ocean-app-content .finite-chat,
-.ocean-app-content .finite-chat-product {
+.ocean-app-content .finite-chat {
   height: 100%;
   max-height: 100%;
 }
@@ -1500,13 +1486,6 @@ button.ocean-pill-button {
   color: color-mix(in srgb, var(--text-secondary) 88%, var(--text-tertiary));
 }
 
-/*
- * Compatibility-only rules from the pre-shared web renderer. The canonical
- * chat product stylesheet is @finite/chat-ui/react/styles.css; placing this
- * retired block in a layer guarantees the unlayered shared rules win until
- * the remaining dead selectors are mechanically removed.
- */
-@layer retired-finite-chat {
 .finite-chat {
   display: grid;
   min-height: 0;
@@ -2040,7 +2019,6 @@ button.ocean-pill-button {
     transform: scale(1);
   }
 }
-}
 
 @keyframes status-card-swirl {
   0% { transform: rotate(0deg) scale(1); }
@@ -2345,7 +2323,6 @@ button.ocean-pill-button {
   }
 }
 
-@layer retired-finite-chat {
 .ocean-chat-window {
   width: 100%;
   height: 100dvh;
@@ -4830,5 +4807,4 @@ button.finite-chat__folder-summary.is-active {
   .finite-chat__send-error {
     width: calc(100% - 24px);
   }
-}
 }

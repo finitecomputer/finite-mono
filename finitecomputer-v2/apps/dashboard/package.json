@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --import tsx --test src/**/*.test.ts ../../../finitechat/packages/finitechat-chat-ui/src/**/*.test.ts",
+    "test": "node --import tsx --test src/**/*.test.ts",
     "test:browser": "node --import tsx --test --test-concurrency=1 browser/**/*.browser.ts",
     "test:stripe-billing-clock": "tsx scripts/stripe-billing-test-clock-e2e.ts"
   },

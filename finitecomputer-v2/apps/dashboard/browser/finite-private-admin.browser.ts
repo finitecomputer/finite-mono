@@ -69,7 +69,7 @@ test("admins keep the SaaS dashboard and separate Finite Private controls", { ti
 function startDashboard(port: number, coreUrl: string) {
   return spawn(
     process.execPath,
-    ["node_modules/next/dist/bin/next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", String(port)],
+    ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
     {
       cwd: process.cwd(),
       env: {

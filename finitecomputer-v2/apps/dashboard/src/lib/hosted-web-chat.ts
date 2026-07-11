@@ -15,10 +15,6 @@ import {
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
-import {
-  trustedOwnerClaims,
-  type TrustedOwnerClaimScope,
-} from "@/lib/trusted-owner-claim";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -46,7 +42,7 @@ export async function bootstrapHostedWebChat(machineId: string) {
     throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
   }
   state = await connectAgentProfile(context, state, agentNpub);
-  await claimAgentOwner(context, state, agentNpub, machineId);
+  await claimAgentOwner(context, state, agentNpub);
 
   return state;
 }
@@ -129,17 +125,12 @@ async function connectAgentProfile(
 async function claimAgentOwner(
   context: Awaited<ReturnType<typeof hostedWebChatContext>>,
   state: HostedChatState,
-  agentNpub: string,
-  machineId: string
+  agentNpub: string
 ) {
   const profile = profileForNpub(state, agentNpub);
   const roomId = state.selected_room_id?.trim();
   if (!profile || !roomId) {
     throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
-  }
-  const scope = ownerClaimScope(context, state, machineId, roomId, profile.account_id);
-  if (trustedOwnerClaims.established(state, scope)) {
-    return;
   }
   const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
     room_id: roomId,
@@ -151,23 +142,6 @@ async function claimAgentOwner(
     wait_millis: 45_000,
   });
   assertCommandSucceeded(response);
-  trustedOwnerClaims.remember(scope);
-}
-
-function ownerClaimScope(
-  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
-  state: HostedChatState,
-  machineId: string,
-  roomId: string,
-  agentAccountId: string
-): TrustedOwnerClaimScope {
-  return {
-    workosUserId: context.account.workosUserId!,
-    machineId,
-    hostedAccountId: state.identity.account_id,
-    roomId,
-    agentAccountId,
-  };
 }
 
 function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile | null {

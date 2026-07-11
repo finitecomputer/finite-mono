@@ -1,18 +1,4 @@
 import type { AccountAuthContext } from "@/lib/dashboard-auth";
-import type {
-  AppAction,
-  AppChatSummary,
-  AppDeviceSummary,
-  AppProfileSummary,
-  AppRoomSummary,
-  AppState,
-  AppTopicSummary,
-  AppTypingMember,
-  ChatMediaAttachment,
-  ChatMediaKind,
-  ChatMessage,
-  OutboundDelivery,
-} from "@finite/chat-ui";
 
 const HOSTED_DEVICE_TIMEOUT_MS = 15_000;
 
@@ -26,21 +12,189 @@ export class HostedDeviceRequestError extends Error {
   }
 }
 
-// The browser and desktop consume the exact same finitechat-core contract.
-// Keep the Hosted names for the server modules that predate the shared package,
-// but never maintain a second, narrower copy of the wire model here.
-export type HostedChatRoom = AppRoomSummary;
-export type HostedChatSummary = AppChatSummary;
-export type HostedChatTopic = AppTopicSummary;
-export type HostedChatMediaKind = ChatMediaKind;
-export type HostedChatMediaAttachment = ChatMediaAttachment;
-export type HostedChatOutboundDelivery = OutboundDelivery;
-export type HostedChatMessage = ChatMessage;
-export type HostedChatTypingMember = AppTypingMember;
-export type HostedChatProfile = AppProfileSummary;
-export type HostedChatDevice = AppDeviceSummary;
-export type HostedChatState = AppState;
-export type HostedChatAction = AppAction;
+export type HostedChatRoom = {
+  room_id: string;
+  display_name: string;
+  state: "Connected" | "WaitingForApproval" | "Joining" | "UnavailableOnDevice";
+  status: string;
+  user_status_text: string;
+  last_message_preview: string;
+  unread_count: number;
+  can_load_older: boolean;
+  is_agent_chat: boolean;
+};
+
+export type HostedChatSummary = {
+  chat_id: string;
+  title: string;
+  last_message_preview: string;
+  unread_count: number;
+  message_count: number;
+  started_seq: number;
+  updated_seq: number;
+  active: boolean;
+};
+
+export type HostedChatTopic = {
+  room_id: string;
+  topic_id: string;
+  title: string;
+  description?: string | null;
+  last_message_preview: string;
+  unread_count: number;
+  message_count: number;
+  created_seq: number;
+  updated_seq: number;
+  archived: boolean;
+  active_chat_id?: string | null;
+  chats: HostedChatSummary[];
+};
+
+export type HostedChatMediaKind = "Image" | "VoiceNote" | "Video" | "File";
+
+export type HostedChatMediaAttachment = {
+  attachment_id: string;
+  url?: string | null;
+  mime_type: string;
+  filename: string;
+  kind: HostedChatMediaKind;
+  width?: number | null;
+  height?: number | null;
+  upload_progress_per_mille?: number | null;
+  download_progress_per_mille?: number | null;
+};
+
+export type HostedChatOutboundDelivery = {
+  local_send: "Sending" | "Sent";
+  server_delivery: "Undelivered" | "Delivered" | { Failed: { reason: string } };
+};
+
+export type HostedChatMessage = {
+  room_id: string;
+  seq: number;
+  message_id: string;
+  conversation_id?: string | null;
+  chat_id?: string | null;
+  sender_account_id: string;
+  sender_device_id: string;
+  sender_display_name: string;
+  sender_npub?: string | null;
+  text: string;
+  display_content: string;
+  rich_text_json?: string;
+  reply_to_message_id?: string | null;
+  is_mine: boolean;
+  outbound_delivery?: HostedChatOutboundDelivery | null;
+  media: HostedChatMediaAttachment[];
+  kind: "message" | "status" | "tool" | "media" | string;
+  status: "running" | "complete" | string;
+  final_delivery: boolean;
+  edit_of_message_id?: string | null;
+  timestamp_unix_seconds: number;
+  display_timestamp: string;
+};
+
+export type HostedChatTypingMember = {
+  room_id: string;
+  topic_id?: string | null;
+  chat_id?: string | null;
+  account_id: string;
+  device_id: string;
+  display_name: string;
+  picture?: string | null;
+  npub?: string | null;
+  activity_kind: "typing" | "thinking" | "working" | string;
+};
+
+export type HostedChatProfile = {
+  account_id: string;
+  npub: string;
+  display_name: string;
+  about?: string | null;
+  picture?: string | null;
+  stale: boolean;
+  is_agent: boolean;
+};
+
+export type HostedChatDevice = {
+  account_id: string;
+  device_id: string;
+  active: boolean;
+  current_device: boolean;
+  revoked: boolean;
+  room_count: number;
+};
+
+export type HostedChatState = {
+  rev: number;
+  identity: {
+    account_id: string;
+    device_id: string;
+  };
+  rooms: HostedChatRoom[];
+  selected_room_id?: string | null;
+  topics: HostedChatTopic[];
+  selected_topic_id?: string | null;
+  selected_chat_id?: string | null;
+  active_profile_id?: string | null;
+  status: string;
+  toast?: string | null;
+  messages: HostedChatMessage[];
+  profiles: HostedChatProfile[];
+  devices: HostedChatDevice[];
+  typing_members: HostedChatTypingMember[];
+  flow: {
+    notice_text?: string | null;
+    notice_busy: boolean;
+    scan_in_flight: boolean;
+    scan_result: string;
+    image_upload_url?: string | null;
+  };
+};
+
+export type HostedChatAction =
+  | { StartRuntime: null }
+  | { OpenRoom: { room_id: string } }
+  | { OpenTopic: { room_id: string; topic_id: string } }
+  | { OpenChat: { room_id: string; topic_id: string; chat_id: string } }
+  | { CreateTopic: { room_id: string; title: string } }
+  | {
+      StartTopicChat: {
+        room_id: string;
+        topic_id: string;
+        reason?: string | null;
+      };
+    }
+  | {
+      RenameChat: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        title: string;
+      };
+    }
+  | { ScanTarget: { value: string } }
+  | {
+      StartProfileChat: {
+        profile: HostedChatProfile;
+        display_name: string;
+      };
+    }
+  | { SendMessage: { room_id: string; text: string } }
+  | { SendTopicMessage: { room_id: string; topic_id: string; text: string } }
+  | {
+      SendChatMessage: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        text: string;
+      };
+    }
+  | { LoadOlderMessages: { room_id: string; before_message_id: string; limit: number } }
+  | { MarkRoomRead: { room_id: string } }
+  | { SetTyping: { room_id: string; is_typing: boolean } }
+  | { RefreshDevices: null }
+  | { RevokeDevice: { account_id: string; device_id: string } };
 
 export type HostedDeviceConfig = {
   baseUrl: string;

@@ -10,10 +10,6 @@ import {
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
-import {
-  trustedOwnerClaims,
-  type TrustedOwnerClaimScope,
-} from "@/lib/trusted-owner-claim";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -140,8 +136,6 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
 type AgentCommandContext = {
   account: Awaited<ReturnType<typeof getAccountAuthContext>>;
   config: NonNullable<ReturnType<typeof hostedDeviceConfig>>;
-  state: HostedChatState;
-  claimScope: TrustedOwnerClaimScope;
   roomId: string;
   targetAccountId: string;
 };
@@ -180,20 +174,7 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
   if (!roomId) {
     throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
   }
-  return {
-    account,
-    config,
-    state,
-    claimScope: {
-      workosUserId: account.workosUserId,
-      machineId,
-      hostedAccountId: state.identity.account_id,
-      roomId,
-      agentAccountId: profile.account_id,
-    },
-    roomId,
-    targetAccountId: profile.account_id,
-  };
+  return { account, config, roomId, targetAccountId: profile.account_id };
 }
 
 function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile | null {
@@ -203,11 +184,7 @@ function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile
 }
 
 async function claimOwner(context: AgentCommandContext) {
-  if (trustedOwnerClaims.established(context.state, context.claimScope)) {
-    return;
-  }
   await sendCommand(context, OWNER_CLAIM, EMPTY_SCHEMA, {});
-  trustedOwnerClaims.remember(context.claimScope);
 }
 
 async function statusForContext(context: AgentCommandContext) {
