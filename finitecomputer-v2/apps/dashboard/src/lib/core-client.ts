@@ -445,34 +445,6 @@ export async function loadCoreBillingOverview(
   }
 }
 
-export async function claimCoreImportCandidates(selectedCandidateIds: string[]) {
-  const status = coreBridgeStatus();
-  if (!status.configured) {
-    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
-  }
-  const account = await getAccountAuthContext();
-  if (!coreAccountReady(account)) {
-    throw new Error("Sign in again to claim imported agents.");
-  }
-  const cleanIds = selectedCandidateIds.map((id) => id.trim()).filter(Boolean);
-  if (cleanIds.length === 0) {
-    throw new Error("Select at least one agent to import.");
-  }
-
-  const result = await coreFetch<{
-    claimed_project_ids: string[];
-    already_claimed_project_ids: string[];
-    denied_candidate_ids: string[];
-  }>("/api/core/v1/me/import-candidates/claim", account, {
-    method: "POST",
-    body: JSON.stringify({
-      selectedCandidateIds: cleanIds,
-    }),
-  });
-  invalidateCoreReadCache();
-  return result;
-}
-
 export async function requestCoreAgentCreation(input: {
   displayName: string;
   launchCode: string;
@@ -650,22 +622,6 @@ export async function requestCoreRuntimeDestroy(projectId: string) {
   return result;
 }
 
-export async function archiveCoreImportedProject(projectId: string) {
-  const status = coreBridgeStatus();
-  if (!status.configured) {
-    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
-  }
-  const account = await getAccountAuthContext();
-  if (!coreAccountReady(account)) {
-    throw new Error("Sign in again to remove this old agent.");
-  }
-  await coreFetch(`/api/core/v1/me/projects/${encodeURIComponent(projectId)}/archive`, account, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-  invalidateCoreReadCache();
-}
-
 export async function cancelFailedCoreAgentCreationRequest(requestId: string) {
   const trimmed = requestId.trim();
   if (!trimmed) {
@@ -691,11 +647,7 @@ export async function findCoreProjectByMachineId(
   if (!result.me) {
     return null;
   }
-  return (
-    result.me.projects.find(
-      (project) => project.runtime?.source_machine_id === machineId
-    ) ?? null
-  );
+  return coreProductProjectForMachineId(result.me.projects, machineId);
 }
 
 export async function loadCoreSourceHostRelayEndpoint(
@@ -1049,6 +1001,22 @@ export async function adminResetCoreFinitePrivateWindow(grantId: string) {
 
 export function coreProjectMachineId(project: CoreVisibleProject) {
   return project.runtime?.source_machine_id?.trim() || null;
+}
+
+/** Projects created by this product; imported whiteglove history is not user-facing. */
+export function coreProductProjects(projects: CoreVisibleProject[]) {
+  return projects.filter((project) => project.project.import_candidate_id == null);
+}
+
+export function coreProductProjectForMachineId(
+  projects: CoreVisibleProject[],
+  machineId: string
+) {
+  return (
+    coreProductProjects(projects).find(
+      (project) => project.runtime?.source_machine_id === machineId
+    ) ?? null
+  );
 }
 
 export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {

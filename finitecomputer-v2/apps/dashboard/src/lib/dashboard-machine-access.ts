@@ -1,6 +1,7 @@
 import {
   loadCoreMe,
   loadCoreSourceHostRelayEndpoint,
+  coreProductProjectForMachineId,
   type CoreAgentCreationRequestSummary,
   type CoreReadCacheMode,
   type CoreReadOptions,
@@ -39,14 +40,10 @@ export async function loadDashboardMachineAccess(
   let core = await loadCoreMe({
     cacheMode: options.coreCacheMode,
   });
-  let coreProject = core.me?.projects.find(
-    (project) => project.runtime?.source_machine_id === machineId
-  ) ?? null;
+  let coreProject = coreProductProjectForMachineId(core.me?.projects ?? [], machineId);
   if (!coreProject && options.coreCacheMode === "swr") {
     core = await loadCoreMe();
-    coreProject = core.me?.projects.find(
-      (project) => project.runtime?.source_machine_id === machineId
-    ) ?? null;
+    coreProject = coreProductProjectForMachineId(core.me?.projects ?? [], machineId);
   }
   const runtime = coreProject?.runtime;
   if (!coreProject || !runtime) {

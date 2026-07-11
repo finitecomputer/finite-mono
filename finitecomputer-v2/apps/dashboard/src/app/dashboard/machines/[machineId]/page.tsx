@@ -8,7 +8,6 @@ import {
 } from "lucide-react";
 
 import {
-  archiveImportedProjectAction,
   destroyCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
@@ -130,25 +129,6 @@ async function ImportedMachineOverview({
             >
               <Trash2Icon />
               Remove agent
-            </ConfirmSubmitButton>
-          </form>
-        </section>
-      ) : null}
-      {access.coreProject?.project.import_candidate_id ? (
-        <section className="rounded-xl border p-5">
-          <h2 className="font-semibold">Old imported agent</h2>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Remove this old agent from your dashboard. Its runtime and saved history are kept.
-          </p>
-          <form action={archiveImportedProjectAction} className="mt-4">
-            <input type="hidden" name="machineId" value={access.machineId} />
-            <ConfirmSubmitButton
-              variant="outline"
-              pendingLabel="Removing..."
-              confirmMessage="Remove this old agent from your dashboard? Its saved history will be kept."
-            >
-              <Trash2Icon />
-              Remove old agent
             </ConfirmSubmitButton>
           </form>
         </section>

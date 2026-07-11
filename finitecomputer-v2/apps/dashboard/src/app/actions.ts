@@ -11,7 +11,6 @@ import {
 } from "@/lib/admin-ops";
 import {
   adminIssueCoreLaunchCodeBatch,
-  archiveCoreImportedProject,
   adminIssueCoreFinitePrivateFriendKey,
   adminRecoverCoreRuntime,
   adminRevokeCoreLaunchCodeBatch,
@@ -21,7 +20,6 @@ import {
   adminRotateCoreFinitePrivateApiKey,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
-  claimCoreImportCandidates,
   coreProjectSupportsHostedRestart,
   issueCoreFinitePrivateApiKey,
   linkCoreStripeCustomer,
@@ -42,15 +40,6 @@ import {
   standardAgentPriceId,
   stripeDashboardReturnUrl,
 } from "@/lib/stripe-billing";
-
-export async function claimCoreImportCandidatesAction(formData: FormData) {
-  const selectedCandidateIds = formData
-    .getAll("candidateId")
-    .map((value) => String(value));
-  await claimCoreImportCandidates(selectedCandidateIds);
-  revalidatePath("/");
-  revalidatePath("/dashboard");
-}
 
 export async function restartCoreRuntimeAction(formData: FormData) {
   const machineId = String(formData.get("machineId") ?? "");
@@ -129,17 +118,6 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   revalidatePath("/dashboard");
   revalidatePath(`/dashboard/machines/${machineId}`);
   revalidatePath(redirectPath);
-}
-
-export async function archiveImportedProjectAction(formData: FormData) {
-  const machineId = String(formData.get("machineId") ?? "");
-  const access = await loadDashboardMachineAccess(machineId);
-  if (!access?.coreProject || access.coreProject.project.import_candidate_id == null) {
-    throw new Error("Only an old imported agent can be removed this way.");
-  }
-  await archiveCoreImportedProject(access.coreProject.project.id);
-  revalidatePath("/dashboard");
-  redirect("/dashboard");
 }
 
 export async function cancelFailedAgentCreationRequestAction(formData: FormData) {

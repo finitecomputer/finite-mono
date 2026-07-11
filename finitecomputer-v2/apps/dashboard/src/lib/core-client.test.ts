@@ -10,6 +10,8 @@ import {
   coreProjectLocationLabel,
   coreProjectMachineId,
   coreProjectPrimaryUrl,
+  coreProductProjectForMachineId,
+  coreProductProjects,
   type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
   loadCoreSourceHostRelayEndpoint,
@@ -97,6 +99,37 @@ test("core project helpers map imported runtimes to dashboard overview state", (
   assert.equal(coreProjectLabel(project), "Smoke");
   assert.equal(coreProjectPrimaryUrl(project), "https://smoke.example.com/app");
   assert.equal(coreProjectLocationLabel(project, null), "Ready to use");
+});
+
+test("normal product project helpers exclude imported rollout history", () => {
+  const imported = {
+    project: {
+      id: "project_imported",
+      import_candidate_id: "import_1",
+    },
+    runtime: {
+      source_machine_id: "smoke-agent",
+    },
+  } as CoreVisibleProject;
+  const current = {
+    project: {
+      id: "project_current",
+      import_candidate_id: null,
+    },
+    runtime: {
+      source_machine_id: "kata-agent",
+    },
+  } as CoreVisibleProject;
+
+  assert.deepEqual(coreProductProjects([imported, current]), [current]);
+  assert.equal(
+    coreProductProjectForMachineId([imported, current], "smoke-agent"),
+    null
+  );
+  assert.equal(
+    coreProductProjectForMachineId([imported, current], "kata-agent"),
+    current
+  );
 });
 
 test("core project helpers expose self-serve launch status without fake runtime links", () => {

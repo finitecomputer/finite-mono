@@ -5,7 +5,6 @@ import { randomUUID } from "node:crypto";
 import {
   ActivityIcon,
   BanIcon,
-  CheckCircle2Icon,
   CreditCardIcon,
   KeyRoundIcon,
   Loader2Icon,
@@ -18,7 +17,6 @@ import {
 import {
   approveFinitePrivateGrantAction,
   cancelFailedAgentCreationRequestAction,
-  claimCoreImportCandidatesAction,
   issueFinitePrivateApiKeyAction,
   resetFinitePrivateGrantAction,
   revokeFinitePrivateApiKeyAction,
@@ -33,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   coreAgentCreationRequestForProject,
+  coreProductProjects,
   coreProjectLocationLabel,
   coreProjectLaunchStatusLabel,
   coreProjectLabel,
@@ -44,7 +43,6 @@ import {
   type CoreFinitePrivateApiKey,
   type CoreFinitePrivateGrant,
   type CoreMeResult,
-  type CoreProjectImportCandidate,
   type CoreVisibleProject,
 } from "@/lib/core-client";
 import {
@@ -120,17 +118,14 @@ export default async function DashboardPage({
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
       account.workosUserId
     );
-    const coreProjects = core.me?.projects ?? [];
+    const coreProjects = coreProductProjects(core.me?.projects ?? []);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
-    const claimableCandidates = core.me?.claimable_candidates ?? [];
     const requestedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching"
     );
     const failedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "failed"
     );
-    // Imports are intentionally hidden from the finite.computer self-serve surface for Oslo.
-    const showImportCandidates = false;
     const firstAgentHref = coreProjects
       .map((project) => coreProjectOverviewHref(project))
       .find((href): href is string => Boolean(href));
@@ -175,7 +170,11 @@ export default async function DashboardPage({
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
 
-    if (draft && billing.billing?.can_create_agent) {
+    if (
+      draft &&
+      billingReturnParam === "success" &&
+      billing.billing?.can_create_agent
+    ) {
       redirect("/dashboard/agent-creation-requests/complete");
     }
 
@@ -213,9 +212,6 @@ export default async function DashboardPage({
             agentCreationRequests={agentCreationRequests}
           />
         ) : null}
-        {showImportCandidates && claimableCandidates.length ? (
-          <CoreImportCandidatesPanel candidates={claimableCandidates} />
-        ) : null}
         {pendingAgentCreationRequests.length ? (
           <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
         ) : null}
@@ -236,6 +232,7 @@ export default async function DashboardPage({
             error={agentCreationError}
             draft={draft}
             requiresAccess={
+              process.env.FC_DASHBOARD_RUNTIME_MODE === "canary" ||
               !billing.billing?.can_create_agent
             }
           />
@@ -737,60 +734,6 @@ function CoreAgentCreationFailedPanel({
   );
 }
 
-function CoreImportCandidatesPanel({
-  candidates,
-}: {
-  candidates: CoreProjectImportCandidate[];
-}) {
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon ocean-utility-card__icon--amber" aria-hidden>
-          <CheckCircle2Icon className="size-5" />
-        </span>
-        <div>
-          <h1 className="ocean-utility-card__title">Import existing agents</h1>
-          <p className="text-sm text-muted-foreground">
-            Add the agents already tied to this email.
-          </p>
-        </div>
-      </div>
-
-      <form action={claimCoreImportCandidatesAction} className="grid gap-4">
-        <div className="grid gap-3">
-          {candidates.map((candidate) => (
-            <label
-              key={candidate.id}
-              className="grid cursor-pointer gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[auto_minmax(0,1fr)_auto]"
-            >
-              <input
-                className="mt-1 size-4"
-                type="checkbox"
-                name="candidateId"
-                value={candidate.id}
-                defaultChecked
-              />
-              <span className="min-w-0">
-                <span className="block truncate font-semibold text-foreground">
-                  {candidate.host_facts.display_name}
-                </span>
-                <span className="mt-1 block truncate text-xs text-muted-foreground">
-                  Already connected to your account
-                </span>
-              </span>
-              <span className="text-sm text-muted-foreground">Available</span>
-            </label>
-          ))}
-        </div>
-        <FormActionButton className="w-fit" pendingLabel="Importing...">
-          <CheckCircle2Icon />
-          Import selected
-        </FormActionButton>
-      </form>
-    </section>
-  );
-}
-
 function CoreAgentCreationPanel({
   error,
   draft,
@@ -905,7 +848,7 @@ function emptyAccountMessage(core: CoreMeResult) {
   if (core.error) {
     return core.error;
   }
-  if (core.me?.projects.length === 0 && core.me.claimable_candidates.length === 0) {
+  if (coreProductProjects(core.me?.projects ?? []).length === 0) {
     return "Create your first agent to continue.";
   }
   return "Choose one of your agents to continue.";
