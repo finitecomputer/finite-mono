@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: ticket #5 complete; tickets #6 and #7 unblocked
+- Current status: ticket #5 complete; ticket #6 in review; ticket #7 unblocked
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -29,9 +29,12 @@ overall visual character in a high-quality, elegant, surgical way.
   [#6](https://github.com/finitecomputer/finite-mono/issues/6),
   [#7](https://github.com/finitecomputer/finite-mono/issues/7), and
   [#8](https://github.com/finitecomputer/finite-mono/issues/8)
-- Ticket sessions: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`
-- Agent briefs: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`
-- Review packets: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`
+- Ticket sessions: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`;
+  `docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-session.md`
+- Agent briefs: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`;
+  `docs/feature-dev/2026-07-11-dashboard-theme-ticket-02-knowledge-workspace.md`
+- Review packets: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`;
+  `docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-review-packet.md`
 - Local CodeRabbit report: pending
 - PR URL: pending
 
@@ -48,7 +51,7 @@ overall visual character in a high-quality, elegant, surgical way.
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
 | #5 | AFK | complete | `/root/ticket_5_theme_foundation` | browser-found light workspace defect and review command-record finding fixed | full ticket suite and four-state visual pass |
-| #6 | AFK | ready | — | — | — |
+| #6 | AFK | in review | `/root/ticket_6_knowledge_workspace` | screenshot-found Graph label/statistics contrast fixed | targeted suite and resumed desktop light/dark visual pass |
 | #7 | AFK | ready | — | — | — |
 | #8 | AFK | blocked by #6 and #7 | — | — | — |
 
@@ -63,6 +66,7 @@ overall visual character in a high-quality, elegant, surgical way.
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
 | #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | `aa3b7a1` plus review fix follow-up | standards/spec pass after one command-record fix | Rust server suite, JS, seeded verifier, format, Clippy, build, diff, and browser pass |
+| #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | pending | standards/spec review pending | Product Client deterministic suite, seeded verifier, focused Rust asset test, diff, and resumed desktop light/dark browser pass |
 
 ## Open Questions
 

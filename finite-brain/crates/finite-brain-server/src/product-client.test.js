@@ -313,6 +313,22 @@ assert.doesNotMatch(cssSource, /\.ribbon-button\.active::before/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown\s*\{[^}]*position:\s*absolute/s);
 assert.match(cssSource, /\.folder-option-button/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown-list\s+\.obsidian-folder-button/);
+for (const token of [
+  "--knowledge-canvas",
+  "--knowledge-code-bg",
+  "--knowledge-code-border",
+  "--knowledge-overlay",
+  "--knowledge-node",
+  "--knowledge-node-selected",
+  "--knowledge-edge",
+]) {
+  assert.match(cssSource, new RegExp(`${token}:`));
+}
+assert.match(cssSource, /\.context-menu\s*\{[^}]*background:\s*var\(--surface-raised\)/s);
+assert.match(cssSource, /\.command-palette-panel\s*\{[^}]*background:\s*var\(--surface-raised\)/s);
+assert.match(cssSource, /\.note-markdown code\s*\{[^}]*background:\s*var\(--knowledge-code-bg\)/s);
+assert.match(cssSource, /\.graph-canvas\s*\{[^}]*background:\s*var\(--knowledge-canvas\)/s);
+assert.match(cssSource, /\.graph-canvas \.node\.selected\s*\{[^}]*fill:\s*var\(--knowledge-node-selected\)/s);
 assert.equal(client.normalizeAccessView("vault"), "vault");
 assert.equal(client.normalizeAccessView("folder"), "folder");
 assert.equal(client.normalizeAccessView("other"), "folder");
