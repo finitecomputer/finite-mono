@@ -21,7 +21,7 @@ type AgentCreationRequest = {
   id: string;
   project_id: string;
   display_name: string;
-  runner_class: "apple_container";
+  runner_class: "apple_container" | "kata";
   profile_picture_url: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id: string | null;
@@ -66,6 +66,7 @@ type CoreState = {
   requests: AgentCreationRequest[];
   creationPosts: unknown[];
   cancelPosts: string[];
+  destroyPosts: string[];
   createDelayMs: number;
   canCreateAgent: boolean;
   creationError: string | null;
@@ -646,6 +647,53 @@ test("dashboard agent creation browser states", { timeout: 120_000 }, async () =
         assert.equal(request.authorization, `Bearer ${HOSTED_DEVICE_TOKEN}`);
         assert.equal(request.workosUserId, "user_browser");
       }
+    });
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_removable",
+          "Removable Kata Bot",
+          hostedDevice.runtimeStatusUrl,
+          "removable-kata-bot"
+        ),
+      ],
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_removable",
+          projectId: "project_removable",
+          displayName: "Removable Kata Bot",
+          status: "running",
+          runnerClass: "kata",
+          agentRuntimeId: "runtime_removable-kata-bot",
+        }),
+      ],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/removable-kata-bot`
+      );
+      const removeButton = page.getByRole("button", { name: "Remove agent" });
+      await removeButton.waitFor({ state: "visible" });
+      const removeForm = removeButton.locator("xpath=ancestor::form");
+      assert.equal(
+        new URL((await removeForm.getAttribute("action")) ?? "", page.url()).pathname,
+        "/dashboard/machines/removable-kata-bot/remove",
+        "removal must use a stable POST URL instead of a build-specific Server Action id"
+      );
+      assert.equal((await removeForm.getAttribute("method"))?.toLowerCase(), "post");
+
+      page.once("dialog", (dialog) => dialog.accept());
+      await removeButton.click();
+      await page.waitForURL(
+        /\/dashboard\/machines\/removable-kata-bot\?removal=requested$/u
+      );
+      await expectVisibleText(page, "Agent removal started");
+      await expectVisibleText(
+        page,
+        "Its compute is being removed. Saved agent data is retained. It will disappear from your dashboard when removal finishes."
+      );
+      assert.deepEqual(core.state.destroyPosts, ["project_removable"]);
     });
   } finally {
     await browser?.close().catch(() => {});
@@ -1286,6 +1334,30 @@ async function handleCoreRequest(
     return;
   }
 
+  const destroyMatch = request.url?.match(
+    /^\/api\/core\/v1\/me\/projects\/([^/]+)\/runtime\/destroy$/u
+  );
+  if (request.method === "POST" && destroyMatch?.[1]) {
+    const projectId = decodeURIComponent(destroyMatch[1]);
+    const project = state.projects.find(
+      (candidate) => candidate.project.id === projectId
+    );
+    state.destroyPosts.push(projectId);
+    writeJson(response, 200, {
+      id: `runtime_control_destroy_${state.destroyPosts.length}`,
+      project_id: projectId,
+      agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
+      source_host_id: project?.runtime?.source_host_id ?? "oslo",
+      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      requested_by_user_id: "user_browser",
+      kind: "destroy",
+      status: "requested",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    return;
+  }
+
   const cancelMatch = request.url?.match(/^\/api\/core\/v1\/agent-creation-requests\/([^/]+)\/cancel$/u);
   if (request.method === "POST" && cancelMatch?.[1]) {
     const requestId = decodeURIComponent(cancelMatch[1]);
@@ -1318,6 +1390,7 @@ function emptyCoreState(): CoreState {
     requests: [],
     creationPosts: [],
     cancelPosts: [],
+    destroyPosts: [],
     createDelayMs: 0,
     canCreateAgent: false,
     creationError: null,
@@ -1331,6 +1404,8 @@ function agentCreationRequest({
   status,
   failureMessage = null,
   createdAt = new Date().toISOString(),
+  runnerClass = "apple_container",
+  agentRuntimeId = null,
 }: {
   id: string;
   projectId: string;
@@ -1338,15 +1413,17 @@ function agentCreationRequest({
   status: AgentCreationRequest["status"];
   failureMessage?: string | null;
   createdAt?: string;
+  runnerClass?: AgentCreationRequest["runner_class"];
+  agentRuntimeId?: string | null;
 }): AgentCreationRequest {
   return {
     id,
     project_id: projectId,
     display_name: displayName,
-    runner_class: "apple_container",
+    runner_class: runnerClass,
     profile_picture_url: null,
     status,
-    agent_runtime_id: null,
+    agent_runtime_id: agentRuntimeId,
     failure_message: failureMessage,
     created_at: createdAt,
     updated_at: createdAt,

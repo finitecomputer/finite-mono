@@ -8,7 +8,6 @@ import {
 } from "lucide-react";
 
 import {
-  destroyCoreRuntimeAction,
   restartCoreRuntimeAction,
   stopCoreRuntimeAction,
 } from "@/app/actions";
@@ -40,10 +39,13 @@ type RelayOverviewState = {
 
 export default async function MachineDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ machineId: string }>;
+  searchParams: Promise<{ removal?: string | string[] }>;
 }) {
   const { machineId } = await params;
+  const query = await searchParams;
   const access = await loadDashboardMachineAccess(machineId, {
     coreCacheMode: "swr",
   });
@@ -52,13 +54,20 @@ export default async function MachineDetailPage({
     redirect("/");
   }
 
-  return <ImportedMachineOverview access={access} />;
+  return (
+    <ImportedMachineOverview
+      access={access}
+      removalResult={firstSearchParam(query.removal)}
+    />
+  );
 }
 
 async function ImportedMachineOverview({
   access,
+  removalResult,
 }: {
   access: DashboardMachineAccess;
+  removalResult: string | null;
 }) {
   const overview = access.coreProject?.runtime
     ? coreRuntimeOverview(
@@ -73,6 +82,34 @@ async function ImportedMachineOverview({
 
   return (
     <div className="space-y-6">
+      {removalResult === "requested" ? (
+        <section
+          className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4"
+          role="status"
+        >
+          <h2 className="font-semibold">Agent removal started</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Its compute is being removed. Saved agent data is retained. It will
+            disappear from your dashboard when removal finishes.
+          </p>
+        </section>
+      ) : null}
+      {removalResult === "failed" ? (
+        <section
+          className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm"
+          role="alert"
+        >
+          We couldn&apos;t remove this agent. Please try again.
+        </section>
+      ) : null}
+      {removalResult === "unavailable" ? (
+        <section
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
+          role="status"
+        >
+          Only active Kata agents can be removed here.
+        </section>
+      ) : null}
       <section className="ocean-status-card" data-cube-state={prismState}>
         <div className="ocean-status-card__inner">
           <StatusPrism state={prismState} className="justify-self-center" />
@@ -119,9 +156,11 @@ async function ImportedMachineOverview({
             This removes the agent&apos;s compute so you can create a new agent. Your saved
             agent data is retained.
           </p>
-          <form action={destroyCoreRuntimeAction} className="mt-4">
-            <input type="hidden" name="machineId" value={access.machineId} />
-            <input type="hidden" name="redirectPath" value="/dashboard?new=1" />
+          <form
+            action={`/dashboard/machines/${encodeURIComponent(access.machineId)}/remove`}
+            method="post"
+            className="mt-4"
+          >
             <ConfirmSubmitButton
               variant="destructive"
               pendingLabel="Removing..."
@@ -135,6 +174,10 @@ async function ImportedMachineOverview({
       ) : null}
     </div>
   );
+}
+
+function firstSearchParam(value: string | string[] | undefined) {
+  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
 function coreRuntimeOverview(
