@@ -29,25 +29,25 @@ overall visual character in a high-quality, elegant, surgical way.
   [#6](https://github.com/finitecomputer/finite-mono/issues/6),
   [#7](https://github.com/finitecomputer/finite-mono/issues/7), and
   [#8](https://github.com/finitecomputer/finite-mono/issues/8)
-- Ticket sessions: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`;
-  `docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-session.md`;
-  `docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-session.md`;
-  `docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-session.md`
-- Agent briefs: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`;
-  `docs/feature-dev/2026-07-11-dashboard-theme-ticket-02-knowledge-workspace.md`;
-  `docs/feature-dev/2026-07-11-dashboard-theme-ticket-03-access-workflows.md`;
-  `docs/feature-dev/2026-07-11-dashboard-theme-ticket-04-responsive-verification.md`
-- Review packets: `docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`;
-  `docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-review-packet.md`;
-  `docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-review-packet.md`;
-  `docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-review-packet.md`
-- Local CodeRabbit report: pending
+- Ticket sessions: `finite-brain/docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-session.md`
+- Agent briefs: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-02-knowledge-workspace.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-03-access-workflows.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-04-responsive-verification.md`
+- Review packets: `finite-brain/docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-review-packet.md`
+- Local CodeRabbit report: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-local-coderabbit-round.md`
 - PR URL: pending
 
 ## Commands
 
 - Install: repository dependencies are Nix-managed; no system install. Use `scripts/with-dev-env` for direct commands.
-- Typecheck: not applicable to the dependency-free Product Client; use `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+- Syntax check: `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
 - Test: `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`; `scripts/with-dev-env cargo test -p finite-brain-server`
 - Build: `scripts/with-dev-env cargo build -p finite-brain-app`
 - Visual verification: seed the smoke fixture, run `finite-brain/scripts/verify-obsidian-product-client.mjs`, serve `finite-brain-app`, and inspect `/client` at desktop and mobile widths with screenshots
@@ -78,7 +78,7 @@ overall visual character in a high-quality, elegant, surgical way.
 
 ## Open Questions
 
-- None for ticket #5.
+- None for tickets #5 through #8 or the final goal review.
 
 ## Escalations
 

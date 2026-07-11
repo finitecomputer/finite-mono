@@ -38,15 +38,24 @@ DOM identity, JavaScript behavior, state, and security boundaries unchanged.
 
 ### Visual evidence
 
-The curated screenshots under
-`docs/feature-dev/artifacts/2026-07-11-issue-8/` cover:
+The 15 curated screenshots under
+`finite-brain/docs/feature-dev/artifacts/2026-07-11-issue-8/` are:
 
-- desktop light/dark locked and resumed states;
-- mobile light/dark locked, Files, Access, and quick-switcher states;
-- tablet light Files/Page state;
-- representative desktop Files, Graph, Vault/Folder Access, and expanded
-  Access-form states;
-- the fixed quick-switcher at light desktop and dark mobile widths.
+- `light-desktop-locked.png`
+- `light-desktop-files.png`
+- `light-desktop-access-forms.png`
+- `light-desktop-quick-switcher.png`
+- `light-tablet-files.png`
+- `light-mobile-locked.png`
+- `light-mobile-files.png`
+- `light-mobile-access.png`
+- `dark-desktop-locked.png`
+- `dark-desktop-access.png`
+- `dark-desktop-graph.png`
+- `dark-mobile-locked.png`
+- `dark-mobile-files.png`
+- `dark-mobile-access.png`
+- `dark-mobile-quick-switcher.png`
 
 The broader inspected scratch matrix under `/tmp/finite-brain-ticket8-*.png`
 additionally covers Search, source/visual editing, slash and context menus,
