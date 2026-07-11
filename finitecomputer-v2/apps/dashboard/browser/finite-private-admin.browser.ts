@@ -38,15 +38,15 @@ test("admins keep the SaaS dashboard and separate Finite Private controls", { ti
     await page.getByLabel("Agent name").waitFor({ state: "visible" });
     const machineSwitcher = page.locator(".ocean-machine-switcher__button");
     await machineSwitcher.waitFor({ state: "visible" });
-    assert.equal(await machineSwitcher.evaluate((element) => element.tagName), "BUTTON");
+    assert.equal(await machineSwitcher.evaluate((element) => element.tagName), "A");
     assert.equal((await machineSwitcher.textContent())?.trim(), "New agent");
-    await machineSwitcher.click();
-    await page
-      .getByRole("menuitem", { name: "Legacy Agent", exact: true })
-      .waitFor({ state: "visible" });
-    await page
-      .getByRole("menuitem", { name: "New agent", exact: true })
-      .waitFor({ state: "visible" });
+    const newAgentUrl = new URL(
+      (await machineSwitcher.getAttribute("href")) ?? "",
+      page.url()
+    );
+    assert.equal(newAgentUrl.pathname, "/dashboard");
+    assert.equal(newAgentUrl.searchParams.get("new"), "1");
+    assert.equal(await page.getByText("Legacy Agent", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
