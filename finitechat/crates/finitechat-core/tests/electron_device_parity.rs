@@ -63,16 +63,26 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         false,
     );
 
-    // The normal exact-Device KeyPackage + MLS Add/Welcome path enrolls the
-    // second User Device. It does not copy the Hosted Web Device's store.
-    add_member(
-        &web,
-        &electron,
-        &room_id,
-        profile(&web_identity.account_id, "Paul", false),
-    );
+    // The product link fanout claims this exact Device's KeyPackage and uses
+    // normal MLS Add/Welcome. It does not copy the Hosted Web Device's store.
+    sync(&electron);
+    let fanout = web
+        .link_device_and_wait(
+            "electron-device-parity-link".to_owned(),
+            "electron-alpha-test".to_owned(),
+        )
+        .unwrap();
+    assert!(fanout.fanout_complete);
+    assert_eq!(fanout.room_count, 1);
     let electron_after_join = sync(&electron);
     assert_room_connected(&electron_after_join, &room_id);
+    let activated = web
+        .link_device_and_wait(
+            "electron-device-parity-link".to_owned(),
+            "electron-alpha-test".to_owned(),
+        )
+        .unwrap();
+    assert_eq!(activated.active_room_count, 1);
     assert!(
         electron_after_join
             .messages
