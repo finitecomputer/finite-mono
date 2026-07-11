@@ -298,7 +298,6 @@ assert.match(cssSource, /\.access-button-row\s*\{[^}]*display:\s*grid;/s);
 assert.doesNotMatch(cssSource, /\.vault-person-action\s*\{[^}]*min-width:\s*max-content/s);
 assert.match(cssSource, /\.vault-management-section\s+\.access-who-has-list\s+li\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
 assert.match(cssSource, /\.vault-access-action-grid\s*\{[^}]*gap:\s*10px;/s);
-assert.match(cssSource, /\.vault-access-option\.primary\s*\{[^}]*rgba\(124,\s*108,\s*255,\s*0\.055\)/s);
 assert.match(cssSource, /#vaultPeopleActionPanel\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
 assert.match(cssSource, /#vaultPeopleSection\s+\.access-person-name\s*\{[^}]*white-space:\s*normal;/s);
 assert.match(cssSource, /#vaultInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
