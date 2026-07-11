@@ -5,8 +5,8 @@
 - Issue: [finitecomputer/finite-mono#7](https://github.com/finitecomputer/finite-mono/issues/7)
 - Fixed point before session: `ac6564a`
 - Worker session: `/root/ticket_7_access_workflows`
-- Commit: pending review
-- Status: implementation complete; review pending
+- Commit: `2960af7` plus review-fix follow-up
+- Status: complete
 
 ## Inputs
 
@@ -14,8 +14,9 @@
 - Ticket: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-03-access-workflows.md`
 - Relevant glossary terms: Dashboard-Aligned Product Theme, Product Client,
   Vault, Folder, Member Identity, Folder Key Grant, Session Lock
-- Relevant ADRs: `docs/adr/0008-clear-browser-secrets-on-session-boundaries.md`,
-  `docs/adr/0015-deny-automatic-plaintext-egress.md`
+- Relevant ADRs: `docs/adr/0010-keep-opened-folder-keys-session-only.md`,
+  `docs/adr/0014-keep-browser-and-desktop-plaintext-ephemeral.md`, and
+  `docs/adr/0015-deny-plaintext-egress-by-default.md`
 - Prototype answer and source branch, if any: none; the current dashboard and
   ticket #5 token foundation are the visual authorities
 
@@ -46,11 +47,13 @@
 ## Review
 
 - Review fixed point: `ac6564a`
-- Standards findings: pending
-- Spec findings: pending
-- Worthy fixes applied: pending
-- Findings ignored with reasons: pending
-- Re-review result: pending
+- Standards findings: two low-severity findings: the session artifact named
+  stale ADR paths, and two access tokens were declared without consumers
+- Spec findings: pass; no missing, incorrect, or scope-creep work
+- Worthy fixes applied: corrected the ADR references to the authoritative
+  current files and removed the unused tokens
+- Findings ignored with reasons: none
+- Re-review result: standards and spec pass with no remaining findings
 
 ## Risks
 
