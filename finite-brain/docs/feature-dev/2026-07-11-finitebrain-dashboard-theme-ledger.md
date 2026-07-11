@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: tickets #5, #6, and #7 complete; ticket #8 implementation and verification complete, review pending
+- Current status: tickets #5 through #8 complete; final goal review pending
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -59,7 +59,7 @@ overall visual character in a high-quality, elegant, surgical way.
 | #5 | AFK | complete | `/root/ticket_5_theme_foundation` | browser-found light workspace defect and review command-record finding fixed | full ticket suite and four-state visual pass |
 | #6 | AFK | complete | `/root/ticket_6_knowledge_workspace` | review-found Graph contrast and CSS test coupling fixed | full ticket suite and resumed desktop light/dark visual pass repeated after fixes |
 | #7 | AFK | complete | `/root/ticket_7_access_workflows` | stale ADR references and two unused tokens fixed | full ticket suite and resumed desktop light/dark visual pass |
-| #8 | AFK | review pending | `/root/ticket_8_responsive_verification` | quick-switcher title/detail spacing fixed during browser audit | full workspace gates and desktop/tablet/mobile light/dark browser matrix |
+| #8 | AFK | complete | `/root/ticket_8_responsive_verification` | quick-switcher spacing fixed; scratch-evidence visibility concern closed with committed curated matrix | full workspace gates, committed desktop/tablet/mobile light/dark browser evidence, standards/spec pass |
 
 ## Parked HITL Slices
 
@@ -74,7 +74,7 @@ overall visual character in a high-quality, elegant, surgical way.
 | #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | `aa3b7a1` plus review fix follow-up | standards/spec pass after one command-record fix | Rust server suite, JS, seeded verifier, format, Clippy, build, diff, and browser pass |
 | #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | `8ee9129` plus review-fix follow-up | standards pass; two spec findings fixed; spec re-review pass | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
 | #7 | `ac6564a` | `/root/ticket_7_access_workflows` | `2960af7` plus review-fix follow-up | standards/spec pass after two low-severity standards fixes | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
-| #8 | `8e36d7a` | `/root/ticket_8_responsive_verification` | pending | review pending | Product Client tests, seeded verifier, asset/font routes, full locked workspace test/Clippy/build, Rustfmt, diff, and desktop/tablet/mobile light/dark browser matrix |
+| #8 | `8e36d7a` | `/root/ticket_8_responsive_verification` | `296a30d` plus review-evidence follow-up | standards/spec pass after durable screenshot follow-up | Product Client tests, seeded verifier, asset/font routes, full locked workspace test/Clippy/build, Rustfmt, diff, and committed desktop/tablet/mobile light/dark browser matrix |
 
 ## Open Questions
 
