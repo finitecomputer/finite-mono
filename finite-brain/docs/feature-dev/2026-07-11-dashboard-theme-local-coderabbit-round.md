@@ -29,4 +29,4 @@
 
 - Continue: yes, after committing the four in-scope documentation fixes and rerunning affected checks
 - Escalate: no
-- Notes: CodeRabbit completed against `main`; the unrelated research file appeared because `--type all` includes untracked files.
+- Notes: CodeRabbit completed against `main`; the unrelated research file appeared because `--type all` includes untracked files. After commit `bbc41b2`, `coderabbit review --agent --type committed --base main` completed with 0 issues.
