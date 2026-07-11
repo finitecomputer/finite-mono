@@ -193,6 +193,29 @@ export function hasFinalRemoteResponse(
   );
 }
 
+/**
+ * Recover an in-flight agent turn from the durable shared transcript. This is
+ * deliberately User-Principal based: a message sent by another linked Device
+ * starts the same turn, and only a later final delivery from a different
+ * account completes it. Tool/status progress never clears the working state.
+ */
+export function hasOutstandingPrincipalTurn(
+  messages: ChatMessage[],
+  ownAccountId: string | null | undefined
+) {
+  if (!ownAccountId) return false;
+  let latestPrincipalSeq = 0;
+  let latestRemoteFinalSeq = 0;
+  for (const message of messages) {
+    if (message.sender_account_id === ownAccountId) {
+      latestPrincipalSeq = Math.max(latestPrincipalSeq, message.seq);
+    } else if (message.final_delivery) {
+      latestRemoteFinalSeq = Math.max(latestRemoteFinalSeq, message.seq);
+    }
+  }
+  return latestPrincipalSeq > latestRemoteFinalSeq;
+}
+
 export function beginPendingChatTurn(
   selection: ChatSelection,
   visibleMessages: ChatMessage[]

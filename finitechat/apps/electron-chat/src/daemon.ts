@@ -1,4 +1,5 @@
 import type { AppAction, AppState } from "@finite/chat-ui";
+import type { ChatTransport } from "@finite/chat-ui/react";
 
 export type { AppAction, AppState } from "@finite/chat-ui";
 
@@ -73,5 +74,36 @@ export function subscribeToUpdates(
     unsubscribeState();
     unsubscribeError();
     unsubscribeGeneration();
+  };
+}
+
+/**
+ * Adapt the renderer-safe IPC bridge to the same product transport used by
+ * the hosted dashboard. The shared ChatProduct never needs to know whether
+ * its state came from authenticated HTTP or the local finitechatd process.
+ */
+export function desktopChatTransport(baseUrl: string): ChatTransport {
+  return {
+    load: () => getState(baseUrl),
+    dispatch: (action) => dispatch(baseUrl, action),
+    upload: async (upload) =>
+      uploadAttachments(baseUrl, {
+        room_id: upload.room_id,
+        topic_id: upload.topic_id,
+        chat_id: upload.chat_id,
+        caption: upload.caption,
+        reply_to_message_id: upload.reply_to_message_id,
+        files: await Promise.all(
+          upload.files.map(async (file) => ({
+            filename: file.name,
+            mime_type: file.type || "application/octet-stream",
+            bytes: await file.arrayBuffer(),
+          }))
+        ),
+      }),
+    subscribe: (onState, onError, onReset) =>
+      subscribeToUpdates(baseUrl, onState, onError, () => onReset()),
+    attachmentUrl: ({ room_id, message_id, attachment_id }) =>
+      attachmentMediaUrl(room_id, message_id, attachment_id),
   };
 }

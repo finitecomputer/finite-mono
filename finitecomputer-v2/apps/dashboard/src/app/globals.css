@@ -3,6 +3,7 @@
 @import "shadcn/tailwind.css";
 @import "../styles/typography.css";
 @import "../styles/design-tokens.css";
+@import "@finite/chat-ui/react/styles.css";
 
 @custom-variant dark (&:is(.dark *));
 

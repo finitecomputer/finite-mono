@@ -5,6 +5,7 @@ import {
   activitiesForChat,
   attachmentSendError,
   beginPendingChatTurn,
+  hasOutstandingPrincipalTurn,
   isUserPrincipalMessage,
   liveActivityLabel,
   messagesForChat,
@@ -119,6 +120,36 @@ test("working presentation remains visible across an activity gap and outranks t
       true
     ),
     "Sol is working"
+  );
+});
+
+test("a turn sent by another linked Device remains working across reload and tool gaps", () => {
+  const electronTurn = message({
+    messageId: "electron-turn",
+    seq: 10,
+    senderAccountId: "user-account",
+    senderDeviceId: "electron-alpha",
+    isMine: false,
+  });
+  const tool = message({
+    messageId: "tool-after-electron",
+    seq: 11,
+    kind: "tool",
+    status: "complete",
+  });
+  assert.equal(
+    hasOutstandingPrincipalTurn([electronTurn, tool], "user-account"),
+    true
+  );
+
+  const final = message({
+    messageId: "agent-finished-electron-turn",
+    seq: 12,
+    finalDelivery: true,
+  });
+  assert.equal(
+    hasOutstandingPrincipalTurn([electronTurn, tool, final], "user-account"),
+    false
   );
 });
 

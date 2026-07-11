@@ -151,11 +151,18 @@ test("attachment media URLs contain only three opaque identifiers and reject tra
 test("renderer attachment boundary has no raw daemon network fallback", () => {
   const daemonSource = fs.readFileSync(path.resolve(__dirname, "../src/daemon.ts"), "utf8");
   const appSource = fs.readFileSync(path.resolve(__dirname, "../src/App.tsx"), "utf8");
+  const sharedProductSource = fs.readFileSync(
+    path.resolve(__dirname, "../../../packages/finitechat-chat-ui/src/react/chat-product.tsx"),
+    "utf8"
+  );
   const html = fs.readFileSync(path.resolve(__dirname, "../index.html"), "utf8");
   assert.doesNotMatch(daemonSource, /VITE_FINITECHAT_DAEMON_URL|new EventSource|\bfetch\s*\(/);
+  assert.doesNotMatch(appSource, /new EventSource|\bfetch\s*\(/);
   assert.doesNotMatch(html, /127\.0\.0\.1|ws:\/\//);
   assert.match(html, /img-src[^;]*finitechat-media:/);
-  assert.match(appSource, /attachmentSendError\(next\)/);
+  assert.match(appSource, /<ChatProduct/);
+  assert.match(appSource, /desktopChatTransport/);
+  assert.match(sharedProductSource, /attachmentSendError\(next\)/);
 });
 
 test("ready records accept only dynamic loopback HTTP addresses", () => {
