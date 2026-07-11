@@ -31,12 +31,15 @@
             cargo
             clippy
             curl
+            git
             just
             nodejs_24
             openssl
             postgresql_16
             pkg-config
             process-compose
+            python3
+            rsync
             rust-analyzer
             rustPlatform.rustLibSrc
             rustc

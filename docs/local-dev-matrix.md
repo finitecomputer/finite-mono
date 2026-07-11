@@ -20,8 +20,8 @@ verification note says otherwise.
 | --- | --- | --- | --- |
 | Web dashboard/chat design and recovery states | repository root | `npm ci` once in `finitecomputer-v2/apps/dashboard`, then `just dev web-design` | Runs the canonical dashboard UI against deterministic fake Core and Hosted Device services. No provider key, runtime, or production access is needed. This is a design loop, not runtime acceptance. |
 | Self-serve SaaS dashboard/Core UI | `finitecomputer-v2/apps/dashboard` | `npm ci`, `npm run dev` | Current v2 product surface for environment-backed WorkOS/dashboard/Project/Finite Private work. Does not prove real runtime launch. |
-| v2 Agent Runtime proof or SaaS launch readiness | `finitecomputer-v2` plus `finitechat` | `cargo test --workspace`, dashboard checks, then follow `docs/hermes-runtime-test-matrix.md` | Product proof is Hosted Web plus an independent local Device, real streaming Hermes, `fsite`, `fbrain`, local Docker, Kata, Phala, recovery from empty targets, then dashboard-controlled launch. |
-| Legacy dashboard chat UI or designer pass | `finitecomputer` | `nix develop`, `just chat-local-bootstrap smoke-finite`, add provider key, `just chat-local-up smoke-finite skyler@finite.vip 3100` | Best current legacy dashboard-to-agent loop. Uses local relay plus MicroSandbox runtime. Not the v2 product chat path. |
+| v2 Agent Runtime proof or SaaS launch readiness | repository root | export the local inference credential, then `just dev saas-smoke` | Canonical full local proof: real Core, Runner, Apple Agent Runtime, streaming Hermes, Hosted Web chat, and restart healing. Use `finitecomputer-v2/docs/hermes-runtime-test-matrix.md` for deeper Docker/Kata/Phala promotion evidence. |
+| Legacy dashboard archaeology | external legacy `finitecomputer` checkout | legacy repo runbooks only | Migration reference only. It is not the v2 product or current web-design path; new design work starts with `just dev web-design` above. |
 | Legacy hosted platform/runtime/control plane | `finitecomputer` | `nix develop`, Cargo commands, root `just` recipes | box1/TRF/smoke and migration bridge lane. Most operator and deployment paths require host secrets or SSH. |
 | Native encrypted chat protocol/server | `finitechat` | `cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3` | Local server and simulator are explicit dev overrides. Production default is `https://chat.finite.computer`. |
 | iOS app build or simulator work | `finitechat` | `ios/ci_scripts/ci_post_clone.sh`, `cargo run -p finitechat-rmp -- run ios` | Requires Xcode. Physical phone work also needs a paired phone and signing team. |
@@ -51,9 +51,9 @@ Documented tools:
   renaming and pruning.
 - Hosted Finite Chat deploy script under
   `infra/hosts/lat1/scripts/deploy-finitechat-server.sh`.
-- Runtime image build path for the Agent Runtime, currently packaging
-  `finitechat`, the Hermes `finitechat` plugin, `fsite`, and `fbrain`; the baked
-  Finite Skills Revision remains a launch-blocking gap.
+- Runtime image build path for the Agent Runtime, packaging `finitechat`, the
+  Hermes `finitechat` plugin, `fsite`, `fbrain`, and the required bundled Finite
+  Skills baseline.
 
 Primary web design loop:
 
@@ -101,7 +101,9 @@ production build. It does not claim runtime or production-browser acceptance.
 
 Product/runtime proof:
 
-- Follow `docs/hermes-runtime-test-matrix.md`.
+- Run `just dev saas-smoke` for the canonical full local acceptance.
+- Follow `finitecomputer-v2/docs/hermes-runtime-test-matrix.md` for the deeper
+  promotion ladder.
 - Rung order is local real-Hermes adapter, runtime image in local Docker,
   runtime image in Kata, then a Phala CVM, then dashboard-controlled SaaS
   launch.
@@ -120,8 +122,8 @@ Friction:
 - `deploy/finite-computer` and the runtime template still carry legacy
   `finitec`/relay/gateway assumptions. Treat those as bridge code with delete
   conditions, not the final v2 product contract.
-- Full SaaS launch proof is not a single local command yet; use the runtime
-  matrix to avoid overclaiming dashboard-only checks.
+- Full SaaS launch proof is the credential-gated `just dev saas-smoke`; it is a
+  deliberately heavier lane than dashboard-only checks.
 
 ### `finitecomputer` legacy
 

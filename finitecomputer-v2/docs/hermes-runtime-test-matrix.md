@@ -162,16 +162,18 @@ Operator command on Apple silicon and macOS 26 or newer:
 ```bash
 container system start
 export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<one operator-held deployed key>
+just dev saas-smoke
 just dev up
 ```
 
-`just dev saas-smoke` is the credential-gated acceptance. Devfinity builds the
-one Hermes 0.18.2 image, registers it as a promoted local artifact, runs Core
-and the generic Runner, launches an Apple VM with a durable `/data` bind mount,
-and opens the same Hosted Web Device used by the dashboard. The preferred
-chained-limiter path gives each runtime a Core-issued key while keeping the
-operator key in the local limiter process; the explicit direct Runner override
-is a fallback only.
+On a fresh checkout, `just dev saas-smoke` is both the Launch Code bootstrap and
+credential-gated acceptance; skip it on later interactive runs with a persisted
+agent. Devfinity builds the one Hermes 0.18.2 image, registers it as a promoted
+local artifact, runs Core and the generic Runner, launches an Apple VM with a
+durable `/data` bind mount, and opens the same Hosted Web Device used by the
+dashboard. The preferred chained-limiter path gives each runtime a Core-issued
+key while keeping the operator key in the local limiter process; the explicit
+direct Runner override is a fallback only.
 
 Shape:
 
