@@ -1,6 +1,6 @@
 # Internal production canary
 
-Status: ACTIVE
+Status: ACTIVE — production deployed; Paul's final browser acceptance remains
 Owner: Paul
 Opened: 2026-07-10
 Acceptance: I, Paul, use a fresh non-admin account in a normal browser to sign up → redeem a Launch Code → launch → complete a two-way agent turn → restart the Agent Runtime from the dashboard → complete another two-way turn in the same visible conversation.
@@ -44,6 +44,13 @@ Core currently accepts the repository-visible `off2026` value for any new organi
 
 Keep it small: one minimal Core-owned batch/code model, issuance/list/revoke operations, one admin screen with one-time copy/download, and the existing redemption/creation path. The organizer distributes codes. Do not build campaign management, a participant roster, invitation delivery, scheduling, analytics, or a separate entitlement service.
 
+**Status: DEPLOYED — manual redemption remains.** At 2026-07-11T01:04Z,
+Paul's real WorkOS operator session loaded the production Admin Ops surface and
+issued a fresh named 24-hour, one-code batch. The one-time plaintext display
+was left for Paul and was not copied into the repository, documentation, or
+command output. Existing later reads remain metadata-only. Paul will redeem
+the code as part of the final normal-browser acceptance below.
+
 ### P0 — make the normal path discoverable
 
 `marketing-home.tsx` currently offers only an external Google Form, while `/signup` and `/login` already exist. For the canary posture, expose **Sign in** and **I have a Launch Code** through the existing WorkOS account flow, and retain the request-access form for everyone else. Do not advertise open paid/self-serve launch until the customer-facing run, create a second auth system, or turn marketing into a control plane.
@@ -71,23 +78,19 @@ by this run.
 
 The product contract and dashboard policy select Kata for production, and the Nix module defines an enabled Kata Runner timer, while `infra/README.md` still calls the Runner dormant because of an older Phala/Enclavia path. Before creating the canary request, verify the live Kata timer, route-scoped Core credential, capacity, promoted Runtime artifact, durable-volume binding, and readiness path. Reconcile the operational docs from that evidence. Do not add provider selection UI or use the canary to finish Phala.
 
-**Status: READY TO SHIP, pending the authorized production rollout.** Read-only
-production inspection found `finite-saas-runner.timer` enabled and active on
-`finite-lat-1`, capacity of 12 total / 2 active Runtimes at 4 CPU and 8G each,
-and the expected two read-write `/data` binds. The `.5` failure is not a Kata or
-runtime-binary regression: its pending chat attachment contains a historical
-`http://127.0.0.1:8788/blobs/...` reference, which points back at the Kata guest
-and ends the Hermes inbound stream. The same encrypted blob is available from
-the canonical `https://chat.finite.computer/blobs/...` origin. The repository
-already makes the Chat server emit canonical public blob URLs and makes the
-Runtime safely reroute historical loopback blob references through its trusted
-Chat server before cryptographic verification. Publish and promote a fresh
-post-fix Runtime, deploy the Chat-server configuration, and use a fresh Kata
-launch for this canary; repairing the old `.5` guest is not a prerequisite.
-The live Runner also still needs its distinct `FC_CORE_RUNNER_API_TOKEN`. No
-production state was changed during diagnosis, and the launch, contact,
-two-way-turn, and restart-preservation checks remain unverified until that
-authorized rollout.
+**Status: DEPLOYED — Paul's fresh launch and browser acceptance remain.** At
+2026-07-11T01:01Z, production switched to mono revision `c610358893d3` using a
+closure built on `finite-lat-2`. The exact dashboard source `30ad9eab25fe` is
+running as `2026-07-10.8` at its committed digest. Core, Dashboard, Chat,
+Hosted Web Device, and the Kata Runner timer are active with no failed units;
+the Runner reports `FC_RUNNER_DRAIN=false`, uses its distinct route-scoped
+credential, and selects promoted, non-retired Runtime `2026-07-10.6`.
+WorkOS issuer configuration survived the switch, direct health checks pass,
+and the known unauthenticated Core usage route rejects with `401`. The `.5`
+guest was not repaired and the limiter was not deployed. A fresh `.6` Kata
+launch, real two-way chat, restart, and same-conversation continuation are
+deliberately left to Paul's final normal-browser acceptance below and are not
+claimed from these deployment checks.
 
 ### P1 — keep dashboard chat state coherent under real latency
 
