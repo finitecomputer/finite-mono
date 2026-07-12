@@ -271,6 +271,7 @@ function legacyProject() {
     project: {
       id: "project_legacy",
       display_name: "Legacy Agent",
+      import_candidate_id: "candidate_legacy",
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
     },

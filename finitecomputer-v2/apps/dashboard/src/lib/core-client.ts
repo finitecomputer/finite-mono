@@ -1026,6 +1026,9 @@ export function coreProjectRuntimeId(project: CoreVisibleProject) {
 
 export function coreProductProjects(projects: CoreVisibleProject[]) {
   return projects.filter((project) => {
+    // N-1 compatibility only: current Core strips imported rollout history
+    // before serializing the public DTO. An older Core can still include this
+    // internal marker during the additive rollout.
     const legacyProject = project.project as CoreProject & {
       import_candidate_id?: unknown;
     };
