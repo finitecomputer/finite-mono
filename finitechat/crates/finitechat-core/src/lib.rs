@@ -15,14 +15,14 @@ use finitechat_blob::{
     prepare_blossom_upload_http_request,
 };
 use finitechat_client::{
-    AppliedLogEntry, ClientError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
-    HttpRuntimeDeliveryError, PreparedCommit, ReqwestHttpRuntimeTransport,
+    AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
+    HttpRuntimeDelivery, HttpRuntimeDeliveryError, PreparedCommit, ReqwestHttpRuntimeTransport,
     ReqwestHttpRuntimeTransportError, RuntimeDelivery, RuntimeLinkFanoutOptions,
-    RuntimeSyncOptions, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
-    StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState, StoredAppState,
-    StoredOutboundLocalState, StoredOutboundMessage, StoredOutboundServerDeliveryState,
-    generate_account_secret, run_link_fanout_tick, run_room_server_sync_tick,
-    run_runtime_sync_tick,
+    RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions,
+    StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState,
+    StoredAppState, StoredOutboundLocalState, StoredOutboundMessage,
+    StoredOutboundServerDeliveryState, generate_account_secret, run_link_fanout_tick,
+    run_room_server_sync_setup_tick, run_room_sync_tick, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
     HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
@@ -927,6 +927,7 @@ struct AppRuntimeWaitPlan {
 struct CoreSyncProjection {
     result: SyncResult,
     events: Vec<StoredAppEvent>,
+    room_sync_failures: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2237,13 +2238,14 @@ impl AppRuntimeState {
     fn runtime_tick(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
+        let room_sync_failure_count = synced.room_sync_failures.len();
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.reload_chat_projection_from_store()?;
         self.materialize_known_connected_rooms()?;
         self.request_missing_link_device_bootstraps()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
-        self.app.status = "ready".to_owned();
+        self.app.status = ready_status(room_sync_failure_count);
         Ok(())
     }
 
@@ -2280,6 +2282,7 @@ impl AppRuntimeState {
     fn agent_bridge_sync_after_change(&mut self) -> Result<AppBridgeSync, FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
+        let room_sync_failure_count = synced.room_sync_failures.len();
         let events = synced
             .events
             .iter()
@@ -2291,7 +2294,7 @@ impl AppRuntimeState {
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
-        self.app.status = "ready".to_owned();
+        self.app.status = ready_status(room_sync_failure_count);
         let joined_account_ids = self.bridge_unseen_joined_account_ids();
         Ok(AppBridgeSync {
             joined_account_ids,
@@ -5628,25 +5631,36 @@ impl AppRuntimeState {
 
     fn existing_profile_chat_room_id(&self, account_id: &str) -> Option<String> {
         let current_account_id = &self.app.identity.account_id;
-        for room in &self.app.rooms {
+        let matches_profile_chat = |room_id: &str| {
+            let Some(room) = self.app.rooms.iter().find(|room| room.room_id == room_id) else {
+                return false;
+            };
             if room.state != AppRoomState::Connected || !self.core.has_room(&room.room_id) {
-                continue;
+                return false;
             }
             let Ok(members) = self.core.device.room_members(&room.room_id) else {
-                continue;
+                return false;
             };
             let member_account_ids = members
                 .into_iter()
                 .map(|member| member.account_id)
                 .collect::<BTreeSet<_>>();
-            if member_account_ids.len() == 2
+            member_account_ids.len() == 2
                 && member_account_ids.contains(current_account_id)
                 && member_account_ids.contains(account_id)
-            {
-                return Some(room.room_id.clone());
-            }
+        };
+
+        if let Some(selected_room_id) = self.app.selected_room_id.as_deref()
+            && matches_profile_chat(selected_room_id)
+        {
+            return Some(selected_room_id.to_owned());
         }
-        None
+
+        self.app
+            .rooms
+            .iter()
+            .find(|room| matches_profile_chat(&room.room_id))
+            .map(|room| room.room_id.clone())
     }
 
     fn room(&self, room_id: &str) -> Option<&AppRoomSummary> {
@@ -7125,7 +7139,7 @@ impl CoreState {
         let owner = self.device.device_ref().clone();
         let mut first_error = None;
         let mut home_delivery = self.home_delivery();
-        match run_runtime_sync_tick(
+        match run_runtime_sync_setup_tick(
             &mut self.store,
             &mut self.device,
             &mut home_delivery,
@@ -7145,16 +7159,58 @@ impl CoreState {
             .collect::<BTreeSet<_>>();
         for server_url in room_servers {
             let mut delivery = delivery_for(&server_url);
-            match run_room_server_sync_tick(
+            match run_room_server_sync_setup_tick(
                 &mut self.store,
                 &mut self.device,
                 &mut delivery,
                 &options,
-                &server_url,
             ) {
                 Ok(report) => projection.merge_report(report, &owner),
                 Err(error) => {
                     first_error.get_or_insert_with(|| runtime_error(error));
+                }
+            }
+        }
+
+        // MLS failures are scoped to one room. Reload a persisted Device
+        // candidate before each attempt so an invalid entry can be rejected
+        // and discarded without poisoning the Device used for later rooms.
+        // `run_room_sync_tick` persists only after the full bounded room tick
+        // succeeds, so a failed room keeps its prior durable cursor and MLS
+        // state while healthy rooms continue.
+        for cursor in self.device.room_sync_cursors() {
+            let config = FiniteChatDeviceConfig {
+                account_secret_key: self.account_secret.clone(),
+                device_id: self.device.device_ref().device_id.clone(),
+                now_unix_seconds: self.now_unix_seconds()?,
+                credential_not_before_unix_seconds: 0,
+                credential_not_after_unix_seconds: u64::MAX,
+            };
+            let mut candidate = self.store.load_device(config).map_err(store_error)?;
+            let server_url = cursor.server_url.unwrap_or_else(|| self.server_url.clone());
+            let mut delivery = delivery_for(&server_url);
+            match run_room_sync_tick(
+                &mut self.store,
+                &mut candidate,
+                &mut delivery,
+                &options,
+                &cursor.room_id,
+            ) {
+                Ok(report) => {
+                    self.device = candidate;
+                    projection.merge_report(report, &owner);
+                }
+                Err(error) => {
+                    let quarantined_room_failure = matches!(
+                        &error,
+                        RuntimeWorkerError::Client(_)
+                            | RuntimeWorkerError::ClientStore(ClientStoreError::Client(_))
+                    );
+                    if quarantined_room_failure {
+                        projection.room_sync_failures.push(cursor.room_id);
+                    } else {
+                        first_error.get_or_insert_with(|| runtime_error(error));
+                    }
                 }
             }
         }
@@ -9825,6 +9881,14 @@ fn compact_error_reason(error: &FiniteChatCoreError) -> String {
     reason = reason.chars().take(MAX_REASON_CHARS).collect();
     reason.push_str("...");
     reason
+}
+
+fn ready_status(room_sync_failure_count: usize) -> String {
+    match room_sync_failure_count {
+        0 => "ready".to_owned(),
+        1 => "ready; 1 room needs repair".to_owned(),
+        count => format!("ready; {count} rooms need repair"),
+    }
 }
 
 fn online_action_failure(error: &FiniteChatCoreError) -> bool {
@@ -12831,6 +12895,165 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_agent_bridge_quarantines_broken_room_and_delivers_fresh_room_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let agent_dir = dir.path().join("agent");
+        let user_dir = dir.path().join("hosted-web");
+        let agent_options = with_test_secret(OpenOptions {
+            data_dir: agent_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let user_options = with_test_secret(OpenOptions {
+            data_dir: user_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let agent_runtime = FiniteChatRuntime::open(agent_options.clone()).unwrap();
+        let user_runtime = FiniteChatRuntime::open(user_options.clone()).unwrap();
+        let user_account_id = user_runtime.state().unwrap().identity.account_id;
+
+        let first_room = agent_runtime
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "First direct room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(
+            &agent_runtime,
+            &user_runtime,
+            &first_room,
+            test_profile(&user_account_id, "User"),
+        );
+        let second_room = agent_runtime
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Fresh recovery room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(
+            &agent_runtime,
+            &user_runtime,
+            &second_room,
+            test_profile(&user_account_id, "User"),
+        );
+
+        let mut room_ids = [first_room, second_room];
+        room_ids.sort();
+        let [broken_room_id, fresh_room_id] = room_ids;
+        drop(agent_runtime);
+        drop(user_runtime);
+
+        let agent_core = CoreState::open(agent_options).unwrap();
+        let mut agent = AppRuntimeState::new(agent_core).unwrap();
+        let user_core = CoreState::open(user_options).unwrap();
+        let mut user = AppRuntimeState::new(user_core).unwrap();
+
+        let broken_before = agent.core.device.last_applied_seq(&broken_room_id).unwrap();
+        let fresh_before = agent.core.device.last_applied_seq(&fresh_room_id).unwrap();
+
+        let mut invalid = user
+            .core
+            .device
+            .create_application_request(
+                &broken_room_id,
+                b"ciphertext deliberately corrupted after creation",
+                "invalid-old-room-entry",
+            )
+            .unwrap();
+        invalid.envelope.payload = vec![0xff; 32];
+        user.core
+            .store
+            .save_device_state(&user.core.device)
+            .unwrap();
+        let mut delivery = delivery_for(&server_url);
+        delivery
+            .append_event(
+                &invalid,
+                DurableAppEventKind::RuntimeCommandRequest.delivery_policy(),
+            )
+            .expect("the opaque server stores the malformed MLS ciphertext");
+
+        let request_id = "request-in-fresh-recovery-room";
+        let request = RuntimeCommandRequestV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Request,
+            request_id: request_id.to_owned(),
+            command: "agent.connections.status".to_owned(),
+            target: finitechat_proto::RuntimeCommandTargetV1 {
+                account_id: agent.app.identity.account_id.clone(),
+                device_id: None,
+            },
+            resource_key: Some("agent.connections".to_owned()),
+            body: finitechat_proto::RuntimeCommandJsonPayloadV1 {
+                schema: "finite.agent.empty.request.v1".to_owned(),
+                json_payload: serde_json::to_vec(&serde_json::json!({})).unwrap(),
+            },
+        };
+        user.send_runtime_command_request(
+            fresh_room_id.clone(),
+            None,
+            DurableAppEventKind::RuntimeCommandRequest,
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .expect("the fresh room accepts a typed runtime command");
+
+        let bridge = agent
+            .agent_bridge_poll_once()
+            .expect("one invalid old room must not abort the fresh room");
+        assert!(bridge.events.iter().any(|stored| {
+            let Ok(event) =
+                serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+            else {
+                return false;
+            };
+            event.kind == DurableAppEventKind::RuntimeCommandRequest
+                && serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload)
+                    .is_ok_and(|request| request.request_id == request_id)
+        }));
+        assert_eq!(agent.app.status, "ready; 1 room needs repair");
+        assert_eq!(
+            agent.core.device.last_applied_seq(&broken_room_id).unwrap(),
+            broken_before,
+            "the rejected room keeps its durable cursor"
+        );
+        assert!(
+            agent.core.device.last_applied_seq(&fresh_room_id).unwrap() > fresh_before,
+            "the healthy room advances independently"
+        );
+
+        let reloaded = agent
+            .core
+            .store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: agent.core.account_secret.clone(),
+                device_id: agent.core.device.device_ref().device_id.clone(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: 0,
+                credential_not_after_unix_seconds: u64::MAX,
+            })
+            .unwrap();
+        assert_eq!(
+            reloaded.last_applied_seq(&broken_room_id).unwrap(),
+            broken_before,
+            "the failed room does not persist a partial advance"
+        );
+        assert!(reloaded.last_applied_seq(&fresh_room_id).unwrap() > fresh_before);
+
+        let idle = agent
+            .agent_bridge_poll_once()
+            .expect("an idle healthy room keeps the quarantined bridge degraded-ready");
+        assert!(idle.events.is_empty());
+        assert_eq!(agent.app.status, "ready; 1 room needs repair");
+    }
+
+    #[test]
     fn app_runtime_failed_inbox_hint_sync_does_not_advance_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let core = CoreState::open(with_test_secret(OpenOptions {
@@ -13070,6 +13293,70 @@ mod tests {
                 .iter()
                 .any(|message| message.text == "hello direct")
         );
+    }
+
+    #[test]
+    fn app_profile_chat_prefers_selected_connected_direct_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("bob").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "bob-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob_account_id = bob.state().unwrap().identity.account_id;
+
+        let first = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Old direct room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(&alice, &bob, &first, test_profile(&bob_account_id, "Bob"));
+        let second = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Fresh direct room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(&alice, &bob, &second, test_profile(&bob_account_id, "Bob"));
+
+        let mut sorted = [first, second];
+        sorted.sort();
+        let [sorted_fallback, selected_recovery_room] = sorted;
+        assert_ne!(selected_recovery_room, sorted_fallback);
+        alice
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: selected_recovery_room.clone(),
+            })
+            .unwrap();
+
+        let opened = alice
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: test_profile(&bob_account_id, "Bob"),
+                display_name: "Chat with Bob".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(opened.status, "chat opened");
+        assert_eq!(
+            opened.selected_room_id.as_deref(),
+            Some(selected_recovery_room.as_str()),
+            "dashboard bootstrap must retain the explicitly selected fresh recovery room"
+        );
+        assert_eq!(opened.rooms.len(), 2);
     }
 
     #[test]

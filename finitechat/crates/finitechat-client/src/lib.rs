@@ -3772,10 +3772,9 @@ impl SqliteClientStore {
 
 /// Apply one ordered log entry to the in-memory device without persisting.
 ///
-/// The sync workers apply a whole page in memory and save once per page;
-/// crash recovery replays at most one page, and the `seq <=
-/// last_applied_seq` guard makes that replay idempotent against whatever
-/// state was last saved.
+/// The sync workers apply their bounded room tick in memory and save only
+/// after every fetched page succeeds. The `seq <= last_applied_seq` guard
+/// makes replay idempotent against the last complete room tick.
 fn apply_log_entry_in_memory(
     device: &mut FiniteChatDevice,
     room_id: &str,
@@ -4649,6 +4648,39 @@ pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
     delivery: &mut D,
     options: &RuntimeSyncOptions,
 ) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
+    let mut report = run_runtime_sync_setup_tick(store, device, delivery, options)?;
+
+    // Group rooms by server (ADR 0005): this tick talks to the home
+    // server, so rooms pinned to another room server are synced by
+    // `run_room_server_sync_tick` with that server's transport.
+    for cursor in device.room_sync_cursors() {
+        if cursor.server_url.is_some() {
+            continue;
+        }
+        sync_room_pages(
+            store,
+            device,
+            delivery,
+            options,
+            cursor.room_id,
+            cursor.after_seq,
+            &mut report,
+        )?;
+    }
+
+    Ok(report)
+}
+
+/// Run the home-server work which is shared by every room sync, without
+/// advancing a room. Callers which need room-level failure isolation can run
+/// this once and then use [`run_room_sync_tick`] with a fresh persisted Device
+/// candidate for each room.
+pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    options: &RuntimeSyncOptions,
+) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
     options.validate_limits()?;
     let mut report = RuntimeSyncReport::default();
 
@@ -4687,11 +4719,23 @@ pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
         report.record_welcome_ack()?;
     }
 
-    // Group rooms by server (ADR 0005): this tick talks to the home
-    // server, so rooms pinned to another room server are synced by
-    // `run_room_server_sync_tick` with that server's transport.
+    Ok(report)
+}
+
+/// Sync the rooms hosted on one specific room server (ADR 0005). The
+/// caller provides a delivery bound to that server's address; welcomes are
+/// claimed there too, because a room Welcome lives on the room's server.
+pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    options: &RuntimeSyncOptions,
+    server_url: &str,
+) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
+    let mut report = run_room_server_sync_setup_tick(store, device, delivery, options)?;
+
     for cursor in device.room_sync_cursors() {
-        if cursor.server_url.is_some() {
+        if cursor.server_url.as_deref() != Some(server_url) {
             continue;
         }
         sync_room_pages(
@@ -4708,15 +4752,13 @@ pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
     Ok(report)
 }
 
-/// Sync the rooms hosted on one specific room server (ADR 0005). The
-/// caller provides a delivery bound to that server's address; welcomes are
-/// claimed there too, because a room Welcome lives on the room's server.
-pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
+/// Claim and activate Welcomes from one room server without advancing any
+/// existing room on it.
+pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
     delivery: &mut D,
     options: &RuntimeSyncOptions,
-    server_url: &str,
 ) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
     options.validate_limits()?;
     let mut report = RuntimeSyncReport::default();
@@ -4739,21 +4781,32 @@ pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
         report.record_welcome_ack()?;
     }
 
-    for cursor in device.room_sync_cursors() {
-        if cursor.server_url.as_deref() != Some(server_url) {
-            continue;
-        }
-        sync_room_pages(
-            store,
-            device,
-            delivery,
-            options,
-            cursor.room_id,
-            cursor.after_seq,
-            &mut report,
-        )?;
-    }
+    Ok(report)
+}
 
+/// Advance exactly one joined room. The caller chooses the transport for the
+/// room's pinned server. On failure this function does not save the Device or
+/// any application rows for the attempted room; callers must discard the
+/// in-memory Device candidate because MLS processing may have changed it.
+pub fn run_room_sync_tick<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    options: &RuntimeSyncOptions,
+    room_id: &str,
+) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
+    options.validate_limits()?;
+    let after_seq = device.last_applied_seq(room_id)?;
+    let mut report = RuntimeSyncReport::default();
+    sync_room_pages(
+        store,
+        device,
+        delivery,
+        options,
+        room_id.to_owned(),
+        after_seq,
+        &mut report,
+    )?;
     Ok(report)
 }
 
@@ -5058,6 +5111,9 @@ fn sync_room_pages<D: RuntimeDelivery>(
         after_seq = after_seq.saturating_sub(PENDING_COMMIT_SYNC_OVERLAP);
     }
     let mut pages = 0u32;
+    let mut dirty = false;
+    let mut app_messages = Vec::new();
+    let mut app_events = Vec::new();
     while pages < options.max_sync_pages_per_room {
         let page = delivery
             .sync_events(&room_id, device.device_ref(), after_seq)
@@ -5075,9 +5131,6 @@ fn sync_room_pages<D: RuntimeDelivery>(
             .into());
         }
 
-        let mut dirty = false;
-        let mut app_messages = Vec::new();
-        let mut app_events = Vec::new();
         for entry in page.entries {
             let seq = entry.seq;
             let message_id = entry.message_id.clone();
@@ -5120,14 +5173,6 @@ fn sync_room_pages<D: RuntimeDelivery>(
                 .map_err(ClientStoreError::from)?;
             dirty = true;
         }
-        if dirty {
-            store.save_device_state_and_app_messages_and_events(
-                device,
-                &app_messages,
-                &app_events,
-            )?;
-        }
-
         if !page.has_more {
             break;
         }
@@ -5135,6 +5180,10 @@ fn sync_room_pages<D: RuntimeDelivery>(
             return Err(ClientError::RuntimeSyncStalled { room_id, after_seq }.into());
         }
         after_seq = page.next_after_seq;
+    }
+
+    if dirty {
+        store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
     }
 
     debug_assert!(pages <= options.max_sync_pages_per_room);
