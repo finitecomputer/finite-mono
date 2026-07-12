@@ -50,12 +50,13 @@ use crate::{
     parse_runtime_control_request_status, parse_runtime_resource_class,
     parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for,
-    provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
-    runtime_artifact_reference_is_immutable_oci, runtime_operation_spec_v1,
-    runtime_relay_token_hash, runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
-    should_replace_stripe_subscription, source_import_key, trim_to_option,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
+    runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
+    runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_v1,
+    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
+    source_import_key, trim_to_option, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -3232,7 +3233,15 @@ where
     let failure_message = trim_to_option(Some(&input.failure_message))
         .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
     let request = locked_agent_creation_request(client, &input.request_id).await?;
-    verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    if let Some(operation) = select_provider_operation(client, &input.request_id).await? {
+        verify_agent_creation_lease_active(client, &request, &input.runner_id, &input.lease_token)
+            .await?;
+        if !provider_operation_allows_generic_failure(&operation) {
+            return Err(CoreError::ProviderOperationBoundaryNotReached);
+        }
+    } else {
+        verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    }
     if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
         let key_id = trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
         let key_row = client
@@ -8735,6 +8744,49 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(replay, reserved);
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.execute(
+                "UPDATE agent_creation_requests
+                 SET lease_expires_at = CURRENT_TIMESTAMP - interval '1 second'
+                 WHERE id = $1",
+                &[&request_id],
+            )
+            .await
+            .unwrap();
+            let expired_failure = store
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: "ledger-runner-a".to_string(),
+                    lease_token: "ledger-token-a".to_string(),
+                    failure_message: "stale worker failure".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    expired_failure,
+                    CoreError::AgentCreationRequestLeaseConflict
+                ),
+                "unexpected expired failure result: {expired_failure:?}"
+            );
+            let intact = raw
+                .query_one(
+                    "SELECT request.status,
+                            (SELECT count(*)
+                             FROM agent_creation_provider_operation_transitions transition
+                             WHERE transition.agent_creation_request_id = request.id)
+                     FROM agent_creation_requests request WHERE request.id = $1",
+                    &[&request_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(intact.get::<_, String>(0), "launching");
+            assert_eq!(intact.get::<_, i64>(1), 1);
             assert!(matches!(
                 store
                     .record_provider_operation_transition(input(
@@ -8748,35 +8800,6 @@ mod tests {
                     .await,
                 Err(CoreError::AgentCreationRequestLeaseConflict)
             ));
-            for transition in [
-                ProviderOperationTransition::Provisioned {
-                    provider_facts: json!({"provider_id": "opaque-ledger-runtime"}),
-                },
-                ProviderOperationTransition::CommitStarted,
-            ] {
-                store
-                    .record_provider_operation_transition(input(
-                        "ledger-runner-a",
-                        "ledger-token-a",
-                        "opaque-ledger-correlation",
-                        transition,
-                    ))
-                    .await
-                    .unwrap();
-            }
-
-            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
-            let connection = tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            raw.execute(
-                "UPDATE agent_creation_requests
-                 SET lease_expires_at = CURRENT_TIMESTAMP - interval '1 second'
-                 WHERE id = $1",
-                &[&request_id],
-            )
-            .await
-            .unwrap();
             let second = store
                 .lease_agent_creation_request(LeaseAgentCreationRequestInput {
                     runner_id: "ledger-runner-b".to_string(),
@@ -8790,7 +8813,65 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(second.request.id, first.request.id);
-            assert_eq!(second.provider_operation.unwrap().v1().transitions.len(), 3);
+            assert_eq!(second.provider_operation.unwrap().v1().transitions.len(), 1);
+            store
+                .record_provider_operation_transition(input(
+                    "ledger-runner-b",
+                    "ledger-token-b",
+                    "opaque-ledger-correlation",
+                    ProviderOperationTransition::Provisioned {
+                        provider_facts: json!({"provider_id": "opaque-ledger-runtime"}),
+                    },
+                ))
+                .await
+                .unwrap();
+            let provisioned_key = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: request_id.clone(),
+                    runner_id: "ledger-runner-b".to_string(),
+                    lease_token: "ledger-token-b".to_string(),
+                    source_host_id: Some("ledger-host".to_string()),
+                    source_machine_id: Some("ledger-machine".to_string()),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                store
+                    .fail_agent_creation_request(FailAgentCreationRequestInput {
+                        request_id: request_id.clone(),
+                        runner_id: "ledger-runner-b".to_string(),
+                        lease_token: "ledger-token-b".to_string(),
+                        failure_message: "must remain resumable".to_string(),
+                        provisioned_finite_private_api_key_id: Some(
+                            provisioned_key.api_key.id.clone(),
+                        ),
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                store
+                    .finite_private_admin_state()
+                    .await
+                    .unwrap()
+                    .api_keys
+                    .into_iter()
+                    .find(|key| key.id == provisioned_key.api_key.id)
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+            store
+                .record_provider_operation_transition(input(
+                    "ledger-runner-b",
+                    "ledger-token-b",
+                    "opaque-ledger-correlation",
+                    ProviderOperationTransition::CommitStarted,
+                ))
+                .await
+                .unwrap();
 
             let handle = crate::ProviderRuntimeHandleEnvelope::V1(crate::ProviderRuntimeHandleV1 {
                 runner_class: crate::RunnerClass::Kata,
@@ -8835,6 +8916,54 @@ mod tests {
                 .map(|row| row.get::<_, i32>(0))
                 .collect::<Vec<_>>();
             assert_eq!(sequences, vec![0, 1, 2, 3, 4]);
+
+            let current_code = issue_test_launch_code(&store, "unused").await;
+            let current = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "provider-ledger-current@finite.vip".to_string(),
+                    workos_user_id: "workos_provider_ledger_current".to_string(),
+                    display_name: "Current Failure".to_string(),
+                    launch_code: current_code,
+                    idempotency_key: "provider-ledger-current".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "ledger-current".to_string(),
+                    lease_token: "ledger-current-token".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            store
+                .record_provider_operation_transition(RecordProviderOperationTransitionInput {
+                    request_id: current.request.id.clone(),
+                    runner_id: "ledger-current".to_string(),
+                    lease_token: "ledger-current-token".to_string(),
+                    correlation_id: "current-failure-correlation".to_string(),
+                    placement,
+                    transition: ProviderOperationTransition::CorrelationReserved,
+                })
+                .await
+                .unwrap();
+            let failed = store
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: current.request.id,
+                    runner_id: "ledger-current".to_string(),
+                    lease_token: "ledger-current-token".to_string(),
+                    failure_message: "failed before provider mutation".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
             drop(raw);
             connection.abort();
         })

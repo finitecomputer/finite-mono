@@ -3468,11 +3468,25 @@ impl BridgeCoreState {
         let now = input.now.unwrap_or(current_time_iso()?);
         let failure_message = trim_to_option(Some(&input.failure_message))
             .ok_or(CoreError::MissingAgentCreationFailureMessage)?;
-        let verified = self.verified_launching_request(
-            &input.request_id,
-            &input.runner_id,
-            &input.lease_token,
-        )?;
+        let verified = if let Some(operation) = self.provider_operations.get(&input.request_id) {
+            let fence_now = current_time_iso()?;
+            let verified = self.verified_active_launching_request(
+                &input.request_id,
+                &input.runner_id,
+                &input.lease_token,
+                &fence_now,
+            )?;
+            if !provider_operation_allows_generic_failure(operation) {
+                return Err(CoreError::ProviderOperationBoundaryNotReached);
+            }
+            verified
+        } else {
+            self.verified_launching_request(
+                &input.request_id,
+                &input.runner_id,
+                &input.lease_token,
+            )?
+        };
         let provisional_runtime_id = verified.agent_runtime_id.clone();
         if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
             let key_id =
@@ -6248,6 +6262,19 @@ pub(crate) fn bound_runtime_capabilities_to_artifact(
     })
 }
 
+pub(crate) fn provider_operation_allows_generic_failure(
+    operation: &ProviderOperationEnvelope,
+) -> bool {
+    matches!(
+        operation
+            .v1()
+            .transitions
+            .last()
+            .map(|record| &record.transition),
+        Some(ProviderOperationTransition::CorrelationReserved)
+    )
+}
+
 fn current_time_iso() -> CoreResult<String> {
     Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
 }
@@ -7225,6 +7252,15 @@ mod tests {
                 transition,
             }
         };
+        let fail_input =
+            |runner: &str, token: &str, key_id: Option<String>| FailAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                runner_id: runner.to_string(),
+                lease_token: token.to_string(),
+                failure_message: "provider launch failed".to_string(),
+                provisioned_finite_private_api_key_id: key_id,
+                now: Some("2098-01-01T00:00:30Z".to_string()),
+            };
 
         let reserved = state
             .record_provider_operation_transition(input(
@@ -7243,6 +7279,36 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(replay, reserved, "replay returns the exact persisted ack");
+        let mut current_failure = state.clone();
+        let failed = current_failure
+            .fail_agent_creation_request(fail_input("runner-a", "token-a", None))
+            .unwrap();
+        assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+        assert_eq!(
+            current_failure.provider_operations.get(&request_id),
+            Some(&reserved),
+            "the accepted pre-provider failure keeps its audit journal"
+        );
+
+        state
+            .agent_creation_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .lease_expires_at = Some("2020-01-01T00:00:00Z".to_string());
+        assert!(matches!(
+            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
+            Err(CoreError::AgentCreationRequestLeaseConflict)
+        ));
+        assert_eq!(state.provider_operations.get(&request_id), Some(&reserved));
+        assert_eq!(
+            state.agent_creation_requests[&request_id].status,
+            AgentCreationRequestStatus::Launching
+        );
+        state
+            .agent_creation_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .lease_expires_at = Some("2099-01-01T00:00:00Z".to_string());
         assert!(matches!(
             state.record_provider_operation_transition(input(
                 "runner-a",
@@ -7264,7 +7330,7 @@ mod tests {
             Err(CoreError::InvalidProviderOperationFacts)
         ));
 
-        state
+        let provision_unknown = state
             .record_provider_operation_transition(input(
                 "runner-a",
                 "token-a",
@@ -7275,6 +7341,14 @@ mod tests {
             ))
             .unwrap();
         assert!(matches!(
+            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert_eq!(
+            state.provider_operations.get(&request_id),
+            Some(&provision_unknown)
+        );
+        assert!(matches!(
             state.record_provider_operation_transition(input(
                 "runner-a",
                 "token-a",
@@ -7283,7 +7357,7 @@ mod tests {
             )),
             Err(CoreError::ProviderOperationTransitionConflict)
         ));
-        state
+        let provisioned = state
             .record_provider_operation_transition(input(
                 "runner-a",
                 "token-a",
@@ -7293,6 +7367,32 @@ mod tests {
                 },
             ))
             .unwrap();
+        let provisioned_key = state
+            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                request_id: request_id.clone(),
+                runner_id: "runner-a".to_string(),
+                lease_token: "token-a".to_string(),
+                source_host_id: Some("ledger-host".to_string()),
+                source_machine_id: Some("ledger-machine".to_string()),
+                now: Some("2098-01-01T00:00:40Z".to_string()),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.fail_agent_creation_request(fail_input(
+                "runner-a",
+                "token-a",
+                Some(provisioned_key.api_key.id.clone()),
+            )),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert_eq!(
+            state.provider_operations.get(&request_id),
+            Some(&provisioned)
+        );
+        assert_eq!(
+            state.finite_private_api_keys[&provisioned_key.api_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
         let committed = state
             .record_provider_operation_transition(input(
                 "runner-a",
@@ -7301,6 +7401,15 @@ mod tests {
                 ProviderOperationTransition::CommitStarted,
             ))
             .unwrap();
+        assert!(matches!(
+            state.fail_agent_creation_request(fail_input(
+                "runner-a",
+                "token-a",
+                Some(provisioned_key.api_key.id.clone()),
+            )),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert_eq!(state.provider_operations.get(&request_id), Some(&committed));
 
         state
             .agent_creation_requests
@@ -7403,6 +7512,25 @@ mod tests {
                 .transition,
             ProviderOperationTransition::ProviderHandleRecorded { .. }
         ));
+        let runtime_id = registered.request.agent_runtime_id.clone().unwrap();
+        let handle_recorded = registered.provider_operation.clone().unwrap();
+        assert!(matches!(
+            state.fail_agent_creation_request(fail_input(
+                "runner-b",
+                "token-b",
+                Some(provisioned_key.api_key.id.clone()),
+            )),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert_eq!(
+            state.provider_operations.get(&request_id),
+            Some(&handle_recorded)
+        );
+        assert!(state.agent_runtimes.contains_key(&runtime_id));
+        assert_eq!(
+            state.finite_private_api_keys[&provisioned_key.api_key.id].status,
+            FinitePrivateApiKeyStatus::Active
+        );
         let completed = state
             .complete_agent_creation_request(CompleteAgentCreationRequestInput {
                 request_id,
