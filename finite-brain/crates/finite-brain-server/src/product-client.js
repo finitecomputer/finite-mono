@@ -111,7 +111,6 @@ const FiniteBrainProductClient = (() => {
     "accessTargetNpubInput",
     "commandPaletteInput",
     "folderKeyInput",
-    "graphFilterInput",
     "okfBundleInput",
     "okfDestinationFolderInput",
     "organizationVaultNameInput",
@@ -3808,8 +3807,7 @@ const FiniteBrainProductClient = (() => {
     return { skipped, writes };
   }
 
-  function buildGraphProjection(pages, filterText = "") {
-    const filter = normalizePageReference(filterText);
+  function buildGraphProjection(pages) {
     const visiblePages = [...pages].filter(isReadablePage);
     const nodes = visiblePages.map((page) => {
       const id = pageKey(page.folderId, page.objectId);
@@ -3823,11 +3821,6 @@ const FiniteBrainProductClient = (() => {
       };
     });
     const titleToNode = new Map(nodes.map((node) => [node.normalizedTitle, node]));
-    const includedNodeIds = new Set(
-      nodes
-        .filter((node) => !filter || node.normalizedTitle.includes(filter))
-        .map((node) => node.id)
-    );
     const edges = [];
     for (const page of visiblePages) {
       const source = nodes.find((node) => node.id === pageKey(page.folderId, page.objectId));
@@ -3835,9 +3828,6 @@ const FiniteBrainProductClient = (() => {
       for (const targetRef of extractPageLinks(page.text)) {
         const target = titleToNode.get(targetRef);
         if (!target) continue;
-        if (filter && !includedNodeIds.has(source.id) && !includedNodeIds.has(target.id)) continue;
-        includedNodeIds.add(source.id);
-        includedNodeIds.add(target.id);
         edges.push({
           id: `${source.id}->${target.id}`,
           source: source.id,
@@ -3846,15 +3836,14 @@ const FiniteBrainProductClient = (() => {
       }
     }
     return {
-      nodes: nodes.filter((node) => includedNodeIds.has(node.id)),
+      nodes,
       edges,
     };
   }
 
-  function graphStats(graph, readablePageCount = graph.nodes.length) {
+  function graphStats(graph) {
     return {
       edgeCount: graph.edges.length,
-      filteredOutCount: Math.max(0, readablePageCount - graph.nodes.length),
       nodeCount: graph.nodes.length,
     };
   }
@@ -4674,18 +4663,11 @@ const FiniteBrainProductClient = (() => {
   }
 
   function graphEmptyStateCopy(options = {}) {
-    const filterText = String(options.filterText || "").trim();
     const readablePageCount = Number(options.readablePageCount || 0);
     if (readablePageCount <= 0) {
       return {
         title: "No graph yet",
         copy: "Open a vault to build the local graph.",
-      };
-    }
-    if (filterText) {
-      return {
-        title: "No matching Pages",
-        copy: "Clear or change the graph filter.",
       };
     }
     return {
@@ -5614,15 +5596,13 @@ const FiniteBrainProductClient = (() => {
     return page;
   }
 
-  function setGraphStats(graph, readablePageCount) {
-    const stats = graphStats(graph, readablePageCount);
-    const filtered =
-      stats.filteredOutCount > 0 ? ` / ${stats.filteredOutCount} hidden by filter` : "";
+  function setGraphStats(graph) {
+    const stats = graphStats(graph);
     setPill(
       "graphStats",
       `${stats.nodeCount} ${stats.nodeCount === 1 ? "node" : "nodes"} / ${stats.edgeCount} ${
         stats.edgeCount === 1 ? "link" : "links"
-      }${filtered}`,
+      }`,
       stats.nodeCount ? "ready" : "muted"
     );
   }
@@ -5790,7 +5770,6 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     if (item.action === "open-graph") {
-      $("graphFilterInput").value = target.title || target.objectId || "";
       setWorkspaceView("graph");
       return;
     }
@@ -9818,10 +9797,9 @@ const FiniteBrainProductClient = (() => {
 
   function renderGraphView() {
     const pages = decryptedPagesForGraph();
-    const filterText = $("graphFilterInput").value;
-    const graph = buildGraphProjection(pages, filterText);
-    drawGraph(graph, { filterText, readablePageCount: pages.length });
-    setGraphStats(graph, pages.length);
+    const graph = buildGraphProjection(pages);
+    drawGraph(graph, { readablePageCount: pages.length });
+    setGraphStats(graph);
     updateGraphFullscreenControl();
     log("Rendered graph from decrypted client index.", {
       edges: graph.edges.length,
@@ -10339,14 +10317,6 @@ const FiniteBrainProductClient = (() => {
         log("Failed to encrypt Page draft.", { error: error.message });
         render();
       });
-    });
-    $("graphFilterInput").addEventListener("input", () => {
-      renderGraphView();
-    });
-    $("graphFilterInput").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      renderGraphView();
     });
     $("zoomInGraphButton").addEventListener("click", () => {
       zoomGraphView(1);

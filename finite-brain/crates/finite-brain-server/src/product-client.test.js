@@ -792,12 +792,17 @@ assert.doesNotMatch(htmlSource, /id="renderGraphButton"/);
 assert.doesNotMatch(htmlSource, /id="replayGraphButton"/);
 assert.doesNotMatch(htmlSource, /id="toggleGraphHistoryButton"/);
 assert.doesNotMatch(htmlSource, /id="replayList"/);
+assert.doesNotMatch(htmlSource, /id="graphFilterInput"/);
+assert.doesNotMatch(htmlSource, /aria-label="Filter graph"/);
 assert.match(source, /requestFullscreen\(\)/);
 assert.match(source, /document\.addEventListener\("fullscreenchange", updateGraphFullscreenControl\)/);
 assert.match(source, /zoomGraphView\(1\)/);
 assert.match(source, /zoomGraphView\(-1\)/);
-assert.match(cssSource, /\.graph-icon-button,[\s\S]*?width:\s*40px;[\s\S]*?min-height:\s*40px;/);
-assert.match(cssSource, /\.graph-icon-button:active:not\(:disabled\),[\s\S]*?transform:\s*scale\(0\.96\);/);
+assert.match(cssSource, /\.graph-floating-controls button\s*\{[\s\S]*?width:\s*40px;[\s\S]*?min-height:\s*40px;/);
+assert.match(cssSource, /\.graph-floating-controls button:active:not\(:disabled\)\s*\{[\s\S]*?transform:\s*scale\(0\.96\);/);
+assert.doesNotMatch(cssSource, /\.graph-icon-button\b/);
+assert.doesNotMatch(cssSource, /\.graph-controls\b/);
+assert.doesNotMatch(source, /graphFilterInput/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
@@ -2430,14 +2435,7 @@ assert.match(source, /"vaultInviteSecretInput"/);
     client.graphEmptyStateCopy({ readablePageCount: 3 }).copy,
     "Readable pages are open, but none link to another page yet."
   );
-  assert.equal(
-    client.graphEmptyStateCopy({ filterText: "folder key", readablePageCount: 3 }).title,
-    "No matching Pages"
-  );
-  assert.equal(
-    client.graphEmptyStateCopy({ filterText: "folder key", readablePageCount: 0 }).title,
-    "No graph yet"
-  );
+  assert.equal(client.graphEmptyStateCopy({ readablePageCount: 3 }).title, "No links yet");
   assert.equal(client.normalizeSidebarMode("search"), "search");
   assert.equal(client.normalizeSidebarMode("access"), "access");
   assert.equal(client.normalizeSidebarMode("bogus"), "files");
@@ -3245,17 +3243,17 @@ assert.match(source, /"vaultInviteSecretInput"/);
   );
   assert.equal(graph.edges.length, 2);
   assert.equal(graph.edges.some((edge) => edge.id.includes("page-hidden")), false);
-  const graphMetrics = client.graphStats(graph, 3);
+  const graphMetrics = client.graphStats(graph);
   assert.equal(graphMetrics.edgeCount, 2);
-  assert.equal(graphMetrics.filteredOutCount, 1);
   assert.equal(graphMetrics.nodeCount, 2);
+  assert.equal("filteredOutCount" in graphMetrics, false);
   assert.deepEqual(
     Array.from(client.graphNeighborIds(graph, "general/page-a")).sort(),
     ["general/page-a", "general/page-b"]
   );
   assert.deepEqual(Array.from(client.graphNeighborIds(graph, null)), []);
 
-  const filteredGraph = client.buildGraphProjection(
+  const fullGraph = client.buildGraphProjection(
     [
       {
         folderId: "general",
@@ -3269,12 +3267,17 @@ assert.match(source, /"vaultInviteSecretInput"/);
         status: "ready",
         text: "# Beta",
       },
-    ],
-    "beta"
+      {
+        folderId: "general",
+        objectId: "page-c",
+        status: "ready",
+        text: "# Gamma",
+      },
+    ]
   );
   assert.deepEqual(
-    Array.from(filteredGraph.nodes.map((node) => node.title).sort()),
-    ["Alpha", "Beta"]
+    Array.from(fullGraph.nodes.map((node) => node.title).sort()),
+    ["Alpha", "Beta", "Gamma"]
   );
   const layout = client.graphLayout(graph, { height: 260, margin: 40, width: 320 });
   assert.equal(layout.size, 2);

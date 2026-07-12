@@ -2308,7 +2308,7 @@ mod tests {
         assert!(client_body.contains("searchSidebarPanel"));
         assert!(client_body.contains("commandPalette"));
         assert!(client_body.contains("Quick switcher"));
-        assert!(client_body.contains("graph-icon-button"));
+        assert!(client_body.contains("graph-floating-controls"));
         assert!(client_body.contains("ribbonGraphButton"));
         assert!(!client_body.contains("editorToolbar"));
         assert!(!client_body.contains("inline-editor-toolbar"));
@@ -2317,7 +2317,8 @@ mod tests {
         assert!(client_body.contains("aria-label=\"Page reader\""));
         assert!(client_body.contains("aria-label=\"Graph View\""));
         assert!(client_body.contains("aria-label=\"Search pages\""));
-        assert!(client_body.contains("aria-label=\"Filter graph\""));
+        assert!(!client_body.contains("graphFilterInput"));
+        assert!(!client_body.contains("aria-label=\"Filter graph\""));
         assert!(client_body.contains("accessFolderButton"));
         assert!(client_body.contains("accessInspector"));
         assert!(client_body.contains("accessWhoHasList"));
@@ -2330,7 +2331,9 @@ mod tests {
         assert!(!client_body.contains("savePageButton"));
         assert!(!client_body.contains("syncBootstrapButton"));
         assert!(client_body.contains("Graph View"));
-        assert!(client_body.contains("Render graph"));
+        assert!(client_body.contains("Zoom in"));
+        assert!(client_body.contains("Reset zoom"));
+        assert!(client_body.contains("Enter full screen"));
         assert!(client_body.contains("contextMenu"));
         assert!(client_body.contains("/client/app.js"));
         assert!(!client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
@@ -2408,6 +2411,9 @@ mod tests {
         assert!(css_body.contains(".obsidian-folder-button"));
         assert!(css_body.contains(".context-menu"));
         assert!(css_body.contains(".graph-stage"));
+        assert!(css_body.contains(".graph-floating-controls"));
+        assert!(!css_body.contains(".graph-icon-button"));
+        assert!(!css_body.contains(".graph-controls"));
         assert!(css_body.contains(".graph-canvas.is-hovering"));
         assert!(css_body.contains(".node.hover-active"));
         assert!(css_body.contains(".edge.hover-connected"));
@@ -2449,7 +2455,8 @@ mod tests {
         assert!(js_body.contains("readerFolderRows"));
         assert!(js_body.contains("readerPageRows"));
         assert!(js_body.contains("buildGraphProjection"));
-        assert!(js_body.contains("buildReplayFrames"));
+        assert!(js_body.contains("graphLayout"));
+        assert!(js_body.contains("graphStats"));
         assert!(js_body.contains("graphNeighborIds"));
         assert!(js_body.contains("setGraphHover"));
         assert!(js_body.contains("createSessionKeyring"));

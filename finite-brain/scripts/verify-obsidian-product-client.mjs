@@ -174,13 +174,6 @@ function checkStaticShell() {
 
   for (const marker of [
     "obsidian-shell",
-    "compact-icon-button",
-    "vaultControlDetails",
-    "vaultControlSummary",
-    "vaultSelect",
-    "vault-connect-button",
-    "organizationVaultNameInput",
-    "createOrganizationVaultButton",
     "app-ribbon",
     "file-sidebar",
     "ribbonFilesButton",
@@ -195,7 +188,7 @@ function checkStaticShell() {
     "pageWorkspace",
     "graphWorkspace",
     "graphEmptyState",
-    "graph-icon-button",
+    "graph-floating-controls",
     "accessFolderButton",
     "accessSidebarCount",
     "accessFolderViewButton",
@@ -278,17 +271,17 @@ function checkStaticShell() {
     !/id="vaultInvitationPanel"[^>]*open/.test(html),
     "Product Client HTML should keep the Vault invitation panel closed by default"
   );
+  assertNotIncludes(html, "graphFilterInput", "Product Client HTML");
+  assertNotIncludes(html, "aria-label=\"Filter graph\"", "Product Client HTML");
+  assertNotIncludes(css, ".graph-controls", "Product Client CSS");
+  assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
+  assertNotIncludes(js, "graphFilterInput", "Product Client JS");
 
   for (const marker of [
     ".obsidian-shell",
     ".obsidian-shell[data-workspace-view=\"graph\"]",
     "[hidden]",
     "--shadow-access-ring",
-    ".compact-icon-button",
-    ".vault-control-body",
-    ".vault-picker",
-    ".vault-create-row",
-    ".vault-connect-button",
     ".app-ribbon",
     ".obsidian-folder-button",
     ".obsidian-file-title",
@@ -296,12 +289,11 @@ function checkStaticShell() {
     ".command-palette-backdrop",
     ".command-palette-row",
     ".graph-stage",
-    ".graph-icon-button",
+    ".graph-floating-controls",
     ".graph-empty-state",
     ".graph-canvas.is-hovering",
     ".node.hover-active",
     ".edge.hover-connected",
-    ".graph-replay-overlay",
     ".access-view-switch",
     ".access-mode-panel",
     ".access-folder-selector",
@@ -349,7 +341,8 @@ function checkStaticShell() {
 
   for (const marker of [
     "buildGraphProjection",
-    "buildReplayFrames",
+    "graphLayout",
+    "graphStats",
     "buildAdminAccessChangeEvent",
     "buildFolderKeyGrantRequest",
     "canonicalAdminAccessChangePayload",

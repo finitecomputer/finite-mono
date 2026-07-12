@@ -628,8 +628,7 @@ label,
   margin-top: 0;
 }
 
-.inline-control > input,
-.graph-controls > input {
+.inline-control > input {
   flex: 1 1 auto;
 }
 
@@ -643,11 +642,6 @@ label,
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
-}
-
-.graph-controls {
-  max-width: 520px;
-  width: 100%;
 }
 
 .reader-list-detail {
@@ -936,10 +930,6 @@ pre {
   .status-row {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .graph-controls {
-    max-width: none;
   }
 
   .facts {
@@ -4285,57 +4275,6 @@ pre {
   color: var(--muted);
 }
 
-.graph-controls {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-  width: auto;
-  max-width: none;
-  opacity: 0.82;
-  pointer-events: auto;
-  transition-duration: 140ms;
-  transition-property: opacity;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-.graph-controls:hover,
-.graph-controls:focus-within {
-  opacity: 1;
-}
-
-.graph-controls input {
-  width: 0;
-  min-width: 0;
-  min-height: 32px;
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  opacity: 0;
-  padding-right: 0;
-  padding-left: 0;
-  pointer-events: none;
-  transform: translateX(8px);
-  transition-duration: 160ms;
-  transition-property: width, opacity, transform, background-color, box-shadow, border-color;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-  backdrop-filter: blur(12px);
-}
-
-.graph-controls:hover input,
-.graph-controls:focus-within input {
-  width: 178px;
-  border-color: var(--line-strong);
-  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
-  box-shadow: var(--shadow-control-hover);
-  opacity: 1;
-  padding-right: 10px;
-  padding-left: 10px;
-  pointer-events: auto;
-  transform: translateX(0);
-}
-
-.graph-icon-button,
 .graph-floating-controls button {
   width: 40px;
   height: 40px;
@@ -4350,21 +4289,18 @@ pre {
   transition-property: background-color, box-shadow, color, opacity, transform;
 }
 
-.graph-icon-button:hover,
 .graph-floating-controls button:hover {
   background: var(--surface-raised);
   box-shadow: var(--shadow-control-hover);
   color: var(--text);
 }
 
-.graph-icon-button[aria-pressed="true"],
 .graph-floating-controls button[aria-pressed="true"] {
   background: var(--blue-soft);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 34%, transparent);
   color: var(--blue-strong);
 }
 
-.graph-icon-button:active:not(:disabled),
 .graph-floating-controls button:active:not(:disabled) {
   transform: scale(0.96);
 }
