@@ -107,6 +107,8 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
     health_json = load_optional_json(args.health_json)
     handoff_image = object_dict(handoff.get("image"))
     handoff_restore = object_dict(handoff.get("restore"))
+    handoff_recovery_scope = object_dict(handoff.get("recovery_scope"))
+    summary_recovery_scope = object_dict(canary_summary.get("recovery_scope"))
     summary_container_name = canary_summary.get("container_name")
     summary_image_digest = canary_summary.get("image_digest")
     summary_config_repo = canary_summary.get("config_repo")
@@ -161,6 +163,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
             "restore_tag": expected_restore_tag,
             "config_repo": first_string(summary_config_repo),
             "release_tag": first_string(summary_release_tag),
+            "recovery_scope": summary_recovery_scope,
         },
         "container": {
             "name": first_string(args.container_name, container["name"], summary_container_name),
@@ -197,6 +200,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, Any]:
             "backup_observed": args.backup_observed,
             "restore_observed": args.restore_observed,
         },
+        "recovery_scope": handoff_recovery_scope,
     }
     return evidence
 

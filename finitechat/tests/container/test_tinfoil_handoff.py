@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HANDOFF_SCRIPT = REPO_ROOT / "scripts" / "hermes-tinfoil-handoff.py"
@@ -16,15 +17,24 @@ RESTIC_REPOSITORY = (
 SNAPSHOT_ID = "88929f1f90c5fcadd1d19e33f26609e595af4c2afb1e72b724695435e051900f"
 IMAGE_REF = "ghcr.io/finitecomputer/finite-chat-hermes-runtime:canary"
 IMAGE_DIGEST = "ghcr.io/finitecomputer/finite-chat-hermes-runtime@sha256:published"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def write_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
 
-def proven_smoke_report() -> dict[str, object]:
+def proven_smoke_report() -> dict[str, Any]:
     return {
         "status": "passed",
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "facts": {
             "image_id": "sha256:local-image",
             "hermes_agent_version_actual": "0.18.2",
@@ -44,7 +54,7 @@ def proven_smoke_report() -> dict[str, object]:
                     "id": SNAPSHOT_ID,
                     "short_id": "88929f1f",
                     "time": "2026-06-26T02:26:14Z",
-                    "paths": ["/data/agent"],
+                    "paths": ["/data"],
                     "tags": ["finite-agent-state"],
                 },
                 "tag": "finite-agent-state",
@@ -104,6 +114,7 @@ class TinfoilHandoffTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(handoff["recovery_scope"], RECOVERY_SCOPE)
         self.assertEqual(handoff["runtime"]["finite_agent_restore_on_start"], "1")
         self.assertEqual(handoff["runtime"]["finite_agent_restore_latest"], "1")
         self.assertEqual(handoff["runtime"]["finite_agent_backup_on_exit"], "1")
@@ -127,6 +138,7 @@ class TinfoilHandoffTest(unittest.TestCase):
                 "FINITE_AGENT_RESTORE_LATEST": "1",
                 "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                 "FINITE_AGENT_BACKUP_INTERVAL_SECS": "30",
+                "FINITE_AGENT_STATE_ROOT": "/data",
                 "FINITE_AGENT_RESTIC_REPOSITORY": RESTIC_REPOSITORY,
                 "FINITE_AGENT_RESTIC_BACKUP_TAG": "finite-agent-state",
                 "FINITECHAT_HERMES_INBOUND_STREAM": "1",
@@ -135,12 +147,38 @@ class TinfoilHandoffTest(unittest.TestCase):
             },
         )
         self.assertIn(
-            "observe a fresh periodic or exit snapshot of agent state",
+            "observe a fresh periodic or exit snapshot rooted at /data",
             handoff["acceptance"],
         )
         self.assertIn(
             "restore with temporary canary restic password secret",
             handoff["acceptance"],
+        )
+
+    def test_handoff_rejects_legacy_agent_only_snapshot_root(self) -> None:
+        smoke = proven_smoke_report()
+        smoke["facts"]["agent_state_backup"]["snapshot"]["paths"] = ["/data/agent"]
+        with tempfile.TemporaryDirectory() as tmp_value:
+            result, handoff = self.run_handoff(Path(tmp_value), smoke=smoke)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(handoff["status"], "failed")
+        self.assertIn(
+            "Restic snapshot paths must include the full /data recovery root",
+            handoff["errors"],
+        )
+
+    def test_handoff_rejects_recovery_readiness_overclaim(self) -> None:
+        smoke = proven_smoke_report()
+        smoke["recovery_scope"]["core_owned_empty_target_restore"] = "proven"
+        with tempfile.TemporaryDirectory() as tmp_value:
+            result, handoff = self.run_handoff(Path(tmp_value), smoke=smoke)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(handoff["status"], "failed")
+        self.assertIn(
+            "Docker smoke recovery_scope.core_owned_empty_target_restore must be 'unproved'",
+            handoff["errors"],
         )
 
     def test_handoff_fails_closed_when_publish_does_not_match_proven_image(self) -> None:

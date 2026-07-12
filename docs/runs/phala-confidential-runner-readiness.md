@@ -434,9 +434,12 @@ Work top-down. Every retained item is required.
   inbound Runtime Management Pipe.
 - Declare the Agent Runtime Recovery Set and snapshot format. It must cover the
   full `/data` contract, including `/data/workspace`, and the key/manifest
-  material needed to restore the same Agent Principal and product state.
-  Replace or extend the current Restic path that omits workspace. This is one
-  necessary part of paid readiness, not a substitute for the existing
+  material needed to restore the same Agent Principal and product state. The
+  optional entrypoint Restic path now snapshots `FINITE_AGENT_STATE_ROOT`,
+  default `/data`, and hardening evidence must reject the legacy `/data/agent`
+  snapshot root. That closes only the filesystem-root coverage defect; it is
+  not proof of an application-consistent barrier, independently recoverable
+  key authority, or the existing
   service-consistent empty-target restore gate for Core, Finite Chat/Hosted Web
   Device, Sites, Brain, and identity/recovery authorities, or for the required
   non-chat user export and dashboard recovery disclosure.

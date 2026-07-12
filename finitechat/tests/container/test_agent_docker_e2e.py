@@ -39,6 +39,16 @@ HERMES_AGENT_VERSION = os.environ.get("FINITE_HERMES_AGENT_VERSION", "0.18.2")
 RESTIC_BACKEND = os.environ.get("FINITE_DOCKER_RESTIC_BACKEND", "local").strip().lower()
 RESTIC_REPOSITORY = os.environ.get("FINITE_DOCKER_RESTIC_REPOSITORY", "").strip()
 RESTIC_SNAPSHOT_TAG = os.environ.get("FINITE_DOCKER_RESTIC_SNAPSHOT_TAG", "finite-agent-state")
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
+WORKSPACE_PROBE_PATH = "/data/workspace/recovery-root-smoke.txt"
+WORKSPACE_PROBE_CONTENT = "workspace survives full recovery-root restore\n"
 DEFAULT_LOCAL_RESTIC_PASSWORD = "finite-docker-smoke-restic-key"
 AWS_RESTIC_ENV_NAMES = (
     "AWS_ACCESS_KEY_ID",
@@ -130,6 +140,7 @@ class SmokeReport:
                     "status": "passed",
                     "name": self.name,
                     "elapsed_ms": int((time.monotonic() - self.started) * 1000),
+                    "recovery_scope": dict(RECOVERY_SCOPE),
                     "facts": self.facts,
                     "steps": self.steps,
                     "proof_layers": [
@@ -148,6 +159,7 @@ class SmokeReport:
                         "agent state volume wipe",
                         "fresh agent container with empty local state",
                         "entrypoint restic latest-by-tag restore into fresh volume",
+                        "workspace file restored from full recovery root",
                         "same agent npub after restore",
                         "runtime HTTP health endpoint after restore",
                         "gateway invite admission after restore",
@@ -537,7 +549,7 @@ class AgentDockerE2ETest(unittest.TestCase):
             "--add-host",
             f"{DOCKER_HOST}:host-gateway",
             "--mount",
-            f"type=volume,src={self.agent_volume},dst=/data/agent",
+            f"type=volume,src={self.agent_volume},dst=/data",
             "--env",
             f"FINITE_SERVER_URL={server_url}",
             "--env",
@@ -697,7 +709,7 @@ class AgentDockerE2ETest(unittest.TestCase):
             repository,
             [
                 "backup",
-                "/data/agent",
+                "/data",
                 "--tag",
                 RESTIC_SNAPSHOT_TAG,
                 "--json",
@@ -731,6 +743,31 @@ class AgentDockerE2ETest(unittest.TestCase):
         run(["docker", "rm", "-f", CONTAINER], check=False, timeout=120)
         run(["docker", "volume", "rm", "-f", self.agent_volume], timeout=120)
         run(["docker", "volume", "create", self.agent_volume], timeout=120)
+
+    def write_workspace_probe(self) -> None:
+        run(
+            [
+                "docker",
+                "exec",
+                CONTAINER,
+                "python",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"path = Path({WORKSPACE_PROBE_PATH!r}); "
+                    "path.parent.mkdir(parents=True, exist_ok=True); "
+                    f"path.write_text({WORKSPACE_PROBE_CONTENT!r}, encoding='utf-8')"
+                ),
+            ],
+            timeout=60,
+        )
+
+    def assert_workspace_probe_restored(self) -> None:
+        restored = run(
+            ["docker", "exec", CONTAINER, "cat", WORKSPACE_PROBE_PATH],
+            timeout=60,
+        ).stdout
+        self.assertEqual(restored, WORKSPACE_PROBE_CONTENT)
 
     def check_restic_repository(self, repository: dict[str, Any]) -> None:
         self.restic(repository, ["check"], timeout=600)
@@ -779,6 +816,7 @@ class AgentDockerE2ETest(unittest.TestCase):
         report.fact("image_id", image_metadata["id"])
         report.fact("image_metadata", image_metadata)
         report.fact("agent_state_volume", self.agent_volume)
+        report.fact("recovery_root_volume", self.agent_volume)
         report.fact("user_state_volume", self.user_volume)
         report.fact("hermes_agent_version_expected", HERMES_AGENT_VERSION)
 
@@ -868,6 +906,7 @@ class AgentDockerE2ETest(unittest.TestCase):
         room_id = joined["room_id"]
         report.fact("room_id", room_id)
         report.fact("gateway_admission_before_restore", True)
+        report.time("workspace_probe_write", self.write_workspace_probe)
 
         agent_config = json.loads(
             run(
@@ -915,6 +954,8 @@ class AgentDockerE2ETest(unittest.TestCase):
         self.assertTrue(restored_health["ready"])
         self.assertEqual(restored_health["npub"], restored_identity["npub"])
         report.fact("agent_npub_after_restore", restored_identity["npub"])
+        report.time("workspace_probe_after_restore", self.assert_workspace_probe_restored)
+        report.fact("workspace_restored_after_restore", True)
 
         cached_restored_invite_info = self.runtime_invite()
         self.assertEqual(cached_restored_invite_info["room_id"], room_id)
@@ -998,7 +1039,7 @@ class AgentDockerE2ETest(unittest.TestCase):
             command.extend(
                 [
                     "--mount",
-                    f"type=volume,src={self.agent_volume},dst=/data/agent{suffix}",
+                    f"type=volume,src={self.agent_volume},dst=/data{suffix}",
                 ]
             )
         command.extend([IMAGE, "restic", "-r", repository["repository"], *args])

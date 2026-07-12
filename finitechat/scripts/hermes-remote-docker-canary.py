@@ -28,6 +28,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
 DEFAULT_DOCKER_HOST = "ssh://finite-lat-2"
 DEFAULT_HERMES_VERSION = "0.18.2"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
+WORKSPACE_PROBE_PATH = "/data/workspace/remote-docker-recovery-root.txt"
+WORKSPACE_PROBE_CONTENT = "remote Docker workspace restore probe\n"
 MODEL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -511,7 +521,7 @@ def start_agent_container(
         container,
         "--detach",
         "--mount",
-        f"type=volume,src={agent_volume},dst=/data/agent",
+        f"type=volume,src={agent_volume},dst=/data",
         "--mount",
         f"type=volume,src={restic_volume},dst=/backup-repo",
         "--env",
@@ -530,6 +540,8 @@ def start_agent_container(
         "FINITE_AGENT_RESTIC_PASSWORD",
         "--env",
         "FINITE_AGENT_BACKUP_ON_EXIT=1",
+        "--env",
+        "FINITE_AGENT_STATE_ROOT=/data",
         "--env",
         "FINITE_AGENT_RESTIC_BACKUP_TAG=remote-docker-canary",
         *container_env_args(env, MODEL_ENV_NAMES),
@@ -751,6 +763,31 @@ def stop_for_backup(opts: argparse.Namespace, container: str) -> None:
     wait_container_log(opts, container, "FINITE_AGENT_BACKUP_COMPLETE", timeout=90)
 
 
+def write_workspace_probe(opts: argparse.Namespace, container: str) -> None:
+    docker(
+        opts,
+        [
+            "exec",
+            container,
+            "python",
+            "-c",
+            (
+                "from pathlib import Path; "
+                f"path = Path({WORKSPACE_PROBE_PATH!r}); "
+                "path.parent.mkdir(parents=True, exist_ok=True); "
+                f"path.write_text({WORKSPACE_PROBE_CONTENT!r}, encoding='utf-8')"
+            ),
+        ],
+        timeout=60,
+    )
+
+
+def assert_workspace_probe_restored(opts: argparse.Namespace, container: str) -> None:
+    restored = docker(opts, ["exec", container, "cat", WORKSPACE_PROBE_PATH], timeout=60).stdout
+    if restored != WORKSPACE_PROBE_CONTENT:
+        raise CanaryFailure("workspace probe was not restored from the full /data recovery root")
+
+
 def main() -> int:
     opts = parse_args()
     enforce_product_server_url(opts.server_url)
@@ -785,6 +822,7 @@ def main() -> int:
         "layer": "remote-docker",
         "run_id": run_id,
         "source": git_source(),
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "local_phone_report": local_report,
         "server": {
             "url": opts.server_url,
@@ -794,6 +832,7 @@ def main() -> int:
             "host": opts.docker_host,
             "container": container,
             "agent_volume": agent_volume,
+            "recovery_root_volume": agent_volume,
             "restic_volume": restic_volume,
             "user_volume": user_volume,
             "restored_user_volume": restored_user_volume,
@@ -943,6 +982,8 @@ def main() -> int:
         )
         report["model_smoke"] = model
         step("model_smoke.before_restore", reply_message_id=model.get("reply_message_id"))
+        write_workspace_probe(opts, container)
+        step("workspace.probe_written", path=WORKSPACE_PROBE_PATH)
 
         stop_for_backup(opts, container)
         step("agent.container_stopped_with_backup")
@@ -980,10 +1021,12 @@ def main() -> int:
             raise CanaryFailure(
                 f"restored invite room mismatch: expected {invite.get('room_id')}, got {restored_invite.get('room_id')}"
             )
+        assert_workspace_probe_restored(opts, container)
         report["restore"] = {
             "status": "passed",
             "same_agent_npub": True,
             "same_room_id": True,
+            "workspace_restored_from_recovery_root": True,
             "healthz": restored_health,
             "invite": restored_invite,
         }

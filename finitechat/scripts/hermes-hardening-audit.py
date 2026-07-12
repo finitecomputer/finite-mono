@@ -22,6 +22,7 @@ REQUIRED_DOCKER_PROOF_LAYERS = {
     "agent state volume wipe",
     "fresh agent container with empty local state",
     "entrypoint restic latest-by-tag restore into fresh volume",
+    "workspace file restored from full recovery root",
     "same agent npub after restore",
     "runtime HTTP health endpoint after restore",
     "gateway invite admission after restore",
@@ -83,6 +84,7 @@ REQUIRED_TINFOIL_PROOF_LAYERS = {
 }
 REQUIRED_CANARY_CONFIG_SNIPPETS = {
     "FINITE_AGENT_RESTORE_ON_START",
+    "FINITE_AGENT_STATE_ROOT",
     "FINITE_SERVER_URL",
     "FINITECHAT_SERVER_URL",
     "FINITE_AGENT_RESTORE_LATEST",
@@ -106,6 +108,9 @@ REQUIRED_CANARY_RUNBOOK_SNIPPETS = {
     "--chat-after-message-id",
     "--debug",
     "--ssh-key",
+    "application-consistent snapshot barrier",
+    "independently recoverable key authority",
+    "Core-owned service-consistent empty-target restore",
 }
 REQUIRED_CANARY_SECRET_ENV = {
     "FINITE_AGENT_RESTIC_PASSWORD",
@@ -128,12 +133,14 @@ REQUIRED_HANDOFF_RUNTIME = {
     "finite_agent_restore_latest": "1",
     "finite_agent_backup_on_exit": "1",
     "finite_agent_backup_interval_secs": "30",
+    "finite_agent_state_root": "/data",
 }
 REQUIRED_HANDOFF_CONTAINER_ENV = {
     "FINITE_AGENT_RESTORE_ON_START": "1",
     "FINITE_AGENT_RESTORE_LATEST": "1",
     "FINITE_AGENT_BACKUP_ON_EXIT": "1",
     "FINITE_AGENT_BACKUP_INTERVAL_SECS": "30",
+    "FINITE_AGENT_STATE_ROOT": "/data",
     "FINITE_AGENT_RESTIC_BACKUP_TAG": "finite-agent-state",
     "FINITECHAT_HERMES_INBOUND_STREAM": "1",
     "FINITECHAT_HERMES_MODEL": "anthropic/claude-sonnet-4.6",
@@ -148,7 +155,15 @@ REQUIRED_PUBLISH_PROOF = {
     "gateway_admission_after_restore": True,
 }
 RESTIC_SNAPSHOT_TAG = "finite-agent-state"
-RESTIC_AGENT_STATE_PATH = "/data/agent"
+RESTIC_RECOVERY_ROOT = "/data"
+REQUIRED_RECOVERY_SCOPE = {
+    "snapshot_root": RESTIC_RECOVERY_ROOT,
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def load_optional_json(path: Path) -> dict[str, Any] | None:
@@ -190,6 +205,17 @@ def non_empty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def validate_recovery_scope(value: Any, *, label: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label} is required"]
+
+    errors: list[str] = []
+    for key, expected in REQUIRED_RECOVERY_SCOPE.items():
+        if value.get(key) != expected:
+            errors.append(f"{label}.{key}={value.get(key)!r}; expected {expected!r}")
+    return errors
+
+
 def resolve_summary_artifact_path(summary_path: Path, value: Any) -> Path | None:
     if not non_empty_str(value):
         return None
@@ -221,6 +247,11 @@ def validate_canary_summary(
     errors: list[str] = []
     if canary_summary.get("status") != "ready":
         errors.append(f"summary status={canary_summary.get('status')!r}")
+    errors.extend(
+        validate_recovery_scope(
+            canary_summary.get("recovery_scope"), label="summary recovery_scope"
+        )
+    )
 
     image_digest = canary_summary.get("image_digest")
     if not non_empty_str(image_digest) or "@sha256:" not in str(image_digest):
@@ -392,8 +423,8 @@ def validate_restic_snapshot(value: Any, *, label: str) -> list[str]:
             errors.append(f"{label}.{key} is required")
 
     paths = value.get("paths")
-    if not isinstance(paths, list) or RESTIC_AGENT_STATE_PATH not in {str(item) for item in paths}:
-        errors.append(f"{label}.paths must include {RESTIC_AGENT_STATE_PATH}")
+    if not isinstance(paths, list) or RESTIC_RECOVERY_ROOT not in {str(item) for item in paths}:
+        errors.append(f"{label}.paths must include {RESTIC_RECOVERY_ROOT}")
 
     tags = value.get("tags")
     if not isinstance(tags, list) or RESTIC_SNAPSHOT_TAG not in {str(item) for item in tags}:
@@ -519,6 +550,9 @@ def validate_tinfoil_handoff(
     handoff_errors = handoff.get("errors")
     if isinstance(handoff_errors, list) and handoff_errors:
         errors.append(f"handoff errors: {', '.join(str(item) for item in handoff_errors)}")
+    errors.extend(
+        validate_recovery_scope(handoff.get("recovery_scope"), label="handoff recovery_scope")
+    )
 
     source_reports = handoff.get("source_reports")
     if not isinstance(source_reports, dict):
@@ -625,6 +659,9 @@ def validate_publish_report(
         errors.append(f"publish status={publish.get('status')!r}; expected 'published'")
     if publish.get("pushed") is not True:
         errors.append(f"publish pushed={publish.get('pushed')!r}; expected True")
+    errors.extend(
+        validate_recovery_scope(publish.get("recovery_scope"), label="publish recovery_scope")
+    )
 
     for key in ("source_report", "source_image", "source_image_id", "target_image_ref"):
         if not non_empty_str(publish.get(key)):
@@ -800,7 +837,15 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
 
     docker_missing = missing_layers(docker or {}, REQUIRED_DOCKER_PROOF_LAYERS)
     docker_facts = docker.get("facts", {}) if isinstance(docker, dict) else {}
-    docker_backup_errors = validate_agent_state_backup(docker_facts)
+    docker_backup_errors = [
+        *validate_agent_state_backup(docker_facts),
+        *validate_recovery_scope(
+            docker.get("recovery_scope") if isinstance(docker, dict) else None,
+            label="Docker recovery_scope",
+        ),
+    ]
+    if docker_facts.get("workspace_restored_after_restore") is not True:
+        docker_backup_errors.append("workspace_restored_after_restore must be true")
     docker_passed = (
         bool(docker)
         and docker.get("status") == "passed"
@@ -811,6 +856,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and docker_facts.get("real_gateway_runtime") is True
         and docker_facts.get("gateway_admission_before_restore") is True
         and docker_facts.get("gateway_admission_after_restore") is True
+        and docker_facts.get("workspace_restored_after_restore") is True
     )
     add_check(
         checks,
@@ -830,10 +876,18 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
 
     s3_emulator_missing = missing_layers(s3_emulator or {}, REQUIRED_DOCKER_PROOF_LAYERS)
     s3_emulator_facts = s3_emulator.get("facts", {}) if isinstance(s3_emulator, dict) else {}
-    s3_emulator_backup_errors = validate_agent_state_backup(
-        s3_emulator_facts,
-        expected_repository_kind="s3",
-    )
+    s3_emulator_backup_errors = [
+        *validate_agent_state_backup(
+            s3_emulator_facts,
+            expected_repository_kind="s3",
+        ),
+        *validate_recovery_scope(
+            s3_emulator.get("recovery_scope") if isinstance(s3_emulator, dict) else None,
+            label="S3 emulator recovery_scope",
+        ),
+    ]
+    if s3_emulator_facts.get("workspace_restored_after_restore") is not True:
+        s3_emulator_backup_errors.append("workspace_restored_after_restore must be true")
     s3_emulator_passed = (
         bool(s3_emulator)
         and s3_emulator.get("status") == "passed"
@@ -846,6 +900,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and s3_emulator_facts.get("real_gateway_runtime") is True
         and s3_emulator_facts.get("gateway_admission_before_restore") is True
         and s3_emulator_facts.get("gateway_admission_after_restore") is True
+        and s3_emulator_facts.get("workspace_restored_after_restore") is True
     )
     add_check(
         checks,
@@ -947,10 +1002,15 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
 
     tinfoil_missing = missing_layers(tinfoil_result or {}, REQUIRED_TINFOIL_PROOF_LAYERS)
     tinfoil_facts = tinfoil_result.get("facts", {}) if isinstance(tinfoil_result, dict) else {}
+    tinfoil_scope_errors = validate_recovery_scope(
+        tinfoil_result.get("recovery_scope") if isinstance(tinfoil_result, dict) else None,
+        label="Tinfoil result recovery_scope",
+    )
     tinfoil_passed = (
         bool(tinfoil_result)
         and tinfoil_result.get("status") == "passed"
         and not tinfoil_missing
+        and not tinfoil_scope_errors
         and tinfoil_facts.get("restic_backend") == "s3"
         and tinfoil_facts.get("restore_tag") == "finite-agent-state"
         and tinfoil_facts.get("agent_npub_before_restart")
@@ -968,13 +1028,16 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         if tinfoil_passed
         else (
             "requires validated live Tinfoil start/health/chat/backup/restart/restore/chat "
-            f"evidence; missing layers: {', '.join(tinfoil_missing)}"
+            f"evidence; missing layers: {', '.join(tinfoil_missing)}; "
+            f"recovery scope errors: {'; '.join(tinfoil_scope_errors)}"
         ),
     )
 
     missing = [check for check in checks if check["status"] != "passed"]
     return {
         "status": "complete" if not missing else "incomplete",
+        "completion_scope": "Hermes runtime hardening; not Agent Runtime Recovery Readiness",
+        "recovery_scope": dict(REQUIRED_RECOVERY_SCOPE),
         "generated_at_unix": int(time.time()),
         "checks": checks,
         "missing": [check["name"] for check in missing],

@@ -23,6 +23,14 @@ SNAPSHOT_ID = "88929f1f90c5fcadd1d19e33f26609e595af4c2afb1e72b724695435e051900f"
 CONFIG_REPO = "finitecomputer/tinfoil-agent-runtime-canary"
 RELEASE_TAG = "v0.1.0"
 CONTAINER_NAME = "finite-agent-tinfoil-user-canary"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 GITHUB_PUBLISH_ARTIFACTS = [
     "target/hermes-hardening-audit.json",
     "target/hermes-docker-smoke/report.json",
@@ -54,6 +62,7 @@ DOCKER_LAYERS = [
     "agent state volume wipe",
     "fresh agent container with empty local state",
     "entrypoint restic latest-by-tag restore into fresh volume",
+    "workspace file restored from full recovery root",
     "same agent npub after restore",
     "runtime HTTP health endpoint after restore",
     "gateway invite admission after restore",
@@ -183,7 +192,7 @@ def agent_state_backup_report(
             "id": SNAPSHOT_ID,
             "short_id": "88929f1f",
             "time": "2026-06-26T02:26:14Z",
-            "paths": ["/data/agent"],
+            "paths": ["/data"],
             "tags": ["finite-agent-state"],
         },
         "tag": "finite-agent-state",
@@ -199,6 +208,7 @@ def docker_report(
 ) -> dict:
     return {
         "status": "passed",
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "proof_layers": DOCKER_LAYERS,
         "facts": {
             "image": "finite-chat-hermes-runtime:smoke",
@@ -215,6 +225,7 @@ def docker_report(
             "real_gateway_runtime": True,
             "gateway_admission_before_restore": True,
             "gateway_admission_after_restore": True,
+            "workspace_restored_after_restore": True,
             "agent_state_backup": agent_state_backup_report(
                 restic_backend,
                 repository=repository,
@@ -237,6 +248,7 @@ def s3_emulator_report() -> dict:
 def tinfoil_result() -> dict:
     return {
         "status": "passed",
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "proof_layers": TINFOIL_LAYERS,
         "facts": {
             "restic_backend": "s3",
@@ -254,6 +266,7 @@ def handoff_report(image_digest: str = IMAGE_DIGEST) -> dict:
     return {
         "status": "ready",
         "errors": [],
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "source_reports": {
             "smoke": "target/hermes-docker-smoke/report.json",
             "preflight": "target/hermes-docker-smoke/restic-preflight.json",
@@ -272,6 +285,7 @@ def handoff_report(image_digest: str = IMAGE_DIGEST) -> dict:
             "finite_agent_restore_latest": "1",
             "finite_agent_backup_on_exit": "1",
             "finite_agent_backup_interval_secs": "30",
+            "finite_agent_state_root": "/data",
         },
         "restore": {
             "backend": "s3",
@@ -297,6 +311,7 @@ def handoff_report(image_digest: str = IMAGE_DIGEST) -> dict:
                 "FINITE_AGENT_RESTORE_LATEST": "1",
                 "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                 "FINITE_AGENT_BACKUP_INTERVAL_SECS": "30",
+                "FINITE_AGENT_STATE_ROOT": "/data",
                 "FINITE_AGENT_RESTIC_REPOSITORY": RESTIC_REPOSITORY,
                 "FINITE_AGENT_RESTIC_BACKUP_TAG": "finite-agent-state",
                 "FINITECHAT_HERMES_INBOUND_STREAM": "1",
@@ -317,6 +332,7 @@ def publish_report(restic_backend: str = "s3") -> dict:
         "target_image_ref": IMAGE_REF,
         "pushed": True,
         "repo_digests": [IMAGE_DIGEST],
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "proof": {
             "smoke_status": "passed",
             "hermes_agent_version_actual": "0.18.2",
@@ -374,6 +390,7 @@ def write_canary_artifacts(tmp: Path, *, image_digest: str = IMAGE_DIGEST) -> No
                 '      - FINITE_AGENT_RESTORE_LATEST: "1"',
                 '      - FINITE_AGENT_BACKUP_ON_EXIT: "1"',
                 '      - FINITE_AGENT_BACKUP_INTERVAL_SECS: "30"',
+                '      - FINITE_AGENT_STATE_ROOT: "/data"',
                 (
                     "      - FINITE_AGENT_RESTIC_REPOSITORY: "
                     '"s3:https://objects.nyc.storage.sh/tinfoil-agent-spike/agent-runtimes/tinfoil-canary-001/restic"'
@@ -418,6 +435,9 @@ def write_canary_artifacts(tmp: Path, *, image_digest: str = IMAGE_DIGEST) -> No
                 "  --chat-after-message-id '<finite-chat-event-id-after-restart>'",
                 "scripts/hermes-tinfoil-canary-result.py \\",
                 "  --evidence-json target/hermes-docker-smoke/tinfoil-canary-evidence.json",
+                "application-consistent snapshot barrier",
+                "independently recoverable key authority",
+                "Core-owned service-consistent empty-target restore",
                 "",
             ]
         ),
@@ -441,6 +461,7 @@ def write_canary_artifacts(tmp: Path, *, image_digest: str = IMAGE_DIGEST) -> No
                 "AWS_SECRET_ACCESS_KEY",
                 "OPENROUTER_API_KEY",
             ],
+            "recovery_scope": dict(RECOVERY_SCOPE),
             "tinfoil_debug": True,
             "tinfoil_debug_ssh_key_env": "TINFOIL_DEBUG_SSH_KEY",
         },
@@ -564,6 +585,37 @@ class HardeningAuditTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(audit["status"], "complete")
         self.assertEqual(audit["missing"], [])
+        self.assertEqual(audit["recovery_scope"], RECOVERY_SCOPE)
+        self.assertIn("not Agent Runtime Recovery Readiness", audit["completion_scope"])
+
+    def test_audit_rejects_legacy_agent_only_snapshot_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_value:
+            tmp = Path(tmp_value)
+            docker = docker_report()
+            docker["facts"]["agent_state_backup"]["snapshot"]["paths"] = ["/data/agent"]
+            write_complete_audit_inputs(tmp, docker=docker)
+            status, audit = run_audit(tmp, require_complete=True)
+
+        self.assertEqual(status, 2)
+        self.assertIn("docker_runtime_local_or_s3_smoke", audit["missing"])
+        details = {check["name"]: check["detail"] for check in audit["checks"]}
+        self.assertIn("paths must include /data", details["docker_runtime_local_or_s3_smoke"])
+
+    def test_audit_rejects_recovery_scope_overclaim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_value:
+            tmp = Path(tmp_value)
+            docker = docker_report()
+            docker["recovery_scope"]["application_consistent_snapshot"] = "proven"
+            write_complete_audit_inputs(tmp, docker=docker)
+            status, audit = run_audit(tmp, require_complete=True)
+
+        self.assertEqual(status, 2)
+        self.assertIn("docker_runtime_local_or_s3_smoke", audit["missing"])
+        details = {check["name"]: check["detail"] for check in audit["checks"]}
+        self.assertIn(
+            "application_consistent_snapshot='proven'; expected 'unproved'",
+            details["docker_runtime_local_or_s3_smoke"],
+        )
 
     def test_audit_rejects_s3_preflight_status_without_repository_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:

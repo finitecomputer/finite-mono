@@ -12,6 +12,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SCRIPT = REPO_ROOT / "scripts" / "hermes-tinfoil-canary-evidence.py"
 RESULT_SCRIPT = REPO_ROOT / "scripts" / "hermes-tinfoil-canary-result.py"
 IMAGE_DIGEST = "ghcr.io/finitecomputer/finite-chat-hermes-runtime:v0.1.0@sha256:published"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -30,6 +38,7 @@ def run_evidence(
         handoff,
         {
             "status": "ready",
+            "recovery_scope": dict(RECOVERY_SCOPE),
             "image": {"digest": IMAGE_DIGEST},
             "restore": {"backend": "s3", "restore_tag": "finite-agent-state"},
         },
@@ -41,6 +50,7 @@ def run_evidence(
             "image_digest": IMAGE_DIGEST,
             "config_repo": "finitecomputer/tinfoil-agent-runtime-canary",
             "release_tag": "v0.1.0",
+            "recovery_scope": dict(RECOVERY_SCOPE),
         },
     )
     container_payload = {
@@ -112,6 +122,7 @@ class TinfoilCanaryEvidenceTest(unittest.TestCase):
         self.assertEqual(evidence["image"]["source"], "container_json")
         self.assertEqual(evidence["storage"]["source"], "operator_arg")
         self.assertTrue(evidence["restart_restore"]["same_npub"])
+        self.assertEqual(evidence["recovery_scope"], RECOVERY_SCOPE)
 
     def test_missing_chat_after_restart_still_emits_invalid_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:

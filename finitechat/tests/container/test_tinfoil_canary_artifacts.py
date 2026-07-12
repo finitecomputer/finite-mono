@@ -14,6 +14,14 @@ IMAGE_DIGEST = "ghcr.io/finitecomputer/finite-chat-hermes-runtime:v0.1.0@sha256:
 RESTIC_REPOSITORY = (
     "s3:https://objects.nyc.storage.sh/tinfoil-agent-spike/agent-runtimes/tinfoil-canary-001/restic"
 )
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -23,6 +31,7 @@ def write_json(path: Path, value: dict) -> None:
 def ready_handoff() -> dict:
     return {
         "status": "ready",
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "image": {
             "source_image_id": "sha256:local-image",
             "target_ref": "ghcr.io/finitecomputer/finite-chat-hermes-runtime:v0.1.0",
@@ -36,6 +45,7 @@ def ready_handoff() -> dict:
             "finite_agent_restore_latest": "1",
             "finite_agent_backup_on_exit": "1",
             "finite_agent_backup_interval_secs": "30",
+            "finite_agent_state_root": "/data",
         },
         "restore": {
             "backend": "s3",
@@ -61,6 +71,7 @@ def ready_handoff() -> dict:
                 "FINITE_AGENT_RESTORE_LATEST": "1",
                 "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                 "FINITE_AGENT_BACKUP_INTERVAL_SECS": "30",
+                "FINITE_AGENT_STATE_ROOT": "/data",
                 "FINITE_AGENT_RESTIC_REPOSITORY": RESTIC_REPOSITORY,
                 "FINITE_AGENT_RESTIC_BACKUP_TAG": "finite-agent-state",
                 "FINITECHAT_HERMES_INBOUND_STREAM": "1",
@@ -102,11 +113,13 @@ class TinfoilCanaryArtifactsTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(summary["status"], "ready")
+        self.assertEqual(summary["recovery_scope"], RECOVERY_SCOPE)
         self.assertIn(f'image: "{IMAGE_DIGEST}"', config)
         self.assertIn('FINITE_SERVER_URL: "https://chat.finite.computer"', config)
         self.assertIn('FINITECHAT_SERVER_URL: "https://chat.finite.computer"', config)
         self.assertIn('FINITE_AGENT_RESTORE_LATEST: "1"', config)
         self.assertIn('FINITE_AGENT_BACKUP_INTERVAL_SECS: "30"', config)
+        self.assertIn('FINITE_AGENT_STATE_ROOT: "/data"', config)
         self.assertNotIn("FINITE_AGENT_RESTIC_SNAPSHOT_ID", config)
         self.assertIn("FINITE_AGENT_RESTIC_PASSWORD", config)
         self.assertIn("OPENROUTER_API_KEY", config)
@@ -129,6 +142,10 @@ class TinfoilCanaryArtifactsTest(unittest.TestCase):
         self.assertIn("event ID is recorded", runbook)
         self.assertIn("raw source artifact references", runbook)
         self.assertIn("visible to Tinfoil infrastructure", runbook)
+        self.assertIn("complete `/data` recovery", runbook)
+        self.assertIn("application-consistent snapshot barrier", runbook)
+        self.assertIn("independently recoverable key authority", runbook)
+        self.assertIn("Core-owned service-consistent empty-target restore", runbook)
 
     def test_refuses_failed_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:
@@ -136,6 +153,15 @@ class TinfoilCanaryArtifactsTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("handoff status must be ready", result.stderr)
+
+    def test_refuses_handoff_that_overstates_empty_target_restore(self) -> None:
+        handoff = ready_handoff()
+        handoff["recovery_scope"]["core_owned_empty_target_restore"] = "proven"
+        with tempfile.TemporaryDirectory() as tmp_value:
+            result = self.run_script(Path(tmp_value), handoff)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("core_owned_empty_target_restore must be 'unproved'", result.stderr)
 
 
 if __name__ == "__main__":

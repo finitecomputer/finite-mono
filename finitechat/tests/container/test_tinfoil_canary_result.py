@@ -11,6 +11,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULT_SCRIPT = REPO_ROOT / "scripts" / "hermes-tinfoil-canary-result.py"
 IMAGE_DIGEST = "ghcr.io/finitecomputer/finite-chat-hermes-runtime:v0.1.0@sha256:published"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -29,7 +37,9 @@ def passing_evidence() -> dict:
             "image_digest": IMAGE_DIGEST,
             "storage_backend": "s3",
             "restore_tag": "finite-agent-state",
+            "recovery_scope": dict(RECOVERY_SCOPE),
         },
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "source_artifacts": {
             "handoff_report": {"path": "handoff.json", "present": True},
             "canary_summary": {"path": "summary.json", "present": True},
@@ -95,6 +105,17 @@ class TinfoilCanaryResultTest(unittest.TestCase):
         self.assertEqual(report["facts"]["chat_before_message_id"], "event-before")
         self.assertTrue(report["facts"]["chat_after_restart"])
         self.assertEqual(report["facts"]["chat_after_message_id"], "event-after")
+        self.assertEqual(report["recovery_scope"], RECOVERY_SCOPE)
+
+    def test_fails_when_recovery_scope_overstates_key_authority(self) -> None:
+        evidence = passing_evidence()
+        evidence["recovery_scope"]["independently_recoverable_key_authority"] = "proven"
+        with tempfile.TemporaryDirectory() as tmp_value:
+            result, report = run_result(Path(tmp_value), evidence)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("independently_recoverable_key_authority", " ".join(report["errors"]))
 
     def test_fails_when_restore_does_not_keep_same_npub(self) -> None:
         evidence = passing_evidence()

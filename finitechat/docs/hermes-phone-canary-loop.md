@@ -244,11 +244,17 @@ By default this uses `ssh://finite-lat-2`, builds the real runtime image on
 that remote Docker daemon, starts the container against
 `https://chat.finite.computer`, proves invite admission and a real Hermes
 model reply, stops the container so the entrypoint writes a restic backup,
-wipes the agent volume, restores into a fresh volume, proves the same user can
-still chat, proves a fresh user can still join, and only then prints a human
-invite URL. The restored container is left running only with
+wipes the full `/data` recovery-root volume, restores into a fresh volume,
+proves a `/data/workspace` probe survived, proves the same user can still chat,
+proves a fresh user can still join, and only then prints a human invite URL.
+The restored container is left running only with
 `--keep-running`; otherwise the script cleans up the remote container and
 volumes after writing the report.
+
+This remains a container hardening canary, not Agent Runtime Recovery
+Readiness. Its reports explicitly keep the application-consistent snapshot
+barrier, independently recoverable key authority, and Core-owned
+service-consistent empty-target restore unproved.
 
 For a remote Docker canary, the wrapper should produce the same report shape as
 the local phone canary plus image metadata:
@@ -257,6 +263,8 @@ the local phone canary plus image metadata:
 - runtime env names used;
 - server URL used by the agent;
 - restic backend, repository, tag, and snapshot id when restore is enabled;
+- recovery scope rooted at `/data`, including the workspace probe, plus the
+  three explicit unproved Recovery Set properties above;
 - before/after admission probe results;
 - optional human phone chat event ids if Paul tests against this remote agent.
 

@@ -17,11 +17,20 @@ DEFAULT_CVM_VERSION = "0.7.5"
 DEFAULT_CPUS = 4
 DEFAULT_MEMORY = 16384
 DEFAULT_HTTP_PORT = "8080"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 REQUIRED_RUNTIME_ENV = {
     "FINITE_AGENT_RESTORE_ON_START",
     "FINITE_AGENT_RESTORE_LATEST",
     "FINITE_AGENT_BACKUP_ON_EXIT",
     "FINITE_AGENT_BACKUP_INTERVAL_SECS",
+    "FINITE_AGENT_STATE_ROOT",
     "FINITE_AGENT_RESTIC_REPOSITORY",
     "FINITE_AGENT_RESTIC_BACKUP_TAG",
     "FINITECHAT_HERMES_INBOUND_STREAM",
@@ -59,6 +68,7 @@ def validate_handoff(handoff: dict[str, Any]) -> tuple[dict[str, Any], list[str]
     errors: list[str] = []
     image = object_dict(handoff.get("image"))
     restore = object_dict(handoff.get("restore"))
+    recovery_scope = object_dict(handoff.get("recovery_scope"))
     container_env = object_dict(restore.get("container_env"))
     require(handoff.get("status") == "ready", "handoff status must be ready", errors)
     digest = image.get("digest")
@@ -67,12 +77,19 @@ def validate_handoff(handoff: dict[str, Any]) -> tuple[dict[str, Any], list[str]
     )
     require(restore.get("backend") == "s3", "restore backend must be s3", errors)
     require(restore.get("restore_selector") == "latest", "restore selector must be latest", errors)
+    for key, expected in RECOVERY_SCOPE.items():
+        require(
+            recovery_scope.get(key) == expected,
+            f"recovery_scope.{key} must be {expected!r}",
+            errors,
+        )
     missing_env = sorted(REQUIRED_RUNTIME_ENV - set(container_env))
     require(not missing_env, f"handoff container_env missing: {', '.join(missing_env)}", errors)
     return {
         "image": image,
         "restore": restore,
         "container_env": container_env,
+        "recovery_scope": recovery_scope,
     }, errors
 
 
@@ -172,6 +189,7 @@ def runbook(
         f"- Restore repository: `{restore.get('repository', {}).get('repository')}`",
         f"- Restore selector: latest snapshot tagged `{restore.get('restore_tag')}`",
         f"- Seed snapshot proof: `{restore.get('seed_snapshot_short_id')}`",
+        f"- Snapshot root: `{RECOVERY_SCOPE['snapshot_root']}` (includes `/data/workspace`)",
         "",
         "## Security Note",
         "",
@@ -186,6 +204,14 @@ def runbook(
         "This canary must be created with Tinfoil debug mode so the runtime can be",
         "inspected while we are still validating the deployment shape. Debug mode is",
         "not attested and is not a production privacy posture.",
+        "",
+        "## Recovery Scope",
+        "",
+        "This canary requires Restic evidence rooted at the complete `/data` recovery",
+        "root, including `/data/workspace`. Its passing result remains narrower than",
+        "Agent Runtime Recovery Readiness: it does not prove an application-consistent snapshot barrier,",
+        "independently recoverable key authority, or the Core-owned service-consistent empty-target restore.",
+        "Those three properties remain explicitly unproved.",
         "",
         "## Files",
         "",
@@ -289,6 +315,8 @@ def runbook(
         "- User chats again after restore and the resulting event ID is recorded.",
         "- `scripts/hermes-tinfoil-canary-result.py` writes a passed",
         "  `target/hermes-docker-smoke/tinfoil-canary-result.json` report.",
+        "- Passing this canary does not promote any of the three unproved Recovery Set",
+        "  properties listed above.",
         "",
         "## References",
         "",
@@ -365,6 +393,7 @@ def main() -> int:
         "image_digest": handoff["image"]["digest"],
         "finite_server_url": args.finite_server_url,
         "secret_env": handoff["restore"]["required_secret_env"],
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "tinfoil_debug": True,
         "tinfoil_debug_ssh_key_env": "TINFOIL_DEBUG_SSH_KEY",
     }

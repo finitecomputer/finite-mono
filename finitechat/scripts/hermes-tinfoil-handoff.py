@@ -13,6 +13,14 @@ from typing import Any
 DEFAULT_HERMES_MODEL = "anthropic/claude-sonnet-4.6"
 DEFAULT_HERMES_PROVIDER = "openrouter"
 DEFAULT_AGENT_BACKUP_INTERVAL_SECS = "30"
+RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -22,6 +30,16 @@ def load_json(path: Path) -> dict[str, Any]:
 def require(condition: bool, message: str, errors: list[str]) -> None:
     if not condition:
         errors.append(message)
+
+
+def require_recovery_scope(value: Any, errors: list[str]) -> None:
+    scope = value if isinstance(value, dict) else {}
+    for key, expected in RECOVERY_SCOPE.items():
+        require(
+            scope.get(key) == expected,
+            f"Docker smoke recovery_scope.{key} must be {expected!r}",
+            errors,
+        )
 
 
 def first_digest(publish: dict[str, Any]) -> str | None:
@@ -55,6 +73,7 @@ def main() -> int:
     errors: list[str] = []
 
     require(smoke.get("status") == "passed", "Docker smoke report must be passed", errors)
+    require_recovery_scope(smoke.get("recovery_scope"), errors)
     require(preflight.get("status") == "ok", "Restic preflight must be ok", errors)
     require(publish.get("status") == "published", "Image publish report must be published", errors)
     require(facts.get("restic_backend") == "s3", "Docker smoke must use restic_backend=s3", errors)
@@ -76,6 +95,12 @@ def main() -> int:
     require(preflight.get("backend") == "s3", "Restic preflight must use backend=s3", errors)
     require(repository.get("kind") == "s3", "Restic repository proof must be kind=s3", errors)
     require(bool(snapshot.get("id")), "Restic snapshot id is required", errors)
+    snapshot_paths = snapshot.get("paths")
+    require(
+        isinstance(snapshot_paths, list) and RECOVERY_SCOPE["snapshot_root"] in snapshot_paths,
+        "Restic snapshot paths must include the full /data recovery root",
+        errors,
+    )
     require(bool(facts.get("image_id")), "Docker smoke image id is required", errors)
     require(
         publish.get("source_image_id") == facts.get("image_id"),
@@ -90,6 +115,7 @@ def main() -> int:
         "status": status,
         "generated_at_unix": int(time.time()),
         "errors": errors,
+        "recovery_scope": dict(RECOVERY_SCOPE),
         "source_reports": {
             "smoke": str(smoke_path),
             "preflight": str(preflight_path),
@@ -110,6 +136,7 @@ def main() -> int:
             "finite_agent_restore_latest": "1",
             "finite_agent_backup_on_exit": "1",
             "finite_agent_backup_interval_secs": DEFAULT_AGENT_BACKUP_INTERVAL_SECS,
+            "finite_agent_state_root": RECOVERY_SCOPE["snapshot_root"],
         },
         "restore": {
             "backend": facts.get("restic_backend"),
@@ -137,6 +164,7 @@ def main() -> int:
                 "FINITE_AGENT_RESTORE_LATEST": "1",
                 "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                 "FINITE_AGENT_BACKUP_INTERVAL_SECS": DEFAULT_AGENT_BACKUP_INTERVAL_SECS,
+                "FINITE_AGENT_STATE_ROOT": RECOVERY_SCOPE["snapshot_root"],
                 "FINITE_AGENT_RESTIC_REPOSITORY": repository.get("repository"),
                 "FINITE_AGENT_RESTIC_BACKUP_TAG": backup.get("tag"),
                 "FINITECHAT_HERMES_INBOUND_STREAM": "1",
@@ -151,7 +179,7 @@ def main() -> int:
             "restore with temporary canary restic password secret",
             "print invite URL",
             "chat once from Finite Chat",
-            "observe a fresh periodic or exit snapshot of agent state",
+            "observe a fresh periodic or exit snapshot rooted at /data",
             "restart container from empty local disk",
             "restore again",
             "chat again",

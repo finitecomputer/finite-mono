@@ -233,11 +233,13 @@ Current debt:
   managed-skills invariants while preserving inference and other messaging
   platforms. A stronger boot-policy operation must be reintroduced only when it
   is implemented in the same image used by Docker, Kata, and Phala.
-- v2 does not currently configure independent Agent Runtime backup, and the
-  optional entrypoint Restic path omits `/data/workspace`; Runtime Retirement
-  and Purge User Data remain unavailable until the future Recovery Set design
-  restores. This does not block normal first-slice launch/restart on preserved
-  provider-durable state.
+- v2 does not currently configure independent Agent Runtime backup. The
+  optional entrypoint Restic path now includes the complete `/data` root,
+  including `/data/workspace`, but it does not yet provide the required
+  application-consistent barrier, independently recoverable key authority, or
+  empty-target restore proof. Runtime Retirement and Purge User Data remain
+  unavailable until that Recovery Set design restores. This does not block
+  normal first-slice launch/restart on preserved provider-durable state.
 - Hermes currently runs as root. The narrow sync command is shipped, but Hermes
   0.18.2 still requires explicit `/reload-skills` for newly added or removed
   slash-command names. Do not replace that limitation with an automatic

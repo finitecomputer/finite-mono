@@ -12,6 +12,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "containers" / "agent" / "entrypoint.sh"
 
 
+def install_gnu_realpath_fixture(fake_bin: Path) -> None:
+    """Provide the Linux `realpath -m` contract when unit tests run on macOS."""
+    realpath = fake_bin / "realpath"
+    realpath.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "paths = [value for value in sys.argv[1:] if value != '-m']\n"
+        "for value in paths:\n"
+        "    print(os.path.realpath(value))\n",
+        encoding="utf-8",
+    )
+    realpath.chmod(0o755)
+
+
 class AgentEntrypointTest(unittest.TestCase):
     def test_runs_command_without_restore(self) -> None:
         result = subprocess.run(
@@ -212,6 +227,7 @@ class AgentEntrypointTest(unittest.TestCase):
             tmp = Path(tmp_value)
             fake_bin = tmp / "bin"
             fake_bin.mkdir()
+            install_gnu_realpath_fixture(fake_bin)
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
             state_root = tmp / "data"
@@ -264,6 +280,7 @@ class AgentEntrypointTest(unittest.TestCase):
             tmp = Path(tmp_value)
             fake_bin = tmp / "bin"
             fake_bin.mkdir()
+            install_gnu_realpath_fixture(fake_bin)
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
             state_root = tmp / "data"
@@ -343,6 +360,7 @@ class AgentEntrypointTest(unittest.TestCase):
             tmp = Path(tmp_value)
             fake_bin = tmp / "bin"
             fake_bin.mkdir()
+            install_gnu_realpath_fixture(fake_bin)
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
             state_root = tmp / "data"
@@ -386,6 +404,9 @@ class AgentEntrypointTest(unittest.TestCase):
     def test_backup_rejects_workspace_outside_state_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_value:
             tmp = Path(tmp_value)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            install_gnu_realpath_fixture(fake_bin)
             state_root = tmp / "data"
             home = state_root / "agent"
             home.mkdir(parents=True)
@@ -393,6 +414,7 @@ class AgentEntrypointTest(unittest.TestCase):
             env = os.environ.copy()
             env.update(
                 {
+                    "PATH": f"{fake_bin}:{env['PATH']}",
                     "FINITECHAT_HOME": str(home),
                     "FINITECHAT_WORKSPACE": str(tmp / "outside-workspace"),
                     "FINITE_AGENT_STATE_ROOT": str(state_root),

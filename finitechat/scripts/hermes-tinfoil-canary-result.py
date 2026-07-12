@@ -22,6 +22,14 @@ REQUIRED_PROOF_LAYERS = {
     "same agent npub after restore",
     "Finite Chat round trip after restore",
 }
+REQUIRED_RECOVERY_SCOPE = {
+    "snapshot_root": "/data",
+    "workspace_path": "/data/workspace",
+    "workspace_included": True,
+    "application_consistent_snapshot": "unproved",
+    "independently_recoverable_key_authority": "unproved",
+    "core_owned_empty_target_restore": "unproved",
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -55,6 +63,15 @@ def normalize_status(value: Any) -> str:
     return ""
 
 
+def recovery_scope_errors(value: Any, *, label: str) -> list[str]:
+    scope = nested_dict(value)
+    return [
+        f"{label}.{key}={scope.get(key)!r}; expected {expected!r}"
+        for key, expected in REQUIRED_RECOVERY_SCOPE.items()
+        if scope.get(key) != expected
+    ]
+
+
 def add_layer(
     proof_layers: set[str],
     errors: list[str],
@@ -76,6 +93,8 @@ def validate(evidence: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     image = nested_dict(evidence.get("image"))
     storage = nested_dict(evidence.get("storage"))
     expected = nested_dict(evidence.get("expected"))
+    recovery_scope = nested_dict(evidence.get("recovery_scope"))
+    expected_recovery_scope = nested_dict(expected.get("recovery_scope"))
     source_artifacts = nested_dict(evidence.get("source_artifacts"))
     health = nested_dict(evidence.get("health"))
     chat = nested_dict(evidence.get("chat"))
@@ -121,6 +140,9 @@ def validate(evidence: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     summary_source_present = artifact_present(source_artifacts, "canary_summary")
     container_source_present = artifact_present(source_artifacts, "container_json")
     health_source_present = artifact_present(source_artifacts, "health_json")
+
+    errors.extend(recovery_scope_errors(recovery_scope, label="recovery_scope"))
+    errors.extend(recovery_scope_errors(expected_recovery_scope, label="expected.recovery_scope"))
 
     add_layer(
         proof_layers,
@@ -236,6 +258,7 @@ def validate(evidence: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         "proof_layers": sorted(proof_layers),
         "missing_proof_layers": sorted(REQUIRED_PROOF_LAYERS - proof_layers),
         "errors": errors,
+        "recovery_scope": recovery_scope,
         "facts": {
             "container_name": container_name,
             "container_url": container_url,

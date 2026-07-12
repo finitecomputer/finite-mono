@@ -375,10 +375,11 @@ admission before and after restore, and writes
 `target/hermes-docker-smoke/report.json`. This proves the packaged Linux image
 has the plugin files, binary, Hermes runtime dependency, real gateway command,
 invite/PIN admission flow, restic encrypted repository init, entrypoint-owned
-encrypted agent state backup on controlled shutdown, repository check, local
-agent volume wipe, latest-by-tag snapshot restore into a fresh
-volume/container, same agent npub, same room, runtime `/healthz`, and restored
-gateway admission. Echo replies are not accepted as Docker runtime proof.
+encrypted recovery-root backup on controlled shutdown, repository check, local
+`/data` volume wipe, latest-by-tag snapshot restore into a fresh
+volume/container, restored `/data/workspace` probe, same agent npub, same room,
+runtime `/healthz`, and restored gateway admission. Echo replies are not
+accepted as Docker runtime proof.
 The smoke defaults to a local bind-mounted restic repository for CI, and can
 point the same restic contract at S3-compatible object storage with
 `FINITE_DOCKER_RESTIC_BACKEND=s3` plus a per-agent repository such as
@@ -396,9 +397,15 @@ requires an explicit non-default backup encryption secret for remote repos, and 
 report that is uploaded alongside the Docker smoke report. The hardening audit
 does not accept a status-only S3/preflight report: the Docker report must show
 the entrypoint-created encrypted restic backup, matching repository metadata,
-a latest-tagged snapshot for `/data/agent`, and a non-emulated S3 backend; the
+a latest-tagged snapshot rooted at the full `/data` recovery root, a restored
+`/data/workspace` probe, and a non-emulated S3 backend; the
 preflight report must show the derived `s3:` repository plus required password
 and AWS credential env presence.
+Passing this Hermes hardening audit is deliberately narrower than Agent Runtime
+Recovery Readiness. Every generated smoke, handoff, canary, and audit report
+keeps the application-consistent snapshot barrier, independently recoverable
+key authority, and Core-owned service-consistent empty-target restore marked
+`unproved`.
 For local S3 runs, `scripts/hermes-sidecar-docker-smoke.sh` sources `.env` when
 present, promotes `FINITE_DOCKER_RESTIC_AWS_*` values to the `AWS_*` names used
 by restic, falls back to the standard AWS shared credentials/config profile

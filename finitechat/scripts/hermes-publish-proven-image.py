@@ -87,6 +87,7 @@ def main() -> int:
         "target_image_ref": target_ref,
         "pushed": False,
         "repo_digests": [],
+        "recovery_scope": smoke.get("recovery_scope"),
         "proof": {
             "smoke_status": smoke["status"],
             "hermes_agent_version_actual": facts.get("hermes_agent_version_actual"),
