@@ -747,6 +747,10 @@ impl KataLauncher {
 }
 
 impl RuntimeLauncher for KataLauncher {
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        state_preserving_runtime_capabilities(true)
+    }
+
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::Kata
     }
@@ -785,6 +789,7 @@ impl RuntimeLauncher for KataLauncher {
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_kata_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
+            runtime_capabilities: Some(self.runtime_capabilities()),
         }
     }
 
@@ -1961,6 +1966,7 @@ esac
                 provider_runtime_handle: None,
                 provider_runtime_handle_history: Vec::new(),
                 contact_endpoint: None,
+                runtime_capabilities: Some(state_preserving_runtime_capabilities(true)),
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Upgrade Agent".to_string(),
                     hostname: None,

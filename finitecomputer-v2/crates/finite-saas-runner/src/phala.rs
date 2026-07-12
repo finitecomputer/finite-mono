@@ -11,11 +11,11 @@ use super::{
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
     RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
     RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
-    docker_equivalent_runtime_env, wait_for_http_json_ready,
+    docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use finite_saas_core::{
     AgentCreationLease, ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass,
-    RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeControlLease,
+    RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -365,6 +365,12 @@ impl PhalaLauncher {
 }
 
 impl RuntimeLauncher for PhalaLauncher {
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        // Provider-safe upgrade remains blocked on opaque environment
+        // encryption material; ordinary lifecycle controls stay available.
+        state_preserving_runtime_capabilities(false)
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         self.config.validate()?;
         self.client()?;
@@ -391,6 +397,7 @@ impl RuntimeLauncher for PhalaLauncher {
             max_sandbox_count: self.config.max_cvm_count,
             active_sandbox_count: Some(snapshot.active_cvm_count),
             available_memory_bytes: self.config.available_memory_bytes,
+            runtime_capabilities: Some(self.runtime_capabilities()),
         }
     }
 
@@ -1990,6 +1997,7 @@ mod tests {
                 provider_runtime_handle: handle,
                 provider_runtime_handle_history: Vec::new(),
                 contact_endpoint: None,
+                runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Fixture Agent".to_string(),
                     hostname: None,

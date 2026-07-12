@@ -19,7 +19,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0004_membership_archive.sql"),
     "\n",
-    include_str!("../migrations/0005_phala_expand.sql")
+    include_str!("../migrations/0005_phala_expand.sql"),
+    "\n",
+    include_str!("../migrations/0006_runtime_capabilities_expand.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -225,6 +227,61 @@ impl ProviderRuntimeHandleEnvelope {
     }
 }
 
+/// Provider-neutral controls the current Runtime can actually perform. This
+/// deliberately excludes the not-yet-proven ensure/inspect/adopt contract;
+/// internal adapter helpers are not product capabilities.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeCapabilitiesV1 {
+    #[serde(default)]
+    pub restart: bool,
+    #[serde(default)]
+    pub recover_known_good_chat: bool,
+    #[serde(default)]
+    pub runtime_upgrade: bool,
+    #[serde(default)]
+    pub stop: bool,
+    #[serde(default)]
+    pub runtime_retirement: bool,
+}
+
+/// Versioned persisted Runtime capability advertisement. Missing and empty
+/// advertisements support no controls; callers must never infer support from
+/// placement, provider handles, or Runtime artifacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "capabilities")]
+pub enum RuntimeCapabilitiesEnvelope {
+    #[serde(rename = "runtime_capabilities.v1")]
+    V1(RuntimeCapabilitiesV1),
+}
+
+impl RuntimeCapabilitiesEnvelope {
+    pub const fn v1(&self) -> &RuntimeCapabilitiesV1 {
+        match self {
+            Self::V1(capabilities) => capabilities,
+        }
+    }
+
+    pub const fn supports(&self, kind: RuntimeControlKind) -> bool {
+        let capabilities = self.v1();
+        match kind {
+            RuntimeControlKind::Restart => capabilities.restart,
+            RuntimeControlKind::RecoverKnownGoodChatRuntime => capabilities.recover_known_good_chat,
+            RuntimeControlKind::Upgrade => capabilities.runtime_upgrade,
+            RuntimeControlKind::Stop => capabilities.stop,
+            RuntimeControlKind::Destroy => capabilities.runtime_retirement,
+        }
+    }
+
+    pub const fn supports_any_control(&self) -> bool {
+        let capabilities = self.v1();
+        capabilities.restart
+            || capabilities.recover_known_good_chat
+            || capabilities.runtime_upgrade
+            || capabilities.stop
+            || capabilities.runtime_retirement
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeControlKind {
@@ -303,6 +360,10 @@ pub enum CoreError {
     ProviderRuntimeHandlePlacementMismatch,
     #[error("runtime spec does not match its persisted project, placement, runtime, or artifact")]
     RuntimeSpecMismatch,
+    #[error("runtime capability advertisement changed during creation")]
+    RuntimeCapabilitiesMismatch,
+    #[error("runtime capability advertisement exceeds current placement policy")]
+    RuntimeCapabilitiesNotAuthorized,
     #[error("no promoted runtime artifact is available for a new runtime")]
     RuntimeArtifactUnavailable,
     #[error("hosting tier is required before creating an agent")]
@@ -373,6 +434,8 @@ pub enum CoreError {
     ProjectRuntimeNotFound,
     #[error("runtime restart is not supported for this runtime")]
     RuntimeRestartUnsupported,
+    #[error("the requested runtime control is not supported for this runtime")]
+    RuntimeControlUnsupported,
     #[error("runtime upgrade is supported only for Kata runtimes created by Core")]
     RuntimeUpgradeUnsupported,
     #[error("runtime upgrades are not enabled for this Core generation")]
@@ -579,9 +642,19 @@ pub struct AgentRuntime {
     pub provider_runtime_handle_history: Vec<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub host_facts: HostOwnedRuntimeFacts,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl AgentRuntime {
+    pub fn supports_runtime_control(&self, kind: RuntimeControlKind) -> bool {
+        self.runtime_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.supports(kind))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1202,7 +1275,7 @@ pub struct AdminRuntimeOverview {
     pub published_app_urls: Vec<String>,
     pub active_finite_private_key_count: i64,
     pub runtime_link_active: bool,
-    pub supports_runtime_control: bool,
+    pub runtime_capabilities: Option<RuntimeCapabilitiesV1>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1324,11 +1397,38 @@ pub struct RunnerLeaseCapacity {
     /// bounded N-1 compatibility path for an old worker.
     #[serde(default)]
     pub runner_classes: Vec<RunnerClass>,
+    /// Exact control operations this worker can reconcile. Omitted or an
+    /// all-false envelope supports no lifecycle leases.
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
 }
 
 impl RunnerLeaseCapacity {
+    pub fn validate_runtime_capability_policy(&self) -> CoreResult<()> {
+        let Some(capabilities) = self.runtime_capabilities.as_ref() else {
+            return Ok(());
+        };
+        let capabilities = capabilities.v1();
+        if capabilities.recover_known_good_chat || capabilities.runtime_retirement {
+            return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+        }
+        if capabilities.runtime_upgrade
+            && self
+                .runner_classes
+                .iter()
+                .any(|runner_class| *runner_class != RunnerClass::Kata)
+        {
+            return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+        }
+        Ok(())
+    }
+
     pub fn accepts_runtime_control(&self) -> bool {
         !self.runner_classes.is_empty()
+            && self
+                .runtime_capabilities
+                .as_ref()
+                .is_some_and(RuntimeCapabilitiesEnvelope::supports_any_control)
     }
 
     pub fn accepts_agent_creation(&self) -> bool {
@@ -1337,6 +1437,12 @@ impl RunnerLeaseCapacity {
 
     pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
         self.runner_classes.contains(&runner_class)
+    }
+
+    pub fn supports_runtime_control(&self, kind: RuntimeControlKind) -> bool {
+        self.runtime_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.supports(kind))
     }
 
     pub fn agent_creation_rejection_reason(&self) -> Option<&'static str> {
@@ -1380,6 +1486,8 @@ pub struct CompleteAgentCreationRequestInput {
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -1404,6 +1512,8 @@ pub struct RegisterAgentCreationRuntimeInput {
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -1576,6 +1686,7 @@ impl BridgeCoreState {
                 provider_runtime_handle: None,
                 provider_runtime_handle_history: Vec::new(),
                 contact_endpoint: None,
+                runtime_capabilities: None,
                 host_facts: candidate.host_facts.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -2150,34 +2261,21 @@ impl BridgeCoreState {
         let runtime = self
             .active_runtime_for_project(&project.id)
             .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if !runtime.supports_runtime_control(kind) {
+            return Err(CoreError::RuntimeControlUnsupported);
+        }
         let artifact_id = runtime
             .runtime_artifact_id
             .as_deref()
             .ok_or(CoreError::RuntimeRestartUnsupported)?;
-        let artifact = self
-            .runtime_artifacts
+        self.runtime_artifacts
             .get(artifact_id)
             .ok_or(CoreError::RuntimeArtifactNotFound)?;
-        if !runtime_artifact_supports_control(artifact.kind) {
-            return Err(CoreError::RuntimeRestartUnsupported);
-        }
 
         let target_runtime_artifact_id = match kind {
             RuntimeControlKind::Upgrade => {
                 let target_id = trim_to_option(target_runtime_artifact_id.as_deref())
                     .ok_or(CoreError::MissingRuntimeArtifactId)?;
-                let runner_class = self
-                    .agent_creation_requests
-                    .values()
-                    .find(|request| {
-                        request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                            && request.status == AgentCreationRequestStatus::Running
-                    })
-                    .map(|request| request.runner_class)
-                    .ok_or(CoreError::RuntimeUpgradeUnsupported)?;
-                if runner_class != RunnerClass::Kata {
-                    return Err(CoreError::RuntimeUpgradeUnsupported);
-                }
                 let target = self.launchable_runtime_artifact(&target_id)?;
                 if target.kind != RuntimeArtifactKind::OciImage {
                     return Err(CoreError::RuntimeUpgradeUnsupported);
@@ -2404,10 +2502,13 @@ impl BridgeCoreState {
         if !(1..=MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
             return Err(CoreError::InvalidAgentCreationLeaseDuration);
         }
+        if let Some(capacity) = input.runner_capacity.as_ref() {
+            capacity.validate_runtime_capability_policy()?;
+        }
         if input
             .runner_capacity
             .as_ref()
-            .is_some_and(|capacity| !capacity.accepts_runtime_control())
+            .is_none_or(|capacity| !capacity.accepts_runtime_control())
         {
             return Ok(None);
         }
@@ -2427,12 +2528,14 @@ impl BridgeCoreState {
                         && source_host_id
                             .as_deref()
                             .is_none_or(|host_id| request.source_host_id == host_id)
-                        && input.runner_capacity.as_ref().is_none_or(|capacity| {
+                        && input.runner_capacity.as_ref().is_some_and(|capacity| {
                             self.agent_runtimes
                                 .get(&request.agent_runtime_id)
-                                .and_then(|runtime| runtime.placement)
-                                .is_some_and(|placement| {
-                                    capacity.supports_runner_class(placement.runner_class)
+                                .is_some_and(|runtime| {
+                                    runtime.placement.is_some_and(|placement| {
+                                        capacity.supports_runner_class(placement.runner_class)
+                                    }) && runtime.supports_runtime_control(request.kind)
+                                        && capacity.supports_runtime_control(request.kind)
                                 })
                         })
                 })
@@ -2831,6 +2934,11 @@ impl BridgeCoreState {
         let contact_endpoint =
             normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
                 .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
+        validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
+        let runtime_capabilities = merge_runtime_capabilities(
+            existing_runtime.as_ref(),
+            input.runtime_capabilities.clone(),
+        )?;
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -2856,6 +2964,7 @@ impl BridgeCoreState {
             provider_runtime_handle,
             provider_runtime_handle_history,
             contact_endpoint,
+            runtime_capabilities,
             host_facts,
             created_at: existing_runtime
                 .map(|runtime| runtime.created_at)
@@ -3003,6 +3112,11 @@ impl BridgeCoreState {
         let contact_endpoint =
             normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
                 .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
+        validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
+        let runtime_capabilities = merge_runtime_capabilities(
+            existing_runtime.as_ref(),
+            input.runtime_capabilities.clone(),
+        )?;
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -3028,6 +3142,7 @@ impl BridgeCoreState {
             provider_runtime_handle,
             provider_runtime_handle_history,
             contact_endpoint,
+            runtime_capabilities,
             host_facts,
             created_at: existing_runtime
                 .map(|runtime| runtime.created_at)
@@ -4363,9 +4478,6 @@ impl BridgeCoreState {
                     .project_runtime_links
                     .values()
                     .any(|link| link.agent_runtime_id == runtime.id && link.active);
-                let supports_runtime_control = artifact
-                    .map(|artifact| runtime_artifact_supports_control(artifact.kind))
-                    .unwrap_or(false);
                 AdminRuntimeOverview {
                     project_id: runtime.project_id.clone(),
                     project_display_name: project
@@ -4391,7 +4503,10 @@ impl BridgeCoreState {
                     published_app_urls: runtime.host_facts.published_app_urls.clone(),
                     active_finite_private_key_count,
                     runtime_link_active,
-                    supports_runtime_control,
+                    runtime_capabilities: runtime
+                        .runtime_capabilities
+                        .as_ref()
+                        .map(|capabilities| *capabilities.v1()),
                 }
             })
             .collect::<Vec<_>>();
@@ -5537,6 +5652,45 @@ pub(crate) fn merge_provider_runtime_handle(
     Ok((current, history))
 }
 
+/// Preserve an explicit Core backfill when an N-1 worker omits the new field,
+/// but never allow a current worker to change its advertisement between
+/// registration retries or final completion.
+pub(crate) fn merge_runtime_capabilities(
+    existing: Option<&AgentRuntime>,
+    incoming: Option<RuntimeCapabilitiesEnvelope>,
+) -> CoreResult<Option<RuntimeCapabilitiesEnvelope>> {
+    let current = existing.and_then(|runtime| runtime.runtime_capabilities.clone());
+    match (current, incoming) {
+        (Some(current), Some(incoming)) if current != incoming => {
+            Err(CoreError::RuntimeCapabilitiesMismatch)
+        }
+        (Some(current), _) => Ok(Some(current)),
+        (None, incoming) => Ok(incoming),
+    }
+}
+
+/// Bound worker claims to product authority this Core generation has actually
+/// accepted. A route-scoped worker credential is not permission to expose a
+/// misleading recovery control or a destructive retirement transition.
+pub(crate) fn validate_runtime_capabilities_policy(
+    capabilities: Option<&RuntimeCapabilitiesEnvelope>,
+    placement: Option<RuntimePlacement>,
+) -> CoreResult<()> {
+    let Some(capabilities) = capabilities else {
+        return Ok(());
+    };
+    let capabilities = capabilities.v1();
+    if capabilities.recover_known_good_chat || capabilities.runtime_retirement {
+        return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+    }
+    if capabilities.runtime_upgrade
+        && placement.is_none_or(|placement| placement.runner_class != RunnerClass::Kata)
+    {
+        return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+    }
+    Ok(())
+}
+
 fn current_time_iso() -> CoreResult<String> {
     Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
 }
@@ -5689,10 +5843,6 @@ fn runtime_control_request_id_for(
         "runtime_ctl",
         &[agent_runtime_id, kind.as_str(), created_at],
     )
-}
-
-fn runtime_artifact_supports_control(kind: RuntimeArtifactKind) -> bool {
-    matches!(kind, RuntimeArtifactKind::OciImage)
 }
 
 pub(crate) fn runtime_artifact_reference_is_immutable_oci(reference: &str) -> bool {
@@ -6214,6 +6364,7 @@ mod tests {
     fn confidential_launch_code_resolves_phala_placement_inside_core() {
         let mut state = BridgeCoreState::default();
         let launch_code = issue_test_launch_code(&mut state);
+        promote_runtime_artifact(&mut state);
         state
             .launch_code_batches
             .values_mut()
@@ -6243,6 +6394,59 @@ mod tests {
             ))
         );
         assert_eq!(requested.request.runner_class, RunnerClass::Phala);
+
+        let lease = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "phala-runner".to_string(),
+                source_host_id: Some("phala-host".to_string()),
+                lease_token: "phala-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            restart: true,
+                            stop: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        },
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        let error = state
+            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                request_id: lease.request.id,
+                runner_id: "phala-runner".to_string(),
+                lease_token: "phala-lease".to_string(),
+                source_host_id: "phala-host".to_string(),
+                source_machine_id: "phala-cvm".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: Some("state-v1".to_string()),
+                provider_runtime_handle: None,
+                contact_endpoint: None,
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        restart: true,
+                        runtime_upgrade: true,
+                        stop: true,
+                        ..RuntimeCapabilitiesV1::default()
+                    },
+                )),
+                runtime_relay_token_hash: runtime_relay_token_hash("phala-runtime-token").unwrap(),
+                display_name: None,
+                hostname: None,
+                runtime_host: None,
+                runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                active_inference_profile: None,
+                hermes_available: None,
+                published_app_urls: Vec::new(),
+                now: Some("2026-05-25T13:01:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(error, CoreError::RuntimeCapabilitiesNotAuthorized));
     }
 
     #[test]
@@ -6273,6 +6477,7 @@ mod tests {
         let draining_kata = RunnerLeaseCapacity {
             draining: true,
             runner_classes: vec![RunnerClass::Kata],
+            runtime_capabilities: Some(kata_runtime_capabilities()),
             ..RunnerLeaseCapacity::default()
         };
         assert!(!draining_kata.accepts_agent_creation());
@@ -6435,7 +6640,11 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some(LATER.to_string()),
             })
             .unwrap()
@@ -6473,6 +6682,7 @@ mod tests {
                     },
                 )),
                 contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: Some("oslo-agent-001.finite.computer".to_string()),
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6630,6 +6840,7 @@ mod tests {
                 provider_runtime_handle: None,
                 provider_runtime_handle_history: Vec::new(),
                 contact_endpoint: None,
+                runtime_capabilities: None,
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Test Agent".to_string(),
                     hostname: None,
@@ -6731,32 +6942,51 @@ mod tests {
         let runtime_token = "runtime-token-1";
         let token_hash = runtime_relay_token_hash(runtime_token).unwrap();
 
+        let register_input = RegisterAgentCreationRuntimeInput {
+            request_id: lease.request.id.clone(),
+            runner_id: "runner-oslo-1".to_string(),
+            lease_token: "lease-token-1".to_string(),
+            source_host_id: "oslo-host-1".to_string(),
+            source_machine_id: "oslo-agent-001".to_string(),
+            runtime_artifact_id: Some("artifact-v1".to_string()),
+            state_schema_version: None,
+            provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                ProviderRuntimeHandleV1 {
+                    runner_class: RunnerClass::Kata,
+                    opaque: json!({"container": "finite-kata-oslo-001"}),
+                },
+            )),
+            contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
+            runtime_capabilities: Some(kata_runtime_capabilities()),
+            runtime_relay_token_hash: token_hash,
+            display_name: None,
+            hostname: None,
+            runtime_host: Some("oslo-host-1".to_string()),
+            runtime_status: Some(RuntimeSummaryStatus::Unknown),
+            active_inference_profile: Some("finite-private".to_string()),
+            hermes_available: None,
+            published_app_urls: Vec::new(),
+            now: Some("2026-05-25T13:01:30Z".to_string()),
+        };
+        for unauthorized in [
+            RuntimeCapabilitiesV1 {
+                recover_known_good_chat: true,
+                ..*kata_runtime_capabilities().v1()
+            },
+            RuntimeCapabilitiesV1 {
+                runtime_retirement: true,
+                ..*kata_runtime_capabilities().v1()
+            },
+        ] {
+            let mut rejected = register_input.clone();
+            rejected.runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(unauthorized));
+            assert!(matches!(
+                state.register_agent_creation_runtime(rejected),
+                Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+            ));
+        }
         let registered = state
-            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                request_id: lease.request.id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "oslo-agent-001".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
-                    ProviderRuntimeHandleV1 {
-                        runner_class: RunnerClass::Kata,
-                        opaque: json!({"container": "finite-kata-oslo-001"}),
-                    },
-                )),
-                contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
-                runtime_relay_token_hash: token_hash,
-                display_name: None,
-                hostname: None,
-                runtime_host: Some("oslo-host-1".to_string()),
-                runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: None,
-                published_app_urls: Vec::new(),
-                now: Some("2026-05-25T13:01:30Z".to_string()),
-            })
+            .register_agent_creation_runtime(register_input)
             .unwrap();
 
         assert_eq!(
@@ -6789,31 +7019,43 @@ mod tests {
             heartbeat.last_seen_at
         );
 
+        let completion_input = CompleteAgentCreationRequestInput {
+            request_id: lease.request.id,
+            runner_id: "runner-oslo-1".to_string(),
+            lease_token: "lease-token-1".to_string(),
+            source_host_id: "oslo-host-1".to_string(),
+            source_machine_id: "oslo-agent-001".to_string(),
+            runtime_artifact_id: Some("artifact-v1".to_string()),
+            state_schema_version: None,
+            provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                ProviderRuntimeHandleV1 {
+                    runner_class: RunnerClass::Kata,
+                    opaque: json!({"container": "finite-kata-oslo-001"}),
+                },
+            )),
+            contact_endpoint: Some("https://oslo-agent.example.com/contact".to_string()),
+            runtime_capabilities: Some(kata_runtime_capabilities()),
+            display_name: None,
+            hostname: None,
+            runtime_host: Some("oslo-host-1".to_string()),
+            runtime_status: Some(RuntimeSummaryStatus::Online),
+            active_inference_profile: Some("finite-private".to_string()),
+            hermes_available: Some(true),
+            published_app_urls: Vec::new(),
+            now: Some("2026-05-25T13:02:00Z".to_string()),
+        };
+        let mut mismatched_completion = completion_input.clone();
+        mismatched_completion.runtime_capabilities =
+            Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                runtime_upgrade: false,
+                ..*kata_runtime_capabilities().v1()
+            }));
+        assert!(matches!(
+            state.complete_agent_creation_request(mismatched_completion),
+            Err(CoreError::RuntimeCapabilitiesMismatch)
+        ));
         let completed = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: lease.request.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "oslo-agent-001".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
-                    ProviderRuntimeHandleV1 {
-                        runner_class: RunnerClass::Kata,
-                        opaque: json!({"container": "finite-kata-oslo-001"}),
-                    },
-                )),
-                contact_endpoint: Some("https://oslo-agent.example.com/contact".to_string()),
-                display_name: None,
-                hostname: None,
-                runtime_host: Some("oslo-host-1".to_string()),
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: Vec::new(),
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
+            .complete_agent_creation_request(completion_input)
             .unwrap();
 
         assert_eq!(
@@ -6869,7 +7111,11 @@ mod tests {
                 lease_token: "restart-lease-1".to_string(),
                 lease_seconds: Some(60),
                 source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some("2026-05-25T13:04:00Z".to_string()),
             })
             .unwrap()
@@ -6922,7 +7168,11 @@ mod tests {
                     lease_token: "restart-lease-2".to_string(),
                     lease_seconds: Some(60),
                     source_host_id: Some("oslo-host-1".to_string()),
-                    runner_capacity: None,
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
                     now: Some("2026-05-25T13:06:00Z".to_string()),
                 })
                 .unwrap()
@@ -6931,7 +7181,7 @@ mod tests {
     }
 
     #[test]
-    fn user_can_request_recover_known_good_chat_runtime() {
+    fn known_good_chat_recovery_is_fail_closed_until_a_real_recovery_path_exists() {
         let mut state = BridgeCoreState::default();
         promote_runtime_artifact(&mut state);
         let runtime_id = complete_self_serve_agent(
@@ -6945,37 +7195,21 @@ mod tests {
         );
         let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
 
-        let recovery = state
+        let error = state
             .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 project_id,
                 now: Some("2026-05-25T13:03:00Z".to_string()),
             })
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(recovery.agent_runtime_id, runtime_id);
-        assert_eq!(recovery.source_host_id, "oslo-host-1");
-        assert_eq!(recovery.source_machine_id, "oslo-agent-001");
-        assert_eq!(
-            recovery.kind,
-            RuntimeControlKind::RecoverKnownGoodChatRuntime
-        );
-        assert_eq!(recovery.status, RuntimeControlRequestStatus::Requested);
-
-        let duplicate = state
-            .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
-                verified_email: "new@finite.vip".to_string(),
-                workos_user_id: "user_workos_new".to_string(),
-                project_id: recovery.project_id.clone(),
-                now: Some("2026-05-25T13:04:00Z".to_string()),
-            })
-            .unwrap();
-        assert_eq!(duplicate.id, recovery.id);
+        assert!(matches!(error, CoreError::RuntimeControlUnsupported));
+        assert!(state.runtime_control_requests.is_empty());
     }
 
     #[test]
-    fn stop_and_destroy_update_plaintext_runtime_status() {
+    fn stop_is_supported_but_runtime_retirement_is_fail_closed() {
         let mut state = BridgeCoreState::default();
         promote_runtime_artifact(&mut state);
         let runtime_id = complete_self_serve_agent(
@@ -7056,7 +7290,11 @@ mod tests {
                 lease_token: "stop-lease-1".to_string(),
                 lease_seconds: Some(60),
                 source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some("2026-05-25T13:04:00Z".to_string()),
             })
             .unwrap()
@@ -7084,59 +7322,75 @@ mod tests {
             vec!["https://oslo-agent.example.com/contact".to_string()]
         );
 
-        let destroy = state
+        let destroy_error = state
             .request_runtime_destroy(RequestRuntimeDestroyInput {
                 verified_email: "new@finite.vip".to_string(),
                 workos_user_id: "user_workos_new".to_string(),
                 project_id: project_id.clone(),
                 now: Some("2026-05-25T13:06:00Z".to_string()),
             })
-            .unwrap();
-        let destroy_lease = state
+            .unwrap_err();
+        assert!(matches!(
+            destroy_error,
+            CoreError::RuntimeControlUnsupported
+        ));
+
+        // A stale N-1 request cannot bypass the persisted-runtime and worker
+        // capability intersection at lease time.
+        let stale_destroy_id = "runtime_ctl_stale_destroy".to_string();
+        state.runtime_control_requests.insert(
+            stale_destroy_id.clone(),
+            RuntimeControlRequest {
+                id: stale_destroy_id.clone(),
+                project_id: project_id.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "oslo-agent-001".to_string(),
+                requested_by_user_id: user_id.clone(),
+                kind: RuntimeControlKind::Destroy,
+                target_runtime_artifact_id: None,
+                status: RuntimeControlRequestStatus::Requested,
+                runner_id: None,
+                lease_token: None,
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-05-25T13:06:30Z".to_string(),
+                updated_at: "2026-05-25T13:06:30Z".to_string(),
+                completed_at: None,
+            },
+        );
+        let stale_destroy_lease = state
             .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-1".to_string(),
                 lease_seconds: Some(60),
                 source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some("2026-05-25T13:07:00Z".to_string()),
             })
-            .unwrap()
-            .expect("destroy request should lease");
-        assert_eq!(destroy_lease.request.kind, RuntimeControlKind::Destroy);
-        state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: destroy.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "destroy-lease-1".to_string(),
-                runtime_artifact_id: None,
-                state_schema_version: None,
-                runtime_host: None,
-                published_app_urls: None,
-                now: Some("2026-05-25T13:08:00Z".to_string()),
-            })
             .unwrap();
-        let destroyed_runtime = &state.agent_runtimes[&runtime_id];
+        assert!(stale_destroy_lease.is_none());
         assert_eq!(
-            destroyed_runtime.host_facts.runtime_status,
-            RuntimeSummaryStatus::Offline
+            state.runtime_control_requests[&stale_destroy_id].status,
+            RuntimeControlRequestStatus::Requested
         );
-        assert_eq!(destroyed_runtime.host_facts.hermes_available, Some(false));
-        assert!(destroyed_runtime.host_facts.published_app_urls.is_empty());
-        assert!(!state.runtime_relay_credentials.contains_key(&runtime_id));
+        assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
         assert!(
             state
                 .project_runtime_links
                 .values()
-                .filter(|link| link.agent_runtime_id == runtime_id)
-                .all(|link| !link.active)
+                .any(|link| link.agent_runtime_id == runtime_id && link.active)
         );
         assert_eq!(
             state.finite_private_api_keys[&runtime_key.id].status,
-            FinitePrivateApiKeyStatus::Revoked
+            FinitePrivateApiKeyStatus::Active
         );
         assert!(
-            state
+            !state
                 .finite_private_admin_audit_events
                 .values()
                 .any(|event| event.action == "finite_private.runtime.destroy_revoke_keys")
@@ -7148,8 +7402,8 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             visible_project_ids,
-            BTreeSet::from([unrelated_project_id.clone()]),
-            "destroyed project is hidden without affecting unrelated membership"
+            BTreeSet::from([project_id.clone(), unrelated_project_id.clone()]),
+            "unsupported retirement cannot hide either project"
         );
         assert!(
             state.projects.contains_key(&project_id),
@@ -7159,15 +7413,14 @@ mod tests {
             state.agent_runtimes.contains_key(&runtime_id),
             "destroy retains the runtime row"
         );
-        assert_eq!(
+        assert!(
             state
                 .project_room_memberships
                 .values()
                 .find(|membership| membership.project_id == project_id)
                 .unwrap()
                 .archived_at
-                .as_deref(),
-            Some("2026-05-25T13:08:00Z")
+                .is_none()
         );
         assert!(
             state
@@ -7247,7 +7500,7 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(matches!(error, CoreError::RuntimeRestartUnsupported));
+        assert!(matches!(error, CoreError::RuntimeControlUnsupported));
     }
 
     #[test]
@@ -7271,7 +7524,11 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-a".to_string(),
                 lease_seconds: Some(60),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some(LATER.to_string()),
             })
             .unwrap()
@@ -7301,6 +7558,7 @@ mod tests {
                 state_schema_version: None,
                 provider_runtime_handle: None,
                 contact_endpoint: None,
+                runtime_capabilities: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: None,
@@ -7464,6 +7722,7 @@ mod tests {
                 state_schema_version: None,
                 provider_runtime_handle: None,
                 contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 runtime_relay_token_hash: runtime_relay_token_hash("runtime-token-1").unwrap(),
                 display_name: None,
                 hostname: None,
@@ -7849,6 +8108,7 @@ mod tests {
                 state_schema_version: None,
                 provider_runtime_handle: None,
                 contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("paid-host-1".to_string()),
@@ -8926,7 +9186,11 @@ mod tests {
                 lease_token: "admin-restart-lease-1".to_string(),
                 lease_seconds: Some(60),
                 source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some("2026-05-25T13:04:30Z".to_string()),
             })
             .unwrap()
@@ -8948,19 +9212,20 @@ mod tests {
             .unwrap();
         assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
 
-        // Recover uses the same machinery and records its own audit action.
-        let recover = state
+        // Recovery is not restart-by-another-name: until a genuine recovery
+        // implementation exists, even the admin path is fail closed.
+        let recover_error = state
             .admin_request_runtime_recover_known_good_chat(AdminRuntimeControlInput {
                 admin_verified_email: "admin@finite.vip".to_string(),
                 admin_workos_user_id: "user_workos_admin".to_string(),
                 project_id,
                 now: Some("2026-05-25T13:06:00Z".to_string()),
             })
-            .unwrap();
-        assert_eq!(
-            recover.kind,
-            RuntimeControlKind::RecoverKnownGoodChatRuntime
-        );
+            .unwrap_err();
+        assert!(matches!(
+            recover_error,
+            CoreError::RuntimeControlUnsupported
+        ));
 
         let actions = state
             .finite_private_admin_audit_events
@@ -8971,10 +9236,11 @@ mod tests {
             "runtime.admin_restart".to_string(),
             "admin@finite.vip".to_string()
         )));
-        assert!(actions.contains(&(
-            "runtime.admin_recover_known_good_chat".to_string(),
-            "admin@finite.vip".to_string()
-        )));
+        assert!(
+            !actions
+                .iter()
+                .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+        );
     }
 
     #[test]
@@ -9195,7 +9461,10 @@ mod tests {
         assert_eq!(overview.hermes_available, Some(true));
         assert_eq!(overview.active_finite_private_key_count, 1);
         assert!(overview.runtime_link_active);
-        assert!(overview.supports_runtime_control);
+        assert_eq!(
+            overview.runtime_capabilities,
+            Some(*kata_runtime_capabilities().v1())
+        );
     }
 
     #[test]
@@ -9227,6 +9496,7 @@ mod tests {
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some(LATER.to_string()),
@@ -9244,6 +9514,7 @@ mod tests {
                 state_schema_version: None,
                 provider_runtime_handle: None,
                 contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("http://127.0.0.1:41001".to_string()),
@@ -9384,7 +9655,11 @@ mod tests {
                 lease_token: "must-not-stick".to_string(),
                 lease_seconds: Some(300),
                 source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
                 now: Some("2026-05-25T13:04:50Z".to_string()),
             })
             .unwrap()
@@ -9423,6 +9698,7 @@ mod tests {
                 source_host_id: Some("oslo-host-1".to_string()),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:05:00Z".to_string()),
@@ -9624,6 +9900,7 @@ mod tests {
                 state_schema_version: None,
                 provider_runtime_handle: None,
                 contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -9636,5 +9913,15 @@ mod tests {
             .unwrap();
         assert_eq!(lease.project.id, completed.project.id);
         completed.request.agent_runtime_id.unwrap()
+    }
+
+    fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
+        RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            restart: true,
+            recover_known_good_chat: false,
+            runtime_upgrade: true,
+            stop: true,
+            runtime_retirement: false,
+        })
     }
 }

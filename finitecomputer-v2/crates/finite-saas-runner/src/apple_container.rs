@@ -441,6 +441,10 @@ impl AppleContainerLauncher {
 }
 
 impl RuntimeLauncher for AppleContainerLauncher {
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        state_preserving_runtime_capabilities(false)
+    }
+
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::AppleContainer
     }
@@ -503,6 +507,7 @@ impl RuntimeLauncher for AppleContainerLauncher {
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_owned_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
+            runtime_capabilities: Some(self.runtime_capabilities()),
         }
     }
 

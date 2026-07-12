@@ -108,6 +108,21 @@ boot intent, bounded public environment, and secret references. Retries reuse
 that same spec even if a newer artifact is promoted meanwhile. Lifecycle leases
 derive their desired spec from the persisted creation spec.
 
+Runtime controls use a separate versioned `runtime_capabilities.v1` envelope
+persisted on the Runtime and advertised by the worker. Core leases an operation
+only when both envelopes explicitly enable that exact kind; missing or empty
+advertisements enable no controls. Docker, Apple Container, Enclavia, and Phala
+currently advertise restart and stop. Kata additionally advertises runtime
+upgrade. Recover-known-good and Runtime Retirement are false everywhere, and
+Phala upgrade remains false until its opaque environment-encryption boundary is
+implemented. A draining worker rejects new creation leases but may still
+service its explicitly advertised controls.
+
+The expand migration backfills only already-running, Core-created Kata rows.
+The exact legacy Kata runner credential supplies the same narrow envelope for
+one N-1 rollout window; current credentials must advertise explicitly. This is
+compatibility metadata, never artifact, provider-handle, or browser inference.
+
 `FC_CORE_RUNTIME_ENV_JSON` is the operator-owned source for the bounded public
 environment copied into new RuntimeSpecs. It is validated with the same rules
 as Runner. `FC_RUNNER_RUNTIME_ENV_JSON` remains only for N-1 rows that genuinely
@@ -117,8 +132,8 @@ may contain connection credentials or secret-looking keys.
 
 Core now persists provider handles early enough for the typed lifecycle path,
 but a complete adapter capability model for inspect/adopt/reconcile remains a
-separate readiness item. Compute destroy preserves durable state; the separate
-Recovery Snapshot/export/purge lifecycle also remains open.
+separate readiness item. No worker advertises compute destroy or Runtime
+Retirement; the Recovery Snapshot/export/purge lifecycle remains open.
 
 Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
 root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the

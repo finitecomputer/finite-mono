@@ -32,6 +32,7 @@ export type CoreProject = {
 export type CoreRuntimeCapabilities = {
   restart?: boolean;
   recover_known_good_chat?: boolean;
+  runtime_upgrade?: boolean;
   stop?: boolean;
   runtime_retirement?: boolean;
 };
@@ -184,7 +185,11 @@ export type CoreAdminRuntimeOverview = {
   published_app_urls: string[];
   active_finite_private_key_count: number;
   runtime_link_active: boolean;
-  supports_runtime_control: boolean;
+  /**
+   * Additive and provider-neutral. Older Core responses omit this field, so
+   * every Dashboard control must treat absence as support for no operations.
+   */
+  runtime_capabilities?: CoreRuntimeCapabilities | null;
 };
 
 export type CoreAdminRuntimesResult = CoreBridgeStatus & {
@@ -1067,29 +1072,106 @@ export function coreProductProjectForLegacyMachineId(
   );
 }
 
-export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {
-  const capabilities = project.runtime?.runtime_capabilities;
+export function coreRuntimeCapabilitiesSupport(
+  capabilities: CoreRuntimeCapabilities | null | undefined,
+  operation: keyof CoreRuntimeCapabilities
+) {
+  return capabilities?.[operation] === true;
+}
+
+export function coreProjectSupportsHostedRuntimeControl(
+  project: CoreVisibleProject | null | undefined
+) {
+  const capabilities = project?.runtime?.runtime_capabilities;
   return Boolean(
-    capabilities?.restart === true ||
-    capabilities?.recover_known_good_chat === true ||
-    capabilities?.stop === true
+    coreRuntimeCapabilitiesSupport(capabilities, "restart") ||
+    coreRuntimeCapabilitiesSupport(capabilities, "recover_known_good_chat") ||
+    coreRuntimeCapabilitiesSupport(capabilities, "stop")
   );
 }
 
-export function coreProjectSupportsHostedRestart(project: CoreVisibleProject) {
-  return project.runtime?.runtime_capabilities?.restart === true;
+export function coreProjectSupportsHostedRestart(
+  project: CoreVisibleProject | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    project?.runtime?.runtime_capabilities,
+    "restart"
+  );
 }
 
-export function coreProjectSupportsHostedRecovery(project: CoreVisibleProject) {
-  return project.runtime?.runtime_capabilities?.recover_known_good_chat === true;
+export function coreProjectSupportsHostedRecovery(
+  project: CoreVisibleProject | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    project?.runtime?.runtime_capabilities,
+    "recover_known_good_chat"
+  );
 }
 
-export function coreProjectSupportsHostedStop(project: CoreVisibleProject) {
-  return project.runtime?.runtime_capabilities?.stop === true;
+export function coreProjectSupportsHostedRuntimeUpgrade(
+  project: CoreVisibleProject | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    project?.runtime?.runtime_capabilities,
+    "runtime_upgrade"
+  );
 }
 
-export function coreProjectSupportsRetirement(project: CoreVisibleProject) {
-  return project.runtime?.runtime_capabilities?.runtime_retirement === true;
+export function coreProjectSupportsHostedStop(
+  project: CoreVisibleProject | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    project?.runtime?.runtime_capabilities,
+    "stop"
+  );
+}
+
+export function coreProjectSupportsRetirement(
+  project: CoreVisibleProject | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    project?.runtime?.runtime_capabilities,
+    "runtime_retirement"
+  );
+}
+
+export function coreAdminRuntimeSupportsRestart(
+  runtime: CoreAdminRuntimeOverview | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(runtime?.runtime_capabilities, "restart");
+}
+
+export function coreAdminRuntimeSupportsRecovery(
+  runtime: CoreAdminRuntimeOverview | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    runtime?.runtime_capabilities,
+    "recover_known_good_chat"
+  );
+}
+
+export function coreAdminRuntimeSupportsUpgrade(
+  runtime: CoreAdminRuntimeOverview | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    runtime?.runtime_capabilities,
+    "runtime_upgrade"
+  );
+}
+
+export function coreAdminRuntimeSupportsStop(
+  runtime: CoreAdminRuntimeOverview | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(runtime?.runtime_capabilities, "stop");
+}
+
+export function coreAdminRuntimeSupportsRetirement(
+  runtime: CoreAdminRuntimeOverview | null | undefined
+) {
+  return coreRuntimeCapabilitiesSupport(
+    runtime?.runtime_capabilities,
+    "runtime_retirement"
+  );
 }
 
 export function coreProjectLabel(project: CoreVisibleProject) {

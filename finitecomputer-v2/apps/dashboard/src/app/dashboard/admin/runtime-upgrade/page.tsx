@@ -7,7 +7,10 @@ import { FormActionButton } from "@/components/form-action-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { canAccessAdminOps } from "@/lib/admin-ops";
-import { loadCoreAdminRuntimes } from "@/lib/core-client";
+import {
+  coreAdminRuntimeSupportsUpgrade,
+  loadCoreAdminRuntimes,
+} from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 
 type RuntimeUpgradePageProps = {
@@ -62,7 +65,7 @@ export default async function RuntimeUpgradePage({
           </div>
         </div>
 
-        {!runtime.supports_runtime_control ? (
+        {!coreAdminRuntimeSupportsUpgrade(runtime) ? (
           <div className="ocean-empty-state">
             Runtime control is not available for this project.
           </div>

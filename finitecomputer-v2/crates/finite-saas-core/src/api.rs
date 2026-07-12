@@ -22,11 +22,11 @@ use crate::{
     RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
-    normalize_source_host_id,
+    RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
+    RuntimeCapabilitiesV1, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, SyncStripeSubscriptionInput,
+    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput, normalize_owner_email,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -174,6 +174,8 @@ pub struct CompleteAgentCreationRequest {
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -197,6 +199,8 @@ pub struct RegisterAgentCreationRuntimeRequest {
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     #[serde(default)]
     pub contact_endpoint: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -522,8 +526,22 @@ impl From<Project> for PublicProject {
 pub struct PublicRuntimeCapabilities {
     pub restart: bool,
     pub recover_known_good_chat: bool,
+    pub runtime_upgrade: bool,
     pub stop: bool,
     pub runtime_retirement: bool,
+}
+
+impl From<&RuntimeCapabilitiesEnvelope> for PublicRuntimeCapabilities {
+    fn from(capabilities: &RuntimeCapabilitiesEnvelope) -> Self {
+        let capabilities = capabilities.v1();
+        Self {
+            restart: capabilities.restart,
+            recover_known_good_chat: capabilities.recover_known_good_chat,
+            runtime_upgrade: capabilities.runtime_upgrade,
+            stop: capabilities.stop,
+            runtime_retirement: capabilities.runtime_retirement,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,13 +562,17 @@ pub struct PublicAgentRuntime {
 impl From<AgentRuntime> for PublicAgentRuntime {
     fn from(runtime: AgentRuntime) -> Self {
         let contact_endpoint = public_runtime_contact_endpoint(&runtime);
+        let runtime_capabilities = runtime
+            .runtime_capabilities
+            .as_ref()
+            .map(PublicRuntimeCapabilities::from);
         Self {
             id: runtime.id,
             project_id: runtime.project_id,
             contact_endpoint,
             runtime_status: runtime.host_facts.runtime_status,
             hermes_available: runtime.host_facts.hermes_available,
-            runtime_capabilities: None,
+            runtime_capabilities,
             created_at: runtime.created_at,
             updated_at: runtime.updated_at,
         }
@@ -1489,7 +1511,7 @@ async fn resolve_runtime_route(
             (project.project.id == identifier
                 || runtime.id == identifier
                 || runtime.source_machine_id == identifier)
-                .then(|| RuntimeRouteResolution {
+                .then_some(RuntimeRouteResolution {
                     project_id: project.project.id,
                     runtime_id: runtime.id,
                 })
@@ -1818,6 +1840,8 @@ async fn complete_agent_creation_request(
     authorize_runner_id(&credential, &input.runner_id)?;
     let source_host_id = authorize_runner_source_host(&credential, Some(&input.source_host_id))?;
     authorize_provider_runtime_handle(&credential, input.provider_runtime_handle.as_ref())?;
+    let runtime_capabilities =
+        authorize_runner_runtime_capabilities(&credential, input.runtime_capabilities)?;
     Ok(Json(
         state
             .store
@@ -1831,6 +1855,7 @@ async fn complete_agent_creation_request(
                 state_schema_version: input.state_schema_version,
                 provider_runtime_handle: input.provider_runtime_handle,
                 contact_endpoint: input.contact_endpoint,
+                runtime_capabilities: Some(runtime_capabilities),
                 display_name: input.display_name,
                 hostname: input.hostname,
                 runtime_host: input.runtime_host,
@@ -1854,6 +1879,8 @@ async fn register_agent_creation_runtime(
     authorize_runner_id(&credential, &input.runner_id)?;
     let source_host_id = authorize_runner_source_host(&credential, Some(&input.source_host_id))?;
     authorize_provider_runtime_handle(&credential, input.provider_runtime_handle.as_ref())?;
+    let runtime_capabilities =
+        authorize_runner_runtime_capabilities(&credential, input.runtime_capabilities)?;
     Ok(Json(
         state
             .store
@@ -1867,6 +1894,7 @@ async fn register_agent_creation_runtime(
                 state_schema_version: input.state_schema_version,
                 provider_runtime_handle: input.provider_runtime_handle,
                 contact_endpoint: input.contact_endpoint,
+                runtime_capabilities: Some(runtime_capabilities),
                 runtime_relay_token_hash: input.runtime_relay_token_hash,
                 display_name: input.display_name,
                 hostname: input.hostname,
@@ -2656,10 +2684,11 @@ fn authorize_runner_capacity(
     credential: &VerifiedRunnerCredential,
     capacity: Option<RunnerLeaseCapacity>,
 ) -> Result<RunnerLeaseCapacity, ApiError> {
-    let Some(capacity) = capacity else {
+    let Some(mut capacity) = capacity else {
         if credential.legacy_kata_compatibility {
             return Ok(RunnerLeaseCapacity {
                 runner_classes: credential.runner_classes.clone(),
+                runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
                 ..RunnerLeaseCapacity::default()
             });
         }
@@ -2674,7 +2703,46 @@ fn authorize_runner_capacity(
     {
         return Err(runner_binding_error());
     }
+    if capacity.runtime_capabilities.is_none() {
+        if credential.legacy_kata_compatibility {
+            capacity.runtime_capabilities = Some(legacy_kata_runtime_capabilities());
+        } else {
+            return Err(runner_binding_error());
+        }
+    }
+    capacity
+        .validate_runtime_capability_policy()
+        .map_err(|_| runner_binding_error())?;
     Ok(capacity)
+}
+
+fn legacy_kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
+    RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        restart: true,
+        recover_known_good_chat: false,
+        runtime_upgrade: true,
+        stop: true,
+        runtime_retirement: false,
+    })
+}
+
+fn authorize_runner_runtime_capabilities(
+    credential: &VerifiedRunnerCredential,
+    capabilities: Option<RuntimeCapabilitiesEnvelope>,
+) -> Result<RuntimeCapabilitiesEnvelope, ApiError> {
+    let capabilities = match capabilities {
+        Some(capabilities) => capabilities,
+        None if credential.legacy_kata_compatibility => legacy_kata_runtime_capabilities(),
+        None => return Err(runner_binding_error()),
+    };
+    RunnerLeaseCapacity {
+        runner_classes: credential.runner_classes.clone(),
+        runtime_capabilities: Some(capabilities.clone()),
+        ..RunnerLeaseCapacity::default()
+    }
+    .validate_runtime_capability_policy()
+    .map_err(|_| runner_binding_error())?;
+    Ok(capabilities)
 }
 
 fn authorize_runner_source_host(
@@ -2916,7 +2984,10 @@ impl From<CoreError> for ApiError {
             | CoreError::RuntimeArtifactNotPromoted
             | CoreError::RuntimeArtifactRetired
             | CoreError::RuntimeArtifactImmutable
+            | CoreError::RuntimeCapabilitiesMismatch
+            | CoreError::RuntimeCapabilitiesNotAuthorized
             | CoreError::RuntimeRestartUnsupported
+            | CoreError::RuntimeControlUnsupported
             | CoreError::RuntimeUpgradeUnsupported
             | CoreError::RuntimeUpgradeNotEnabled
             | CoreError::RuntimeUpgradeStateSchemaIncompatible
@@ -3046,6 +3117,24 @@ mod tests {
         format!("Bearer {}", scoped_token("finite-private-usage"))
     }
 
+    fn runtime_capabilities_json(runtime_upgrade: bool) -> serde_json::Value {
+        serde_json::to_value(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            restart: true,
+            recover_known_good_chat: false,
+            runtime_upgrade,
+            stop: true,
+            runtime_retirement: false,
+        }))
+        .unwrap()
+    }
+
+    fn runner_capacity_json(runner_class: RunnerClass) -> serde_json::Value {
+        serde_json::json!({
+            "runnerClasses": [runner_class],
+            "runtimeCapabilities": runtime_capabilities_json(runner_class == RunnerClass::Kata),
+        })
+    }
+
     fn assert_json_omits_keys(value: &serde_json::Value, forbidden: &[&str]) {
         match value {
             serde_json::Value::Object(object) => {
@@ -3081,6 +3170,118 @@ mod tests {
     }
 
     #[test]
+    fn runner_capability_authorization_is_explicit_and_legacy_kata_is_narrow() {
+        let current_kata = VerifiedRunnerCredential {
+            credential_id: "kata-current".to_string(),
+            runner_id: "kata-worker".to_string(),
+            runner_classes: vec![RunnerClass::Kata],
+            source_host_id: "kata-host".to_string(),
+            legacy_kata_compatibility: false,
+        };
+        assert!(authorize_runner_capacity(&current_kata, None).is_err());
+        assert!(
+            authorize_runner_runtime_capabilities(&current_kata, None).is_err(),
+            "current credentials must advertise on registration and completion"
+        );
+        assert!(
+            authorize_runner_capacity(
+                &current_kata,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_err()
+        );
+
+        let legacy_kata = VerifiedRunnerCredential {
+            legacy_kata_compatibility: true,
+            ..current_kata.clone()
+        };
+        let compatibility = authorize_runner_capacity(&legacy_kata, None).unwrap();
+        let RuntimeCapabilitiesEnvelope::V1(capabilities) =
+            compatibility.runtime_capabilities.unwrap();
+        assert_eq!(
+            capabilities,
+            RuntimeCapabilitiesV1 {
+                restart: true,
+                recover_known_good_chat: false,
+                runtime_upgrade: true,
+                stop: true,
+                runtime_retirement: false,
+            }
+        );
+        assert_eq!(
+            authorize_runner_runtime_capabilities(&legacy_kata, None).unwrap(),
+            legacy_kata_runtime_capabilities()
+        );
+
+        for overclaim in [
+            RuntimeCapabilitiesV1 {
+                recover_known_good_chat: true,
+                ..RuntimeCapabilitiesV1::default()
+            },
+            RuntimeCapabilitiesV1 {
+                runtime_retirement: true,
+                ..RuntimeCapabilitiesV1::default()
+            },
+        ] {
+            assert!(
+                authorize_runner_capacity(
+                    &current_kata,
+                    Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(overclaim)),
+                        ..RunnerLeaseCapacity::default()
+                    })
+                )
+                .is_err()
+            );
+        }
+
+        let current_phala = VerifiedRunnerCredential {
+            credential_id: "phala-current".to_string(),
+            runner_id: "phala-worker".to_string(),
+            runner_classes: vec![RunnerClass::Phala],
+            source_host_id: "phala-host".to_string(),
+            legacy_kata_compatibility: false,
+        };
+        assert!(
+            authorize_runner_capacity(
+                &current_phala,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            runtime_upgrade: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        }
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_runner_capacity(
+                &current_phala,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            restart: true,
+                            stop: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        }
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn public_runtime_contact_prefers_explicit_normalized_endpoint_over_n_minus_one_urls() {
         let runtime = AgentRuntime {
             id: "runtime-public-contact".to_string(),
@@ -3094,6 +3295,7 @@ mod tests {
             provider_runtime_handle: None,
             provider_runtime_handle_history: Vec::new(),
             contact_endpoint: Some("https://contact.example.test/".to_string()),
+            runtime_capabilities: None,
             host_facts: crate::HostOwnedRuntimeFacts {
                 display_name: "Contact test".to_string(),
                 hostname: None,
@@ -3125,6 +3327,30 @@ mod tests {
         assert_eq!(
             public_runtime_contact_endpoint(&legacy_runtime).as_deref(),
             Some("https://legacy.example.test/contact")
+        );
+
+        let public_legacy = PublicAgentRuntime::from(legacy_runtime.clone());
+        assert!(public_legacy.runtime_capabilities.is_none());
+        assert!(
+            serde_json::to_value(public_legacy)
+                .unwrap()
+                .get("runtime_capabilities")
+                .is_none()
+        );
+
+        let public_current = PublicAgentRuntime::from(AgentRuntime {
+            runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
+            ..legacy_runtime
+        });
+        assert_eq!(
+            public_current.runtime_capabilities,
+            Some(PublicRuntimeCapabilities {
+                restart: true,
+                recover_known_good_chat: false,
+                runtime_upgrade: true,
+                stop: true,
+                runtime_retirement: false,
+            })
         );
     }
 
@@ -4218,7 +4444,7 @@ mod tests {
                             "runnerId": "runner-oslo-1",
                             "leaseToken": "lease-token-1",
                             "leaseSeconds": 300,
-                            "runnerCapacity": { "runnerClasses": ["kata"] },
+                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
                             "now": "2026-05-25T13:00:00Z"
                         })
                         .to_string(),
@@ -4297,6 +4523,7 @@ mod tests {
                             "activeInferenceProfile": "finite-private",
                             "hermesAvailable": true,
                             "publishedAppUrls": [],
+                            "runtimeCapabilities": runtime_capabilities_json(true),
                             "now": "2026-05-25T13:01:00Z"
                         })
                         .to_string(),
@@ -4479,14 +4706,16 @@ mod tests {
                 "maxSandboxCount": 4,
                 "activeSandboxCount": 1,
                 "availableMemoryBytes": 8589934592_u64,
-                "runnerClasses": ["kata"]
+                "runnerClasses": ["kata"],
+                "runtimeCapabilities": runtime_capabilities_json(true)
             }),
             serde_json::json!({
                 "draining": false,
                 "maxSandboxCount": 1,
                 "activeSandboxCount": 1,
                 "availableMemoryBytes": 1073741824_u64,
-                "runnerClasses": ["kata"]
+                "runnerClasses": ["kata"],
+                "runtimeCapabilities": runtime_capabilities_json(true)
             }),
         ] {
             let response = app
@@ -4536,7 +4765,8 @@ mod tests {
                                 "maxSandboxCount": 4,
                                 "activeSandboxCount": 1,
                                 "availableMemoryBytes": 8589934592_u64,
-                                "runnerClasses": ["kata"]
+                                "runnerClasses": ["kata"],
+                                "runtimeCapabilities": runtime_capabilities_json(true)
                             },
                             "now": "2026-05-25T13:00:01Z"
                         })
@@ -4560,6 +4790,33 @@ mod tests {
         let store = CoreStore::memory();
         let launch_code = issue_test_launch_code(&store).await;
         let app = router(store, test_auth());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/core/v1/runtime-artifacts/artifact-v1")
+                    .header("authorization", "Bearer core-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "kind": "oci_image",
+                            "reference": format!(
+                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                "a".repeat(64)
+                            ),
+                            "versionLabel": "v1",
+                            "stateSchemaVersion": "state-v1",
+                            "promoted": true,
+                            "now": "2026-05-25T12:00:00Z"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let create = serde_json::to_vec(&CreateAgentRequest {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
@@ -5025,7 +5282,7 @@ mod tests {
                 Some(serde_json::json!({
                     "runnerId": "kata-worker-1",
                     "leaseToken": "lease-token",
-                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
                 })),
             )
             .await;
@@ -5051,7 +5308,7 @@ mod tests {
             serde_json::json!({
                 "runnerId": "kata-worker-1",
                 "leaseToken": "lease-token",
-                "runnerCapacity": { "runnerClasses": ["phala"] }
+                "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
             }),
         ] {
             let (status, _) = send_json(
@@ -5092,7 +5349,7 @@ mod tests {
                 "runnerId": "phala-worker-1",
                 "leaseToken": "lease-token",
                 "sourceHostId": "phala-host-1",
-                "runnerCapacity": { "runnerClasses": ["phala"] }
+                "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
             })),
         )
         .await;
@@ -5162,7 +5419,7 @@ mod tests {
                     "runnerId": "runner-auth-boundary",
                     "leaseToken": "lease-auth-boundary",
                     "leaseSeconds": 60,
-                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
                 }),
             ),
             (
@@ -5172,7 +5429,7 @@ mod tests {
                     "leaseToken": "lease-auth-boundary",
                     "leaseSeconds": 60,
                     "sourceHostId": "source-auth-boundary",
-                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
                 }),
             ),
             (
@@ -5534,6 +5791,7 @@ mod tests {
                 "activeInferenceProfile": "finite-private",
                 "hermesAvailable": true,
                 "publishedAppUrls": [],
+                "runtimeCapabilities": runtime_capabilities_json(true),
                 "now": "2026-05-25T13:01:00Z"
             })),
         )
@@ -5884,7 +6142,17 @@ mod tests {
         assert_eq!(overview["source_host_id"], "oslo-host-1");
         assert_eq!(overview["runtime_artifact_version_label"], "v1");
         assert_eq!(overview["runtime_status"], "online");
-        assert_eq!(overview["supports_runtime_control"], true);
+        assert_eq!(overview["runtime_capabilities"]["restart"], true);
+        assert_eq!(
+            overview["runtime_capabilities"]["recover_known_good_chat"],
+            false
+        );
+        assert_eq!(overview["runtime_capabilities"]["runtime_upgrade"], true);
+        assert_eq!(overview["runtime_capabilities"]["stop"], true);
+        assert_eq!(
+            overview["runtime_capabilities"]["runtime_retirement"],
+            false
+        );
 
         // Admin restart succeeds even though the admin does not own the project.
         let (status, restart) = send_json(
@@ -6010,8 +6278,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(upgraded["status"], "succeeded");
 
-        // Recover uses the same machinery.
-        let (status, recover) = send_json(
+        // Recovery remains disabled until it is more than a restart alias.
+        let (status, _) = send_json(
             &app,
             "POST",
             &format!("/api/core/v1/admin/projects/{project_id}/runtime/recover-known-good-chat"),
@@ -6019,8 +6287,7 @@ mod tests {
             Some(serde_json::json!({ "now": "2026-05-25T13:06:00Z" })),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(recover["kind"], "recover_known_good_chat_runtime");
+        assert_eq!(status, StatusCode::CONFLICT);
 
         // Both admin actions are audited with the admin's email as actor.
         let (status, events) = send_json(
@@ -6040,7 +6307,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(admin_actions.contains(&"runtime.admin_restart".to_string()));
         assert!(admin_actions.contains(&"runtime.admin_upgrade".to_string()));
-        assert!(admin_actions.contains(&"runtime.admin_recover_known_good_chat".to_string()));
+        assert!(!admin_actions.contains(&"runtime.admin_recover_known_good_chat".to_string()));
     }
 
     #[tokio::test]

@@ -4,9 +4,10 @@ use finite_saas_core::{
     FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
-    RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent, RuntimeControlKind,
-    RuntimeControlLease, RuntimeControlRequest, RuntimeResourceClass, RuntimeSpecEnvelope,
-    RuntimeSpecV1, RuntimeSummaryStatus, runtime_relay_token_hash as hash_runtime_relay_token,
+    RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope,
+    RuntimeCapabilitiesV1, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeResourceClass, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1, RuntimePlacement};
@@ -53,6 +54,18 @@ const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES: usize = 128 * 1024;
+
+pub(crate) fn state_preserving_runtime_capabilities(
+    runtime_upgrade: bool,
+) -> RuntimeCapabilitiesEnvelope {
+    RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        restart: true,
+        recover_known_good_chat: false,
+        runtime_upgrade,
+        stop: true,
+        runtime_retirement: false,
+    })
+}
 
 fn wait_with_captured_output(
     mut child: Child,
@@ -336,7 +349,9 @@ where
         self.launcher.validate_ready()?;
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
-        let runner_capacity = self.launcher.runner_capacity();
+        let runtime_capabilities = self.launcher.runtime_capabilities();
+        let mut runner_capacity = self.launcher.runner_capacity();
+        runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
         if runner_capacity.runner_classes.is_empty() {
             return Ok(RunOnceOutcome::CapacityUnavailable {
                 reason: "runner advertises no classes".to_string(),
@@ -412,6 +427,7 @@ where
                         active_inference_profile: facts.active_inference_profile.clone(),
                         hermes_available: facts.hermes_available,
                         published_app_urls: facts.published_app_urls.clone(),
+                        runtime_capabilities: Some(runtime_capabilities.clone()),
                         now: None,
                     },
                 );
@@ -436,6 +452,7 @@ where
                                 active_inference_profile: facts.active_inference_profile.clone(),
                                 hermes_available: facts.hermes_available,
                                 published_app_urls: facts.published_app_urls.clone(),
+                                runtime_capabilities: Some(runtime_capabilities),
                                 now: None,
                             },
                         ),
@@ -530,6 +547,25 @@ where
         kind: RuntimeControlKind,
     ) -> Result<RunOnceOutcome, RunnerError> {
         let request_id = lease.request.id.clone();
+        if !self.launcher.runtime_capabilities().supports(kind) {
+            let failure_message =
+                format!("runtime control {kind:?} is not advertised by the runner adapter");
+            self.queue.fail_runtime_control(
+                &request_id,
+                FailRuntimeControlRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: self.runner_id.clone(),
+                    lease_token,
+                    failure_message: failure_message.clone(),
+                    now: None,
+                },
+            )?;
+            return Ok(runtime_control_failed_outcome(
+                kind,
+                request_id,
+                failure_message,
+            ));
+        }
         let source_machine_id = lease.request.source_machine_id.clone();
         let previous_heartbeat = match kind {
             RuntimeControlKind::Restart
@@ -863,6 +899,7 @@ pub trait AgentCreationQueue {
 
 pub trait RuntimeLauncher {
     fn validate_ready(&self) -> Result<(), RunnerError>;
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope;
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::LocalDocker
     }
@@ -931,6 +968,10 @@ where
 {
     fn validate_ready(&self) -> Result<(), RunnerError> {
         (**self).validate_ready()
+    }
+
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        (**self).runtime_capabilities()
     }
 
     fn runner_class(&self) -> RunnerClass {
@@ -1929,6 +1970,10 @@ impl DockerLauncher {
 }
 
 impl RuntimeLauncher for DockerLauncher {
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        state_preserving_runtime_capabilities(false)
+    }
+
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::LocalDocker
     }
@@ -1948,6 +1993,7 @@ impl RuntimeLauncher for DockerLauncher {
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_docker_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
+            runtime_capabilities: Some(self.runtime_capabilities()),
         }
     }
 
@@ -2853,6 +2899,10 @@ impl EnclaviaLauncher {
 }
 
 impl RuntimeLauncher for EnclaviaLauncher {
+    fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+        state_preserving_runtime_capabilities(false)
+    }
+
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::Enclavia
     }
@@ -2872,6 +2922,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
             max_sandbox_count: self.config.max_enclave_count,
             active_sandbox_count: active_enclavia_enclave_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
+            runtime_capabilities: Some(self.runtime_capabilities()),
         }
     }
 
@@ -3251,6 +3302,33 @@ mod tests {
     }
 
     #[test]
+    fn adapters_advertise_only_proven_runtime_controls() {
+        let state_preserving = state_preserving_runtime_capabilities(false);
+        let state_preserving_with_upgrade = state_preserving_runtime_capabilities(true);
+
+        assert_eq!(
+            DockerLauncher::new(DockerConfig::default()).runtime_capabilities(),
+            state_preserving
+        );
+        assert_eq!(
+            AppleContainerLauncher::new(AppleContainerConfig::default()).runtime_capabilities(),
+            state_preserving
+        );
+        assert_eq!(
+            EnclaviaLauncher::new(EnclaviaConfig::default()).runtime_capabilities(),
+            state_preserving
+        );
+        assert_eq!(
+            PhalaLauncher::new(PhalaConfig::default()).runtime_capabilities(),
+            state_preserving
+        );
+        assert_eq!(
+            KataLauncher::new(KataConfig::default()).runtime_capabilities(),
+            state_preserving_with_upgrade
+        );
+    }
+
+    #[test]
     fn run_once_does_not_lease_when_launcher_is_not_ready() {
         let mut runner = AgentCreationRunner::new(
             FakeQueue::idle(),
@@ -3288,7 +3366,10 @@ mod tests {
 
     #[test]
     fn run_once_with_no_advertised_classes_claims_no_work() {
-        let capacity = RunnerLeaseCapacity::default();
+        let capacity = RunnerLeaseCapacity {
+            runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            ..RunnerLeaseCapacity::default()
+        };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(sample_lease("agent_request_123")),
             FakeLauncher::ready(RuntimeLaunchFacts::sample())
@@ -3321,6 +3402,7 @@ mod tests {
             max_sandbox_count: Some(4),
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+            runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::idle(),
@@ -3357,6 +3439,7 @@ mod tests {
             max_sandbox_count: Some(2),
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(1024 * 1024 * 1024),
+            runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(sample_lease("agent_request_123")),
@@ -3496,7 +3579,7 @@ mod tests {
     }
 
     #[test]
-    fn run_once_recovers_known_good_chat_runtime_control_request() {
+    fn run_once_refuses_unadvertised_known_good_recovery_from_an_older_core() {
         let runtime_control = sample_runtime_control_lease_with_kind(
             "runtime_ctl_123",
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
@@ -3519,19 +3602,16 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RunOnceOutcome::RuntimeRecoveredKnownGoodChat {
+            RunOnceOutcome::RuntimeRecoveryFailed {
                 request_id: runtime_control.request.id.clone(),
-                runtime_id: runtime_control.runtime.id.clone(),
+                failure_message: "runtime control RecoverKnownGoodChatRuntime is not advertised by the runner adapter".to_string(),
             }
         );
         assert!(runner.launcher.restarted.is_empty());
-        assert_eq!(
-            runner.launcher.recovered,
-            vec!["oslo-agent-001".to_string()]
-        );
+        assert!(runner.launcher.recovered.is_empty());
         assert!(runner.queue.leases.is_empty());
-        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
-        assert!(runner.queue.failed_runtime_control.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+        assert_eq!(runner.queue.failed_runtime_control.len(), 1);
     }
 
     #[test]
@@ -3539,7 +3619,9 @@ mod tests {
         let runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()).without_core_heartbeat(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata_upgrade()
+                .without_core_heartbeat(),
             FixedLeaseTokens::new(["lease-upgrade"]),
             "runner-1",
             300,
@@ -3603,7 +3685,7 @@ mod tests {
     }
 
     #[test]
-    fn run_once_destroys_runtime_control_request_without_waiting_for_heartbeat() {
+    fn run_once_refuses_unadvertised_retirement_from_an_older_core() {
         let runtime_control =
             sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Destroy);
         let mut runner = AgentCreationRunner::new(
@@ -3619,18 +3701,16 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RunOnceOutcome::RuntimeDestroyed {
+            RunOnceOutcome::RuntimeDestroyFailed {
                 request_id: runtime_control.request.id.clone(),
-                runtime_id: runtime_control.runtime.id.clone(),
+                failure_message: "runtime control Destroy is not advertised by the runner adapter"
+                    .to_string(),
             }
         );
-        assert_eq!(
-            runner.launcher.destroyed,
-            vec!["oslo-agent-001".to_string()]
-        );
+        assert!(runner.launcher.destroyed.is_empty());
         assert!(runner.queue.heartbeat_checks.is_empty());
-        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
-        assert!(runner.queue.failed_runtime_control.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+        assert_eq!(runner.queue.failed_runtime_control.len(), 1);
     }
 
     #[test]
@@ -4909,6 +4989,8 @@ mod tests {
         stopped: Vec<String>,
         destroyed: Vec<String>,
         runner_capacity: RunnerLeaseCapacity,
+        runner_class: RunnerClass,
+        runtime_upgrade: bool,
         uses_core_heartbeat: bool,
     }
 
@@ -4927,9 +5009,11 @@ mod tests {
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Phala],
+                    runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
                 },
+                runner_class: RunnerClass::LocalDocker,
+                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -4948,9 +5032,11 @@ mod tests {
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Phala],
+                    runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
                 },
+                runner_class: RunnerClass::LocalDocker,
+                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -4969,9 +5055,11 @@ mod tests {
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
                 runner_capacity: RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Phala],
+                    runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
                 },
+                runner_class: RunnerClass::LocalDocker,
+                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -4985,6 +5073,13 @@ mod tests {
             self.uses_core_heartbeat = false;
             self
         }
+
+        fn for_kata_upgrade(mut self) -> Self {
+            self.runner_class = RunnerClass::Kata;
+            self.runtime_upgrade = true;
+            self.runner_capacity.runner_classes = vec![RunnerClass::Kata];
+            self
+        }
     }
 
     impl RuntimeLauncher for FakeLauncher {
@@ -4993,6 +5088,14 @@ mod tests {
                 return Err(RunnerError::RuntimeLaunch(message.clone()));
             }
             Ok(())
+        }
+
+        fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+            state_preserving_runtime_capabilities(self.runtime_upgrade)
+        }
+
+        fn runner_class(&self) -> RunnerClass {
+            self.runner_class
         }
 
         fn uses_core_runtime_heartbeat(&self) -> bool {
@@ -5154,7 +5257,7 @@ mod tests {
                 project_id: "project_123".to_string(),
                 idempotency_key: "browser-submit-1".to_string(),
                 display_name: "Oslo Agent".to_string(),
-                runner_class: RunnerClass::Phala,
+                runner_class: RunnerClass::LocalDocker,
                 hosting_tier: None,
                 placement: None,
                 desired_runtime_artifact_id: None,
@@ -5298,6 +5401,7 @@ mod tests {
                 provider_runtime_handle: None,
                 provider_runtime_handle_history: Vec::new(),
                 contact_endpoint: None,
+                runtime_capabilities: None,
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Oslo Agent".to_string(),
                     hostname: None,

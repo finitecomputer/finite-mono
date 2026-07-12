@@ -28,29 +28,31 @@ use crate::{
     RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
     ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeBootIntent, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlKind, RuntimeControlLease,
+    RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential,
+    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
     UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, build_runtime_spec_v1, chat_identity_id_for_user,
     current_time_iso, finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
-    new_agent_creation_request_id, new_agent_runtime_id, new_customer_org_id,
-    new_self_service_project_id, new_user_id, normalize_id_part, normalize_idempotency_key,
-    normalize_owner_email, normalize_profile_picture_url, normalize_runtime_contact_endpoint,
-    normalize_source_host_id, parse_agent_creation_request_status, parse_billing_class,
-    parse_billing_subscription_status, parse_finite_private_api_key_status,
-    parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
-    parse_import_candidate_status, parse_runner_class, parse_runtime_artifact_kind,
-    parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_resource_class,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
+    parse_finite_private_api_key_status, parse_finite_private_grant_status,
+    parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
+    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
+    parse_runtime_control_request_status, parse_runtime_resource_class,
     parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for, runtime_artifact_material_matches,
     runtime_artifact_reference_is_immutable_oci, runtime_operation_spec_v1,
     runtime_relay_token_hash, runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
     should_replace_stripe_subscription, source_import_key, trim_to_option,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    validate_runtime_capabilities_policy, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -2901,6 +2903,11 @@ where
     )?;
     let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
         .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
+    validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
+    let runtime_capabilities = merge_runtime_capabilities(
+        existing_runtime.as_ref(),
+        input.runtime_capabilities.clone(),
+    )?;
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -2913,6 +2920,7 @@ where
         provider_runtime_handle,
         provider_runtime_handle_history,
         contact_endpoint,
+        runtime_capabilities,
         host_facts: runtime_host_facts_from_register_input(&input, &request, &source_host_id),
         created_at: existing_runtime
             .map(|runtime| runtime.created_at)
@@ -3017,6 +3025,11 @@ where
     )?;
     let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
         .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
+    validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
+    let runtime_capabilities = merge_runtime_capabilities(
+        existing_runtime.as_ref(),
+        input.runtime_capabilities.clone(),
+    )?;
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -3029,6 +3042,7 @@ where
         provider_runtime_handle,
         provider_runtime_handle_history,
         contact_endpoint,
+        runtime_capabilities,
         host_facts: runtime_host_facts_from_complete_input(&input, &request, &source_host_id),
         created_at: existing_runtime
             .map(|runtime| runtime.created_at)
@@ -3282,7 +3296,7 @@ where
                     runtime.runtime_artifact_id, runtime.state_schema_version,
                     runtime.placement_runner_class, runtime.runtime_resource_class,
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
-                    runtime.contact_endpoint,
+                    runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
              FROM runtime_relay_credentials AS credential
              JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
@@ -3381,7 +3395,7 @@ where
                     runtime.placement_runner_class AS runtime_placement_runner_class,
                     runtime.runtime_resource_class AS runtime_runtime_resource_class,
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
-                    runtime.contact_endpoint,
+                    runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, runtime.created_at::text AS runtime_created_at,
                     runtime.updated_at::text AS runtime_updated_at
              FROM project_room_memberships AS membership
@@ -3452,6 +3466,10 @@ where
                         .map_err(json_error)?
                         .unwrap_or_default(),
                         contact_endpoint: row.get("contact_endpoint"),
+                        runtime_capabilities: optional_json_column(&row, "runtime_capabilities")?
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(json_error)?,
                         host_facts: json_column(&row, "host_facts")?,
                         created_at: row.get("runtime_created_at"),
                         updated_at: row.get("runtime_updated_at"),
@@ -3669,6 +3687,7 @@ fn agent_runtime_from_row(row: &Row) -> CoreResult<AgentRuntime> {
     let provider_runtime_handle = optional_json_column(row, "provider_runtime_handle")?;
     let provider_runtime_handle_history =
         optional_json_column(row, "provider_runtime_handle_history")?;
+    let runtime_capabilities = optional_json_column(row, "runtime_capabilities")?;
     Ok(AgentRuntime {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -3692,6 +3711,10 @@ fn agent_runtime_from_row(row: &Row) -> CoreResult<AgentRuntime> {
             .map_err(json_error)?
             .unwrap_or_default(),
         contact_endpoint: row.get("contact_endpoint"),
+        runtime_capabilities: runtime_capabilities
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_error)?,
         host_facts: json_column(row, "host_facts")?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -3916,7 +3939,8 @@ where
             "SELECT id, project_id, source_host_id, source_machine_id, source_import_key,
                     runtime_artifact_id, state_schema_version, placement_runner_class,
                     runtime_resource_class, provider_runtime_handle,
-                    provider_runtime_handle_history, contact_endpoint, host_facts,
+                    provider_runtime_handle_history, contact_endpoint, runtime_capabilities,
+                    host_facts,
                     created_at::text, updated_at::text
              FROM agent_runtimes WHERE id = $1",
             &[&runtime_id],
@@ -3942,7 +3966,8 @@ where
             "SELECT id, project_id, source_host_id, source_machine_id, source_import_key,
                     runtime_artifact_id, state_schema_version, placement_runner_class,
                     runtime_resource_class, provider_runtime_handle,
-                    provider_runtime_handle_history, contact_endpoint, host_facts,
+                    provider_runtime_handle_history, contact_endpoint, runtime_capabilities,
+                    host_facts,
                     created_at::text, updated_at::text
              FROM agent_runtimes WHERE source_import_key = $1",
             &[&source_import_key],
@@ -3951,30 +3976,6 @@ where
         .map_err(store_error)?
         .map(|row| agent_runtime_from_row(&row))
         .transpose()
-}
-
-async fn select_core_created_runtime_runner_class<C>(
-    client: &C,
-    runtime_id: &str,
-) -> CoreResult<Option<crate::RunnerClass>>
-where
-    C: GenericClient + Sync,
-{
-    let row = client
-        .query_opt(
-            "SELECT runner_class FROM agent_creation_requests
-             WHERE agent_runtime_id = $1 AND status = 'running'
-             ORDER BY created_at, id LIMIT 1",
-            &[&runtime_id],
-        )
-        .await
-        .map_err(store_error)?;
-    row.map(|row| {
-        let value: String = row.get("runner_class");
-        parse_runner_class(&value)
-            .ok_or_else(|| CoreError::Store(format!("invalid agent runner class {value}")))
-    })
-    .transpose()
 }
 
 async fn postgres_list_launch_code_batches<C>(client: &C) -> CoreResult<Vec<LaunchCodeBatchDetails>>
@@ -4424,16 +4425,24 @@ where
         .map_err(json_error)?;
     let provider_runtime_handle_history =
         serde_json::to_value(&runtime.provider_runtime_handle_history).map_err(json_error)?;
+    let runtime_capabilities = runtime
+        .runtime_capabilities
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(json_error)?;
     client
         .execute(
             "INSERT INTO agent_runtimes (
                id, project_id, source_host_id, source_machine_id, source_import_key,
                runtime_artifact_id, state_schema_version, placement_runner_class,
                runtime_resource_class, provider_runtime_handle,
-               provider_runtime_handle_history, contact_endpoint, host_facts, created_at, updated_at
+               provider_runtime_handle_history, contact_endpoint, runtime_capabilities,
+               host_facts, created_at, updated_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
-                     $12, $13::jsonb, $14::text::timestamptz, $15::text::timestamptz)
+                     $12, $13::jsonb, $14::jsonb, $15::text::timestamptz,
+                     $16::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                project_id = EXCLUDED.project_id,
                runtime_artifact_id = EXCLUDED.runtime_artifact_id,
@@ -4443,6 +4452,7 @@ where
                provider_runtime_handle = EXCLUDED.provider_runtime_handle,
                provider_runtime_handle_history = EXCLUDED.provider_runtime_handle_history,
                contact_endpoint = EXCLUDED.contact_endpoint,
+               runtime_capabilities = EXCLUDED.runtime_capabilities,
                host_facts = EXCLUDED.host_facts,
                updated_at = EXCLUDED.updated_at",
             &[
@@ -4458,6 +4468,7 @@ where
                 &provider_runtime_handle,
                 &provider_runtime_handle_history,
                 &runtime.contact_endpoint,
+                &runtime_capabilities,
                 &host_facts,
                 &runtime.created_at,
                 &runtime.updated_at,
@@ -5040,7 +5051,7 @@ where
                     runtime.runtime_artifact_id, runtime.state_schema_version,
                     runtime.placement_runner_class, runtime.runtime_resource_class,
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
-                    runtime.contact_endpoint,
+                    runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
              FROM project_runtime_links AS link
              JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
@@ -5072,26 +5083,21 @@ where
     let runtime = postgres_active_runtime_for_project(client, &project.id)
         .await?
         .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    if !runtime.supports_runtime_control(kind) {
+        return Err(CoreError::RuntimeControlUnsupported);
+    }
     let artifact_id = runtime
         .runtime_artifact_id
         .as_deref()
         .ok_or(CoreError::RuntimeRestartUnsupported)?;
-    let artifact = select_runtime_artifact(client, artifact_id)
+    select_runtime_artifact(client, artifact_id)
         .await?
         .ok_or(CoreError::RuntimeArtifactNotFound)?;
-    if !crate::runtime_artifact_supports_control(artifact.kind) {
-        return Err(CoreError::RuntimeRestartUnsupported);
-    }
 
     let target_runtime_artifact_id = match kind {
         RuntimeControlKind::Upgrade => {
             let target_id = trim_to_option(target_runtime_artifact_id.as_deref())
                 .ok_or(CoreError::MissingRuntimeArtifactId)?;
-            if select_core_created_runtime_runner_class(client, &runtime.id).await?
-                != Some(crate::RunnerClass::Kata)
-            {
-                return Err(CoreError::RuntimeUpgradeUnsupported);
-            }
             let target = select_runtime_artifact(client, &target_id)
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
@@ -5308,11 +5314,11 @@ where
     if !(1..=crate::MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
         return Err(CoreError::InvalidAgentCreationLeaseDuration);
     }
-    if input
-        .runner_capacity
-        .as_ref()
-        .is_some_and(|capacity| !capacity.accepts_runtime_control())
-    {
+    let Some(capacity) = input.runner_capacity.as_ref() else {
+        return Ok(None);
+    };
+    capacity.validate_runtime_capability_policy()?;
+    if !capacity.accepts_runtime_control() {
         return Ok(None);
     }
     let source_host_id = input
@@ -5320,13 +5326,22 @@ where
         .as_deref()
         .map(normalize_source_host_id)
         .transpose()?;
-    let runner_classes = input.runner_capacity.as_ref().map(|capacity| {
-        capacity
-            .runner_classes
-            .iter()
-            .map(|runner_class| runner_class.as_str().to_owned())
-            .collect::<Vec<_>>()
-    });
+    let runner_classes = capacity
+        .runner_classes
+        .iter()
+        .map(|runner_class| runner_class.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let supported_control_kinds = [
+        RuntimeControlKind::Restart,
+        RuntimeControlKind::RecoverKnownGoodChatRuntime,
+        RuntimeControlKind::Upgrade,
+        RuntimeControlKind::Stop,
+        RuntimeControlKind::Destroy,
+    ]
+    .into_iter()
+    .filter(|kind| capacity.supports_runtime_control(*kind))
+    .map(|kind| kind.as_str().to_owned())
+    .collect::<Vec<_>>();
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
     loop {
         let Some(row) = client
@@ -5343,10 +5358,22 @@ where
                         )
                       )
                   AND ($5::text IS NULL OR request.source_host_id = $5)
-                  AND (
-                        $6::text[] IS NULL
-                        OR runtime.placement_runner_class = ANY($6::text[])
-                      )
+                  AND runtime.placement_runner_class = ANY($6::text[])
+                  AND request.kind = ANY($7::text[])
+                  AND runtime.runtime_capabilities->>'schema' = 'runtime_capabilities.v1'
+                  AND CASE request.kind
+                        WHEN 'restart' THEN
+                          runtime.runtime_capabilities->'capabilities'->'restart' = 'true'::jsonb
+                        WHEN 'recover_known_good_chat_runtime' THEN
+                          runtime.runtime_capabilities->'capabilities'->'recover_known_good_chat' = 'true'::jsonb
+                        WHEN 'upgrade' THEN
+                          runtime.runtime_capabilities->'capabilities'->'runtime_upgrade' = 'true'::jsonb
+                        WHEN 'stop' THEN
+                          runtime.runtime_capabilities->'capabilities'->'stop' = 'true'::jsonb
+                        WHEN 'destroy' THEN
+                          runtime.runtime_capabilities->'capabilities'->'runtime_retirement' = 'true'::jsonb
+                        ELSE false
+                      END
                 ORDER BY request.created_at, request.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -5374,6 +5401,7 @@ where
                 &now,
                 &source_host_id,
                 &runner_classes,
+                &supported_control_kinds,
             ],
             )
             .await
@@ -6134,7 +6162,7 @@ where
                     snapshot.updated_at::text AS status_updated_at,
                     snapshot.hermes_available AS snapshot_hermes_available,
                     artifact.version_label AS runtime_artifact_version_label,
-                    artifact.kind AS runtime_artifact_kind,
+                    runtime.runtime_capabilities,
                     EXISTS (
                       SELECT 1 FROM project_runtime_links link
                       WHERE link.agent_runtime_id = runtime.id AND link.active
@@ -6165,12 +6193,11 @@ where
                         .ok_or_else(|| CoreError::Store(format!("invalid runtime status {value}")))
                 })
                 .transpose()?;
-            let artifact_kind: Option<String> = row.get("runtime_artifact_kind");
-            let supports_runtime_control = artifact_kind
-                .as_deref()
-                .and_then(parse_runtime_artifact_kind)
-                .map(crate::runtime_artifact_supports_control)
-                .unwrap_or(false);
+            let runtime_capabilities: Option<RuntimeCapabilitiesEnvelope> =
+                optional_json_column(row, "runtime_capabilities")?
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(json_error)?;
             let project_display_name: Option<String> = row.get("project_display_name");
             let snapshot_hermes: Option<bool> = row.get("snapshot_hermes_available");
             Ok(AdminRuntimeOverview {
@@ -6191,7 +6218,9 @@ where
                 published_app_urls: host_facts.published_app_urls.clone(),
                 active_finite_private_key_count: row.get("active_finite_private_key_count"),
                 runtime_link_active: row.get("runtime_link_active"),
-                supports_runtime_control,
+                runtime_capabilities: runtime_capabilities
+                    .as_ref()
+                    .map(|capabilities| *capabilities.v1()),
             })
         })
         .collect()
@@ -6519,6 +6548,7 @@ where
             provider_runtime_handle: None,
             provider_runtime_handle_history: Vec::new(),
             contact_endpoint: None,
+            runtime_capabilities: None,
             host_facts: candidate.host_facts.clone(),
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -7479,10 +7509,23 @@ fn json_error(error: serde_json::Error) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FinitePrivateApiKeyStatus, RuntimeArtifactKind};
+    use crate::{
+        FinitePrivateApiKeyStatus, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
+        RuntimeCapabilitiesV1,
+    };
     use futures_util::FutureExt;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
+        RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            restart: true,
+            recover_known_good_chat: false,
+            runtime_upgrade: true,
+            stop: true,
+            runtime_retirement: false,
+        })
+    }
 
     /// Ephemeral-Postgres-per-test harness.
     ///
@@ -8314,6 +8357,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
@@ -8346,6 +8390,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("row-native-host".to_string()),
@@ -8451,6 +8496,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     display_name: Some("Admin Ops Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("admin-ops-host".to_string()),
@@ -8477,7 +8523,10 @@ mod tests {
                 overview.runtime_artifact_version_label.as_deref(),
                 Some("admin-ops-v1")
             );
-            assert!(overview.supports_runtime_control);
+            assert_eq!(
+                overview.runtime_capabilities,
+                Some(*kata_runtime_capabilities().v1())
+            );
             assert!(overview.runtime_link_active);
 
             // Admin restart persists a leasable control request.
@@ -8497,7 +8546,11 @@ mod tests {
                     lease_token: format!("control-lease-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some("admin-ops-host".to_string()),
-                    runner_capacity: None,
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
                     now: None,
                 })
                 .await
@@ -8689,6 +8742,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     display_name: Some("RC Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(host.to_string()),
@@ -9940,6 +9994,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
@@ -9965,6 +10020,7 @@ mod tests {
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
                     contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(source_host_id.clone()),

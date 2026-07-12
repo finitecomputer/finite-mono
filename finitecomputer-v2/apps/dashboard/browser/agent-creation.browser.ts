@@ -45,6 +45,7 @@ type VisibleProject = {
     runtime_capabilities?: {
       restart?: boolean;
       recover_known_good_chat?: boolean;
+      runtime_upgrade?: boolean;
       stop?: boolean;
       runtime_retirement?: boolean;
     } | null;
@@ -459,11 +460,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
-      await main.getByRole("button", { name: "Recover chat" }).waitFor({ state: "visible" });
-      await expectVisibleText(
-        page,
-        "Restarts and reconciles this agent's known-good chat services. This does not restore a backup or delete chat data."
+      assert.equal(
+        await main.getByRole("button", { name: "Recover chat" }).count(),
+        0,
+        "recovery must stay hidden when Core explicitly advertises it as unsupported"
       );
+      assert.equal(await page.getByText("Chat recovery", { exact: true }).count(), 0);
       await main.getByRole("button", { name: "Stop" }).waitFor({ state: "visible" });
       assert.equal(await main.getByRole("button", { name: "Destroy" }).count(), 0);
       const openWebChat = main.getByRole("link", { name: "Open chat" });
@@ -635,10 +637,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await waitFor(() => core.state.restartPosts.includes("project_running"));
       await restartAgent.waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.unavailable, true, "restart must not fake chat recovery");
-      const recoverChat = main.getByRole("button", { name: "Recover chat" });
-      await recoverChat.click();
-      await waitFor(() => core.state.recoverPosts.includes("project_running"));
-      await recoverChat.waitFor({ state: "visible" });
+      assert.equal(await main.getByRole("button", { name: "Recover chat" }).count(), 0);
+      assert.deepEqual(core.state.recoverPosts, []);
+      hostedDevice.setAvailable(true);
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
       );
@@ -1754,7 +1755,8 @@ function visibleProject(
   displayName: string,
   runtimeStatusUrl: string,
   legacyMachineId = "completed-oslo-bot",
-  runtimeRetirement = false
+  runtimeRetirement = false,
+  recoverKnownGoodChat = false
 ): VisibleProject {
   return {
     project: {
@@ -1771,7 +1773,8 @@ function visibleProject(
       hermes_available: true,
       runtime_capabilities: {
         restart: true,
-        recover_known_good_chat: true,
+        recover_known_good_chat: recoverKnownGoodChat,
+        runtime_upgrade: false,
         stop: true,
         runtime_retirement: runtimeRetirement,
       },

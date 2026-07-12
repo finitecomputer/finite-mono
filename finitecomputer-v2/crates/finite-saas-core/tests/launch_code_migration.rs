@@ -7,6 +7,8 @@ const RUNTIME_UPGRADE_V2: &str = include_str!("../migrations/0002_runtime_upgrad
 const LAUNCH_CODES_V3: &str = include_str!("../migrations/0003_launch_codes.sql");
 const MEMBERSHIP_ARCHIVE_V4: &str = include_str!("../migrations/0004_membership_archive.sql");
 const PHALA_EXPAND_V5: &str = include_str!("../migrations/0005_phala_expand.sql");
+const RUNTIME_CAPABILITIES_V6: &str =
+    include_str!("../migrations/0006_runtime_capabilities_expand.sql");
 
 static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -376,6 +378,105 @@ async fn phala_expand_backfills_standard_without_moving_running_placement() {
         assert_eq!(old_row.get::<_, Option<serde_json::Value>>(2), None);
 
         client.batch_execute(PHALA_EXPAND_V5).await.unwrap();
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO agent_runtimes (
+                  id, project_id, source_host_id, source_machine_id, source_import_key,
+                  host_facts, created_at, updated_at
+                ) VALUES
+                  (
+                    'runtime-kata', 'project-unlaunched', 'kata-host', 'kata-machine',
+                    'kata-host:kata-machine',
+                    '{"display_name":"Running Kata","hostname":null,"runtime_host":"kata-host","runtime_status":"online","active_inference_profile":null,"hermes_available":true,"published_app_urls":[]}'::jsonb,
+                    now(), now()
+                  ),
+                  (
+                    'runtime-imported', 'project-n-minus-one', 'legacy-host', 'legacy-machine',
+                    'legacy-host:legacy-machine',
+                    '{"display_name":"Imported","hostname":null,"runtime_host":"legacy-host","runtime_status":"online","active_inference_profile":null,"hermes_available":true,"published_app_urls":[]}'::jsonb,
+                    now(), now()
+                  );
+                UPDATE agent_creation_requests
+                  SET status = 'running', agent_runtime_id = 'runtime-kata'
+                  WHERE id = 'request-unlaunched';
+                "#,
+            )
+            .await
+            .unwrap();
+
+        client.batch_execute(RUNTIME_CAPABILITIES_V6).await.unwrap();
+        let kata_capabilities = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-kata'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, Option<serde_json::Value>>(0)
+            .unwrap();
+        assert_eq!(
+            kata_capabilities,
+            serde_json::json!({
+                "schema": "runtime_capabilities.v1",
+                "capabilities": {
+                    "restart": true,
+                    "recover_known_good_chat": false,
+                    "runtime_upgrade": true,
+                    "stop": true,
+                    "runtime_retirement": false
+                }
+            })
+        );
+        for runtime_id in ["runtime-running", "runtime-imported"] {
+            let capabilities = client
+                .query_one(
+                    "SELECT runtime_capabilities FROM agent_runtimes WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(capabilities.get::<_, Option<serde_json::Value>>(0), None);
+        }
+
+        // The expand column remains nullable for N-1 writers and accepts only
+        // object envelopes when a value is present.
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO agent_runtimes (
+                  id, project_id, source_host_id, source_machine_id, source_import_key,
+                  host_facts, created_at, updated_at
+                ) VALUES (
+                  'runtime-n-minus-one-post', 'project-n-minus-one', 'old-host', 'old-machine',
+                  'old-host:old-machine',
+                  '{"display_name":"Old writer","hostname":null,"runtime_host":"old-host","runtime_status":"unknown","active_inference_profile":null,"hermes_available":null,"published_app_urls":[]}'::jsonb,
+                  now(), now()
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+        let old_writer = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-n-minus-one-post'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_writer.get::<_, Option<serde_json::Value>>(0), None);
+        let invalid_capabilities = client
+            .execute(
+                "UPDATE agent_runtimes SET runtime_capabilities = '[]'::jsonb WHERE id = 'runtime-imported'",
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            invalid_capabilities.code(),
+            Some(&SqlState::CHECK_VIOLATION)
+        );
+        client.batch_execute(RUNTIME_CAPABILITIES_V6).await.unwrap();
     })
     .await;
 }

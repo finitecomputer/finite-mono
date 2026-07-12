@@ -91,7 +91,7 @@ test("oneTimeKeyError surfaces only error states", () => {
   );
 });
 
-test("runtime upgrade control stays admin-only and requires an exact artifact id", async () => {
+test("admin runtime controls use exact fail-closed capabilities", async () => {
   const [actionsSource, adminPageSource, upgradePageSource] = await Promise.all([
     readFile(path.resolve(process.cwd(), "src/app/actions.ts"), "utf8"),
     readFile(
@@ -106,6 +106,60 @@ test("runtime upgrade control stays admin-only and requires an exact artifact id
       "utf8"
     ),
   ]);
+
+  const restartActionSource = sourceBetween(
+    actionsSource,
+    "export async function adminOpsRestartRuntimeAction",
+    "export async function adminOpsRecoverRuntimeAction"
+  );
+  const recoverActionSource = sourceBetween(
+    actionsSource,
+    "export async function adminOpsRecoverRuntimeAction",
+    "export async function adminOpsUpgradeRuntimeAction"
+  );
+  const upgradeActionSource = sourceBetween(
+    actionsSource,
+    "export async function adminOpsUpgradeRuntimeAction",
+    "export async function adminOpsRevokeFinitePrivateKeyAction"
+  );
+
+  assert.doesNotMatch(adminPageSource, /supports_runtime_control/u);
+  assert.doesNotMatch(upgradePageSource, /supports_runtime_control/u);
+  assert.doesNotMatch(actionsSource, /supports_runtime_control/u);
+
+  assert.match(adminPageSource, /const canRestart = coreAdminRuntimeSupportsRestart\(runtime\)/u);
+  assert.match(adminPageSource, /disabled=\{!canRestart\}/u);
+  assert.match(adminPageSource, /const canRecover = coreAdminRuntimeSupportsRecovery\(runtime\)/u);
+  assert.match(adminPageSource, /disabled=\{!canRecover\}/u);
+  assert.match(adminPageSource, /const canUpgrade = coreAdminRuntimeSupportsUpgrade\(runtime\)/u);
+  assert.match(adminPageSource, /\{canUpgrade \? \(/u);
+
+  assert.match(restartActionSource, /requireAdminViewer\("restart hosted runtimes"\)/u);
+  assert.match(restartActionSource, /loadAdminRuntimeForAction\(projectId\)/u);
+  assert.match(restartActionSource, /coreAdminRuntimeSupportsRestart\(runtime\)/u);
+  assert.match(restartActionSource, /adminRestartCoreRuntime\(projectId\)/u);
+  assert.doesNotMatch(
+    restartActionSource,
+    /coreAdminRuntimeSupports(?:Recovery|Upgrade)\(/u
+  );
+
+  assert.match(recoverActionSource, /requireAdminViewer\("recover hosted runtimes"\)/u);
+  assert.match(recoverActionSource, /loadAdminRuntimeForAction\(projectId\)/u);
+  assert.match(recoverActionSource, /coreAdminRuntimeSupportsRecovery\(runtime\)/u);
+  assert.match(recoverActionSource, /adminRecoverCoreRuntime\(projectId\)/u);
+  assert.doesNotMatch(
+    recoverActionSource,
+    /coreAdminRuntimeSupports(?:Restart|Upgrade)\(/u
+  );
+
+  assert.match(upgradeActionSource, /requireAdminViewer\("upgrade hosted runtimes"\)/u);
+  assert.match(upgradeActionSource, /loadAdminRuntimeForAction\(projectId\)/u);
+  assert.match(upgradeActionSource, /coreAdminRuntimeSupportsUpgrade\(runtime\)/u);
+  assert.match(upgradeActionSource, /adminUpgradeCoreRuntime\(\{/u);
+  assert.doesNotMatch(
+    upgradeActionSource,
+    /coreAdminRuntimeSupports(?:Restart|Recovery)\(/u
+  );
 
   assert.match(
     actionsSource,
@@ -123,6 +177,10 @@ test("runtime upgrade control stays admin-only and requires an exact artifact id
     /candidate\.project_id === projectId/u
   );
   assert.match(upgradePageSource, /name="targetRuntimeArtifactId"/u);
+  assert.match(
+    upgradePageSource,
+    /!coreAdminRuntimeSupportsUpgrade\(runtime\)/u
+  );
   assert.match(upgradePageSource, /required/u);
   assert.match(upgradePageSource, /<FormActionButton/u);
   assert.doesNotMatch(upgradePageSource, /ConfirmSubmitButton/u);
@@ -131,3 +189,11 @@ test("runtime upgrade control stays admin-only and requires an exact artifact id
     /No\s+candidate is selected automatically\./u
   );
 });
+
+function sourceBetween(source: string, start: string, end: string) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert.notEqual(startIndex, -1, `missing source marker: ${start}`);
+  assert.notEqual(endIndex, -1, `missing source marker: ${end}`);
+  return source.slice(startIndex, endIndex);
+}

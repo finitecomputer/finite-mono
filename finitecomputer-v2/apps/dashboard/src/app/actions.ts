@@ -22,12 +22,16 @@ import {
   adminUpgradeCoreRuntime,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
+  coreAdminRuntimeSupportsRecovery,
+  coreAdminRuntimeSupportsRestart,
+  coreAdminRuntimeSupportsUpgrade,
   coreProjectSupportsHostedRecovery,
   coreProjectSupportsHostedRestart,
   coreProjectSupportsHostedStop,
   coreProjectSupportsRetirement,
   issueCoreFinitePrivateApiKey,
   linkCoreStripeCustomer,
+  loadCoreAdminRuntimes,
   loadCoreBillingOverview,
   loadCoreMe,
   resetCoreFinitePrivateGrant,
@@ -312,22 +316,44 @@ async function requireAdminViewer(action: string) {
   }
 }
 
+async function loadAdminRuntimeForAction(projectId: string) {
+  const result = await loadCoreAdminRuntimes();
+  return (
+    result.runtimes?.find((runtime) => runtime.project_id === projectId) ?? null
+  );
+}
+
 export async function adminOpsRestartRuntimeAction(formData: FormData) {
   await requireAdminViewer("restart hosted runtimes");
-  await adminRestartCoreRuntime(String(formData.get("projectId") ?? ""));
+  const projectId = String(formData.get("projectId") ?? "");
+  const runtime = await loadAdminRuntimeForAction(projectId);
+  if (!coreAdminRuntimeSupportsRestart(runtime)) {
+    throw new Error("This hosted runtime cannot be restarted from the dashboard.");
+  }
+  await adminRestartCoreRuntime(projectId);
   revalidatePath("/dashboard/admin");
 }
 
 export async function adminOpsRecoverRuntimeAction(formData: FormData) {
   await requireAdminViewer("recover hosted runtimes");
-  await adminRecoverCoreRuntime(String(formData.get("projectId") ?? ""));
+  const projectId = String(formData.get("projectId") ?? "");
+  const runtime = await loadAdminRuntimeForAction(projectId);
+  if (!coreAdminRuntimeSupportsRecovery(runtime)) {
+    throw new Error("Chat recovery is not available for this hosted runtime.");
+  }
+  await adminRecoverCoreRuntime(projectId);
   revalidatePath("/dashboard/admin");
 }
 
 export async function adminOpsUpgradeRuntimeAction(formData: FormData) {
   await requireAdminViewer("upgrade hosted runtimes");
+  const projectId = String(formData.get("projectId") ?? "");
+  const runtime = await loadAdminRuntimeForAction(projectId);
+  if (!coreAdminRuntimeSupportsUpgrade(runtime)) {
+    throw new Error("This hosted runtime cannot be upgraded from the dashboard.");
+  }
   await adminUpgradeCoreRuntime({
-    projectId: String(formData.get("projectId") ?? ""),
+    projectId,
     targetRuntimeArtifactId: String(
       formData.get("targetRuntimeArtifactId") ?? ""
     ),

@@ -31,6 +31,9 @@ import {
   launchCodeHostingTierLabel,
 } from "@/lib/admin-ops";
 import {
+  coreAdminRuntimeSupportsRecovery,
+  coreAdminRuntimeSupportsRestart,
+  coreAdminRuntimeSupportsUpgrade,
   loadCoreAdminRuntimes,
   loadCoreFinitePrivateAdminState,
   loadCoreLaunchCodeBatches,
@@ -231,6 +234,10 @@ function ProvisionedBoxesPanel({ result }: { result: CoreAdminRuntimesResult }) 
 }
 
 function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
+  const canRestart = coreAdminRuntimeSupportsRestart(runtime);
+  const canRecover = coreAdminRuntimeSupportsRecovery(runtime);
+  const canUpgrade = coreAdminRuntimeSupportsUpgrade(runtime);
+
   return (
     <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
@@ -293,7 +300,7 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
               variant="outline"
               size="sm"
               pendingLabel="Restarting..."
-              disabled={!runtime.supports_runtime_control}
+              disabled={!canRestart}
               confirmMessage={`Restart ${runtime.project_display_name} (${runtime.source_machine_id})?`}
             >
               <RotateCcwIcon />
@@ -306,7 +313,7 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
               variant="outline"
               size="sm"
               pendingLabel="Recovering..."
-              disabled={!runtime.supports_runtime_control}
+              disabled={!canRecover}
               confirmMessage={`Recover known-good chat runtime for ${runtime.project_display_name}?`}
             >
               <ActivityIcon />
@@ -314,7 +321,7 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
             </ConfirmSubmitButton>
           </form>
         </div>
-        {runtime.supports_runtime_control ? (
+        {canUpgrade ? (
           <Button asChild variant="outline" size="sm" className="w-fit">
             <Link
               href={{

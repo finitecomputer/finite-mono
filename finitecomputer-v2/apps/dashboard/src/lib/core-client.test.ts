@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  coreAdminRuntimeSupportsRecovery,
+  coreAdminRuntimeSupportsRestart,
+  coreAdminRuntimeSupportsRetirement,
+  coreAdminRuntimeSupportsStop,
+  coreAdminRuntimeSupportsUpgrade,
   coreAgentCreationRequestForProject,
   coreAgentCreationRequestBody,
   coreBridgeStatus,
@@ -12,11 +17,19 @@ import {
   coreProjectLocationLabel,
   coreProjectPrimaryUrl,
   coreProjectRuntimeId,
+  coreProjectSupportsHostedRecovery,
+  coreProjectSupportsHostedRestart,
+  coreProjectSupportsHostedRuntimeControl,
+  coreProjectSupportsHostedRuntimeUpgrade,
+  coreProjectSupportsHostedStop,
   coreProjectSupportsRetirement,
   coreProductProjectForLegacyMachineId,
   coreProductProjectForRouteId,
   coreProductProjects,
+  coreRuntimeCapabilitiesSupport,
   type CoreAgentCreationRequestSummary,
+  type CoreAdminRuntimeOverview,
+  type CoreRuntimeCapabilities,
   type CoreVisibleProject,
   loadCoreSourceHostRelayEndpoint,
 } from "./core-client";
@@ -199,21 +212,104 @@ test("route helpers prefer stable ids and isolate N-1 legacy alias reads", () =>
   );
 });
 
-test("runtime retirement requires an explicit provider-neutral capability", () => {
+test("runtime capability helpers fail closed when the advertisement is absent", () => {
   const project = {
     project: { id: "project_1" },
     runtime: { id: "runtime_1" },
   } as CoreVisibleProject;
-  assert.equal(coreProjectSupportsRetirement(project), false);
+  const projectHelpers = [
+    coreProjectSupportsHostedRuntimeControl,
+    coreProjectSupportsHostedRestart,
+    coreProjectSupportsHostedRecovery,
+    coreProjectSupportsHostedRuntimeUpgrade,
+    coreProjectSupportsHostedStop,
+    coreProjectSupportsRetirement,
+  ];
+  const adminHelpers = [
+    coreAdminRuntimeSupportsRestart,
+    coreAdminRuntimeSupportsRecovery,
+    coreAdminRuntimeSupportsUpgrade,
+    coreAdminRuntimeSupportsStop,
+    coreAdminRuntimeSupportsRetirement,
+  ];
 
-  const advertised = {
-    ...project,
-    runtime: {
-      ...project.runtime,
-      runtime_capabilities: { runtime_retirement: true },
+  for (const helper of projectHelpers) {
+    assert.equal(helper(undefined), false);
+    assert.equal(helper(project), false);
+  }
+  for (const helper of adminHelpers) {
+    assert.equal(helper(undefined), false);
+    assert.equal(helper({} as CoreAdminRuntimeOverview), false);
+  }
+  for (const operation of [
+    "restart",
+    "recover_known_good_chat",
+    "runtime_upgrade",
+    "stop",
+    "runtime_retirement",
+  ] as const) {
+    assert.equal(coreRuntimeCapabilitiesSupport(undefined, operation), false);
+    assert.equal(coreRuntimeCapabilitiesSupport(null, operation), false);
+    assert.equal(coreRuntimeCapabilitiesSupport({}, operation), false);
+  }
+});
+
+test("runtime capability helpers gate only their exact advertised operation", () => {
+  const operations = [
+    {
+      capability: "restart",
+      projectHelper: coreProjectSupportsHostedRestart,
+      adminHelper: coreAdminRuntimeSupportsRestart,
     },
-  } as CoreVisibleProject;
-  assert.equal(coreProjectSupportsRetirement(advertised), true);
+    {
+      capability: "recover_known_good_chat",
+      projectHelper: coreProjectSupportsHostedRecovery,
+      adminHelper: coreAdminRuntimeSupportsRecovery,
+    },
+    {
+      capability: "runtime_upgrade",
+      projectHelper: coreProjectSupportsHostedRuntimeUpgrade,
+      adminHelper: coreAdminRuntimeSupportsUpgrade,
+    },
+    {
+      capability: "stop",
+      projectHelper: coreProjectSupportsHostedStop,
+      adminHelper: coreAdminRuntimeSupportsStop,
+    },
+    {
+      capability: "runtime_retirement",
+      projectHelper: coreProjectSupportsRetirement,
+      adminHelper: coreAdminRuntimeSupportsRetirement,
+    },
+  ] as const;
+
+  for (const advertised of operations) {
+    const capabilities: CoreRuntimeCapabilities = {
+      restart: false,
+      recover_known_good_chat: false,
+      runtime_upgrade: false,
+      stop: false,
+      runtime_retirement: false,
+      [advertised.capability]: true,
+    };
+    const project = {
+      project: { id: "project_1" },
+      runtime: { id: "runtime_1", runtime_capabilities: capabilities },
+    } as CoreVisibleProject;
+    const adminRuntime = {
+      runtime_capabilities: capabilities,
+    } as CoreAdminRuntimeOverview;
+
+    for (const operation of operations) {
+      const expected = operation.capability === advertised.capability;
+      assert.equal(operation.projectHelper(project), expected);
+      assert.equal(operation.adminHelper(adminRuntime), expected);
+      assert.equal(
+        coreRuntimeCapabilitiesSupport(capabilities, operation.capability),
+        expected
+      );
+    }
+  }
 });
 
 test("core project helpers expose self-serve launch status without fake runtime links", () => {

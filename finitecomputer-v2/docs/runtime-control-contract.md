@@ -23,26 +23,27 @@ skills. They do not become Runtime Management Pipe commands or status fields.
   Private grant/key state.
 - Dashboard web chat uses a Hosted Web Device; Electron and native clients can
   enroll as additional independent Finite Chat Devices.
-- Dashboard-owned runtime controls are limited to normal restart,
-  recover-known-good runtime, stop, and Runtime Retirement. Purge User
-  Data is a separate retention/export workflow, not a normal runtime control.
+- Dashboard-owned runtime controls are limited to the exact operations in
+  Core's persisted Runtime capability envelope. Missing capabilities expose no
+  controls. Purge User Data is a separate retention/export workflow, not a
+  normal runtime control.
 - Runtime Management Pipe v1 is outbound only and carries generic runtime
   health and Product Release telemetry. It carries no product feature command,
   feature-specific status, credential, chat state, or arbitrary payload.
 - Every new runtime exposes the Product Release's baked Managed Skills Baseline
   before its first turn. Existing agents keep their installed baseline until
   they explicitly choose `finite skills sync`.
-- Restart and recover operations are leased from Core and completed only after
-  the runtime proves it is alive again. Stop completes after the provider
-  operation succeeds. Runtime Retirement completes only after Recovery
-  Readiness is proven and compute is deprovisioned without purging recovery
-  material.
+- Core leases a control only when the persisted Runtime and the worker both
+  explicitly advertise that exact kind. Restart completes only after the
+  runtime proves it is alive again; stop completes after the provider operation
+  succeeds. Recover-known-good and Runtime Retirement are currently
+  unadvertised and unavailable.
 - Recovery does not mutate chat identity, room membership, Hermes memory,
   workspace files, user-installed tools, or skills.
-- Recover-known-good is a first-class lifecycle request, but its current
-  Docker/Kata/Phala implementation is provider restart plus runtime-image boot
-  reconciliation. It must not claim stronger mounted-state mutation until that
-  behavior exists in the same image used across the test matrix.
+- The recover-known-good database kind remains for rollout compatibility, but
+  Core does not enqueue or lease it and current Runner binaries refuse an N-1
+  lease before adapter dispatch. A future implementation must prove behavior
+  stronger than restart before advertising the capability.
 
 ## Control Boundary
 
@@ -114,9 +115,9 @@ chat-specific configuration behavior.
 It is intended for a case where the runtime is reachable enough to restart but
 image-owned boot state is suspected broken.
 
-Today this operation is intentionally equivalent to provider restart in Docker,
-Kata, and Phala. That is a real control path with a real Core kind, lease, and
-Postgres check constraint, but it does not claim to rewrite mounted state.
+Today this operation is unavailable. Treating provider restart as recovery made
+the control misleading, so every adapter advertises it as false. The retained
+Core kind and adapter method are compatibility seams, not evidence of support.
 
 A stronger recovery policy may be added later only if the same runtime image
 used by Docker, Kata, and Phala implements it. That future image-owned operation must
@@ -228,11 +229,9 @@ Current debt:
 
 - the first-class image still uses the Finite Chat owned entrypoint and gateway
   launcher. That is the right product shape for this release.
-- recover-known-good is currently equivalent to restart while the current image
-  owns narrow config reconciliation on boot. It repairs only Finite Chat and
-  managed-skills invariants while preserving inference and other messaging
-  platforms. A stronger boot-policy operation must be reintroduced only when it
-  is implemented in the same image used by Docker, Kata, and Phala.
+- recover-known-good is unavailable. A stronger boot-policy operation may be
+  advertised only when it is implemented and verified across the same runtime
+  image and provider test matrix; ordinary restart does not satisfy that bar.
 - v2 does not currently configure independent Agent Runtime backup. The
   optional entrypoint Restic path now includes the complete `/data` root,
   including `/data/workspace`, but it does not yet provide the required
