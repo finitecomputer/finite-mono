@@ -92,23 +92,40 @@ test("oneTimeKeyError surfaces only error states", () => {
 });
 
 test("runtime upgrade control stays admin-only and requires an exact artifact id", async () => {
-  const [actionsSource, pageSource] = await Promise.all([
+  const [actionsSource, adminPageSource, upgradePageSource] = await Promise.all([
     readFile(path.resolve(process.cwd(), "src/app/actions.ts"), "utf8"),
     readFile(
       path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
+      "utf8"
+    ),
+    readFile(
+      path.resolve(
+        process.cwd(),
+        "src/app/dashboard/admin/runtime-upgrade/page.tsx"
+      ),
       "utf8"
     ),
   ]);
 
   assert.match(
     actionsSource,
-    /adminOpsUpgradeRuntimeAction[\s\S]*requireAdminViewer\("upgrade hosted runtimes"\)[\s\S]*adminUpgradeCoreRuntime\([\s\S]*targetRuntimeArtifactId/u
+    /adminOpsUpgradeRuntimeAction[\s\S]*requireAdminViewer\("upgrade hosted runtimes"\)[\s\S]*adminUpgradeCoreRuntime\([\s\S]*targetRuntimeArtifactId[\s\S]*redirect\("\/dashboard\/admin"\)/u
   );
-  assert.match(pageSource, /name="targetRuntimeArtifactId"/u);
-  assert.match(pageSource, /required/u);
+  assert.doesNotMatch(adminPageSource, /name="targetRuntimeArtifactId"/u);
   assert.match(
-    pageSource,
-    /disabled=\{!runtime\.supports_runtime_control\}/u
+    adminPageSource,
+    /pathname: "\/dashboard\/admin\/runtime-upgrade"[\s\S]*query: \{ projectId: runtime\.project_id \}/u
   );
-  assert.match(pageSource, /No\s+candidate is selected automatically\./u);
+  assert.match(upgradePageSource, /canAccessAdminOps\(viewer\)/u);
+  assert.match(upgradePageSource, /loadCoreAdminRuntimes\(\)/u);
+  assert.match(
+    upgradePageSource,
+    /candidate\.project_id === projectId/u
+  );
+  assert.match(upgradePageSource, /name="targetRuntimeArtifactId"/u);
+  assert.match(upgradePageSource, /required/u);
+  assert.match(
+    upgradePageSource,
+    /No\s+candidate is selected automatically\./u
+  );
 });

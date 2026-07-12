@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   ActivityIcon,
@@ -16,7 +17,6 @@ import {
   adminOpsRevokeFinitePrivateKeyAction,
   adminOpsResetFinitePrivateWindowAction,
   adminOpsRestartRuntimeAction,
-  adminOpsUpgradeRuntimeAction,
 } from "@/app/actions";
 import {
   AdminFriendKeyIssueForm,
@@ -24,7 +24,7 @@ import {
   AdminRotateKeyForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
-import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { canAccessAdminOps, heartbeatAgeLabel } from "@/lib/admin-ops";
 import {
   loadCoreAdminRuntimes,
@@ -305,42 +305,19 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
             </ConfirmSubmitButton>
           </form>
         </div>
-        <form
-          action={adminOpsUpgradeRuntimeAction}
-          className="grid gap-1.5 sm:grid-cols-[minmax(12rem,18rem)_auto]"
-        >
-          <input type="hidden" name="projectId" value={runtime.project_id} />
-          <label
-            className="grid gap-1 text-xs font-medium text-muted-foreground sm:col-span-2"
-            htmlFor={`runtime-artifact-${runtime.agent_runtime_id}`}
-          >
-            Exact target runtime artifact ID
-          </label>
-          <Input
-            id={`runtime-artifact-${runtime.agent_runtime_id}`}
-            name="targetRuntimeArtifactId"
-            className="font-mono text-xs"
-            placeholder="Paste an approved artifact ID"
-            required
-            autoComplete="off"
-            spellCheck={false}
-            disabled={!runtime.supports_runtime_control}
-          />
-          <ConfirmSubmitButton
-            variant="outline"
-            size="sm"
-            pendingLabel="Upgrading..."
-            disabled={!runtime.supports_runtime_control}
-            confirmMessage={`Upgrade ${runtime.project_display_name} to the exact runtime artifact ID entered? The hosted runtime will restart on its existing volume.`}
-          >
-            <ActivityIcon />
-            Upgrade
-          </ConfirmSubmitButton>
-          <p className="text-xs text-muted-foreground sm:col-span-2">
-            Operator control: enter the full Core runtime artifact ID. No
-            candidate is selected automatically.
-          </p>
-        </form>
+        {runtime.supports_runtime_control ? (
+          <Button asChild variant="outline" size="sm" className="w-fit">
+            <Link
+              href={{
+                pathname: "/dashboard/admin/runtime-upgrade",
+                query: { projectId: runtime.project_id },
+              }}
+            >
+              <ActivityIcon />
+              Upgrade
+            </Link>
+          </Button>
+        ) : null}
       </div>
     </div>
   );

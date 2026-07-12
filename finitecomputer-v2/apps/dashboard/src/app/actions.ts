@@ -333,6 +333,7 @@ export async function adminOpsUpgradeRuntimeAction(formData: FormData) {
     ),
   });
   revalidatePath("/dashboard/admin");
+  redirect("/dashboard/admin");
 }
 
 export async function adminOpsRevokeFinitePrivateKeyAction(formData: FormData) {
