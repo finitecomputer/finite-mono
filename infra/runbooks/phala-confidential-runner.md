@@ -87,8 +87,11 @@ If any precondition is false, leave the unit dark and stop.
 The current adapter deliberately cannot satisfy precondition 5: the official
 SDKs do not provide a reviewed Rust environment-encryption helper, and the
 required cross-language encryption/signature vectors are not pinned here.
-Creation and update therefore remain disabled even when read-only preflight is
-green. Do not port the cryptography or construct
+Core also does not yet expose the typed in-flight Phala reservation count that
+must be combined with provider inventory for admission. The worker therefore
+advertises hard-draining capacity even when every provider read is green;
+creation and update remain disabled. Do not substitute the provider CVM count
+for Core's reservation ledger, port the cryptography, or construct
 `VerifiedEncryptedEnvironment` as part of an operations workaround.
 
 ## Dark deployment verification
@@ -135,8 +138,10 @@ redacted shape/price/capacity/count summary. Configure the environment-scoped
 secret named `PHALA_CLOUD_API_KEY`; never put its value in a workflow input or
 repository variable. Configure the non-secret environment variables
 `PHALA_EXPECTED_WORKSPACE_ID` and `PHALA_EXPECTED_WORKSPACE_SLUG` as the exact
-identity fence. A green read-only preflight is not the live Phala rung and
-does not authorize a provision.
+identity fence. The workflow injects the API key only into the typed live
+preflight step; checkout, toolchain setup, fixture tests, summary validation,
+and artifact upload do not receive it. A green read-only preflight is not the
+live Phala rung and does not authorize a provision.
 
 Before the worker may advertise a new lease, its startup preflight performs:
 
@@ -146,7 +151,7 @@ Before the worker may advertise a new lease, its startup preflight performs:
 | Workspace quota | `GET /workspaces/{slug}/quotas` | response belongs to the expected slug and has one VM slot, 2 vCPU, 4096 MB memory, and 40 GB disk remaining (`-1` means provider-reported unlimited) |
 | Instance catalog | `GET /instance-types/cpu` | `tdx.medium` is exactly 2 vCPU, 4096 MB, and the reviewed live price |
 | Provider capacity | `GET /teepods/available` | response schema is recognized; region scheduling remains a provision-time gate and workspace quota is rechecked then |
-| Inventory | every page of `GET /apps` and `GET /cvms/paginated`, then every page of `GET /apps/{app_id}/revisions` for each retained Finite app | bounded complete reads; retain all rows until provider apps, non-deleted CVMs, and revisions reconcile locally; Core-ledger reconciliation remains a separate admission input |
+| Inventory | every page of `GET /apps` and `GET /cvms/paginated`, then every page of `GET /apps/{app_id}/revisions` for each retained Finite app | bounded complete reads; the Finite name prefix is discovery only, then every non-deleted CVM linked to a retained app by exact `app_id` is counted and each app's declared `cvm_count` must equal those linked rows; revisions must reconcile for every linked CVM; Core-ledger reconciliation remains a separate required admission input |
 | Privacy and allocation | returned CVM records | every non-deleted Finite CVM has `public_logs=false`, `public_sysinfo=false`, exact Medium/40 GB allocation, and the reviewed billing period/rate; a missing field is unproved |
 | Metered cost | not called by startup preflight | the official SDK surface does not currently pin a bounded usage query; do not add an unbounded read or treat metered usage as a settled invoice |
 | Private operation | provision/update request contract | `public_logs=false`, expected Cloud KMS, exact 40 GB; no mutation during preflight |
@@ -158,6 +163,14 @@ storage can still be billable. Stop and escalate on API version/schema drift,
 workspace mismatch, insufficient provider quota, changed Medium shape/price,
 incomplete inventory, an unknown resource, or inability to keep logs and
 sysinfo private.
+
+The service loop may reconstruct its launcher every 20 seconds. Provider
+preflight results are therefore shared within the process and refreshed at
+most once per 60-second window. A failed refresh retains the last conservative
+provider count and keeps creation drained; it does not make known-handle
+lifecycle controls depend on a successful inventory refresh. The cache is an
+API-load bound, not an admission proof: creation stays hard-drained until the
+typed Core in-flight reservation count and reviewed encryption path exist.
 
 Missing or malformed API-key/workspace-fence environment is static worker
 misconfiguration and fails startup; restore the required configuration before
@@ -200,6 +213,10 @@ a CVM directly.
 Adopt uses a persisted CVM id and `GET /cvms/{cvm_id}`. It never guesses from
 an endpoint or lowercases a provider id into a source-machine id. Exactly one
 matching resource may be adopted; zero or multiple matches stop the operation.
+For lifecycle control, the persisted handle authorizes only the exact returned
+`cvm_id` plus exact `app_id`; the record must also be non-deleted, private, and
+match the reviewed allocation. A provider name prefix is never handle
+authority and is not required for an already persisted handle.
 
 ## Status and restart
 
@@ -302,8 +319,11 @@ provider deletion step.
 Read every bounded page of `GET /apps` and `GET /cvms/paginated`, then each
 retained app's bounded `GET /apps/{app_id}/revisions`. Join API-visible Finite
 apps/CVMs/revisions against Core provision/reservation operations plus current
-and historical handles.
-Record safe counts for
+and historical handles. Use the Finite prefix only to discover an app/CVM
+relationship. Once an app is retained, include every non-deleted CVM whose
+exact `app_id` points to that app, including non-prefixed or provider-renamed
+CVMs, and stop if the app's declared `cvm_count` disagrees with the linked
+rows. Record safe counts for
 creating, running, stopped, retained and unknown resources. Expected unknown
 count is zero. Never automatically mutate an unknown resource.
 
@@ -322,6 +342,11 @@ Ordinary capacity is consumed by any current billable/non-deleted Finite
 resource or in-flight reservation, regardless of running state. The one
 stopped-source restore exception is separately owned/expiring and blocks new
 provisioning; it does not raise ordinary capacity.
+
+Provider inventory does not contain Core operations that reserved capacity
+before the provider resource became visible. Until Core exposes that typed
+in-flight count to the Runner's admission calculation, the only safe capacity
+answer is hard-draining even when provider inventory is empty and healthy.
 
 Cost inspection records the verified live catalog rate, actual provider
 account charges from a documented API/export when available, storage,

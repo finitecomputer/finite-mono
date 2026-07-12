@@ -20,6 +20,8 @@ pub enum InventoryContractError {
     IncompleteApp,
     #[error("Phala app and CVM inventory did not reconcile")]
     AppCvmMismatch,
+    #[error("Phala app-declared CVM counts did not match linked CVM inventory")]
+    AppCvmCountMismatch,
     #[error("Phala app inventory did not match the private Cloud KMS policy")]
     AppPolicyMismatch,
     #[error("Phala revision inventory did not match its requested app")]
@@ -198,6 +200,7 @@ impl RevisionsPage {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FiniteProviderInventory {
     pub app_ids: BTreeSet<String>,
+    pub cvm_ids: BTreeSet<String>,
     pub cvm_count: u32,
 }
 
@@ -206,11 +209,14 @@ impl FiniteProviderInventory {
         for app in apps {
             app.validate_complete()?;
         }
-        let finite_cvms = cvms
+        // The name prefix is discovery only. Once a Finite app is retained,
+        // every non-deleted CVM linked by app_id belongs to its inventory even
+        // if the provider-side CVM name changed or never used the prefix.
+        let discovered_cvms = cvms
             .iter()
-            .filter(|cvm| cvm.name.starts_with(FINITE_CVM_NAME_PREFIX) && cvm.deleted_at.is_none())
+            .filter(|cvm| cvm.is_finite_inventory_candidate())
             .collect::<Vec<_>>();
-        let cvm_app_ids = finite_cvms
+        let discovered_app_ids = discovered_cvms
             .iter()
             .map(|cvm| {
                 cvm.app_id
@@ -221,10 +227,13 @@ impl FiniteProviderInventory {
             .collect::<Result<BTreeSet<_>, _>>()?;
         let app_ids = apps
             .iter()
-            .filter(|app| app.is_finite_named() || cvm_app_ids.contains(app.app_id.as_str()))
+            .filter(|app| app.is_finite_named() || discovered_app_ids.contains(app.app_id.as_str()))
             .map(|app| app.app_id.clone())
             .collect::<BTreeSet<_>>();
-        if cvm_app_ids.iter().any(|app_id| !app_ids.contains(*app_id)) {
+        if discovered_app_ids
+            .iter()
+            .any(|app_id| !app_ids.contains(*app_id))
+        {
             return Err(InventoryContractError::AppCvmMismatch);
         }
         if apps
@@ -233,9 +242,43 @@ impl FiniteProviderInventory {
         {
             return Err(InventoryContractError::AppPolicyMismatch);
         }
+        let linked_cvms = cvms
+            .iter()
+            .filter(|cvm| cvm.deleted_at.is_none())
+            .filter(|cvm| {
+                cvm.app_id
+                    .as_deref()
+                    .is_some_and(|app_id| app_ids.contains(app_id))
+            })
+            .collect::<Vec<_>>();
+        let cvm_ids = linked_cvms
+            .iter()
+            .map(|cvm| cvm.id.clone())
+            .collect::<BTreeSet<_>>();
+        if cvm_ids.len() != linked_cvms.len() || cvm_ids.iter().any(|id| id.trim().is_empty()) {
+            return Err(InventoryContractError::AppCvmMismatch);
+        }
+        let mut declared_cvm_count = 0_u32;
+        for app in apps.iter().filter(|app| app_ids.contains(&app.app_id)) {
+            let declared = app.cvm_count.ok_or(InventoryContractError::IncompleteApp)?;
+            let observed = linked_cvms
+                .iter()
+                .filter(|cvm| cvm.app_id.as_deref() == Some(app.app_id.as_str()))
+                .count();
+            if usize::try_from(declared).ok() != Some(observed) {
+                return Err(InventoryContractError::AppCvmCountMismatch);
+            }
+            declared_cvm_count = declared_cvm_count
+                .checked_add(declared)
+                .ok_or(InventoryContractError::AppCvmCountMismatch)?;
+        }
+        if usize::try_from(declared_cvm_count).ok() != Some(linked_cvms.len()) {
+            return Err(InventoryContractError::AppCvmCountMismatch);
+        }
         Ok(Self {
             app_ids,
-            cvm_count: finite_cvms.len().try_into().unwrap_or(u32::MAX),
+            cvm_ids,
+            cvm_count: declared_cvm_count,
         })
     }
 
@@ -245,6 +288,10 @@ impl FiniteProviderInventory {
             .try_into()
             .unwrap_or(u32::MAX)
             .max(self.cvm_count)
+    }
+
+    pub fn contains_cvm(&self, cvm: &CvmInfo) -> bool {
+        self.cvm_ids.contains(&cvm.id)
     }
 
     pub fn reconcile_revisions(
@@ -258,10 +305,7 @@ impl FiniteProviderInventory {
         {
             return Err(InventoryContractError::RevisionMismatch);
         }
-        for cvm in cvms
-            .iter()
-            .filter(|cvm| cvm.name.starts_with(FINITE_CVM_NAME_PREFIX) && cvm.deleted_at.is_none())
-        {
+        for cvm in cvms.iter().filter(|cvm| self.contains_cvm(cvm)) {
             let app_id = cvm
                 .app_id
                 .as_deref()
@@ -303,6 +347,13 @@ mod tests {
         .cloned()
         .map(serde_json::from_value)
         .unwrap()
+        .unwrap()
+    }
+
+    fn linked_nonprefixed_cvm() -> CvmInfo {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/phala/cvm-linked-nonprefixed.json"
+        ))
         .unwrap()
     }
 
@@ -400,5 +451,42 @@ mod tests {
             revisions.verify_app("app_wrong").unwrap_err(),
             InventoryContractError::RevisionMismatch
         );
+    }
+
+    #[test]
+    fn retained_app_counts_every_linked_cvm_and_checks_declared_count() {
+        let mut apps: AppsPage =
+            serde_json::from_str(include_str!("../tests/fixtures/phala/apps-list.json")).unwrap();
+        let mut linked_cvms = cvms();
+        let linked = linked_nonprefixed_cvm();
+        assert!(!linked.is_finite_inventory_candidate());
+        linked_cvms.push(linked.clone());
+
+        assert_eq!(
+            FiniteProviderInventory::reconcile(&apps.dstack_apps, &linked_cvms).unwrap_err(),
+            InventoryContractError::AppCvmCountMismatch
+        );
+
+        apps.dstack_apps[0].cvm_count = Some(2);
+        let inventory =
+            FiniteProviderInventory::reconcile(&apps.dstack_apps, &linked_cvms).unwrap();
+        assert_eq!(inventory.cvm_count, 2);
+        assert_eq!(inventory.billable_resource_count(), 2);
+        assert!(inventory.cvm_ids.contains("cvm_fixture_01"));
+        assert!(inventory.cvm_ids.contains("cvm_fixture_linked"));
+        linked.verify_finite_runtime().unwrap();
+
+        let revisions: RevisionsPage =
+            serde_json::from_str(include_str!("../tests/fixtures/phala/app-revisions.json"))
+                .unwrap();
+        let mut linked_revision = revisions.revisions[0].clone();
+        linked_revision.revision_id = "revision_fixture_linked".to_string();
+        linked_revision.vm_uuid = Some("vm_fixture_linked".to_string());
+        linked_revision.compose_hash = Some("compose_fixture_linked".to_string());
+        let mut all_revisions = revisions.revisions;
+        all_revisions.push(linked_revision);
+        inventory
+            .reconcile_revisions(&linked_cvms, &all_revisions)
+            .unwrap();
     }
 }

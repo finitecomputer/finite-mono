@@ -26,7 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Read;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
@@ -46,6 +46,7 @@ const MAX_COMPOSE_BYTES: usize = 200 * 1024;
 const MAX_PROVIDER_ID_BYTES: usize = 256;
 const MAX_INVENTORY_PAGES: u32 = 1000;
 const INVENTORY_PAGE_SIZE: u32 = 100;
+const PREFLIGHT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("finite-saas-runner/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone)]
@@ -214,8 +215,16 @@ impl PhalaRuntimeHandleV1 {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PreflightSnapshot {
-    provider_healthy: bool,
     billable_resource_count: u32,
+    last_attempt: Option<Instant>,
+}
+
+static SHARED_PREFLIGHT: OnceLock<Arc<Mutex<PreflightSnapshot>>> = OnceLock::new();
+
+fn shared_preflight() -> Arc<Mutex<PreflightSnapshot>> {
+    SHARED_PREFLIGHT
+        .get_or_init(|| Arc::new(Mutex::new(PreflightSnapshot::default())))
+        .clone()
 }
 
 type HealthCheck = fn(&str, &str, Duration, Duration) -> Result<(), RunnerError>;
@@ -223,7 +232,8 @@ type HealthCheck = fn(&str, &str, Duration, Duration) -> Result<(), RunnerError>
 pub struct PhalaLauncher {
     config: PhalaConfig,
     client: Result<PhalaApiClient, String>,
-    preflight: Mutex<PreflightSnapshot>,
+    preflight: Arc<Mutex<PreflightSnapshot>>,
+    preflight_refresh_interval: Duration,
     health_check: HealthCheck,
 }
 
@@ -244,17 +254,34 @@ impl PhalaLauncher {
         Self {
             config,
             client,
-            preflight: Mutex::new(PreflightSnapshot::default()),
+            preflight: shared_preflight(),
+            preflight_refresh_interval: PREFLIGHT_REFRESH_INTERVAL,
             health_check: wait_for_http_json_ready,
         }
     }
 
     #[cfg(test)]
     fn with_client(config: PhalaConfig, client: PhalaApiClient) -> Self {
+        Self::with_client_and_preflight(
+            config,
+            client,
+            Arc::new(Mutex::new(PreflightSnapshot::default())),
+            Duration::ZERO,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_client_and_preflight(
+        config: PhalaConfig,
+        client: PhalaApiClient,
+        preflight: Arc<Mutex<PreflightSnapshot>>,
+        preflight_refresh_interval: Duration,
+    ) -> Self {
         Self {
             config,
             client: Ok(client),
-            preflight: Mutex::new(PreflightSnapshot::default()),
+            preflight,
+            preflight_refresh_interval,
             health_check: no_op_health_check,
         }
     }
@@ -266,6 +293,21 @@ impl PhalaLauncher {
     }
 
     fn refresh_preflight(&self) -> Result<(), RunnerError> {
+        let attempted_at = Instant::now();
+        {
+            let mut snapshot = self.preflight.lock().map_err(|_| {
+                RunnerError::RuntimeLaunch("Phala preflight state lock was poisoned".to_string())
+            })?;
+            if snapshot.last_attempt.is_some_and(|last_attempt| {
+                attempted_at.saturating_duration_since(last_attempt)
+                    < self.preflight_refresh_interval
+            }) {
+                return Ok(());
+            }
+            // Claim the bounded refresh window before I/O so per-cycle
+            // launcher reconstruction cannot fan out duplicate reads.
+            snapshot.last_attempt = Some(attempted_at);
+        }
         let result = (|| {
             let client = self.client()?;
             client
@@ -280,16 +322,12 @@ impl PhalaLauncher {
         })?;
         match result {
             Ok(summary) => {
-                *snapshot = PreflightSnapshot {
-                    provider_healthy: true,
-                    billable_resource_count: summary.billable_finite_resource_count,
-                };
+                snapshot.billable_resource_count = summary.billable_finite_resource_count;
             }
             Err(error) => {
                 // Preserve the last known conservative count while draining.
                 // A transient read failure must not make existing resources
                 // disappear from capacity accounting.
-                snapshot.provider_healthy = false;
                 eprintln!("Phala preflight blocked new creation: {error}");
             }
         }
@@ -338,7 +376,10 @@ impl PhalaLauncher {
             .inspect_cvm(&handle.cvm_id)
             .map_err(runner_api_error)?;
         cvm.verify_finite_runtime().map_err(runner_api_error)?;
-        if !cvm.is_finite_non_deleted() || cvm.app_id.as_deref() != Some(handle.app_id.as_str()) {
+        if cvm.id != handle.cvm_id
+            || cvm.deleted_at.is_some()
+            || cvm.app_id.as_deref() != Some(handle.app_id.as_str())
+        {
             return Err(RunnerError::RuntimeLaunch(
                 "Phala CVM did not match its persisted provider handle".to_string(),
             ));
@@ -421,7 +462,10 @@ impl RuntimeLauncher for PhalaLauncher {
             .unwrap_or_default();
         RunnerLeaseCapacity {
             runner_classes: vec![RunnerClass::Phala],
-            draining: self.config.drain_new_leases || !snapshot.provider_healthy,
+            // Creation stays hard-disabled until both reviewed environment
+            // encryption and a typed Core in-flight reservation count exist.
+            // Provider inventory alone is not a sufficient admission ledger.
+            draining: true,
             max_sandbox_count: self.config.max_cvm_count,
             active_sandbox_count: Some(snapshot.billable_resource_count),
             available_memory_bytes: self.config.available_memory_bytes,
@@ -513,7 +557,7 @@ impl RuntimeLauncher for PhalaLauncher {
         // allowed on this side of the encryption-and-acknowledgment boundary.
         let _compose = phala_compose(&config, lease, options)?;
         Err(RunnerError::RuntimeLaunch(
-            "Phala creation is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
+            "Phala creation is disabled until reviewed encrypted-environment handling, typed Core reservation accounting, and durable Core acknowledgment are wired"
                 .to_string(),
         ))
     }
@@ -846,7 +890,7 @@ impl PhalaApiClient {
         let cvms = self.cvm_inventory()?;
         let inventory =
             FiniteProviderInventory::reconcile(&apps, &cvms).map_err(inventory_contract_error)?;
-        for cvm in cvms.iter().filter(|cvm| cvm.is_finite_non_deleted()) {
+        for cvm in cvms.iter().filter(|cvm| inventory.contains_cvm(cvm)) {
             cvm.verify_finite_runtime()?;
         }
         let mut revisions = Vec::new();
@@ -1249,6 +1293,9 @@ fn inventory_contract_error(error: InventoryContractError) -> PhalaApiError {
             "Phala app inventory contained an incomplete record"
         }
         InventoryContractError::AppCvmMismatch => "Phala app and CVM inventory did not reconcile",
+        InventoryContractError::AppCvmCountMismatch => {
+            "Phala app-declared CVM counts did not match linked CVM inventory"
+        }
         InventoryContractError::AppPolicyMismatch => {
             "Phala app inventory did not match the Cloud KMS policy"
         }
@@ -1662,7 +1709,7 @@ pub struct CvmInfo {
 }
 
 impl CvmInfo {
-    pub fn is_finite_non_deleted(&self) -> bool {
+    pub fn is_finite_inventory_candidate(&self) -> bool {
         self.name.starts_with(FINITE_CVM_NAME_PREFIX) && self.deleted_at.is_none()
     }
 
@@ -2184,6 +2231,23 @@ mod tests {
         ]
     }
 
+    fn empty_preflight_responses() -> Vec<FixtureResponse> {
+        vec![
+            json_response(include_str!("../tests/fixtures/phala/auth-me.json")),
+            json_response(include_str!(
+                "../tests/fixtures/phala/workspace-quotas.json"
+            )),
+            json_response(include_str!(
+                "../tests/fixtures/phala/instance-types-cpu.json"
+            )),
+            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
+            json_response(
+                r#"{"dstack_apps":[],"page":1,"page_size":100,"total":0,"total_pages":0}"#,
+            ),
+            json_response(r#"{"items":[],"total":0,"page":1,"page_size":100,"pages":0}"#),
+        ]
+    }
+
     fn launcher_config() -> PhalaConfig {
         PhalaConfig {
             api_key: FIXTURE_API_KEY.to_string(),
@@ -2343,7 +2407,7 @@ mod tests {
         let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
         launcher.validate_ready().unwrap();
         let capacity = launcher.runner_capacity();
-        assert!(!capacity.draining);
+        assert!(capacity.draining);
         assert_eq!(capacity.active_sandbox_count, Some(1));
         assert_eq!(capacity.max_sandbox_count, Some(1));
         assert!(!capacity.accepts_agent_creation());
@@ -2363,6 +2427,29 @@ mod tests {
                 "/api/v1/apps/app_fixture_01/revisions?page=1&page_size=100",
             ]
         );
+    }
+
+    #[test]
+    fn green_empty_preflight_remains_hard_drained_without_core_reservation_count() {
+        let server = FakePhalaServer::start(empty_preflight_responses());
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        launcher.validate_ready().unwrap();
+        let capacity = launcher.runner_capacity();
+        assert!(capacity.draining);
+        assert_eq!(capacity.active_sandbox_count, Some(0));
+        assert!(!capacity.accepts_agent_creation());
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| request.method == "GET")
+        );
+
+        let launch_error = launcher
+            .launch(&sample_creation_lease(), &RuntimeLaunchOptions::default())
+            .unwrap_err();
+        assert!(launch_error.to_string().contains("creation is disabled"));
+        assert!(server.requests().is_empty());
     }
 
     #[test]
@@ -2419,14 +2506,56 @@ mod tests {
             body: r#"{"error_code":"FIXTURE_UNAVAILABLE"}"#,
         });
         let server = FakePhalaServer::start(responses);
-        let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        let shared = Arc::new(Mutex::new(PreflightSnapshot::default()));
+        let first_launcher = PhalaLauncher::with_client_and_preflight(
+            launcher_config(),
+            server.client(),
+            shared.clone(),
+            Duration::ZERO,
+        );
 
-        launcher.validate_ready().unwrap();
-        assert_eq!(launcher.runner_capacity().active_sandbox_count, Some(1));
-        launcher.validate_ready().unwrap();
-        let capacity = launcher.runner_capacity();
+        first_launcher.validate_ready().unwrap();
+        assert_eq!(
+            first_launcher.runner_capacity().active_sandbox_count,
+            Some(1)
+        );
+        let second_launcher = PhalaLauncher::with_client_and_preflight(
+            launcher_config(),
+            server.client(),
+            shared,
+            Duration::ZERO,
+        );
+        second_launcher.validate_ready().unwrap();
+        let capacity = second_launcher.runner_capacity();
         assert!(capacity.draining);
         assert_eq!(capacity.active_sandbox_count, Some(1));
+    }
+
+    #[test]
+    fn recreated_launcher_reuses_bounded_process_preflight_cache() {
+        let server = FakePhalaServer::start(preflight_responses());
+        let shared = Arc::new(Mutex::new(PreflightSnapshot::default()));
+        let first_launcher = PhalaLauncher::with_client_and_preflight(
+            launcher_config(),
+            server.client(),
+            shared.clone(),
+            Duration::from_secs(60),
+        );
+        first_launcher.validate_ready().unwrap();
+        assert_eq!(server.requests().len(), 7);
+
+        let second_launcher = PhalaLauncher::with_client_and_preflight(
+            launcher_config(),
+            server.client(),
+            shared,
+            Duration::from_secs(60),
+        );
+        second_launcher.validate_ready().unwrap();
+        assert!(server.requests().is_empty());
+        assert_eq!(
+            second_launcher.runner_capacity().active_sandbox_count,
+            Some(1)
+        );
     }
 
     #[test]
@@ -2466,6 +2595,63 @@ mod tests {
             stop_server.requests()[1].path,
             "/api/v1/cvms/cvm_fixture_01/shutdown"
         );
+    }
+
+    #[test]
+    fn persisted_handle_authorizes_exact_id_and_app_without_name_prefix() {
+        let linked = include_str!("../tests/fixtures/phala/cvm-linked-nonprefixed.json");
+        let handle = PhalaRuntimeHandleV1 {
+            cvm_id: "cvm_fixture_linked".to_string(),
+            app_id: "app_fixture_01".to_string(),
+        };
+        let server = FakePhalaServer::start(vec![
+            json_response(linked),
+            json_response(
+                r#"{"id":"cvm_fixture_linked","name":"provider-renamed-fixture","status":"restarting"}"#,
+            ),
+            json_response(linked),
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        launcher
+            .restart_runtime(
+                &sample_control_lease(RuntimeControlKind::Restart, Some(handle.core_envelope())),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/api/v1/cvms/cvm_fixture_linked",
+                "/api/v1/cvms/cvm_fixture_linked/restart",
+                "/api/v1/cvms/cvm_fixture_linked",
+            ]
+        );
+
+        let mismatch_server = FakePhalaServer::start(vec![json_response(linked)]);
+        let mut mismatch_launcher =
+            PhalaLauncher::with_client(launcher_config(), mismatch_server.client());
+        let wrong_handle = PhalaRuntimeHandleV1 {
+            cvm_id: "cvm_fixture_wrong".to_string(),
+            app_id: "app_fixture_01".to_string(),
+        };
+        assert!(
+            mismatch_launcher
+                .restart_runtime(
+                    &sample_control_lease(
+                        RuntimeControlKind::Restart,
+                        Some(wrong_handle.core_envelope()),
+                    ),
+                    &RuntimeRestartOptions::default(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("persisted provider handle")
+        );
+        assert_eq!(mismatch_server.requests().len(), 1);
     }
 
     #[test]
@@ -2619,7 +2805,7 @@ mod tests {
         assert_eq!(cvms.len(), 3);
         assert_eq!(
             cvms.iter()
-                .filter(|cvm| cvm.is_finite_non_deleted())
+                .filter(|cvm| cvm.is_finite_inventory_candidate())
                 .count(),
             1
         );
@@ -2710,6 +2896,18 @@ mod tests {
                 "read-only workflow contains forbidden command {forbidden}"
             );
         }
+        let (before_live_preflight, live_and_later) = workflow
+            .split_once("      - name: Run typed GET-only preflight")
+            .unwrap();
+        let live_preflight = live_and_later
+            .split_once("      - name: Validate the redacted summary contract")
+            .unwrap()
+            .0;
+        let scoped_secret = "FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}";
+        assert!(!before_live_preflight.contains("secrets.PHALA_CLOUD_API_KEY"));
+        assert!(live_preflight.contains(scoped_secret));
+        assert_eq!(workflow.matches(scoped_secret).count(), 1);
+        assert_eq!(workflow.matches("secrets.PHALA_CLOUD_API_KEY").count(), 1);
     }
 
     #[test]

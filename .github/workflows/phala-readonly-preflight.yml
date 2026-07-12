@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 20
     environment: phala-staging
     env:
-      FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID: ${{ vars.PHALA_EXPECTED_WORKSPACE_ID }}
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG: ${{ vars.PHALA_EXPECTED_WORKSPACE_SLUG }}
     steps:
@@ -32,9 +31,8 @@ jobs:
         with:
           toolchain: "1.93"
 
-      - name: Require the environment-scoped key and identity fence
+      - name: Require the non-secret identity fence
         run: |
-          test -n "$FC_RUNNER_PHALA_API_KEY"
           test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID"
           test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG"
 
@@ -42,7 +40,10 @@ jobs:
         run: cargo test --locked --package finite-saas-runner phala
 
       - name: Run typed GET-only preflight
+        env:
+          FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
+          test -n "$FC_RUNNER_PHALA_API_KEY"
           cargo run --locked --quiet --package finite-saas-runner -- phala-preflight \
             > phala-preflight.json
 
