@@ -39,6 +39,6 @@ notes = "Kata launches the immutable digest through a promoted Core artifact. Ex
 finitechat_server = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8788 behind chat.finite.computer" }
 finitechat_hosted_device = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :38918, shared server-only token with dashboard" }
 finite_saas_core = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :4200, native Postgres" }
-finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-11.6@sha256:cccf3a2253d4f7799b7152704e5d1a576b90ad9f5729facb6ffe7ba7e3a3ba56", contract = "finite.computer, WorkOS + Stripe test mode" }
+finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-11.7@sha256:408cf8bdb0ce7f6fd332e22e26c85c56d49a6e45dc3cbf69e4e4e05b632e682b", contract = "finite.computer, WorkOS + Stripe test mode" }
 finitesitesd = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8787 behind api.finite.chat and site domains" }
 finite_brain = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :3015; WorkOS-gated /client and Brain-authorized /_admin through the dashboard proxy" }
