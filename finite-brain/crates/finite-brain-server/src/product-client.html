@@ -348,7 +348,7 @@
                 </summary>
                 <div class="access-admin-content">
                   <div class="vault-access-action-grid">
-                    <section class="access-admin-section vault-access-option primary">
+                    <section id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary">
                       <div class="vault-access-option-heading">
                         <h4>Invite by email</h4>
                         <span class="pill ready">email invite</span>
@@ -833,6 +833,15 @@ Start writing here.</textarea>
                   <small>People and links</small>
                 </span>
               </button>
+              <button id="settingsNavInvitations" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsInvitationsPanel" tabindex="-1">
+                <span class="settings-nav-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 7l9 6 9-6" /></svg>
+                </span>
+                <span>
+                  <strong>Invitations</strong>
+                  <small>Invite and connect</small>
+                </span>
+              </button>
             </nav>
             <div class="settings-modal-content">
               <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavSession">
@@ -896,6 +905,15 @@ Start writing here.</textarea>
                   <p>Manage folder access, Vault members, invitations, and single-use sharing links.</p>
                 </header>
                 <div id="settingsAccessPanelMount"></div>
+              </section>
+
+              <section id="settingsInvitationsPanel" class="settings-section settings-invitations-section" role="tabpanel" aria-labelledby="settingsNavInvitations" hidden>
+                <header class="settings-section-header">
+                  <p class="eyebrow">Invitations</p>
+                  <h3>Vault invitations</h3>
+                  <p>Create and accept one-shot Vault invitations, then review pending invites and shared-folder relationships.</p>
+                </header>
+                <div id="settingsInvitationsPanelMount"></div>
               </section>
             </div>
           </div>

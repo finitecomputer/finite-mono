@@ -1960,7 +1960,7 @@ const FiniteBrainProductClient = (() => {
     return "Signer unavailable";
   }
 
-  const SETTINGS_SECTIONS = Object.freeze(["session", "vault", "access"]);
+  const SETTINGS_SECTIONS = Object.freeze(["session", "vault", "access", "invitations"]);
 
   function normalizeSettingsSection(section) {
     return SETTINGS_SECTIONS.includes(section) ? section : "session";
@@ -1986,12 +1986,28 @@ const FiniteBrainProductClient = (() => {
     panel.removeAttribute("aria-hidden");
   }
 
+  function mountInvitationPanelInSettings() {
+    const mount = $("settingsInvitationsPanelMount");
+    if (!mount) return;
+    const invitationNodes = [
+      $("vaultInvitationActionSection"),
+      $("vaultInvitationPanel"),
+      $("vaultInvitationListSection"),
+      $("sharedFolderSection"),
+    ].filter(Boolean);
+    for (const node of invitationNodes) {
+      if (node.parentElement !== mount) mount.appendChild(node);
+    }
+  }
+
   function focusSettingsSection(section = state.settingsSection) {
     const navButton = $(
       section === "vault"
         ? "settingsNavVault"
         : section === "access"
           ? "settingsNavAccess"
+          : section === "invitations"
+            ? "settingsNavInvitations"
           : "settingsNavSession"
     );
     if (typeof requestAnimationFrame === "function") {
@@ -2137,12 +2153,15 @@ const FiniteBrainProductClient = (() => {
     const sessionNav = $("settingsNavSession");
     const vaultNav = $("settingsNavVault");
     const accessNav = $("settingsNavAccess");
+    const invitationsNav = $("settingsNavInvitations");
     const sessionPanel = $("settingsSessionPanel");
     const vaultPanel = $("settingsVaultPanel");
     const accessPanel = $("settingsAccessPanel");
+    const invitationsPanel = $("settingsInvitationsPanel");
     const sessionActive = state.settingsSection === "session";
     const vaultActive = state.settingsSection === "vault";
     const accessActive = state.settingsSection === "access";
+    const invitationsActive = state.settingsSection === "invitations";
     if (sessionNav) {
       sessionNav.className = `settings-nav-item${sessionActive ? " active" : ""}`;
       sessionNav.setAttribute("aria-selected", String(sessionActive));
@@ -2158,6 +2177,11 @@ const FiniteBrainProductClient = (() => {
       accessNav.setAttribute("aria-selected", String(accessActive));
       accessNav.tabIndex = accessActive ? 0 : -1;
     }
+    if (invitationsNav) {
+      invitationsNav.className = `settings-nav-item${invitationsActive ? " active" : ""}`;
+      invitationsNav.setAttribute("aria-selected", String(invitationsActive));
+      invitationsNav.tabIndex = invitationsActive ? 0 : -1;
+    }
     if (sessionPanel) {
       sessionPanel.hidden = !sessionActive;
       sessionPanel.setAttribute("aria-hidden", String(!sessionActive));
@@ -2169,6 +2193,10 @@ const FiniteBrainProductClient = (() => {
     if (accessPanel) {
       accessPanel.hidden = !accessActive;
       accessPanel.setAttribute("aria-hidden", String(!accessActive));
+    }
+    if (invitationsPanel) {
+      invitationsPanel.hidden = !invitationsActive;
+      invitationsPanel.setAttribute("aria-hidden", String(!invitationsActive));
     }
     setText("settingsVaultName", activeVaultLabel());
     setText("settingsVaultIdentity", sessionIdentityLabel());
@@ -6112,6 +6140,7 @@ const FiniteBrainProductClient = (() => {
     renderVaultSwitchList();
     safeSetHidden("accessConnectSignerButton", signerConnected);
     safeSetHidden("accessCreateOrganizationPanel", !showsCreateOrganizationControl(metadata));
+    safeSetHidden("vaultInvitationActionSection", !(organizationVault || inviteInProgress));
     safeSetElement("vaultPeopleActionPanel", (panel) => {
       panel.hidden = !organizationVault;
       if (!organizationVault) panel.open = false;
@@ -9580,12 +9609,20 @@ const FiniteBrainProductClient = (() => {
     $("settingsNavAccess")?.addEventListener("click", () => {
       setSettingsSection("access");
     });
+    $("settingsNavInvitations")?.addEventListener("click", () => {
+      setSettingsSection("invitations");
+    });
     $("settingsModal")?.addEventListener("click", (event) => {
       if (event.target === $("settingsModal")) closeSettingsModal();
     });
     $("settingsNav")?.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
-      const buttons = [$("settingsNavSession"), $("settingsNavVault"), $("settingsNavAccess")].filter(Boolean);
+      const buttons = [
+        $("settingsNavSession"),
+        $("settingsNavVault"),
+        $("settingsNavAccess"),
+        $("settingsNavInvitations"),
+      ].filter(Boolean);
       const activeIndex = buttons.findIndex((button) => button.getAttribute("aria-selected") === "true");
       if (activeIndex < 0) return;
       event.preventDefault();
@@ -9594,12 +9631,12 @@ const FiniteBrainProductClient = (() => {
         return;
       }
       if (event.key === "End") {
-        setSettingsSection("access");
+        setSettingsSection("invitations");
         return;
       }
       const direction = event.key === "ArrowDown" ? 1 : -1;
       const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
-      setSettingsSection(["session", "vault", "access"][nextIndex] || "session");
+      setSettingsSection(["session", "vault", "access", "invitations"][nextIndex] || "session");
     });
     $("loadVaultButton").addEventListener("click", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
@@ -10149,14 +10186,15 @@ const FiniteBrainProductClient = (() => {
       populated = true;
     }
     if (!populated) return false;
-    state.activeAccessView = "folder";
-    state.settingsSection = "access";
+    state.activeAccessView = "vault";
+    state.settingsSection = "invitations";
     state.settingsModalOpen = true;
     return true;
   }
 
   async function start() {
     mountAccessPanelInSettings();
+    mountInvitationPanelInSettings();
     bind();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();

@@ -1963,6 +1963,28 @@ pre {
   display: none;
 }
 
+.settings-invitations-section {
+  gap: 12px;
+}
+
+.settings-invitations-section > #settingsInvitationsPanelMount {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  --access-panel-inset: 0px;
+  --access-surface-radius: 10px;
+}
+
+.settings-invitations-section #settingsInvitationsPanelMount > .access-vault-admin,
+.settings-invitations-section #settingsInvitationsPanelMount > .vault-management-section,
+.settings-invitations-section #settingsInvitationsPanelMount > .access-admin-section {
+  margin: 0;
+}
+
+.settings-invitations-section #settingsInvitationsPanelMount > .vault-access-option {
+  width: auto;
+}
+
 .settings-section-header {
   display: grid;
   gap: 5px;
