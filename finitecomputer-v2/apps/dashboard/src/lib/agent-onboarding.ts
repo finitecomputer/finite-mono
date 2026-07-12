@@ -13,6 +13,8 @@ export type AgentOnboardingDraft = {
   profilePictureUrl: string | null;
   idempotencyKey: string;
   issuedAtMs: number;
+  /** Validated Runtime id used only to return to the originating agent. */
+  returnMachineId?: string | null;
   /** Present only after this signed draft actually initiated Stripe Checkout. */
   stripeCheckoutStartedAtMs?: number | null;
 };
@@ -59,6 +61,11 @@ export function normalizeAgentDisplayName(value: FormDataEntryValue | null) {
   return name;
 }
 
+export function normalizeAgentReturnMachineId(value: FormDataEntryValue | null) {
+  const machineId = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(machineId) ? machineId : null;
+}
+
 export async function sealAgentOnboardingDraft(
   draft: AgentOnboardingDraft,
   env: Record<string, string | undefined> = process.env
@@ -102,6 +109,7 @@ export async function unsealAgentOnboardingDraft(
       profilePictureUrl: draft.profilePictureUrl ?? null,
       idempotencyKey: draft.idempotencyKey,
       issuedAtMs: draft.issuedAtMs,
+      returnMachineId: normalizeAgentReturnMachineId(draft.returnMachineId ?? null),
       stripeCheckoutStartedAtMs: draft.stripeCheckoutStartedAtMs,
     };
   } catch {

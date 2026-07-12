@@ -52,7 +52,8 @@ function sectionLinks(
   pathname: string,
   machine: MachineNavItem | null,
   saasMode: boolean,
-  isAdmin: boolean
+  isAdmin: boolean,
+  isNewAgentFlow: boolean
 ): SectionLink[] {
   const machineHref = machine ? `/dashboard/machines/${machine.id}` : "/dashboard";
   const chatHref = machine ? `/dashboard/machines/${machine.id}/chat` : "/dashboard";
@@ -64,7 +65,10 @@ function sectionLinks(
         label: "Agent",
         href: machineHref,
         icon: BotIcon,
-        active: pathname === "/dashboard" || (machine ? pathname === `/dashboard/machines/${machine.id}` : false),
+        active:
+          !isNewAgentFlow &&
+          (pathname === "/dashboard" ||
+            (machine ? pathname === `/dashboard/machines/${machine.id}` : false)),
       },
       {
         label: "Connections",
@@ -115,6 +119,14 @@ function sectionLinks(
   ];
 }
 
+function newAgentHref(machine: MachineNavItem | null) {
+  const params = new URLSearchParams({ new: "1" });
+  if (machine?.id) {
+    params.set("machine", machine.id);
+  }
+  return `/dashboard?${params.toString()}`;
+}
+
 function MachineSwitcher({
   activeMachine,
   creatingNewAgent,
@@ -133,7 +145,7 @@ function MachineSwitcher({
   if (machines.length === 0 && showNewAgent) {
     return (
       <div className="ocean-machine-switcher">
-        <Link href="/dashboard?new=1" className="ocean-machine-switcher__button">
+        <Link href={newAgentHref(activeMachine)} className="ocean-machine-switcher__button">
           <PlusIcon className="size-4" aria-hidden />
           <span className="ocean-machine-switcher__label">New agent</span>
         </Link>
@@ -187,7 +199,7 @@ function MachineSwitcher({
             <>
               {machines.length > 0 ? <div className="ocean-menu-separator" /> : null}
               <Link
-                href="/dashboard?new=1"
+                href={newAgentHref(activeMachine)}
                 className={cn("ocean-menu-item", creatingNewAgent && "is-active")}
                 role="menuitem"
                 onClick={() => {
@@ -228,7 +240,7 @@ function DashboardAppSection({
   viewerEmail?: string | null;
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
-  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin);
+  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin, isNewAgentFlow);
   const scrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => {

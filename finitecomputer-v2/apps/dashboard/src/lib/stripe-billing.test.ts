@@ -5,9 +5,18 @@ import {
   billingSubscriptionShouldUsePortal,
   standardAgentCheckoutMetadata,
   stripeBillingStatus,
+  stripeDashboardOnboardingReturnPath,
   stripeDashboardReturnUrl,
   stripeIdempotencyKey,
 } from "./stripe-billing";
+
+test("Stripe onboarding returns to the originating agent after the portal", () => {
+  assert.equal(stripeDashboardOnboardingReturnPath(), "/dashboard");
+  assert.equal(
+    stripeDashboardOnboardingReturnPath("runtime_second-oslo-bot"),
+    "/dashboard?new=1&machine=runtime_second-oslo-bot"
+  );
+});
 
 test("stripeBillingStatus fails closed without checkout, webhook, and return configuration", () => {
   assert.deepEqual(stripeBillingStatus({}), {

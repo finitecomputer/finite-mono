@@ -8,6 +8,7 @@ import {
   CreditCardIcon,
   KeyRoundIcon,
   Loader2Icon,
+  MessageSquareIcon,
   PlusIcon,
   RotateCcwIcon,
   ShieldCheckIcon,
@@ -80,6 +81,8 @@ type DashboardSearchParams = {
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
   creation?: string | string[];
+  machine?: string | string[];
+  machineId?: string | string[];
   new?: string | string[];
 };
 
@@ -103,6 +106,10 @@ export default async function DashboardPage({
     firstSearchParam(query.billingSyncStartedAt)
   );
   const isNewAgentFlow = firstSearchParam(query.new) === "1";
+  const originMachineId =
+    firstSearchParam(query.machine)?.trim() ||
+    firstSearchParam(query.machineId)?.trim() ||
+    null;
   const trackedCreationRequestId = firstSearchParam(query.creation)?.trim() || null;
   const [viewer, account] = await Promise.all([
     loadOptionalViewerContext(),
@@ -131,6 +138,12 @@ export default async function DashboardPage({
     const firstAgentHref = coreProjects
       .map((project) => coreProjectOverviewHref(project))
       .find((href): href is string => Boolean(href));
+    const returnProject =
+      coreProjects.find((project) => project.runtime?.id === originMachineId) ??
+      coreProjects.find((project) => Boolean(coreProjectOverviewHref(project))) ??
+      null;
+    const returnAgentHref = returnProject ? coreProjectOverviewHref(returnProject) : null;
+    const returnAgentLabel = returnProject ? coreProjectLabel(returnProject) : null;
     const trackedCreationRequest = trackedCreationRequestId
       ? agentCreationRequests.find((request) => request.id === trackedCreationRequestId) ?? null
       : null;
@@ -167,7 +180,12 @@ export default async function DashboardPage({
     if (billingReturn.kind === "stamp-sync-start") {
       // First render after a successful checkout while Core still waits on
       // the webhook: stamp the sync window start so the poll stays bounded.
-      redirect(billingSyncStampRedirectPath(undefined, { newAgent: isNewAgentFlow }));
+      redirect(
+        billingSyncStampRedirectPath(undefined, {
+          newAgent: isNewAgentFlow,
+          returnMachineId: returnProject?.runtime?.id ?? null,
+        })
+      );
     }
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
@@ -210,6 +228,12 @@ export default async function DashboardPage({
     return (
       <div className="ocean-page-stack">
         <PendingRefresh enabled={hasPendingAgentCreation} />
+        {isNewAgentFlow && returnAgentHref && returnAgentLabel ? (
+          <ExistingAgentReturnPanel
+            label={returnAgentLabel}
+            overviewHref={returnAgentHref}
+          />
+        ) : null}
         {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
         {coreProjects.length > 0 && !isNewAgentFlow ? (
           <CoreProjectsPanel
@@ -227,7 +251,9 @@ export default async function DashboardPage({
           <BillingSyncWaitPanel deadlineAtMs={billingReturn.deadlineAtMs} />
         ) : null}
         {showBillingSyncState && billingReturn.kind === "sync-timeout" ? (
-          <BillingSyncTimeoutPanel />
+          <BillingSyncTimeoutPanel
+            returnMachineId={returnProject?.runtime?.id ?? null}
+          />
         ) : null}
         {showCreateAgent && billingReturn.kind === "cancelled" ? (
           <BillingCheckoutCancelledNotice />
@@ -236,6 +262,7 @@ export default async function DashboardPage({
           <CoreAgentCreationPanel
             error={agentCreationError}
             draft={draft}
+            returnMachineId={returnProject?.runtime?.id ?? null}
             requiresAccess={
               process.env.FC_DASHBOARD_RUNTIME_MODE === "canary" ||
               !billing.billing?.can_create_agent
@@ -294,6 +321,45 @@ export default async function DashboardPage({
 
       <FinitePrivateAdminPanel result={finitePrivateAdmin} />
     </div>
+  );
+}
+
+function ExistingAgentReturnPanel({
+  label,
+  overviewHref,
+}: {
+  label: string;
+  overviewHref: string;
+}) {
+  return (
+    <section className="ocean-utility-card">
+      <div className="ocean-utility-card__header">
+        <span className="ocean-utility-card__icon" aria-hidden>
+          <MessageSquareIcon className="size-5" />
+        </span>
+        <div>
+          <h2 className="ocean-utility-card__title">Your existing agent is still available</h2>
+          <p className="text-sm text-muted-foreground">
+            Creating another agent will not interrupt {label}. Return to its chat whenever you
+            want.
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button asChild>
+          <Link href={`${overviewHref}/chat`}>
+            <MessageSquareIcon />
+            Return to {label} chat
+          </Link>
+        </Button>
+        <Button asChild variant="outline">
+          <Link href={overviewHref}>
+            <ServerIcon />
+            View {label}
+          </Link>
+        </Button>
+      </div>
+    </section>
   );
 }
 
@@ -757,10 +823,12 @@ function CoreAgentCreationFailedPanel({
 function CoreAgentCreationPanel({
   error,
   draft,
+  returnMachineId,
   requiresAccess,
 }: {
   error: string | null;
   draft: AgentOnboardingDraft | null;
+  returnMachineId: string | null;
   requiresAccess: boolean;
 }) {
   const idempotencyKey = randomUUID();
@@ -784,6 +852,7 @@ function CoreAgentCreationPanel({
         idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
         initialName={draft?.displayName}
         initialPictureUrl={draft?.profilePictureUrl}
+        returnMachineId={returnMachineId}
         requiresAccess={requiresAccess}
         stripeConfigured={stripeBillingStatus().configured}
       />
@@ -814,7 +883,15 @@ function BillingSyncWaitPanel({ deadlineAtMs }: { deadlineAtMs: number }) {
   );
 }
 
-function BillingSyncTimeoutPanel() {
+function BillingSyncTimeoutPanel({
+  returnMachineId,
+}: {
+  returnMachineId: string | null;
+}) {
+  const params = new URLSearchParams({ new: "1", billing: "success" });
+  if (returnMachineId) {
+    params.set("machine", returnMachineId);
+  }
   return (
     <section className="ocean-utility-card">
       <div className="ocean-utility-card__header">
@@ -831,7 +908,7 @@ function BillingSyncTimeoutPanel() {
         </div>
       </div>
       <Button asChild variant="outline" className="w-fit">
-        <Link href="/dashboard?billing=success">
+        <Link href={`/dashboard?${params.toString()}`}>
           <RotateCcwIcon />
           Check again
         </Link>

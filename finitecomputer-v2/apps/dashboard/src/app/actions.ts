@@ -48,6 +48,7 @@ import {
   requireStripeClient,
   standardAgentCheckoutMetadata,
   standardAgentPriceId,
+  stripeDashboardOnboardingReturnPath,
   stripeDashboardReturnUrl,
   stripeIdempotencyKey,
 } from "@/lib/stripe-billing";
@@ -150,7 +151,10 @@ export async function startBillingCheckoutAction() {
   redirect(await billingCheckoutDestination(randomUUID()));
 }
 
-export async function billingCheckoutDestination(attemptId: string = randomUUID()) {
+export async function billingCheckoutDestination(
+  attemptId: string = randomUUID(),
+  returnMachineId?: string | null
+) {
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
     throw new Error(billing.error ?? "Sign in again to manage billing.");
@@ -173,18 +177,24 @@ export async function billingCheckoutDestination(attemptId: string = randomUUID(
       billing.billing.billing_account?.stripe_subscription_id
     )
   ) {
-    return billingPortalDestination(stripeCustomerId);
+    return billingPortalDestination(stripeCustomerId, returnMachineId);
   }
 
   const metadata = standardAgentCheckoutMetadata(customerOrgId);
+  const successParams = new URLSearchParams({ new: "1", billing: "success" });
+  const cancelParams = new URLSearchParams({ new: "1", billing: "cancelled" });
+  if (returnMachineId) {
+    successParams.set("machine", returnMachineId);
+    cancelParams.set("machine", returnMachineId);
+  }
   const checkout = await stripe.checkout.sessions.create(
     {
       mode: "subscription",
       customer: stripeCustomerId,
       client_reference_id: metadata.clientReferenceId,
       allow_promotion_codes: true,
-      success_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=success"),
-      cancel_url: stripeDashboardReturnUrl("/dashboard?new=1&billing=cancelled"),
+      success_url: stripeDashboardReturnUrl(`/dashboard?${successParams.toString()}`),
+      cancel_url: stripeDashboardReturnUrl(`/dashboard?${cancelParams.toString()}`),
       line_items: [
         {
           price: standardAgentPriceId(),
@@ -216,10 +226,15 @@ export async function openBillingPortalAction() {
   redirect(await billingPortalDestination(stripeCustomerId));
 }
 
-async function billingPortalDestination(stripeCustomerId: string) {
+async function billingPortalDestination(
+  stripeCustomerId: string,
+  returnMachineId?: string | null
+) {
   const portal = await requireStripeClient().billingPortal.sessions.create({
     customer: stripeCustomerId,
-    return_url: stripeDashboardReturnUrl("/dashboard"),
+    return_url: stripeDashboardReturnUrl(
+      stripeDashboardOnboardingReturnPath(returnMachineId)
+    ),
   });
 
   return portal.url;

@@ -74,11 +74,14 @@ export function resolveBillingReturnStateNow(
 // Redirect target that stamps the start of the bounded sync window.
 export function billingSyncStampRedirectPath(
   nowMs: number = Date.now(),
-  options: { newAgent?: boolean } = {}
+  options: { newAgent?: boolean; returnMachineId?: string | null } = {}
 ) {
   const params = new URLSearchParams();
   if (options.newAgent) {
     params.set("new", "1");
+  }
+  if (options.returnMachineId) {
+    params.set("machine", options.returnMachineId);
   }
   params.set("billing", "success");
   params.set("billingSyncStartedAt", String(nowMs));

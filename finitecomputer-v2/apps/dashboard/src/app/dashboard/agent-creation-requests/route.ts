@@ -8,6 +8,7 @@ import {
   MAX_AGENT_PROFILE_IMAGE_BYTES,
   agentCreationErrorMessage,
   normalizeAgentDisplayName,
+  normalizeAgentReturnMachineId,
   resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
@@ -28,7 +29,8 @@ import { workosBaseUrl } from "@/lib/workos-auth";
 function dashboardRedirect(
   request: Request,
   error?: unknown,
-  creationRequestId?: string
+  creationRequestId?: string,
+  returnMachineId?: string | null
 ) {
   const url = new URL("/dashboard", workosBaseUrl() ?? request.url);
   if (creationRequestId) {
@@ -42,12 +44,16 @@ function dashboardRedirect(
       agentCreationErrorMessage(error)
     );
   }
+  if (returnMachineId) {
+    url.searchParams.set("machine", returnMachineId);
+  }
   return NextResponse.redirect(url, { status: 303 });
 }
 
 export async function POST(request: Request) {
   const formData = await request.formData();
   const account = await getAccountAuthContext();
+  const returnMachineId = normalizeAgentReturnMachineId(formData.get("machine"));
   let draft: AgentOnboardingDraft | null = null;
 
   try {
@@ -69,6 +75,7 @@ export async function POST(request: Request) {
       profilePictureUrl,
       idempotencyKey,
       issuedAtMs: Date.now(),
+      returnMachineId,
       stripeCheckoutStartedAtMs: null,
     };
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
@@ -85,7 +92,12 @@ export async function POST(request: Request) {
         throw new Error("Enter your Launch Code.");
       }
       const creation = await launchDraft(draft, launchCode);
-      const response = dashboardRedirect(request, undefined, creation.request.id);
+      const response = dashboardRedirect(
+        request,
+        undefined,
+        creation.request.id,
+        draft.returnMachineId
+      );
       clearDraftCookie(response);
       return response;
     }
@@ -94,9 +106,10 @@ export async function POST(request: Request) {
       if (!stripeBillingStatus().configured) {
         throw new Error("Payment is unavailable right now.");
       }
-      const response = NextResponse.redirect(await billingCheckoutDestination(draft.idempotencyKey), {
-        status: 303,
-      });
+      const response = NextResponse.redirect(
+        await billingCheckoutDestination(draft.idempotencyKey, draft.returnMachineId),
+        { status: 303 }
+      );
       setDraftCookie(
         response,
         await sealAgentOnboardingDraft({
@@ -109,14 +122,19 @@ export async function POST(request: Request) {
 
     if (accessPath === "entitlement") {
       const creation = await launchDraft(draft);
-      const response = dashboardRedirect(request, undefined, creation.request.id);
+      const response = dashboardRedirect(
+        request,
+        undefined,
+        creation.request.id,
+        draft.returnMachineId
+      );
       clearDraftCookie(response);
       return response;
     }
 
     throw new Error("Use a Launch Code or continue to payment.");
   } catch (error) {
-    const response = dashboardRedirect(request, error);
+    const response = dashboardRedirect(request, error, undefined, returnMachineId);
     if (draft) {
       setDraftCookie(response, await sealAgentOnboardingDraft(draft));
     }

@@ -75,6 +75,17 @@ export function stripeDashboardReturnUrl(
   return url.toString();
 }
 
+export function stripeDashboardOnboardingReturnPath(returnMachineId?: string | null) {
+  if (!returnMachineId) {
+    return "/dashboard";
+  }
+  const params = new URLSearchParams({
+    new: "1",
+    machine: returnMachineId,
+  });
+  return `/dashboard?${params.toString()}`;
+}
+
 export function stripeIdempotencyKey(
   operation: "customer" | "checkout",
   stableAttemptId: string

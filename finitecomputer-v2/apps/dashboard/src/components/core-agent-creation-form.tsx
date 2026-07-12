@@ -21,6 +21,7 @@ export function CoreAgentCreationForm({
   idempotencyKey,
   initialName,
   initialPictureUrl,
+  returnMachineId,
   requiresAccess,
   stripeConfigured,
 }: {
@@ -28,6 +29,7 @@ export function CoreAgentCreationForm({
   idempotencyKey: string;
   initialName?: string | null;
   initialPictureUrl?: string | null;
+  returnMachineId?: string | null;
   requiresAccess: boolean;
   stripeConfigured: boolean;
 }) {
@@ -76,6 +78,7 @@ export function CoreAgentCreationForm({
       }}
     >
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
+      {returnMachineId ? <input type="hidden" name="machine" value={returnMachineId} /> : null}
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground" aria-label="Setup progress">
         <StepDot active={step === "profile"} complete={step === "access"}>1</StepDot>

@@ -38,6 +38,9 @@ export async function GET(request: Request) {
     ) {
       dashboard.searchParams.set("new", "1");
       dashboard.searchParams.set("billing", "success");
+      if (draft.returnMachineId) {
+        dashboard.searchParams.set("machine", draft.returnMachineId);
+      }
       return NextResponse.redirect(dashboard, { status: 303 });
     }
     const creation = await requestCoreAgentCreation({
@@ -48,6 +51,9 @@ export async function GET(request: Request) {
     });
     dashboard.searchParams.set("new", "1");
     dashboard.searchParams.set("creation", creation.request.id);
+    if (draft.returnMachineId) {
+      dashboard.searchParams.set("machine", draft.returnMachineId);
+    }
     const response = NextResponse.redirect(dashboard, { status: 303 });
     response.cookies.set(AGENT_DRAFT_COOKIE, "", {
       httpOnly: true,
@@ -59,6 +65,9 @@ export async function GET(request: Request) {
     return response;
   } catch (error) {
     dashboard.searchParams.set("new", "1");
+    if (draft.returnMachineId) {
+      dashboard.searchParams.set("machine", draft.returnMachineId);
+    }
     dashboard.searchParams.set(
       "agentCreationError",
       error instanceof Error ? error.message : "Could not create agent."

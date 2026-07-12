@@ -440,15 +440,85 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       await machineSwitcher.waitFor({ state: "visible" });
       await machineSwitcher.click();
+      const secondAgentItem = page.getByRole("menuitem", {
+        name: "Second Oslo Bot",
+        exact: true,
+      });
+      await secondAgentItem.waitFor({ state: "visible" });
+      await secondAgentItem.click();
+      await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
+
+      const secondMachineSwitcher = page.getByRole("button", {
+        name: "Second Oslo Bot",
+        exact: true,
+      });
+      await secondMachineSwitcher.waitFor({ state: "visible" });
+      await secondMachineSwitcher.click();
       const newAgentItem = page.getByRole("menuitem", { name: "New agent", exact: true });
       await newAgentItem.waitFor({ state: "visible" });
       await newAgentItem.click();
-      await page.waitForURL(/\/dashboard\?new=1$/u);
+      await page.waitForURL(
+        /\/dashboard\?new=1&machine=runtime_second-oslo-bot$/u
+      );
       await page.getByLabel("Agent name").waitFor({ state: "visible" });
-      assert.equal(await page.getByText("Completed Oslo Bot", { exact: true }).count(), 0);
+      const returnToExistingChat = page.getByRole("link", {
+        name: "Return to Second Oslo Bot chat",
+        exact: true,
+      });
+      await returnToExistingChat.waitFor({ state: "visible" });
+      assert.equal(
+        await returnToExistingChat.getAttribute("href"),
+        "/dashboard/machines/runtime_second-oslo-bot/chat"
+      );
+      await returnToExistingChat.click();
+      await page.waitForURL(
+        /\/dashboard\/machines\/runtime_second-oslo-bot\/chat$/u
+      );
+      const existingComposer = page.getByLabel("Message your agent");
+      await existingComposer.waitFor({ state: "visible" });
+      await waitFor(
+        async () => existingComposer.isEnabled(),
+        5_000,
+        () => "returning from New agent did not restore the existing chat composer"
+      );
+
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_second-oslo-bot`
+      );
+      await secondMachineSwitcher.waitFor({ state: "visible" });
+      await secondMachineSwitcher.click();
+      await page.getByRole("menuitem", { name: "New agent", exact: true }).click();
+      await page.waitForURL(
+        /\/dashboard\?new=1&machine=runtime_second-oslo-bot$/u
+      );
+      await page.getByLabel("Agent name").waitFor({ state: "visible" });
       await page.getByLabel("Agent name").fill("Second Oslo Bot");
       await page.getByRole("button", { name: "Continue" }).click();
       await page.getByLabel("Launch Code").waitFor({ state: "visible" });
+      await page.getByRole("button", { name: "Apply", exact: true }).click();
+      await page.waitForURL((url) => {
+        const params = url.searchParams;
+        return (
+          url.pathname === "/dashboard" &&
+          params.get("new") === "1" &&
+          params.get("machine") === "runtime_second-oslo-bot" &&
+          Boolean(params.get("agentCreationError"))
+        );
+      });
+      await page
+        .getByRole("paragraph")
+        .filter({ hasText: /^Enter your Launch Code\.$/u })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        await page
+          .getByRole("link", {
+            name: "Return to Second Oslo Bot chat",
+            exact: true,
+          })
+          .getAttribute("href"),
+        "/dashboard/machines/runtime_second-oslo-bot/chat",
+        "a server redirect lost the originating agent"
+      );
 
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`

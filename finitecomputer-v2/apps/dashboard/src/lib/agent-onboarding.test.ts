@@ -5,6 +5,7 @@ import {
   agentCreationErrorMessage,
   draftStartedStripeCheckout,
   normalizeAgentDisplayName,
+  normalizeAgentReturnMachineId,
   resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
@@ -64,6 +65,15 @@ test("agent names are compact user-facing values", () => {
   assert.throws(() => normalizeAgentDisplayName(""), /between 1 and 80/u);
 });
 
+test("agent return machine ids are bounded navigation hints", () => {
+  assert.equal(
+    normalizeAgentReturnMachineId(" runtime_second-oslo-bot "),
+    "runtime_second-oslo-bot"
+  );
+  assert.equal(normalizeAgentReturnMachineId("../../dashboard"), null);
+  assert.equal(normalizeAgentReturnMachineId("x".repeat(129)), null);
+});
+
 test("onboarding draft is sealed, user-bound, and expiring", async () => {
   const issuedAtMs = Date.now();
   const sealed = await sealAgentOnboardingDraft(
@@ -74,14 +84,18 @@ test("onboarding draft is sealed, user-bound, and expiring", async () => {
       profilePictureUrl: "https://chat.example/profile.png",
       idempotencyKey: "request-a",
       issuedAtMs,
+      returnMachineId: "runtime_existing-agent",
     },
     env
   );
-  assert.equal(
-    (await unsealAgentOnboardingDraft(sealed, "user-a", env, issuedAtMs + 1000))
-      ?.displayName,
-    "Moss"
+  const unsealed = await unsealAgentOnboardingDraft(
+    sealed,
+    "user-a",
+    env,
+    issuedAtMs + 1000
   );
+  assert.equal(unsealed?.displayName, "Moss");
+  assert.equal(unsealed?.returnMachineId, "runtime_existing-agent");
   assert.equal(await unsealAgentOnboardingDraft(sealed, "user-b", env), null);
   assert.equal(
     await unsealAgentOnboardingDraft(sealed, "user-a", env, issuedAtMs + 25 * 60 * 60 * 1000),
