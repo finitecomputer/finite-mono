@@ -3,8 +3,8 @@
 - Issue: #25 — make Page and Folder affordances truthful
 - Fixed point before session: `c7ca3ef`
 - Worker session: `/root/ticket_25_truthful_page_affordances`
-- Commit: `7bf2581` plus focused review follow-up
-- Status: verified; follow-up ready to commit
+- Commits: `7bf2581`, `5d46c75`
+- Status: completed and verified
 
 ## Inputs
 
