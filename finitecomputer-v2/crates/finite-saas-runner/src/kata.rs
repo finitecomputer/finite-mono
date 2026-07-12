@@ -1,5 +1,5 @@
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -15,7 +15,9 @@ const RECOVERY_REQUEST_ID_LABEL: &str = "computer.finite.v2.recovery_request_id"
 const RECOVERY_BOOT_INTENT_ENV: &str = "FINITE_AGENT_BOOT_INTENT_JSON";
 const RECOVERY_STATE_ROOT_ENV: &str = "FINITE_AGENT_STATE_ROOT";
 const RECOVERY_STATE_ROOT: &str = "/data";
-const MAX_RECOVERY_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_KATA_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_KATA_CONTAINER_LIST_BYTES: usize = 64 * 1024;
+const MAX_KATA_RECOVERY_FENCE_OPERATIONS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct KataConfig {
@@ -366,6 +368,181 @@ impl KataLauncher {
         self.remove_compute(&plan.container_name)
     }
 
+    fn container_names(&self) -> Result<Vec<String>, RunnerError> {
+        let raw = self.run_checked(
+            self.command(vec![
+                OsString::from("ps"),
+                OsString::from("--all"),
+                OsString::from("--format"),
+                OsString::from("{{.Names}}"),
+            ]),
+            self.config.command_timeout,
+        )?;
+        if raw.len() > MAX_KATA_CONTAINER_LIST_BYTES {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata container inventory exceeded its bounded limit".to_string(),
+            ));
+        }
+        let mut names = Vec::new();
+        let mut unique = BTreeSet::new();
+        for name in raw.lines().map(str::trim).filter(|name| !name.is_empty()) {
+            if name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                || !unique.insert(name.to_string())
+            {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata container inventory was ambiguous or invalid".to_string(),
+                ));
+            }
+            names.push(name.to_string());
+        }
+        Ok(names)
+    }
+
+    fn recovery_helpers(
+        &self,
+        canonical_plan: &KataLaunchPlan,
+        project_id: &str,
+        canonical: &KataInspect,
+    ) -> Result<Vec<KataRecoveryHelper>, RunnerError> {
+        let mut helpers = Vec::new();
+        for container_name in self.container_names()? {
+            if container_name == canonical_plan.container_name {
+                continue;
+            }
+            let Some(inspected) = self.inspect(&container_name)? else {
+                continue;
+            };
+            let request_id = inspected
+                .config
+                .labels
+                .get(RECOVERY_REQUEST_ID_LABEL)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty());
+            let source_matches = inspected
+                .config
+                .labels
+                .get("computer.finite.v2.source_machine_id")
+                .map(String::as_str)
+                == Some(canonical_plan.container_name.as_str());
+            let state_root_matches = inspected.mounts.iter().any(|mount| {
+                mount.destination == Path::new("/data") && mount.source == canonical_plan.state_root
+            });
+            let writable_state_root_matches = inspected.mounts.iter().any(|mount| {
+                mount.destination == Path::new("/data")
+                    && mount.source == canonical_plan.state_root
+                    && mount.read_write
+            });
+            let name_matches = kata_recovery_name_matches_canonical(
+                &container_name,
+                &canonical_plan.container_name,
+            );
+            if !name_matches && !(request_id.is_some() && (source_matches || state_root_matches)) {
+                continue;
+            }
+            let request_id = request_id.ok_or_else(|| {
+                RunnerError::RuntimeLaunch(
+                    "ambiguous Kata recovery helper omitted its operation label".to_string(),
+                )
+            })?;
+            if !valid_kata_recovery_operation_id(request_id)
+                || kata_recovery_plan(canonical_plan, request_id).container_name != container_name
+            {
+                return Err(RunnerError::RuntimeLaunch(
+                    "ambiguous Kata recovery helper name did not match its operation".to_string(),
+                ));
+            }
+            if !source_matches || !writable_state_root_matches {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata recovery helper did not have the exact canonical source and writable /data bind"
+                        .to_string(),
+                ));
+            }
+            self.validate_owned(canonical_plan, project_id, &inspected)?;
+            if inspected.config.image != canonical.config.image
+                || [
+                    "computer.finite.v2.runtime_artifact_id",
+                    "computer.finite.v2.state_schema_version",
+                ]
+                .iter()
+                .any(|label| {
+                    inspected.config.labels.get(*label) != canonical.config.labels.get(*label)
+                })
+            {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata recovery helper did not match the canonical Runtime artifact".to_string(),
+                ));
+            }
+            helpers.push(KataRecoveryHelper {
+                container_name,
+                request_id: request_id.to_string(),
+                inspected,
+            });
+        }
+        Ok(helpers)
+    }
+
+    fn reconcile_recovery_helpers(
+        &self,
+        canonical_plan: &KataLaunchPlan,
+        project_id: &str,
+        canonical: &KataInspect,
+        keep_request_id: Option<&str>,
+    ) -> Result<Option<KataInspect>, RunnerError> {
+        if canonical
+            .config
+            .labels
+            .get(RECOVERY_REQUEST_ID_LABEL)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "canonical Kata Runtime unexpectedly retained a recovery helper label".to_string(),
+            ));
+        }
+        let helpers = self.recovery_helpers(canonical_plan, project_id, canonical)?;
+        if !helpers.is_empty() {
+            let mut operations = read_kata_recovery_fence(canonical_plan)?
+                .map(|fence| fence.operation_ids.into_iter().collect::<BTreeSet<_>>())
+                .unwrap_or_default();
+            operations.extend(helpers.iter().map(|helper| helper.request_id.clone()));
+            write_kata_recovery_fence(canonical_plan, operations)?;
+        }
+
+        let canonical_running = canonical.state.status == "running";
+        let mut kept = None;
+        for helper in helpers {
+            remove_kata_recovery_env_file(canonical_plan, &helper.request_id)?;
+            if !canonical_running && keep_request_id == Some(helper.request_id.as_str()) {
+                if kept.is_some() {
+                    return Err(RunnerError::RuntimeLaunch(
+                        "multiple Kata recovery helpers matched one operation".to_string(),
+                    ));
+                }
+                kept = Some(helper.inspected);
+            } else {
+                self.remove_compute(&helper.container_name)?;
+            }
+        }
+        Ok(kept)
+    }
+
+    fn guard_canonical_start_against_recovery(
+        &self,
+        canonical_plan: &KataLaunchPlan,
+        project_id: &str,
+        canonical: &KataInspect,
+    ) -> Result<(), RunnerError> {
+        self.reconcile_recovery_helpers(canonical_plan, project_id, canonical, None)?;
+        if read_kata_recovery_fence(canonical_plan)?.is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata Runtime has an unresolved recovery fence".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn host_port(&self, plan: &KataLaunchPlan) -> Result<u16, RunnerError> {
         let raw = self.run_checked(
             self.command(vec![
@@ -423,39 +600,27 @@ impl KataLauncher {
         let url = plan.contact_url(host_port);
         let started = Instant::now();
         loop {
-            let result = ureq::get(&url)
-                .timeout(
-                    self.config
-                        .readiness_interval
-                        .max(Duration::from_millis(250)),
-                )
-                .call()
-                .map_err(|error| error.to_string())
-                .and_then(|response| {
-                    response
-                        .into_json::<serde_json::Value>()
-                        .map_err(|error| error.to_string())
-                })
-                .and_then(|value| parse_agent_npub(&value).map_err(|error| error.to_string()));
-            match result {
-                Ok(npub) => return Ok(npub),
-                Err(last_error) if started.elapsed() >= self.config.readiness_timeout => {
-                    return Err(RunnerError::RuntimeLaunch(format!(
-                        "Kata runtime /contact did not expose its Agent Principal within {}s: {last_error}",
-                        self.config.readiness_timeout.as_secs()
-                    )));
-                }
-                Err(_) => thread::sleep(self.config.readiness_interval),
+            if let Some(value) = self.probe_bounded_json(&url, "contact")?
+                && let Ok(npub) = parse_agent_npub(&value)
+            {
+                return Ok(npub);
             }
+            if started.elapsed() >= self.config.readiness_timeout {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "Kata runtime /contact did not expose its Agent Principal within {}s",
+                    self.config.readiness_timeout.as_secs()
+                )));
+            }
+            thread::sleep(self.config.readiness_interval);
         }
     }
 
-    fn probe_bounded_health(
+    fn probe_bounded_json(
         &self,
-        plan: &KataLaunchPlan,
-        host_port: u16,
+        url: &str,
+        response_name: &str,
     ) -> Result<Option<serde_json::Value>, RunnerError> {
-        let response = match ureq::get(&plan.health_url(host_port))
+        let response = match ureq::get(url)
             .timeout(
                 self.config
                     .readiness_interval
@@ -470,22 +635,32 @@ impl KataLauncher {
         let mut body = Vec::new();
         response
             .into_reader()
-            .take(MAX_RECOVERY_HEALTH_RESPONSE_BYTES + 1)
+            .take(MAX_KATA_HTTP_RESPONSE_BYTES + 1)
             .read_to_end(&mut body)
             .map_err(|_| {
-                RunnerError::RuntimeLaunch(
-                    "Kata runtime health response could not be read".to_string(),
-                )
+                RunnerError::RuntimeLaunch(format!(
+                    "Kata runtime {response_name} response could not be read"
+                ))
             })?;
-        if body.len() as u64 > MAX_RECOVERY_HEALTH_RESPONSE_BYTES {
-            return Err(RunnerError::RuntimeLaunch(
-                "Kata runtime health response exceeded the bounded limit".to_string(),
-            ));
+        if body.len() as u64 > MAX_KATA_HTTP_RESPONSE_BYTES {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "Kata runtime {response_name} response exceeded the bounded limit"
+            )));
         }
         let value = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
-            RunnerError::RuntimeLaunch("Kata runtime health returned invalid JSON".to_string())
+            RunnerError::RuntimeLaunch(format!(
+                "Kata runtime {response_name} returned invalid JSON"
+            ))
         })?;
         Ok(Some(value))
+    }
+
+    fn probe_bounded_health(
+        &self,
+        plan: &KataLaunchPlan,
+        host_port: u16,
+    ) -> Result<Option<serde_json::Value>, RunnerError> {
+        self.probe_bounded_json(&plan.health_url(host_port), "health")
     }
 
     fn probe_recovery_startup(
@@ -1000,7 +1175,8 @@ impl RuntimeLauncher for KataLauncher {
         _options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
-        let (plan, _) = self.validate_control(lease)?;
+        let (plan, inspected) = self.validate_control(lease)?;
+        self.guard_canonical_start_against_recovery(&plan, &lease.runtime.project_id, &inspected)?;
         self.run_checked(
             self.command(vec![
                 OsString::from("restart"),
@@ -1032,21 +1208,18 @@ impl RuntimeLauncher for KataLauncher {
             &canonical,
             spec,
         )?;
-        let canonical_host_port = self.host_port(&canonical_plan)?;
-        let canonical_endpoint = canonical_plan.public_base_url(canonical_host_port);
-        if lease.runtime.host_facts.runtime_host != canonical_endpoint {
-            return Err(RunnerError::RuntimeLaunch(
-                "Kata recovery refused to change the persisted Runtime endpoint".to_string(),
-            ));
-        }
-
         let operation_hash = kata_recovery_operation_hash(&lease.request.id);
         let candidate_plan = kata_recovery_plan(&canonical_plan, &lease.request.id);
         let expected_npub_path =
             kata_recovery_expected_npub_path(&canonical_plan, &lease.request.id);
         let recovery_environment =
             kata_recovery_environment(&canonical.config, options, &lease.request.id)?;
-        let mut candidate = self.inspect(&candidate_plan.container_name)?;
+        let mut candidate = self.reconcile_recovery_helpers(
+            &canonical_plan,
+            &lease.runtime.project_id,
+            &canonical,
+            Some(&lease.request.id),
+        )?;
         if let Some(inspected) = candidate.as_ref() {
             self.validate_recovery_candidate(
                 &canonical_plan,
@@ -1057,13 +1230,12 @@ impl RuntimeLauncher for KataLauncher {
                 &recovery_environment,
             )?;
         }
-
-        // This topology is not produced by the transaction, but an exact
-        // operation-scoped helper is always the disposable side. Remove it
-        // before continuing so two containers can never write /data.
-        if candidate.is_some() && canonical.state.status == "running" {
-            self.remove_compute(&candidate_plan.container_name)?;
-            candidate = None;
+        let canonical_host_port = self.host_port(&canonical_plan)?;
+        let canonical_endpoint = canonical_plan.public_base_url(canonical_host_port);
+        if lease.runtime.host_facts.runtime_host != canonical_endpoint {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata recovery refused to change the persisted Runtime endpoint".to_string(),
+            ));
         }
 
         let mut expected_npub = if expected_npub_path.exists() {
@@ -1080,6 +1252,9 @@ impl RuntimeLauncher for KataLauncher {
                     .to_string(),
             ));
         }
+        if candidate.is_some() {
+            write_kata_recovery_fence(&canonical_plan, [lease.request.id.clone()])?;
+        }
 
         if candidate.is_none() {
             if canonical.state.status != "running" {
@@ -1091,7 +1266,6 @@ impl RuntimeLauncher for KataLauncher {
                         )
                     })?;
             }
-            self.wait_for_runtime_http(&canonical_plan, canonical_host_port)?;
             let observed_npub = self.wait_for_agent_npub(&canonical_plan, canonical_host_port)?;
             if let Some(expected) = expected_npub.as_deref() {
                 if observed_npub != expected {
@@ -1114,6 +1288,18 @@ impl RuntimeLauncher for KataLauncher {
                 &operation_hash,
             )? {
                 KataRecoveryProbe::Accepted(recovered_npub) if recovered_npub == observed_npub => {
+                    let normalized = self.verify_normalized_recovery(
+                        &canonical_plan,
+                        canonical_host_port,
+                        &operation_hash,
+                        &observed_npub,
+                    );
+                    if let Err(error) = normalized {
+                        let stop = self.stop_compute(&canonical_plan.container_name);
+                        return Err(runtime_recovery_failure(error, stop.err()));
+                    }
+                    remove_kata_recovery_env_file(&canonical_plan, &lease.request.id)?;
+                    remove_kata_recovery_fence(&canonical_plan)?;
                     return Ok(());
                 }
                 KataRecoveryProbe::Accepted(_) => {
@@ -1122,12 +1308,17 @@ impl RuntimeLauncher for KataLauncher {
                     ));
                 }
                 KataRecoveryProbe::Refused => {
+                    write_kata_recovery_fence(&canonical_plan, [lease.request.id.clone()])?;
                     return Err(RunnerError::RuntimeLaunch(
                         "Kata recovery image refused its boot intent".to_string(),
                     ));
                 }
                 KataRecoveryProbe::Pending => {}
             }
+
+            // Persist the global fence before the first operation that can
+            // leave canonical stopped. Every Kata control consults this file.
+            write_kata_recovery_fence(&canonical_plan, [lease.request.id.clone()])?;
 
             if let Err(error) = self.stop_compute(&canonical_plan.container_name) {
                 let restore = self.restore_previous_compute(
@@ -1325,6 +1516,8 @@ impl RuntimeLauncher for KataLauncher {
             let stop = self.stop_compute(&canonical_plan.container_name);
             return Err(runtime_recovery_failure(error, stop.err()));
         }
+        remove_kata_recovery_env_file(&canonical_plan, &lease.request.id)?;
+        remove_kata_recovery_fence(&canonical_plan)?;
         Ok(())
     }
 
@@ -1367,6 +1560,11 @@ impl RuntimeLauncher for KataLauncher {
             target,
         )?;
         let (canonical_plan, mut inspected) = self.validate_control(lease)?;
+        self.guard_canonical_start_against_recovery(
+            &canonical_plan,
+            &lease.runtime.project_id,
+            &inspected,
+        )?;
         self.prepare_plan(&canonical_plan)?;
         let canonical_name = canonical_plan.container_name.clone();
         let candidate_name =
@@ -1638,6 +1836,7 @@ impl RuntimeLauncher for KataLauncher {
     fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         self.validate_ready()?;
         let (plan, inspected) = self.validate_control(lease)?;
+        self.reconcile_recovery_helpers(&plan, &lease.runtime.project_id, &inspected, None)?;
         if inspected.state.status == "running" {
             self.run_checked(
                 self.command(vec![
@@ -1654,7 +1853,8 @@ impl RuntimeLauncher for KataLauncher {
 
     fn destroy_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         self.validate_ready()?;
-        let (plan, _) = self.validate_control(lease)?;
+        let (plan, inspected) = self.validate_control(lease)?;
+        self.reconcile_recovery_helpers(&plan, &lease.runtime.project_id, &inspected, None)?;
         // Destroy is deliberately compute-only. The durable state root is a
         // separate recovery boundary and must survive every runtime lifecycle
         // operation until an explicit, separately authorized data purge exists.
@@ -2135,6 +2335,151 @@ fn kata_recovery_plan(canonical: &KataLaunchPlan, request_id: &str) -> KataLaunc
     }
 }
 
+fn valid_kata_recovery_operation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn kata_recovery_name_matches_canonical(name: &str, canonical_name: &str) -> bool {
+    let Some((base, suffix)) = name.rsplit_once("-recovery-") else {
+        return false;
+    };
+    !base.is_empty()
+        && !suffix.is_empty()
+        && suffix.len() <= 10
+        && canonical_name.starts_with(base)
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn kata_recovery_fence_path(canonical: &KataLaunchPlan) -> PathBuf {
+    canonical.metadata_root.join("recovery-active.json")
+}
+
+fn read_kata_recovery_fence(
+    canonical: &KataLaunchPlan,
+) -> Result<Option<KataRecoveryFence>, RunnerError> {
+    let path = kata_recovery_fence_path(canonical);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "failed to read the Kata recovery fence: {error}"
+            )));
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take((MAX_KATA_RECOVERY_FENCE_OPERATIONS * 320 + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            RunnerError::RuntimeLaunch(format!("failed to read the Kata recovery fence: {error}"))
+        })?;
+    if bytes.len() > MAX_KATA_RECOVERY_FENCE_OPERATIONS * 320 {
+        return Err(RunnerError::RuntimeLaunch(
+            "Kata recovery fence exceeded its bounded limit".to_string(),
+        ));
+    }
+    let fence = serde_json::from_slice::<KataRecoveryFence>(&bytes)
+        .map_err(|_| RunnerError::RuntimeLaunch("Kata recovery fence was invalid".to_string()))?;
+    let operations = fence.operation_ids.iter().collect::<BTreeSet<_>>();
+    if fence.schema_version != 1
+        || fence.operation_ids.is_empty()
+        || fence.operation_ids.len() > MAX_KATA_RECOVERY_FENCE_OPERATIONS
+        || operations.len() != fence.operation_ids.len()
+        || fence
+            .operation_ids
+            .iter()
+            .any(|operation| !valid_kata_recovery_operation_id(operation))
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Kata recovery fence violated its contract".to_string(),
+        ));
+    }
+    Ok(Some(fence))
+}
+
+fn write_kata_recovery_fence(
+    canonical: &KataLaunchPlan,
+    operations: impl IntoIterator<Item = String>,
+) -> Result<(), RunnerError> {
+    let operation_ids = operations.into_iter().collect::<BTreeSet<_>>();
+    if operation_ids.is_empty()
+        || operation_ids.len() > MAX_KATA_RECOVERY_FENCE_OPERATIONS
+        || operation_ids
+            .iter()
+            .any(|operation| !valid_kata_recovery_operation_id(operation))
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "refusing to write an invalid Kata recovery fence".to_string(),
+        ));
+    }
+    let fence = KataRecoveryFence {
+        schema_version: 1,
+        operation_ids: operation_ids.into_iter().collect(),
+    };
+    let bytes = serde_json::to_vec(&fence)
+        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+    let path = kata_recovery_fence_path(canonical);
+    let temporary = path.with_extension("json.tmp");
+    write_secret_file(&temporary, &bytes).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!(
+            "failed to persist the Kata recovery fence: {error}"
+        ))
+    })?;
+    std::fs::rename(&temporary, &path).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!("failed to commit the Kata recovery fence: {error}"))
+    })?;
+    #[cfg(unix)]
+    std::fs::File::open(&canonical.metadata_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            RunnerError::RuntimeLaunch(format!(
+                "failed to make the Kata recovery fence durable: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
+fn remove_kata_recovery_fence(canonical: &KataLaunchPlan) -> Result<(), RunnerError> {
+    match std::fs::remove_file(kata_recovery_fence_path(canonical)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "failed to clear the Kata recovery fence: {error}"
+            )));
+        }
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&canonical.metadata_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            RunnerError::RuntimeLaunch(format!(
+                "failed to make Kata recovery fence removal durable: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
+fn remove_kata_recovery_env_file(
+    canonical: &KataLaunchPlan,
+    request_id: &str,
+) -> Result<(), RunnerError> {
+    let path = kata_recovery_plan(canonical, request_id).env_file;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RunnerError::RuntimeLaunch(format!(
+            "failed to remove a transient Kata recovery environment: {error}"
+        ))),
+    }
+}
+
 fn kata_recovery_expected_npub_path(canonical: &KataLaunchPlan, request_id: &str) -> PathBuf {
     canonical.metadata_root.join(format!(
         "recovery-{}.expected-npub",
@@ -2511,6 +2856,19 @@ struct KataInspectMount {
     read_write: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct KataRecoveryFence {
+    schema_version: u8,
+    operation_ids: Vec<String>,
+}
+
+struct KataRecoveryHelper {
+    container_name: String,
+    request_id: String,
+    inspected: KataInspect,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2565,7 +2923,14 @@ mod tests {
                             let request = String::from_utf8_lossy(&request[..count]);
                             let body = if request.contains(" /contact ") {
                                 contact_requests_thread.fetch_add(1, Ordering::Relaxed);
-                                format!(r#"{{"agent_npub":"{npub}"}}"#)
+                                if recovery.as_ref().is_some_and(|recovery| recovery.oversized) {
+                                    format!(
+                                        r#"{{"padding":"{}"}}"#,
+                                        "x".repeat(MAX_KATA_HTTP_RESPONSE_BYTES as usize + 1)
+                                    )
+                                } else {
+                                    format!(r#"{{"agent_npub":"{npub}"}}"#)
+                                }
                             } else {
                                 health_requests_thread.fetch_add(1, Ordering::Relaxed);
                                 match recovery.as_ref() {
@@ -2577,7 +2942,7 @@ mod tests {
                                             format!(
                                                 r#"{{"padding":"{}"}}"#,
                                                 "x".repeat(
-                                                    MAX_RECOVERY_HEALTH_RESPONSE_BYTES as usize + 1
+                                                    MAX_KATA_HTTP_RESPONSE_BYTES as usize + 1
                                                 )
                                             )
                                         } else if recovery.visible.load(Ordering::Relaxed) {
@@ -2599,8 +2964,16 @@ mod tests {
                                     None => r#"{"ready":true}"#.to_string(),
                                 }
                             };
+                            let refused = recovery.as_ref().is_some_and(|recovery| {
+                                recovery.visible.load(Ordering::Relaxed) && !recovery.accepted
+                            });
+                            let status = if refused {
+                                "503 Service Unavailable"
+                            } else {
+                                "200 OK"
+                            };
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                 body.len(),
                                 body
                             );
@@ -2653,6 +3026,11 @@ field_or_empty() { if [ -f "$root/$1.$2" ]; then cat "$root/$1.$2"; fi; }
 write_field() { printf '%s' "$3" > "$root/$1.$2"; }
 case "$cmd" in
   info|pull) exit 0 ;;
+  ps)
+    for image in "$root"/*.image; do
+      if [ -f "$image" ]; then basename "$image" .image; fi
+    done
+    ;;
   inspect)
     name="$1"
     if [ ! -f "$root/$name.image" ]; then echo "not found" >&2; exit 1; fi
@@ -3189,6 +3567,15 @@ esac
             &lease,
             candidate_server.port,
         );
+        write_kata_env_file(
+            &candidate.env_file,
+            &[(
+                "FINITE_PRIVATE_API_KEY".to_string(),
+                "crash-secret".to_string(),
+            )],
+        )
+        .unwrap();
+        assert!(candidate.env_file.exists());
 
         launcher
             .recover_known_good_chat_runtime(&lease, &recovery_options())
@@ -3210,6 +3597,10 @@ esac
             !fake_state
                 .join(format!("{}.image", candidate.container_name))
                 .exists()
+        );
+        assert!(
+            !candidate.env_file.exists(),
+            "reconciliation must unlink a crash-retained recovery env file"
         );
         assert_eq!(
             std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
@@ -3324,6 +3715,20 @@ esac
             std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
                 .unwrap(),
             "running"
+        );
+
+        let commands_before_retry =
+            std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let retry_error = launcher
+            .recover_known_good_chat_runtime(&lease, &recovery_options())
+            .unwrap_err();
+        assert!(retry_error.to_string().contains("refused its boot intent"));
+        let commands_after_retry =
+            std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert_eq!(
+            commands_after_retry.matches("run --detach").count(),
+            commands_before_retry.matches("run --detach").count(),
+            "same-operation refusal must not launch another helper"
         );
     }
 
@@ -3472,6 +3877,269 @@ esac
             .unwrap_err();
 
         assert!(error.to_string().contains("bounded limit"));
+    }
+
+    #[test]
+    fn kata_recovery_contact_response_is_bounded_even_on_status_errors() {
+        let visible = Arc::new(AtomicBool::new(true));
+        let server = TestHttpServer::start_with_recovery(
+            "npub1sameagent",
+            Some(TestRecoveryBehavior {
+                operation_hash: kata_recovery_operation_hash("runtime_ctl_bounded_contact"),
+                visible,
+                reveal_on_health: false,
+                accepted: false,
+                oversized: true,
+            }),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _) = test_launcher(&temp, server.port);
+
+        let error = launcher
+            .wait_for_agent_npub(&plan, server.port)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("contact response exceeded"));
+    }
+
+    #[test]
+    fn newer_recovery_runs_despite_an_older_refused_503_report() {
+        let old_request = "runtime_ctl_recover_old_refusal";
+        let new_request = "runtime_ctl_recover_new_after_refusal";
+        let old_server = TestHttpServer::start_with_recovery(
+            "npub1sameagent",
+            Some(TestRecoveryBehavior {
+                operation_hash: kata_recovery_operation_hash(old_request),
+                visible: Arc::new(AtomicBool::new(true)),
+                reveal_on_health: false,
+                accepted: false,
+                oversized: false,
+            }),
+        );
+        let candidate_server = TestHttpServer::start_with_recovery(
+            "npub1sameagent",
+            Some(TestRecoveryBehavior {
+                operation_hash: kata_recovery_operation_hash(new_request),
+                visible: Arc::new(AtomicBool::new(false)),
+                reveal_on_health: true,
+                accepted: true,
+                oversized: false,
+            }),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        launcher.config.readiness_timeout = Duration::from_millis(100);
+        let image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        write_kata_recovery_fence(&plan, [old_request.to_string()]).unwrap();
+        let lease = recovery_lease(new_request, image, old_server.port);
+
+        let error = launcher
+            .recover_known_good_chat_runtime(&lease, &recovery_options())
+            .unwrap_err();
+
+        assert!(
+            !error
+                .to_string()
+                .contains("did not expose its Agent Principal")
+        );
+        assert!(!error.to_string().contains("refused its boot intent"));
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(commands.contains("run --detach"));
+        let environment = fake_environment(&fake_state, "last-run");
+        let intent: serde_json::Value =
+            serde_json::from_str(environment.get(RECOVERY_BOOT_INTENT_ENV).unwrap()).unwrap();
+        assert_eq!(intent["operation_id"], new_request);
+        assert_eq!(
+            read_kata_recovery_fence(&plan)
+                .unwrap()
+                .unwrap()
+                .operation_ids,
+            vec![new_request.to_string()]
+        );
+    }
+
+    #[test]
+    fn recovery_reconciles_owned_helpers_from_older_request_ids_before_start() {
+        let new_request = "runtime_ctl_recover_after_old_helper";
+        let operation_hash = kata_recovery_operation_hash(new_request);
+        let visible = Arc::new(AtomicBool::new(false));
+        let old_server = TestHttpServer::start_with_recovery(
+            "npub1sameagent",
+            Some(TestRecoveryBehavior {
+                operation_hash: operation_hash.clone(),
+                visible: visible.clone(),
+                reveal_on_health: false,
+                accepted: true,
+                oversized: false,
+            }),
+        );
+        let candidate_server = TestHttpServer::start_with_recovery(
+            "npub1sameagent",
+            Some(TestRecoveryBehavior {
+                operation_hash,
+                visible,
+                reveal_on_health: true,
+                accepted: true,
+                oversized: false,
+            }),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        let old_lease = recovery_lease(
+            "runtime_ctl_recover_abandoned_helper",
+            image,
+            old_server.port,
+        );
+        let old_helper = write_fake_recovery_candidate(
+            &launcher,
+            &fake_state,
+            &plan,
+            &old_lease,
+            candidate_server.port,
+        );
+        let new_lease = recovery_lease(new_request, image, old_server.port);
+
+        launcher
+            .recover_known_good_chat_runtime(&new_lease, &recovery_options())
+            .unwrap();
+
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let remove_old = commands
+            .find(&format!("rm --force {}", old_helper.container_name))
+            .unwrap();
+        let stop = commands
+            .find(&format!("stop --time 30 {}", plan.container_name))
+            .unwrap();
+        assert!(remove_old < stop);
+        assert!(!kata_recovery_fence_path(&plan).exists());
+    }
+
+    #[test]
+    fn mismatched_recovery_helper_blocks_restart_without_provider_mutation() {
+        let server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, server.port);
+        let image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            image,
+            "artifact-v1",
+            "",
+            server.port,
+            &plan.state_root,
+        );
+        let helper_lease = recovery_lease("runtime_ctl_recover_wrong_mount", image, server.port);
+        let helper = write_fake_recovery_candidate(
+            &launcher,
+            &fake_state,
+            &plan,
+            &helper_lease,
+            server.port,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.mount", helper.container_name)),
+            temp.path().join("wrong-state").display().to_string(),
+        )
+        .unwrap();
+        let mut restart = helper_lease;
+        restart.request.id = "runtime_ctl_restart_blocked".to_string();
+        restart.request.kind = RuntimeControlKind::Restart;
+        let RuntimeSpecEnvelope::V1(spec) = restart.runtime_spec.as_mut().unwrap();
+        spec.operation_id = restart.request.id.clone();
+        spec.boot_intent = RuntimeBootIntent::Normal;
+
+        let error = launcher
+            .restart_runtime(&restart, &RuntimeRestartOptions::default())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("exact canonical source and writable /data"),
+            "{error}"
+        );
+        assert!(
+            fake_state
+                .join(format!("{}.image", helper.container_name))
+                .exists()
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(!commands.contains("restart --time"));
+    }
+
+    #[test]
+    fn post_stop_host_port_failure_leaves_fence_all_controls_honor() {
+        let request_id = "runtime_ctl_recover_missing_helper_port";
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        let image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        let lease = recovery_lease(request_id, image, old_server.port);
+        write_kata_recovery_expected_npub(&plan, request_id, "npub1sameagent").unwrap();
+        let helper =
+            write_fake_recovery_candidate(&launcher, &fake_state, &plan, &lease, old_server.port);
+        std::fs::write(
+            fake_state.join(format!("{}.port", helper.container_name)),
+            "invalid",
+        )
+        .unwrap();
+
+        launcher
+            .recover_known_good_chat_runtime(&lease, &recovery_options())
+            .unwrap_err();
+        assert!(kata_recovery_fence_path(&plan).exists());
+
+        let mut restart = lease;
+        restart.request.id = "runtime_ctl_restart_after_failed_recovery".to_string();
+        restart.request.kind = RuntimeControlKind::Restart;
+        let RuntimeSpecEnvelope::V1(spec) = restart.runtime_spec.as_mut().unwrap();
+        spec.operation_id = restart.request.id.clone();
+        spec.boot_intent = RuntimeBootIntent::Normal;
+        let restart_error = launcher
+            .restart_runtime(&restart, &RuntimeRestartOptions::default())
+            .unwrap_err();
+        assert!(
+            restart_error
+                .to_string()
+                .contains("unresolved recovery fence")
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(!commands.contains("restart --time"));
+        assert!(!commands.contains(&format!("start {}", plan.container_name)));
     }
 
     #[test]
