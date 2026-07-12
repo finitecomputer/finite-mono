@@ -3879,7 +3879,7 @@ pre {
 
 .page-surface {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
 }
 
@@ -3892,10 +3892,6 @@ pre {
   border-bottom: 1px solid var(--line);
   background: var(--bg);
   padding: 11px 22px;
-}
-
-.page-header {
-  display: none;
 }
 
 .page-header h2,

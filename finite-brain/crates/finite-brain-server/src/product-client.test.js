@@ -234,6 +234,10 @@ const updateActiveTaskDraftSource = source.slice(
   source.indexOf("function updateActiveTaskDraft(taskCheckbox)"),
   source.indexOf("function setEditorMode(mode)")
 );
+const drawGraphSource = source.slice(
+  source.indexOf("function drawGraph(graph, options = {})"),
+  source.indexOf("function setGraphHover(svg, graph, nodeId)")
+);
 assert.match(
   reportClientActionFailureSource,
   /handledAccessFailures\.has\(error\)\) return;/,
@@ -839,6 +843,21 @@ assert.doesNotMatch(source, /graphFilterInput/);
 for (const [, rule] of cssSource.matchAll(/\.graph-canvas \.node\s*\{([^}]*)\}/g)) {
   assert.doesNotMatch(rule, /cursor:\s*pointer/);
 }
+assert.doesNotMatch(
+  drawGraphSource,
+  /addEventListener\("click"/,
+  "Graph nodes must not gain a click activation before that behavior exists"
+);
+assert.match(
+  cssSource,
+  /\.page-surface\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/s,
+  "The Page header needs its own grid row so the explicit Save action is visible"
+);
+assert.doesNotMatch(
+  cssSource,
+  /\.page-header\s*\{[^}]*display:\s*none;/s,
+  "The Page header must not hide the visible Save Page action"
+);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
@@ -2931,6 +2950,27 @@ assert.match(source, /"vaultInviteSecretInput"/);
     client.toggleMarkdownTask("- [x] First\r\n- [ ] Second", 1, true),
     "- [x] First\r\n- [x] Second",
     "A task toggle must preserve the normal draft's line ending style"
+  );
+  assert.equal(
+    client.toggleMarkdownTask(
+      [
+        "```md",
+        "- [ ] Example code, not a visual task",
+        "```",
+        "",
+        "- [ ] The visible task",
+      ].join("\n"),
+      0,
+      true
+    ),
+    [
+      "```md",
+      "- [ ] Example code, not a visual task",
+      "```",
+      "",
+      "- [x] The visible task",
+    ].join("\n"),
+    "A visual task toggle must not change task-looking source inside a fenced code block"
   );
   assert.equal(
     client.taskCheckboxAriaLabel("Ship the explicit draft", false),

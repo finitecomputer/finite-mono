@@ -3219,7 +3219,7 @@ const FiniteBrainProductClient = (() => {
     return lines.join("\n");
   }
 
-  function markdownPreviewBlocks(markdown) {
+  function markdownPreviewBlocks(markdown, options = {}) {
     const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
     const blocks = [];
     let paragraph = [];
@@ -3290,10 +3290,12 @@ const FiniteBrainProductClient = (() => {
           const item = parseMarkdownListItem(lines[index]);
           if (!item || item.ordered !== ordered) break;
           if (start === null) start = item.start;
-          items.push({
+          const itemRecord = {
             checked: item.checked,
             text: item.text,
-          });
+          };
+          if (options.includeSourcePositions) itemRecord.sourceLineIndex = index;
+          items.push(itemRecord);
           index += 1;
         }
         index -= 1;
@@ -5169,15 +5171,20 @@ const FiniteBrainProductClient = (() => {
     const source = String(markdown ?? "");
     const lineEnding = source.includes("\r\n") ? "\r\n" : "\n";
     const selectedIndex = Number(taskIndex);
-    let foundTasks = 0;
-    return source
-      .split(/\r?\n/)
-      .map((line) => {
-        const task = line.match(/^(\s*[-*+]\s+\[)[ xX](\]\s+.*)$/);
-        if (!task || foundTasks++ !== selectedIndex) return line;
-        return `${task[1]}${checked ? "x" : " "}${task[2]}`;
-      })
-      .join(lineEnding);
+    const taskSourceLines = [];
+    for (const block of markdownPreviewBlocks(source, { includeSourcePositions: true })) {
+      if (block.type !== "list") continue;
+      for (const item of block.items) {
+        if (item.checked !== null) taskSourceLines.push(item.sourceLineIndex);
+      }
+    }
+    const sourceLineIndex = taskSourceLines[selectedIndex];
+    if (!Number.isInteger(sourceLineIndex)) return source;
+    const lines = source.split(/\r?\n/);
+    const task = lines[sourceLineIndex]?.match(/^(\s*[-*+]\s+\[)[ xX](\]\s+.+)$/);
+    if (!task) return source;
+    lines[sourceLineIndex] = `${task[1]}${checked ? "x" : " "}${task[2]}`;
+    return lines.join(lineEnding);
   }
 
   function taskCheckboxAriaLabel(taskText, checked) {
