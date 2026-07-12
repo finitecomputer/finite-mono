@@ -15,11 +15,12 @@ use crate::{
     FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateGrant,
     FinitePrivateSettlementKind, FinitePrivateUsageDecision, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, ProjectImportCandidate, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput,
-    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    LinkVerifiedUserInput, ProjectImportCandidate, ProviderRuntimeHandleEnvelope,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RegisterAgentCreationRuntimeInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RunnerClass, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
@@ -103,8 +104,6 @@ pub struct CreateAgentRequest {
     pub launch_code: String,
     pub idempotency_key: String,
     #[serde(default)]
-    pub runner_class: RunnerClass,
-    #[serde(default)]
     pub profile_picture_url: Option<String>,
 }
 
@@ -114,6 +113,8 @@ pub struct IssueLaunchCodeBatchRequest {
     pub name: String,
     pub code_count: u32,
     pub expires_in_hours: Option<i64>,
+    #[serde(default)]
+    pub hosting_tier: Option<crate::HostingTier>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +169,10 @@ pub struct CompleteAgentCreationRequest {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -187,6 +192,10 @@ pub struct RegisterAgentCreationRuntimeRequest {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -1039,6 +1048,7 @@ async fn admin_issue_launch_code_batch(
             name: input.name,
             code_count: input.code_count,
             expires_in_hours: input.expires_in_hours,
+            hosting_tier: input.hosting_tier,
             created_by_workos_user_id: identity.workos_user_id,
             now: None,
         })
@@ -1428,7 +1438,7 @@ async fn create_agent_request(
                     now: None,
                 },
                 AgentCreationConfiguration {
-                    runner_class: input.runner_class,
+                    placement: None,
                     profile_picture_url: input.profile_picture_url,
                 },
             )
@@ -1636,6 +1646,8 @@ async fn complete_agent_creation_request(
                 source_machine_id: input.source_machine_id,
                 runtime_artifact_id: input.runtime_artifact_id,
                 state_schema_version: input.state_schema_version,
+                provider_runtime_handle: input.provider_runtime_handle,
+                contact_endpoint: input.contact_endpoint,
                 display_name: input.display_name,
                 hostname: input.hostname,
                 runtime_host: input.runtime_host,
@@ -1667,6 +1679,8 @@ async fn register_agent_creation_runtime(
                 source_machine_id: input.source_machine_id,
                 runtime_artifact_id: input.runtime_artifact_id,
                 state_schema_version: input.state_schema_version,
+                provider_runtime_handle: input.provider_runtime_handle,
+                contact_endpoint: input.contact_endpoint,
                 runtime_relay_token_hash: input.runtime_relay_token_hash,
                 display_name: input.display_name,
                 hostname: input.hostname,
@@ -2762,12 +2776,25 @@ mod tests {
         format!("Bearer {}", scoped_token("finite-private-usage"))
     }
 
+    #[test]
+    fn user_agent_creation_json_cannot_select_provider_placement() {
+        let error = serde_json::from_value::<CreateAgentRequest>(serde_json::json!({
+            "displayName": "Provider injection",
+            "launchCode": "finite_test",
+            "idempotencyKey": "provider-injection",
+            "runnerClass": "phala"
+        }))
+        .expect_err("runnerClass must remain outside the user boundary");
+        assert!(error.to_string().contains("unknown field `runnerClass`"));
+    }
+
     async fn issue_test_launch_code(store: &CoreStore) -> String {
         store
             .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
                 name: "Core API test batch".to_string(),
                 code_count: 1,
                 expires_in_hours: Some(crate::launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                hosting_tier: None,
                 created_by_workos_user_id: "workos-test-operator".to_string(),
                 now: None,
             })
@@ -3542,7 +3569,6 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
-            runner_class: RunnerClass::Kata,
             profile_picture_url: Some("https://chat.finite.computer/v1/blobs/profile".to_string()),
         })
         .unwrap();
@@ -3663,7 +3689,6 @@ mod tests {
             display_name: "Second Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-2".to_string(),
-            runner_class: RunnerClass::Phala,
             profile_picture_url: None,
         })
         .unwrap();
@@ -3701,6 +3726,7 @@ mod tests {
                 name: "Expired browser code".to_string(),
                 code_count: 1,
                 expires_in_hours: Some(1),
+                hosting_tier: None,
                 created_by_workos_user_id: "workos-test-operator".to_string(),
                 now: Some("2020-01-01T00:00:00Z".to_string()),
             })
@@ -3778,7 +3804,6 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
-            runner_class: RunnerClass::Phala,
             profile_picture_url: None,
         })
         .unwrap();
@@ -4074,7 +4099,8 @@ mod tests {
                                 "draining": false,
                                 "maxSandboxCount": 4,
                                 "activeSandboxCount": 1,
-                                "availableMemoryBytes": 8589934592_u64
+                                "availableMemoryBytes": 8589934592_u64,
+                                "runnerClasses": ["kata"]
                             },
                             "now": "2026-05-25T13:00:01Z"
                         })
@@ -4102,7 +4128,6 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
-            runner_class: RunnerClass::Phala,
             profile_picture_url: None,
         })
         .unwrap();
@@ -4866,8 +4891,7 @@ mod tests {
             Some(serde_json::json!({
                 "displayName": "Oslo Agent",
                 "launchCode": launch_code,
-                "idempotencyKey": "browser-submit-1",
-                "runnerClass": "kata"
+                "idempotencyKey": "browser-submit-1"
             })),
         )
         .await;

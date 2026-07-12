@@ -17,7 +17,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0003_launch_codes.sql"),
     "\n",
-    include_str!("../migrations/0004_membership_archive.sql")
+    include_str!("../migrations/0004_membership_archive.sql"),
+    "\n",
+    include_str!("../migrations/0005_phala_expand.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -88,18 +90,129 @@ pub enum RuntimeArtifactKind {
     OciImage,
 }
 
+/// Customer-facing hosting promise. Provider placement remains a separate,
+/// Core-owned fact and is never inferred from BillingClass.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingTier {
+    Standard,
+    Confidential,
+}
+
+/// Provider-neutral minimum compute shape. Runner adapters translate this
+/// closed value to a provider-specific size and verify the returned capacity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeResourceClass {
+    Vcpu4Memory8Gib,
+    Vcpu2Memory4Gib,
+}
+
 /// Product placement choice stored with an agent creation request. Provider
 /// vocabulary stops at the runner adapter; feature behavior does not branch on
 /// this value.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerClass {
     LocalDocker,
     AppleContainer,
     Kata,
-    #[default]
     Phala,
     Enclavia,
+}
+
+/// Immutable placement resolved by Core. Replacement and recovery copy this
+/// value rather than rerunning current product policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePlacement {
+    pub runner_class: RunnerClass,
+    pub runtime_resource_class: RuntimeResourceClass,
+}
+
+impl RuntimePlacement {
+    pub const fn for_hosting_tier(tier: HostingTier) -> Self {
+        match tier {
+            HostingTier::Standard => Self {
+                runner_class: RunnerClass::Kata,
+                runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+            },
+            HostingTier::Confidential => Self {
+                runner_class: RunnerClass::Phala,
+                runtime_resource_class: RuntimeResourceClass::Vcpu2Memory4Gib,
+            },
+        }
+    }
+
+    /// Compatibility bridge for proven Kata/Phala rows written before the
+    /// placement columns existed. Other experimental adapters have no durable
+    /// resource-class fact, so callers must leave the expand fields null.
+    pub const fn from_legacy_runner_class(runner_class: RunnerClass) -> Option<Self> {
+        match runner_class {
+            RunnerClass::Kata => Some(Self::for_hosting_tier(HostingTier::Standard)),
+            RunnerClass::Phala => Some(Self::for_hosting_tier(HostingTier::Confidential)),
+            RunnerClass::LocalDocker | RunnerClass::AppleContainer | RunnerClass::Enclavia => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEndpointContractV1 {
+    pub service_port: u16,
+    pub health_path: String,
+    pub contact_path: String,
+}
+
+/// Complete immutable launch input owned by Core. The envelope is explicitly
+/// versioned so readers reject an unknown contract instead of guessing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSpecV1 {
+    pub operation_id: String,
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub placement: RuntimePlacement,
+    pub runtime_artifact_id: String,
+    pub runtime_image_digest: String,
+    pub state_schema_version: String,
+    pub durable_state_id: String,
+    pub endpoints: RuntimeEndpointContractV1,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secret_references: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "spec")]
+pub enum RuntimeSpecEnvelope {
+    #[serde(rename = "runtime_spec.v1")]
+    V1(RuntimeSpecV1),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRuntimeHandleV1 {
+    pub runner_class: RunnerClass,
+    /// Adapter-owned JSON. Core stores and returns it without interpreting
+    /// provider ids or copying them into source host/machine identity.
+    pub opaque: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "handle")]
+pub enum ProviderRuntimeHandleEnvelope {
+    #[serde(rename = "provider_runtime_handle.v1")]
+    V1(ProviderRuntimeHandleV1),
+}
+
+impl ProviderRuntimeHandleEnvelope {
+    pub const fn runner_class(&self) -> RunnerClass {
+        match self {
+            Self::V1(handle) => handle.runner_class,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +287,12 @@ pub enum CoreError {
     MissingAgentCreationIdempotencyKey,
     #[error("agent profile picture URL is invalid")]
     InvalidAgentProfilePictureUrl,
+    #[error("runtime contact endpoint is invalid")]
+    InvalidRuntimeContactEndpoint,
+    #[error("provider runtime handle does not match the persisted placement")]
+    ProviderRuntimeHandlePlacementMismatch,
+    #[error("hosting tier is required before creating an agent")]
+    MissingHostingTier,
     #[error("launch code is required")]
     MissingLaunchCode,
     #[error("launch code is invalid")]
@@ -357,6 +476,8 @@ pub struct CustomerOrganization {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomerBillingAccount {
     pub customer_org_id: String,
+    #[serde(default)]
+    pub hosting_tier: Option<HostingTier>,
     pub stripe_customer_id: Option<String>,
     pub stripe_subscription_id: Option<String>,
     pub stripe_price_id: Option<String>,
@@ -419,6 +540,10 @@ pub struct Project {
     pub owner_user_id: String,
     pub display_name: String,
     pub import_candidate_id: Option<String>,
+    #[serde(default)]
+    pub hosting_tier: Option<HostingTier>,
+    #[serde(default)]
+    pub placement: Option<RuntimePlacement>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -432,6 +557,14 @@ pub struct AgentRuntime {
     pub source_import_key: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub placement: Option<RuntimePlacement>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub provider_runtime_handle_history: Vec<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub host_facts: HostOwnedRuntimeFacts,
     pub created_at: String,
     pub updated_at: String,
@@ -530,6 +663,8 @@ pub struct ArchiveImportedProjectInput {
 pub struct AgentCreationEntitlement {
     pub id: String,
     pub customer_org_id: String,
+    #[serde(default)]
+    pub hosting_tier: Option<HostingTier>,
     pub allowed_new_agent_runtimes: i32,
     pub launch_code: Option<String>,
     pub created_at: String,
@@ -572,7 +707,16 @@ pub struct AgentCreationRequest {
     pub project_id: String,
     pub idempotency_key: String,
     pub display_name: String,
+    /// Legacy dual-write retained for the N-1 Runner during expansion.
     pub runner_class: RunnerClass,
+    #[serde(default)]
+    pub hosting_tier: Option<HostingTier>,
+    #[serde(default)]
+    pub placement: Option<RuntimePlacement>,
+    #[serde(default)]
+    pub desired_runtime_artifact_id: Option<String>,
+    #[serde(default)]
+    pub runtime_spec: Option<RuntimeSpecEnvelope>,
     pub profile_picture_url: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
@@ -975,7 +1119,9 @@ pub struct RequestAgentCreationInput {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCreationConfiguration {
-    pub runner_class: RunnerClass,
+    /// Internal-only placement override for local/provider conformance tests.
+    /// User-scoped HTTP requests never populate this field.
+    pub placement: Option<RuntimePlacement>,
     pub profile_picture_url: Option<String>,
 }
 
@@ -1164,15 +1310,15 @@ pub struct RunnerLeaseCapacity {
 
 impl RunnerLeaseCapacity {
     pub fn accepts_runtime_control(&self) -> bool {
-        !self.draining
+        true
     }
 
     pub fn accepts_agent_creation(&self) -> bool {
-        self.accepts_runtime_control() && !self.sandbox_limit_reached()
+        !self.draining && !self.sandbox_limit_reached()
     }
 
     pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
-        self.runner_classes.is_empty() || self.runner_classes.contains(&runner_class)
+        self.runner_classes.contains(&runner_class)
     }
 
     pub fn agent_creation_rejection_reason(&self) -> Option<&'static str> {
@@ -1210,6 +1356,10 @@ pub struct CompleteAgentCreationRequestInput {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -1230,6 +1380,10 @@ pub struct RegisterAgentCreationRuntimeInput {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -1385,6 +1539,8 @@ impl BridgeCoreState {
                 owner_user_id: user.id.clone(),
                 display_name: candidate.host_facts.display_name.clone(),
                 import_candidate_id: Some(candidate.id.clone()),
+                hosting_tier: Some(HostingTier::Standard),
+                placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
@@ -1396,6 +1552,10 @@ impl BridgeCoreState {
                 source_import_key: candidate.source_import_key.clone(),
                 runtime_artifact_id: None,
                 state_schema_version: None,
+                placement: project.placement,
+                provider_runtime_handle: None,
+                provider_runtime_handle_history: Vec::new(),
+                contact_endpoint: None,
                 host_facts: candidate.host_facts.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -1505,6 +1665,23 @@ impl BridgeCoreState {
         } else {
             None
         };
+        let hosting_tier = if let Some(selected) = selected_launch_code.as_ref() {
+            self.launch_code_batches
+                .get(&selected.batch_id)
+                .and_then(|batch| batch.hosting_tier)
+                .unwrap_or(HostingTier::Standard)
+        } else {
+            let org_id = existing_org_id
+                .as_deref()
+                .ok_or(CoreError::MissingHostingTier)?;
+            self.customer_billing_accounts
+                .get(org_id)
+                .and_then(|account| account.hosting_tier)
+                .ok_or(CoreError::MissingHostingTier)?
+        };
+        let placement = configuration
+            .placement
+            .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
 
         let user = self.ensure_linked_user_with_billing_class(
             &verified_email,
@@ -1570,10 +1747,15 @@ impl BridgeCoreState {
         let project_id = new_self_service_project_id()?;
         if let Some(selected) = selected_launch_code.as_ref() {
             if selected.redeemed_customer_org_id.is_none() {
-                self.grant_launch_code_agent_creation_entitlement(&org.id, &selected.id, &now);
+                self.grant_launch_code_agent_creation_entitlement(
+                    &org.id,
+                    &selected.id,
+                    hosting_tier,
+                    &now,
+                );
             }
         } else {
-            self.ensure_agent_creation_entitlement(&org.id, None, &now)?;
+            self.ensure_agent_creation_entitlement(&org.id, None, hosting_tier, &now)?;
         }
         if let Some(selected) = selected_launch_code.as_ref()
             && selected.redeemed_customer_org_id.is_none()
@@ -1594,6 +1776,8 @@ impl BridgeCoreState {
             owner_user_id: user.id.clone(),
             display_name: display_name.clone(),
             import_candidate_id: None,
+            hosting_tier: Some(hosting_tier),
+            placement: Some(placement),
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -1604,7 +1788,11 @@ impl BridgeCoreState {
             project_id: project_id.clone(),
             idempotency_key,
             display_name,
-            runner_class: configuration.runner_class,
+            runner_class: placement.runner_class,
+            hosting_tier: Some(hosting_tier),
+            placement: Some(placement),
+            desired_runtime_artifact_id: None,
+            runtime_spec: None,
             profile_picture_url,
             status: AgentCreationRequestStatus::Requested,
             requested_launch_code: selected_launch_code.map(|record| record.id),
@@ -1760,7 +1948,11 @@ impl BridgeCoreState {
             .insert(customer_org_id.clone(), account.clone());
 
         if input.subscription_status.can_create_agent() {
-            self.ensure_billing_agent_creation_entitlement(&customer_org_id, &now);
+            self.ensure_billing_agent_creation_entitlement(
+                &customer_org_id,
+                HostingTier::Standard,
+                &now,
+            );
             if let Some(org) = self.customer_orgs.get_mut(&customer_org_id) {
                 org.billing_class = BillingClass::Standard;
                 org.updated_at = now;
@@ -2138,6 +2330,14 @@ impl BridgeCoreState {
                         && source_host_id
                             .as_deref()
                             .is_none_or(|host_id| request.source_host_id == host_id)
+                        && input.runner_capacity.as_ref().is_none_or(|capacity| {
+                            self.agent_runtimes
+                                .get(&request.agent_runtime_id)
+                                .and_then(|runtime| runtime.placement)
+                                .is_some_and(|placement| {
+                                    capacity.supports_runner_class(placement.runner_class)
+                                })
+                        })
                 })
                 .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
                 .map(|request| request.id.clone());
@@ -2403,10 +2603,24 @@ impl BridgeCoreState {
         // Resolve the runtime by its natural key (source_import_key is UNIQUE):
         // reuse the existing surrogate id when the source is already known, mint
         // a fresh one otherwise. The id is never derived from the source.
-        let runtime_id = match self.find_agent_runtime_by_source_import_key(&source_import_key) {
-            Some(existing) => existing.id,
-            None => new_agent_runtime_id()?,
-        };
+        let existing_runtime = self.find_agent_runtime_by_source_import_key(&source_import_key);
+        let runtime_id = existing_runtime
+            .as_ref()
+            .map(|runtime| runtime.id.clone())
+            .map(Ok)
+            .unwrap_or_else(new_agent_runtime_id)?;
+        let placement = request.placement.or(project.placement).or(existing_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.placement));
+        let (provider_runtime_handle, provider_runtime_handle_history) =
+            merge_provider_runtime_handle(
+                existing_runtime.as_ref(),
+                input.provider_runtime_handle.clone(),
+                placement,
+            )?;
+        let contact_endpoint =
+            normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
+                .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -2428,8 +2642,14 @@ impl BridgeCoreState {
             source_import_key,
             runtime_artifact_id: Some(artifact.id),
             state_schema_version: Some(state_schema_version),
+            placement,
+            provider_runtime_handle,
+            provider_runtime_handle_history,
+            contact_endpoint,
             host_facts,
-            created_at: now.clone(),
+            created_at: existing_runtime
+                .map(|runtime| runtime.created_at)
+                .unwrap_or_else(|| now.clone()),
             updated_at: now.clone(),
         };
         self.agent_runtimes
@@ -2522,10 +2742,25 @@ impl BridgeCoreState {
         // Reuse the runtime already known for this source (registered earlier or
         // resolved by its UNIQUE source_import_key); mint a fresh surrogate id
         // only for a source we have never seen.
-        let runtime_id = match self.find_agent_runtime_by_source_import_key(&source_import_key) {
-            Some(existing) => existing.id,
-            None => new_agent_runtime_id()?,
-        };
+        let runtime_by_source = self.find_agent_runtime_by_source_import_key(&source_import_key);
+        let runtime_id = runtime_by_source
+            .as_ref()
+            .map(|runtime| runtime.id.clone())
+            .map(Ok)
+            .unwrap_or_else(new_agent_runtime_id)?;
+        let existing_runtime = existing_runtime.or(runtime_by_source);
+        let placement = request.placement.or(project.placement).or(existing_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.placement));
+        let (provider_runtime_handle, provider_runtime_handle_history) =
+            merge_provider_runtime_handle(
+                existing_runtime.as_ref(),
+                input.provider_runtime_handle.clone(),
+                placement,
+            )?;
+        let contact_endpoint =
+            normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
+                .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -2547,6 +2782,10 @@ impl BridgeCoreState {
             source_import_key,
             runtime_artifact_id: Some(artifact.id),
             state_schema_version: Some(state_schema_version),
+            placement,
+            provider_runtime_handle,
+            provider_runtime_handle_history,
+            contact_endpoint,
             host_facts,
             created_at: existing_runtime
                 .map(|runtime| runtime.created_at)
@@ -3116,6 +3355,7 @@ impl BridgeCoreState {
         &mut self,
         customer_org_id: &str,
         launch_code_id: Option<&str>,
+        hosting_tier: HostingTier,
         now: &str,
     ) -> CoreResult<AgentCreationEntitlement> {
         if launch_code_id.is_none() && !self.customer_org_has_active_billing(customer_org_id) {
@@ -3140,6 +3380,7 @@ impl BridgeCoreState {
             customer_org_id,
             1,
             launch_code_id.map(str::to_string),
+            hosting_tier,
             now,
         ))
     }
@@ -3148,6 +3389,7 @@ impl BridgeCoreState {
         &mut self,
         customer_org_id: &str,
         launch_code_id: &str,
+        hosting_tier: HostingTier,
         now: &str,
     ) -> AgentCreationEntitlement {
         let id = agent_creation_entitlement_id_for(customer_org_id);
@@ -3155,6 +3397,7 @@ impl BridgeCoreState {
             existing.allowed_new_agent_runtimes =
                 existing.allowed_new_agent_runtimes.saturating_add(1);
             existing.launch_code = Some(launch_code_id.to_string());
+            existing.hosting_tier = Some(hosting_tier);
             existing.updated_at = now.to_string();
             return existing.clone();
         }
@@ -3162,6 +3405,7 @@ impl BridgeCoreState {
             customer_org_id,
             1,
             Some(launch_code_id.to_string()),
+            hosting_tier,
             now,
         )
     }
@@ -3171,6 +3415,7 @@ impl BridgeCoreState {
         customer_org_id: &str,
         allowed_new_agent_runtimes: i32,
         launch_code: Option<String>,
+        hosting_tier: HostingTier,
         now: &str,
     ) -> AgentCreationEntitlement {
         let id = agent_creation_entitlement_id_for(customer_org_id);
@@ -3182,6 +3427,7 @@ impl BridgeCoreState {
         let entitlement = AgentCreationEntitlement {
             id: id.clone(),
             customer_org_id: customer_org_id.to_string(),
+            hosting_tier: Some(hosting_tier),
             allowed_new_agent_runtimes,
             launch_code,
             created_at,
@@ -3195,15 +3441,17 @@ impl BridgeCoreState {
     fn ensure_billing_agent_creation_entitlement(
         &mut self,
         customer_org_id: &str,
+        hosting_tier: HostingTier,
         now: &str,
     ) -> AgentCreationEntitlement {
         let id = agent_creation_entitlement_id_for(customer_org_id);
         if let Some(existing) = self.agent_creation_entitlements.get_mut(&id) {
             existing.allowed_new_agent_runtimes = existing.allowed_new_agent_runtimes.max(1);
+            existing.hosting_tier.get_or_insert(hosting_tier);
             existing.updated_at = now.to_string();
             return existing.clone();
         }
-        self.upsert_agent_creation_entitlement(customer_org_id, 1, None, now)
+        self.upsert_agent_creation_entitlement(customer_org_id, 1, None, hosting_tier, now)
     }
 
     fn active_agent_creation_entitlement_count(&self, customer_org_id: &str) -> i32 {
@@ -3286,6 +3534,10 @@ impl BridgeCoreState {
         }
         let account = CustomerBillingAccount {
             customer_org_id: customer_org_id.to_string(),
+            hosting_tier: existing
+                .as_ref()
+                .and_then(|account| account.hosting_tier)
+                .or(Some(HostingTier::Standard)),
             stripe_customer_id: Some(stripe_customer_id.to_string()),
             stripe_subscription_id: existing
                 .as_ref()
@@ -4438,6 +4690,24 @@ impl RunnerClass {
     }
 }
 
+impl HostingTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Confidential => "confidential",
+        }
+    }
+}
+
+impl RuntimeResourceClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Vcpu4Memory8Gib => "vcpu4_memory8_gib",
+            Self::Vcpu2Memory4Gib => "vcpu2_memory4_gib",
+        }
+    }
+}
+
 impl AgentCreationRequestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -4501,6 +4771,22 @@ pub fn parse_runner_class(value: &str) -> Option<RunnerClass> {
         "kata" => Some(RunnerClass::Kata),
         "phala" => Some(RunnerClass::Phala),
         "enclavia" => Some(RunnerClass::Enclavia),
+        _ => None,
+    }
+}
+
+pub fn parse_hosting_tier(value: &str) -> Option<HostingTier> {
+    match value {
+        "standard" => Some(HostingTier::Standard),
+        "confidential" => Some(HostingTier::Confidential),
+        _ => None,
+    }
+}
+
+pub fn parse_runtime_resource_class(value: &str) -> Option<RuntimeResourceClass> {
+    match value {
+        "vcpu4_memory8_gib" => Some(RuntimeResourceClass::Vcpu4Memory8Gib),
+        "vcpu2_memory4_gib" => Some(RuntimeResourceClass::Vcpu2Memory4Gib),
         _ => None,
     }
 }
@@ -4729,6 +5015,49 @@ pub(crate) fn normalize_profile_picture_url(value: Option<&str>) -> CoreResult<O
         return Err(CoreError::InvalidAgentProfilePictureUrl);
     }
     Ok(Some(value))
+}
+
+pub(crate) fn normalize_runtime_contact_endpoint(
+    value: Option<&str>,
+) -> CoreResult<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let valid_scheme = value.starts_with("https://") || value.starts_with("http://");
+    if !valid_scheme
+        || value.len() > 2_048
+        || value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(CoreError::InvalidRuntimeContactEndpoint);
+    }
+    Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
+pub(crate) fn merge_provider_runtime_handle(
+    existing: Option<&AgentRuntime>,
+    incoming: Option<ProviderRuntimeHandleEnvelope>,
+    placement: Option<RuntimePlacement>,
+) -> CoreResult<(
+    Option<ProviderRuntimeHandleEnvelope>,
+    Vec<ProviderRuntimeHandleEnvelope>,
+)> {
+    let mut current = existing.and_then(|runtime| runtime.provider_runtime_handle.clone());
+    let mut history = existing
+        .map(|runtime| runtime.provider_runtime_handle_history.clone())
+        .unwrap_or_default();
+    if let Some(incoming) = incoming {
+        let placement = placement.ok_or(CoreError::ProviderRuntimeHandlePlacementMismatch)?;
+        if incoming.runner_class() != placement.runner_class {
+            return Err(CoreError::ProviderRuntimeHandlePlacementMismatch);
+        }
+        if history.last() != Some(&incoming) {
+            history.push(incoming.clone());
+        }
+        current = Some(incoming);
+    }
+    Ok((current, history))
 }
 
 fn current_time_iso() -> CoreResult<String> {
@@ -5058,6 +5387,7 @@ mod tests {
                 name: "Test batch".to_string(),
                 code_count: 1,
                 expires_in_hours: Some(launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                hosting_tier: None,
                 created_by_workos_user_id: "workos-test-operator".to_string(),
                 now: Some(NOW.to_string()),
             })
@@ -5387,6 +5717,13 @@ mod tests {
         assert_eq!(state.projects.len(), 1);
         assert_eq!(state.agent_runtimes.len(), 0);
         assert_eq!(state.agent_creation_requests.len(), 1);
+        assert_eq!(first.project.hosting_tier, Some(HostingTier::Standard));
+        assert_eq!(
+            first.project.placement,
+            Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+        );
+        assert_eq!(first.request.runner_class, RunnerClass::Kata);
+        assert_eq!(first.request.hosting_tier, Some(HostingTier::Standard));
         let user = state.users.values().next().unwrap();
         let org = state.customer_orgs.values().next().unwrap();
         assert_eq!(org.billing_class, BillingClass::Sponsored);
@@ -5394,6 +5731,41 @@ mod tests {
             state.visible_projects_for_user(&user.id),
             vec![first.project]
         );
+    }
+
+    #[test]
+    fn confidential_launch_code_resolves_phala_placement_inside_core() {
+        let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
+        state
+            .launch_code_batches
+            .values_mut()
+            .next()
+            .unwrap()
+            .hosting_tier = Some(HostingTier::Confidential);
+
+        let requested = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "confidential@finite.vip".to_string(),
+                workos_user_id: "user_workos_confidential".to_string(),
+                display_name: "Confidential Agent".to_string(),
+                launch_code,
+                idempotency_key: "confidential-submit".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            requested.project.hosting_tier,
+            Some(HostingTier::Confidential)
+        );
+        assert_eq!(
+            requested.project.placement,
+            Some(RuntimePlacement::for_hosting_tier(
+                HostingTier::Confidential
+            ))
+        );
+        assert_eq!(requested.request.runner_class, RunnerClass::Phala);
     }
 
     #[test]
@@ -5412,7 +5784,7 @@ mod tests {
                     now: Some(NOW.to_string()),
                 },
                 AgentCreationConfiguration {
-                    runner_class: RunnerClass::Kata,
+                    placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                     profile_picture_url: Some(
                         "https://chat.finite.computer/v1/blobs/profile".to_string(),
                     ),
@@ -5420,6 +5792,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(requested.request.runner_class, RunnerClass::Kata);
+
+        let draining_kata = RunnerLeaseCapacity {
+            draining: true,
+            runner_classes: vec![RunnerClass::Kata],
+            ..RunnerLeaseCapacity::default()
+        };
+        assert!(!draining_kata.accepts_agent_creation());
+        assert!(draining_kata.accepts_runtime_control());
 
         let phala = state
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
@@ -5435,6 +5815,18 @@ mod tests {
             })
             .unwrap();
         assert!(phala.is_none());
+
+        let unspecified = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "unspecified-worker".to_string(),
+                source_host_id: None,
+                lease_token: "unspecified-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity::default()),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert!(unspecified.is_none());
 
         let kata = state
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
@@ -5506,6 +5898,13 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                    ProviderRuntimeHandleV1 {
+                        runner_class: RunnerClass::Kata,
+                        opaque: json!({"container": "finite-kata-oslo-001"}),
+                    },
+                )),
+                contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
                 display_name: None,
                 hostname: Some("oslo-agent-001.finite.computer".to_string()),
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -5656,6 +6055,10 @@ mod tests {
                 source_import_key: "host-test/machine-test".to_string(),
                 runtime_artifact_id: Some("artifact-immutable".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
+                placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                provider_runtime_handle: None,
+                provider_runtime_handle_history: Vec::new(),
+                contact_endpoint: None,
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Test Agent".to_string(),
                     hostname: None,
@@ -5730,6 +6133,8 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: None,
@@ -5787,6 +6192,13 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                    ProviderRuntimeHandleV1 {
+                        runner_class: RunnerClass::Kata,
+                        opaque: json!({"container": "finite-kata-oslo-001"}),
+                    },
+                )),
+                contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
                 runtime_relay_token_hash: token_hash,
                 display_name: None,
                 hostname: None,
@@ -5804,6 +6216,12 @@ mod tests {
             AgentCreationRequestStatus::Launching
         );
         assert!(registered.request.agent_runtime_id.is_some());
+        let runtime = &state.agent_runtimes[registered.request.agent_runtime_id.as_ref().unwrap()];
+        assert_eq!(
+            runtime.contact_endpoint.as_deref(),
+            Some("https://oslo-agent.example.com/contact")
+        );
+        assert_eq!(runtime.provider_runtime_handle_history.len(), 1);
         assert!(
             state
                 .runtime_heartbeat_for_machine("oslo-agent-001")
@@ -5832,6 +6250,13 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                    ProviderRuntimeHandleV1 {
+                        runner_class: RunnerClass::Kata,
+                        opaque: json!({"container": "finite-kata-oslo-001"}),
+                    },
+                )),
+                contact_endpoint: Some("https://oslo-agent.example.com/contact".to_string()),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6326,6 +6751,8 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: None,
@@ -6485,6 +6912,8 @@ mod tests {
                 source_machine_id: "oslo-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 runtime_relay_token_hash: runtime_relay_token_hash("runtime-token-1").unwrap(),
                 display_name: None,
                 hostname: None,
@@ -6868,6 +7297,8 @@ mod tests {
                 source_machine_id: "paid-agent-001".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("paid-host-1".to_string()),
@@ -7710,6 +8141,110 @@ mod tests {
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
     }
 
+    #[test]
+    fn expand_domain_reads_old_rows_and_n_minus_one_ignores_new_fields() {
+        let old_project: Project = serde_json::from_value(json!({
+            "id": "project-old",
+            "customer_org_id": "org-old",
+            "owner_user_id": "user-old",
+            "display_name": "Old Agent",
+            "import_candidate_id": null,
+            "created_at": NOW,
+            "updated_at": NOW
+        }))
+        .unwrap();
+        assert_eq!(old_project.hosting_tier, None);
+        assert_eq!(old_project.placement, None);
+
+        let new_project = Project {
+            hosting_tier: Some(HostingTier::Standard),
+            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+            ..old_project
+        };
+        #[derive(Deserialize)]
+        struct NMinusOneProject {
+            id: String,
+            display_name: String,
+        }
+        let legacy: NMinusOneProject =
+            serde_json::from_value(serde_json::to_value(&new_project).unwrap()).unwrap();
+        assert_eq!(legacy.id, "project-old");
+        assert_eq!(legacy.display_name, "Old Agent");
+
+        let old_runtime: AgentRuntime = serde_json::from_value(json!({
+            "id": "runtime-old",
+            "project_id": "project-old",
+            "source_host_id": "legacy-host",
+            "source_machine_id": "legacy-machine",
+            "source_import_key": "legacy-host:legacy-machine",
+            "runtime_artifact_id": null,
+            "state_schema_version": null,
+            "host_facts": {
+                "display_name": "Old Agent",
+                "hostname": null,
+                "runtime_host": "legacy-host",
+                "runtime_status": "online",
+                "active_inference_profile": null,
+                "hermes_available": true,
+                "published_app_urls": []
+            },
+            "created_at": NOW,
+            "updated_at": NOW
+        }))
+        .unwrap();
+        assert_eq!(old_runtime.placement, None);
+        assert_eq!(old_runtime.provider_runtime_handle, None);
+        assert!(old_runtime.provider_runtime_handle_history.is_empty());
+
+        let new_runtime = AgentRuntime {
+            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+            provider_runtime_handle: Some(ProviderRuntimeHandleEnvelope::V1(
+                ProviderRuntimeHandleV1 {
+                    runner_class: RunnerClass::Kata,
+                    opaque: json!({"container": "finite-kata-old"}),
+                },
+            )),
+            provider_runtime_handle_history: vec![ProviderRuntimeHandleEnvelope::V1(
+                ProviderRuntimeHandleV1 {
+                    runner_class: RunnerClass::Kata,
+                    opaque: json!({"container": "finite-kata-old"}),
+                },
+            )],
+            contact_endpoint: Some("https://old.example.test/contact".to_string()),
+            ..old_runtime
+        };
+        #[derive(Deserialize)]
+        struct NMinusOneRuntime {
+            id: String,
+            source_host_id: String,
+            source_machine_id: String,
+        }
+        let legacy_runtime: NMinusOneRuntime =
+            serde_json::from_value(serde_json::to_value(new_runtime).unwrap()).unwrap();
+        assert_eq!(legacy_runtime.id, "runtime-old");
+        assert_eq!(legacy_runtime.source_host_id, "legacy-host");
+        assert_eq!(legacy_runtime.source_machine_id, "legacy-machine");
+    }
+
+    #[test]
+    fn versioned_runtime_identity_envelopes_fail_closed_on_unknown_schema() {
+        let unknown_spec = serde_json::from_value::<RuntimeSpecEnvelope>(json!({
+            "schema": "runtime_spec.v2",
+            "spec": {}
+        }));
+        assert!(unknown_spec.is_err());
+
+        let unknown_handle = serde_json::from_value::<ProviderRuntimeHandleEnvelope>(json!({
+            "schema": "provider_runtime_handle.v2",
+            "handle": {"runnerClass": "phala", "opaque": {}}
+        }));
+        assert!(unknown_handle.is_err());
+        assert!(matches!(
+            normalize_runtime_contact_endpoint(Some("file:///tmp/contact")),
+            Err(CoreError::InvalidRuntimeContactEndpoint)
+        ));
+    }
+
     fn options<const N: usize>(
         allowlisted_owner_emails: [&str; N],
         now: &str,
@@ -8097,7 +8632,7 @@ mod tests {
                     now: Some(NOW.to_string()),
                 },
                 AgentCreationConfiguration {
-                    runner_class: RunnerClass::Kata,
+                    placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                     profile_picture_url: None,
                 },
             )
@@ -8125,6 +8660,8 @@ mod tests {
                 source_machine_id: "finite-kata-upgrade".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("http://127.0.0.1:41001".to_string()),
@@ -8500,6 +9037,8 @@ mod tests {
                 source_machine_id: source_machine_id.to_string(),
                 runtime_artifact_id: Some(artifact_id.to_string()),
                 state_schema_version: None,
+                provider_runtime_handle: None,
+                contact_endpoint: None,
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),

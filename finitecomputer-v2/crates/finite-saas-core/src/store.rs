@@ -17,7 +17,7 @@ use crate::{
     FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
     FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
     FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, IssueFinitePrivateApiKeyInput,
+    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
     LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
@@ -28,22 +28,23 @@ use crate::{
     ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimeRelayCredential, RuntimeStatusSnapshot,
+    RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential, RuntimeStatusSnapshot,
     RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
     SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, chat_identity_id_for_user, current_time_iso,
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
-    generate_finite_private_api_key, hash_finite_private_api_key, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_source_host_id, parse_agent_creation_request_status,
-    parse_billing_class, parse_billing_subscription_status, parse_finite_private_api_key_status,
-    parse_finite_private_grant_status, parse_finite_private_reservation_status,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    new_agent_creation_request_id, new_agent_runtime_id, new_customer_org_id,
+    new_self_service_project_id, new_user_id, normalize_id_part, normalize_idempotency_key,
+    normalize_owner_email, normalize_profile_picture_url, normalize_runtime_contact_endpoint,
+    normalize_source_host_id, parse_agent_creation_request_status, parse_billing_class,
+    parse_billing_subscription_status, parse_finite_private_api_key_status,
+    parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
     parse_import_candidate_status, parse_runner_class, parse_runtime_artifact_kind,
-    parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_summary_status,
-    parse_time, parse_user_link_status, project_room_membership_id_for,
-    project_runtime_link_id_for, runtime_artifact_material_matches,
+    parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_resource_class,
+    parse_runtime_summary_status, parse_time, parse_user_link_status,
+    project_room_membership_id_for, project_runtime_link_id_for, runtime_artifact_material_matches,
     runtime_artifact_reference_is_immutable_oci, runtime_relay_token_hash,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
     source_import_key, trim_to_option,
@@ -1184,13 +1185,14 @@ impl PostgresCoreStore {
             .map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?;
         tx.execute(
             "INSERT INTO launch_code_batches
-               (id, name, code_count, expires_at, revoked_at,
+               (id, name, hosting_tier, code_count, expires_at, revoked_at,
                 revoked_by_workos_user_id, created_by_workos_user_id, created_at)
-             VALUES ($1, $2, $3, $4::text::timestamptz, NULL, NULL, $5,
-                     $6::text::timestamptz)",
+             VALUES ($1, $2, $3, $4, $5::text::timestamptz, NULL, NULL, $6,
+                     $7::text::timestamptz)",
             &[
                 &prepared.batch.id,
                 &prepared.batch.name,
+                &prepared.batch.hosting_tier.map(HostingTier::as_str),
                 &code_count,
                 &prepared.batch.expires_at,
                 &prepared.batch.created_by_workos_user_id,
@@ -1242,7 +1244,7 @@ impl PostgresCoreStore {
                     SET revoked_at = COALESCE(revoked_at, $2::text::timestamptz),
                         revoked_by_workos_user_id = COALESCE(revoked_by_workos_user_id, $3)
                   WHERE id = $1
-                  RETURNING id, name, code_count, expires_at::text,
+                  RETURNING id, name, hosting_tier, code_count, expires_at::text,
                             revoked_at::text, revoked_by_workos_user_id,
                             created_by_workos_user_id, created_at::text",
                 &[&input.batch_id.trim(), &now, &actor],
@@ -2020,6 +2022,20 @@ where
     } else {
         None
     };
+    let hosting_tier = if let Some(locked) = locked_launch_code.as_ref() {
+        locked.hosting_tier.unwrap_or(HostingTier::Standard)
+    } else {
+        let org_id = existing_org_id
+            .as_deref()
+            .ok_or(CoreError::MissingHostingTier)?;
+        select_customer_billing_account(client, org_id, false)
+            .await?
+            .and_then(|account| account.hosting_tier)
+            .ok_or(CoreError::MissingHostingTier)?
+    };
+    let placement = configuration
+        .placement
+        .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
     if client
         .query_opt(
             "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
@@ -2066,6 +2082,7 @@ where
                 client,
                 &org.id,
                 &locked.record.id,
+                hosting_tier,
                 &now,
             )
             .await?
@@ -2104,6 +2121,8 @@ where
         owner_user_id: user.id.clone(),
         display_name: display_name.clone(),
         import_candidate_id: None,
+        hosting_tier: Some(hosting_tier),
+        placement: Some(placement),
         created_at: now.clone(),
         updated_at: now.clone(),
     };
@@ -2116,7 +2135,11 @@ where
         project_id: project_id.clone(),
         idempotency_key,
         display_name,
-        runner_class: configuration.runner_class,
+        runner_class: placement.runner_class,
+        hosting_tier: Some(hosting_tier),
+        placement: Some(placement),
+        desired_runtime_artifact_id: None,
+        runtime_spec: None,
         profile_picture_url,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: locked_launch_code.map(|locked| locked.record.id),
@@ -2173,7 +2196,7 @@ where
     C: GenericClient + Sync,
 {
     let sql = format!(
-        "SELECT customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
+        "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
                 subscription_status, current_period_end::text, cancel_at_period_end,
                 last_stripe_event_id, last_stripe_event_created, created_at::text, updated_at::text
          FROM customer_billing_accounts WHERE customer_org_id = $1{}",
@@ -2196,7 +2219,7 @@ where
 {
     client
         .query_opt(
-            "SELECT customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
+            "SELECT customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
                     subscription_status, current_period_end::text, cancel_at_period_end,
                     last_stripe_event_id, last_stripe_event_created, created_at::text, updated_at::text
              FROM customer_billing_accounts WHERE stripe_customer_id = $1",
@@ -2215,17 +2238,17 @@ async fn select_agent_creation_entitlement_by_org<C>(
 where
     C: GenericClient + Sync,
 {
-    Ok(client
+    client
         .query_opt(
-            "SELECT id, customer_org_id, allowed_new_agent_runtimes, launch_code,
+            "SELECT id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
                     created_at::text, updated_at::text
              FROM agent_creation_entitlements WHERE customer_org_id = $1",
             &[&customer_org_id],
         )
         .await
         .map_err(store_error)?
-        .as_ref()
-        .map(agent_creation_entitlement_from_row))
+        .map(|row| agent_creation_entitlement_from_row(&row))
+        .transpose()
 }
 
 /// Mirrors `active_agent_creation_entitlement_count`: active self-serve runtime
@@ -2375,13 +2398,13 @@ where
     let row = client
         .query_one(
             "INSERT INTO customer_billing_accounts
-               (customer_org_id, stripe_customer_id, cancel_at_period_end, created_at, updated_at)
-             VALUES ($1, $2, FALSE, $3::text::timestamptz, $3::text::timestamptz)
+               (customer_org_id, hosting_tier, stripe_customer_id, cancel_at_period_end, created_at, updated_at)
+             VALUES ($1, 'standard', $2, FALSE, $3::text::timestamptz, $3::text::timestamptz)
              ON CONFLICT (customer_org_id) DO UPDATE SET
                stripe_customer_id = EXCLUDED.stripe_customer_id,
                updated_at = EXCLUDED.updated_at
              RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       subscription_status, current_period_end::text, cancel_at_period_end,
+                       hosting_tier, subscription_status, current_period_end::text, cancel_at_period_end,
                        last_stripe_event_id, last_stripe_event_created,
                        created_at::text, updated_at::text",
             &[&customer_org_id, &stripe_customer_id, &now],
@@ -2512,11 +2535,11 @@ where
     let row = client
         .query_one(
             "INSERT INTO customer_billing_accounts (
-                customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
+                customer_org_id, hosting_tier, stripe_customer_id, stripe_subscription_id, stripe_price_id,
                 subscription_status, current_period_end, cancel_at_period_end,
                 last_stripe_event_id, last_stripe_event_created, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7, $8, $9, $10::text::timestamptz, $11::text::timestamptz)
+             VALUES ($1, 'standard', $2, $3, $4, $5, $6::text::timestamptz, $7, $8, $9, $10::text::timestamptz, $11::text::timestamptz)
              ON CONFLICT (customer_org_id) DO UPDATE SET
                stripe_customer_id = EXCLUDED.stripe_customer_id,
                stripe_subscription_id = EXCLUDED.stripe_subscription_id,
@@ -2528,7 +2551,7 @@ where
                last_stripe_event_created = EXCLUDED.last_stripe_event_created,
                updated_at = EXCLUDED.updated_at
              RETURNING customer_org_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
-                       subscription_status, current_period_end::text, cancel_at_period_end,
+                       hosting_tier, subscription_status, current_period_end::text, cancel_at_period_end,
                        last_stripe_event_id, last_stripe_event_created,
                        created_at::text, updated_at::text",
             &[
@@ -2623,17 +2646,13 @@ where
         .as_deref()
         .map(normalize_source_host_id)
         .transpose()?;
-    let runner_classes = input
-        .runner_capacity
-        .as_ref()
-        .map(|capacity| {
-            capacity
-                .runner_classes
-                .iter()
-                .map(|runner_class| runner_class.as_str().to_owned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let runner_classes = input.runner_capacity.as_ref().map(|capacity| {
+        capacity
+            .runner_classes
+            .iter()
+            .map(|runner_class| runner_class.as_str().to_owned())
+            .collect::<Vec<_>>()
+    });
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
     let Some(row) = client
         .query_opt(
@@ -2653,7 +2672,7 @@ where
                         OR target_source_host_id = $5
                       )
                   AND (
-                        cardinality($6::text[]) = 0
+                        $6::text[] IS NULL
                         OR runner_class = ANY($6::text[])
                       )
                 ORDER BY created_at, id
@@ -2671,7 +2690,10 @@ where
              WHERE request.id = candidate.id
              RETURNING request.id, request.customer_org_id, request.owner_user_id,
                        request.project_id, request.idempotency_key, request.display_name,
-                       request.runner_class, request.profile_picture_url,
+                       request.runner_class, request.hosting_tier,
+                       request.placement_runner_class, request.runtime_resource_class,
+                       request.desired_runtime_artifact_id, request.runtime_spec,
+                       request.profile_picture_url,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
                        request.runner_id, request.lease_token, request.lease_expires_at::text,
                        request.failure_message, request.created_at::text, request.updated_at::text",
@@ -2733,6 +2755,17 @@ where
             Some(existing) => existing.id,
             None => new_agent_runtime_id()?,
         };
+    let existing_runtime = select_agent_runtime(client, &runtime_id).await?;
+    let placement = request.placement.or(project.placement).or(existing_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.placement));
+    let (provider_runtime_handle, provider_runtime_handle_history) = merge_provider_runtime_handle(
+        existing_runtime.as_ref(),
+        input.provider_runtime_handle.clone(),
+        placement,
+    )?;
+    let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
+        .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -2741,8 +2774,14 @@ where
         source_import_key,
         runtime_artifact_id: Some(artifact.id),
         state_schema_version: Some(state_schema_version),
+        placement,
+        provider_runtime_handle,
+        provider_runtime_handle_history,
+        contact_endpoint,
         host_facts: runtime_host_facts_from_register_input(&input, &request, &source_host_id),
-        created_at: now.clone(),
+        created_at: existing_runtime
+            .map(|runtime| runtime.created_at)
+            .unwrap_or_else(|| now.clone()),
         updated_at: now.clone(),
     };
     upsert_agent_runtime_row(client, &runtime).await?;
@@ -2804,6 +2843,18 @@ where
             Some(existing) => existing.id,
             None => new_agent_runtime_id()?,
         };
+    let runtime_by_source = select_agent_runtime(client, &runtime_id).await?;
+    let existing_runtime = existing_runtime.or(runtime_by_source);
+    let placement = request.placement.or(project.placement).or(existing_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.placement));
+    let (provider_runtime_handle, provider_runtime_handle_history) = merge_provider_runtime_handle(
+        existing_runtime.as_ref(),
+        input.provider_runtime_handle.clone(),
+        placement,
+    )?;
+    let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
+        .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -2812,6 +2863,10 @@ where
         source_import_key,
         runtime_artifact_id: Some(artifact.id),
         state_schema_version: Some(state_schema_version),
+        placement,
+        provider_runtime_handle,
+        provider_runtime_handle_history,
+        contact_endpoint,
         host_facts: runtime_host_facts_from_complete_input(&input, &request, &source_host_id),
         created_at: existing_runtime
             .map(|runtime| runtime.created_at)
@@ -2876,7 +2931,9 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, runner_class, profile_picture_url,
+                       display_name, runner_class, hosting_tier, placement_runner_class,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
@@ -2914,7 +2971,9 @@ where
                  updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, runner_class, profile_picture_url,
+                       display_name, runner_class, hosting_tier, placement_runner_class,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
@@ -3059,6 +3118,9 @@ where
             "SELECT runtime.id, runtime.project_id, runtime.source_host_id,
                     runtime.source_machine_id, runtime.source_import_key,
                     runtime.runtime_artifact_id, runtime.state_schema_version,
+                    runtime.placement_runner_class, runtime.runtime_resource_class,
+                    runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
+                    runtime.contact_endpoint,
                     runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
              FROM runtime_relay_credentials AS credential
              JOIN agent_runtimes AS runtime ON runtime.id = credential.agent_runtime_id
@@ -3147,11 +3209,17 @@ where
     let rows = client
         .query(
             "SELECT project.id AS project_id, project.customer_org_id, project.owner_user_id,
-                    project.display_name, project.import_candidate_id, project.created_at::text,
+                    project.display_name, project.import_candidate_id, project.hosting_tier,
+                    project.placement_runner_class, project.runtime_resource_class,
+                    project.created_at::text,
                     project.updated_at::text,
                     runtime.id AS runtime_id, runtime.project_id AS runtime_project_id,
                     runtime.source_host_id, runtime.source_machine_id, runtime.source_import_key,
                     runtime.runtime_artifact_id, runtime.state_schema_version,
+                    runtime.placement_runner_class AS runtime_placement_runner_class,
+                    runtime.runtime_resource_class AS runtime_runtime_resource_class,
+                    runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
+                    runtime.contact_endpoint,
                     runtime.host_facts, runtime.created_at::text AS runtime_created_at,
                     runtime.updated_at::text AS runtime_updated_at
              FROM project_room_memberships AS membership
@@ -3181,8 +3249,14 @@ where
                 owner_user_id: row.get("owner_user_id"),
                 display_name: row.get("display_name"),
                 import_candidate_id: row.get("import_candidate_id"),
-                created_at: row.get(5),
-                updated_at: row.get(6),
+                hosting_tier: optional_hosting_tier_column(&row, "hosting_tier")?,
+                placement: optional_runtime_placement_columns(
+                    &row,
+                    "placement_runner_class",
+                    "runtime_resource_class",
+                )?,
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
             };
             let runtime = row
                 .get::<_, Option<String>>("runtime_id")
@@ -3195,6 +3269,27 @@ where
                         source_import_key: row.get("source_import_key"),
                         runtime_artifact_id: row.get("runtime_artifact_id"),
                         state_schema_version: row.get("state_schema_version"),
+                        placement: optional_runtime_placement_columns(
+                            &row,
+                            "runtime_placement_runner_class",
+                            "runtime_runtime_resource_class",
+                        )?,
+                        provider_runtime_handle: optional_json_column(
+                            &row,
+                            "provider_runtime_handle",
+                        )?
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(json_error)?,
+                        provider_runtime_handle_history: optional_json_column(
+                            &row,
+                            "provider_runtime_handle_history",
+                        )?
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(json_error)?
+                        .unwrap_or_default(),
+                        contact_endpoint: row.get("contact_endpoint"),
                         host_facts: json_column(&row, "host_facts")?,
                         created_at: row.get("runtime_created_at"),
                         updated_at: row.get("runtime_updated_at"),
@@ -3217,7 +3312,10 @@ where
         .query(
             "SELECT request.id, request.customer_org_id, request.owner_user_id,
                     request.project_id, request.idempotency_key, request.display_name,
-                    request.runner_class, request.profile_picture_url,
+                    request.runner_class, request.hosting_tier,
+                    request.placement_runner_class, request.runtime_resource_class,
+                    request.desired_runtime_artifact_id, request.runtime_spec,
+                    request.profile_picture_url,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
                     request.runner_id, request.lease_token, request.lease_expires_at::text,
                     request.failure_message, request.created_at::text, request.updated_at::text
@@ -3258,10 +3356,43 @@ fn customer_org_from_row(row: &Row) -> CoreResult<CustomerOrganization> {
     })
 }
 
+fn optional_hosting_tier_column(row: &Row, name: &str) -> CoreResult<Option<HostingTier>> {
+    let value: Option<String> = row.get(name);
+    value
+        .map(|value| {
+            parse_hosting_tier(&value)
+                .ok_or_else(|| CoreError::Store(format!("invalid hosting tier {value}")))
+        })
+        .transpose()
+}
+
+fn optional_runtime_placement_columns(
+    row: &Row,
+    runner_name: &str,
+    resource_name: &str,
+) -> CoreResult<Option<RuntimePlacement>> {
+    let runner: Option<String> = row.get(runner_name);
+    let resource: Option<String> = row.get(resource_name);
+    match (runner, resource) {
+        (None, None) => Ok(None),
+        (Some(runner), Some(resource)) => Ok(Some(RuntimePlacement {
+            runner_class: parse_runner_class(&runner)
+                .ok_or_else(|| CoreError::Store(format!("invalid agent runner class {runner}")))?,
+            runtime_resource_class: parse_runtime_resource_class(&resource).ok_or_else(|| {
+                CoreError::Store(format!("invalid runtime resource class {resource}"))
+            })?,
+        })),
+        _ => Err(CoreError::Store(
+            "incomplete persisted runtime placement".to_string(),
+        )),
+    }
+}
+
 fn customer_billing_account_from_row(row: &Row) -> CoreResult<CustomerBillingAccount> {
     let status: Option<String> = row.get("subscription_status");
     Ok(CustomerBillingAccount {
         customer_org_id: row.get("customer_org_id"),
+        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
         stripe_customer_id: row.get("stripe_customer_id"),
         stripe_subscription_id: row.get("stripe_subscription_id"),
         stripe_price_id: row.get("stripe_price_id"),
@@ -3282,32 +3413,40 @@ fn customer_billing_account_from_row(row: &Row) -> CoreResult<CustomerBillingAcc
     })
 }
 
-fn agent_creation_entitlement_from_row(row: &Row) -> AgentCreationEntitlement {
-    AgentCreationEntitlement {
+fn agent_creation_entitlement_from_row(row: &Row) -> CoreResult<AgentCreationEntitlement> {
+    Ok(AgentCreationEntitlement {
         id: row.get("id"),
         customer_org_id: row.get("customer_org_id"),
+        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
         allowed_new_agent_runtimes: row.get("allowed_new_agent_runtimes"),
         launch_code: row.get("launch_code"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
-fn project_from_row(row: &Row) -> Project {
-    Project {
+fn project_from_row(row: &Row) -> CoreResult<Project> {
+    Ok(Project {
         id: row.get("id"),
         customer_org_id: row.get("customer_org_id"),
         owner_user_id: row.get("owner_user_id"),
         display_name: row.get("display_name"),
         import_candidate_id: row.get("import_candidate_id"),
+        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
+        placement: optional_runtime_placement_columns(
+            row,
+            "placement_runner_class",
+            "runtime_resource_class",
+        )?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
 fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest> {
     let status: String = row.get("status");
     let runner_class: String = row.get("runner_class");
+    let runtime_spec = optional_json_column(row, "runtime_spec")?;
     Ok(AgentCreationRequest {
         id: row.get("id"),
         customer_org_id: row.get("customer_org_id"),
@@ -3318,6 +3457,17 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
         runner_class: parse_runner_class(&runner_class).ok_or_else(|| {
             CoreError::Store(format!("invalid agent runner class {runner_class}"))
         })?,
+        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
+        placement: optional_runtime_placement_columns(
+            row,
+            "placement_runner_class",
+            "runtime_resource_class",
+        )?,
+        desired_runtime_artifact_id: row.get("desired_runtime_artifact_id"),
+        runtime_spec: runtime_spec
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_error)?,
         profile_picture_url: row.get("profile_picture_url"),
         status: parse_agent_creation_request_status(&status).ok_or_else(|| {
             CoreError::Store(format!("invalid agent creation request status {status}"))
@@ -3354,6 +3504,9 @@ fn runtime_artifact_from_row(row: &Row) -> CoreResult<RuntimeArtifact> {
 }
 
 fn agent_runtime_from_row(row: &Row) -> CoreResult<AgentRuntime> {
+    let provider_runtime_handle = optional_json_column(row, "provider_runtime_handle")?;
+    let provider_runtime_handle_history =
+        optional_json_column(row, "provider_runtime_handle_history")?;
     Ok(AgentRuntime {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -3362,6 +3515,21 @@ fn agent_runtime_from_row(row: &Row) -> CoreResult<AgentRuntime> {
         source_import_key: row.get("source_import_key"),
         runtime_artifact_id: row.get("runtime_artifact_id"),
         state_schema_version: row.get("state_schema_version"),
+        placement: optional_runtime_placement_columns(
+            row,
+            "placement_runner_class",
+            "runtime_resource_class",
+        )?,
+        provider_runtime_handle: provider_runtime_handle
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_error)?,
+        provider_runtime_handle_history: provider_runtime_handle_history
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_error)?
+            .unwrap_or_default(),
+        contact_endpoint: row.get("contact_endpoint"),
         host_facts: json_column(row, "host_facts")?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -3465,13 +3633,14 @@ where
     client
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, display_name, import_candidate_id,
+                    hosting_tier, placement_runner_class, runtime_resource_class,
                     created_at::text, updated_at::text
              FROM projects WHERE id = $1",
             &[&project_id],
         )
         .await
         .map_err(store_error)?
-        .map(|row| Ok(project_from_row(&row)))
+        .map(|row| project_from_row(&row))
         .transpose()
 }
 
@@ -3490,7 +3659,9 @@ where
     client
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                    display_name, runner_class, profile_picture_url,
+                    display_name, runner_class, hosting_tier, placement_runner_class,
+                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                    profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
@@ -3514,7 +3685,9 @@ where
     let row = client
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                    display_name, runner_class, profile_picture_url,
+                    display_name, runner_class, hosting_tier, placement_runner_class,
+                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                    profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
@@ -3556,7 +3729,9 @@ where
     client
         .query_opt(
             "SELECT id, project_id, source_host_id, source_machine_id, source_import_key,
-                    runtime_artifact_id, state_schema_version, host_facts,
+                    runtime_artifact_id, state_schema_version, placement_runner_class,
+                    runtime_resource_class, provider_runtime_handle,
+                    provider_runtime_handle_history, contact_endpoint, host_facts,
                     created_at::text, updated_at::text
              FROM agent_runtimes WHERE id = $1",
             &[&runtime_id],
@@ -3580,7 +3755,9 @@ where
     client
         .query_opt(
             "SELECT id, project_id, source_host_id, source_machine_id, source_import_key,
-                    runtime_artifact_id, state_schema_version, host_facts,
+                    runtime_artifact_id, state_schema_version, placement_runner_class,
+                    runtime_resource_class, provider_runtime_handle,
+                    provider_runtime_handle_history, contact_endpoint, host_facts,
                     created_at::text, updated_at::text
              FROM agent_runtimes WHERE source_import_key = $1",
             &[&source_import_key],
@@ -3621,7 +3798,7 @@ where
 {
     let rows = client
         .query(
-            "SELECT id, name, code_count, expires_at::text, revoked_at::text,
+            "SELECT id, name, hosting_tier, code_count, expires_at::text, revoked_at::text,
                     revoked_by_workos_user_id, created_by_workos_user_id,
                     created_at::text
                FROM launch_code_batches
@@ -3672,6 +3849,7 @@ fn launch_code_batch_from_row(row: &Row) -> CoreResult<LaunchCodeBatch> {
     Ok(LaunchCodeBatch {
         id: row.get("id"),
         name: row.get("name"),
+        hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
         code_count: u32::try_from(count).map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?,
         expires_at: row.get("expires_at"),
         revoked_at: row.get("revoked_at"),
@@ -3683,6 +3861,7 @@ fn launch_code_batch_from_row(row: &Row) -> CoreResult<LaunchCodeBatch> {
 
 struct LockedLaunchCode {
     record: LaunchCodeRecord,
+    hosting_tier: Option<HostingTier>,
 }
 
 async fn lock_postgres_launch_code<C>(
@@ -3701,6 +3880,7 @@ where
                     code.redeemed_customer_org_id,
                     code.redemption_idempotency_key, code.redeemed_at::text,
                     code.created_at::text,
+                    batch.hosting_tier,
                     batch.revoked_at IS NOT NULL AS batch_revoked,
                     batch.expires_at <= $2::text::timestamptz AS batch_expired
               FROM launch_codes AS code
@@ -3719,6 +3899,7 @@ where
         return Err(CoreError::InvalidLaunchCode);
     }
     Ok(LockedLaunchCode {
+        hosting_tier: optional_hosting_tier_column(&row, "hosting_tier")?,
         record: LaunchCodeRecord {
             id: row.get("id"),
             batch_id: row.get("batch_id"),
@@ -3821,6 +4002,7 @@ async fn grant_launch_code_agent_creation_entitlement_row<C>(
     client: &C,
     customer_org_id: &str,
     launch_code_id: &str,
+    hosting_tier: HostingTier,
     now: &str,
 ) -> CoreResult<AgentCreationEntitlement>
 where
@@ -3830,19 +4012,26 @@ where
     let row = client
         .query_one(
             "INSERT INTO agent_creation_entitlements
-               (id, customer_org_id, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
-             VALUES ($1, $2, 1, $3, $4::text::timestamptz, $4::text::timestamptz)
+               (id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
+             VALUES ($1, $2, $3, 1, $4, $5::text::timestamptz, $5::text::timestamptz)
              ON CONFLICT (customer_org_id) DO UPDATE SET
                allowed_new_agent_runtimes = agent_creation_entitlements.allowed_new_agent_runtimes + 1,
+               hosting_tier = EXCLUDED.hosting_tier,
                launch_code = EXCLUDED.launch_code,
                updated_at = EXCLUDED.updated_at
-             RETURNING id, customer_org_id, allowed_new_agent_runtimes, launch_code,
+             RETURNING id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
                        created_at::text, updated_at::text",
-            &[&id, &customer_org_id, &launch_code_id, &now],
+            &[
+                &id,
+                &customer_org_id,
+                &hosting_tier.as_str(),
+                &launch_code_id,
+                &now,
+            ],
         )
         .await
         .map_err(store_error)?;
-    Ok(agent_creation_entitlement_from_row(&row))
+    agent_creation_entitlement_from_row(&row)
 }
 
 async fn ensure_standard_agent_creation_entitlement_row<C>(
@@ -3857,8 +4046,8 @@ where
     let row = client
         .query_one(
             "INSERT INTO agent_creation_entitlements
-               (id, customer_org_id, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
-             VALUES ($1, $2, 1, NULL, $3::text::timestamptz, $3::text::timestamptz)
+               (id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
+             VALUES ($1, $2, 'standard', 1, NULL, $3::text::timestamptz, $3::text::timestamptz)
              ON CONFLICT (customer_org_id) DO UPDATE SET
                allowed_new_agent_runtimes = GREATEST(
                  agent_creation_entitlements.allowed_new_agent_runtimes,
@@ -3866,13 +4055,13 @@ where
                ),
                launch_code = agent_creation_entitlements.launch_code,
                updated_at = EXCLUDED.updated_at
-             RETURNING id, customer_org_id, allowed_new_agent_runtimes, launch_code,
+             RETURNING id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code,
                        created_at::text, updated_at::text",
             &[&id, &customer_org_id, &now],
         )
         .await
         .map_err(store_error)?;
-    Ok(agent_creation_entitlement_from_row(&row))
+    agent_creation_entitlement_from_row(&row)
 }
 
 async fn ensure_hosted_web_membership_row<C>(
@@ -3917,13 +4106,24 @@ async fn upsert_project_row<C>(client: &C, project: &Project) -> CoreResult<()>
 where
     C: GenericClient + Sync,
 {
+    let placement_runner_class = project
+        .placement
+        .map(|placement| placement.runner_class.as_str());
+    let runtime_resource_class = project
+        .placement
+        .map(|placement| placement.runtime_resource_class.as_str());
     client
         .execute(
             "INSERT INTO projects
-               (id, customer_org_id, owner_user_id, display_name, import_candidate_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7::text::timestamptz)
+               (id, customer_org_id, owner_user_id, display_name, import_candidate_id,
+                hosting_tier, placement_runner_class, runtime_resource_class, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                     $9::text::timestamptz, $10::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                display_name = EXCLUDED.display_name,
+               hosting_tier = EXCLUDED.hosting_tier,
+               placement_runner_class = EXCLUDED.placement_runner_class,
+               runtime_resource_class = EXCLUDED.runtime_resource_class,
                updated_at = EXCLUDED.updated_at",
             &[
                 &project.id,
@@ -3931,6 +4131,9 @@ where
                 &project.owner_user_id,
                 &project.display_name,
                 &project.import_candidate_id,
+                &project.hosting_tier.map(HostingTier::as_str),
+                &placement_runner_class,
+                &runtime_resource_class,
                 &project.created_at,
                 &project.updated_at,
             ],
@@ -3947,20 +4150,39 @@ async fn upsert_agent_creation_request_row<C>(
 where
     C: GenericClient + Sync,
 {
+    let placement_runner_class = request
+        .placement
+        .map(|placement| placement.runner_class.as_str());
+    let runtime_resource_class = request
+        .placement
+        .map(|placement| placement.runtime_resource_class.as_str());
+    let runtime_spec = request
+        .runtime_spec
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(json_error)?;
     client
         .execute(
             "INSERT INTO agent_creation_requests (
                id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name,
-               runner_class, profile_picture_url, status, requested_launch_code,
+               runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
+               desired_runtime_artifact_id, runtime_spec, profile_picture_url, status, requested_launch_code,
                agent_runtime_id, runner_id, lease_token,
                lease_expires_at, failure_message, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                     $14::text::timestamptz, $15, $16::text::timestamptz, $17::text::timestamptz)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                     $13, $14, $15, $16, $17, $18, $19::text::timestamptz, $20,
+                     $21::text::timestamptz, $22::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                status = EXCLUDED.status,
                display_name = EXCLUDED.display_name,
                runner_class = EXCLUDED.runner_class,
+               hosting_tier = EXCLUDED.hosting_tier,
+               placement_runner_class = EXCLUDED.placement_runner_class,
+               runtime_resource_class = EXCLUDED.runtime_resource_class,
+               desired_runtime_artifact_id = EXCLUDED.desired_runtime_artifact_id,
+               runtime_spec = EXCLUDED.runtime_spec,
                profile_picture_url = EXCLUDED.profile_picture_url,
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                runner_id = EXCLUDED.runner_id,
@@ -3976,6 +4198,11 @@ where
                 &request.idempotency_key,
                 &request.display_name,
                 &request.runner_class.as_str(),
+                &request.hosting_tier.map(HostingTier::as_str),
+                &placement_runner_class,
+                &runtime_resource_class,
+                &request.desired_runtime_artifact_id,
+                &runtime_spec,
                 &request.profile_picture_url,
                 &request.status.as_str(),
                 &request.requested_launch_code,
@@ -3998,17 +4225,39 @@ where
     C: GenericClient + Sync,
 {
     let host_facts = serde_json::to_value(&runtime.host_facts).map_err(json_error)?;
+    let placement_runner_class = runtime
+        .placement
+        .map(|placement| placement.runner_class.as_str());
+    let runtime_resource_class = runtime
+        .placement
+        .map(|placement| placement.runtime_resource_class.as_str());
+    let provider_runtime_handle = runtime
+        .provider_runtime_handle
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(json_error)?;
+    let provider_runtime_handle_history =
+        serde_json::to_value(&runtime.provider_runtime_handle_history).map_err(json_error)?;
     client
         .execute(
             "INSERT INTO agent_runtimes (
                id, project_id, source_host_id, source_machine_id, source_import_key,
-               runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+               runtime_artifact_id, state_schema_version, placement_runner_class,
+               runtime_resource_class, provider_runtime_handle,
+               provider_runtime_handle_history, contact_endpoint, host_facts, created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text::timestamptz, $10::text::timestamptz)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb,
+                     $12, $13::jsonb, $14::text::timestamptz, $15::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                project_id = EXCLUDED.project_id,
                runtime_artifact_id = EXCLUDED.runtime_artifact_id,
                state_schema_version = EXCLUDED.state_schema_version,
+               placement_runner_class = EXCLUDED.placement_runner_class,
+               runtime_resource_class = EXCLUDED.runtime_resource_class,
+               provider_runtime_handle = EXCLUDED.provider_runtime_handle,
+               provider_runtime_handle_history = EXCLUDED.provider_runtime_handle_history,
+               contact_endpoint = EXCLUDED.contact_endpoint,
                host_facts = EXCLUDED.host_facts,
                updated_at = EXCLUDED.updated_at",
             &[
@@ -4019,6 +4268,11 @@ where
                 &runtime.source_import_key,
                 &runtime.runtime_artifact_id,
                 &runtime.state_schema_version,
+                &placement_runner_class,
+                &runtime_resource_class,
+                &provider_runtime_handle,
+                &provider_runtime_handle_history,
+                &runtime.contact_endpoint,
                 &host_facts,
                 &runtime.created_at,
                 &runtime.updated_at,
@@ -4457,7 +4711,9 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, runner_class, profile_picture_url,
+                       display_name, runner_class, hosting_tier, placement_runner_class,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
@@ -4488,7 +4744,9 @@ where
                  updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
-                       display_name, runner_class, profile_picture_url,
+                       display_name, runner_class, hosting_tier, placement_runner_class,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
@@ -4595,6 +4853,9 @@ where
             "SELECT runtime.id, runtime.project_id, runtime.source_host_id,
                     runtime.source_machine_id, runtime.source_import_key,
                     runtime.runtime_artifact_id, runtime.state_schema_version,
+                    runtime.placement_runner_class, runtime.runtime_resource_class,
+                    runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
+                    runtime.contact_endpoint,
                     runtime.host_facts, runtime.created_at::text, runtime.updated_at::text
              FROM project_runtime_links AS link
              JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
@@ -4874,22 +5135,34 @@ where
         .as_deref()
         .map(normalize_source_host_id)
         .transpose()?;
+    let runner_classes = input.runner_capacity.as_ref().map(|capacity| {
+        capacity
+            .runner_classes
+            .iter()
+            .map(|runner_class| runner_class.as_str().to_owned())
+            .collect::<Vec<_>>()
+    });
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
     loop {
         let Some(row) = client
             .query_opt(
             "WITH candidate AS (
-                SELECT id
-                FROM runtime_control_requests
+                SELECT request.id
+                FROM runtime_control_requests AS request
+                JOIN agent_runtimes AS runtime ON runtime.id = request.agent_runtime_id
                 WHERE (
-                        status = 'requested'
+                        request.status = 'requested'
                         OR (
-                          status = 'running'
-                          AND (lease_expires_at IS NULL OR lease_expires_at <= $4::text::timestamptz)
+                          request.status = 'running'
+                          AND (request.lease_expires_at IS NULL OR request.lease_expires_at <= $4::text::timestamptz)
                         )
                       )
-                  AND ($5::text IS NULL OR source_host_id = $5)
-                ORDER BY created_at, id
+                  AND ($5::text IS NULL OR request.source_host_id = $5)
+                  AND (
+                        $6::text[] IS NULL
+                        OR runtime.placement_runner_class = ANY($6::text[])
+                      )
+                ORDER BY request.created_at, request.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
              )
@@ -4915,6 +5188,7 @@ where
                 &lease_expires_at,
                 &now,
                 &source_host_id,
+                &runner_classes,
             ],
             )
             .await
@@ -5931,6 +6205,8 @@ where
             owner_user_id: user.id.clone(),
             display_name: candidate.host_facts.display_name.clone(),
             import_candidate_id: Some(candidate.id.clone()),
+            hosting_tier: Some(HostingTier::Standard),
+            placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -5943,6 +6219,10 @@ where
             source_import_key: candidate.source_import_key.clone(),
             runtime_artifact_id: None,
             state_schema_version: None,
+            placement: project.placement,
+            provider_runtime_handle: None,
+            provider_runtime_handle_history: Vec::new(),
+            contact_endpoint: None,
             host_facts: candidate.host_facts.clone(),
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -6865,6 +7145,10 @@ fn json_column<T: DeserializeOwned>(row: &Row, name: &str) -> CoreResult<T> {
     serde_json::from_value(value).map_err(json_error)
 }
 
+fn optional_json_column(row: &Row, name: &str) -> CoreResult<Option<Value>> {
+    Ok(row.get(name))
+}
+
 /// Convert a Postgres error into a structured `CoreError::Database`, preserving
 /// the `as_db_error()` fields (SQLSTATE code, constraint, table, column, DETAIL)
 /// that `error.to_string()` used to flatten into the useless string "db error".
@@ -6940,6 +7224,7 @@ mod tests {
                 name: "Postgres test batch".to_string(),
                 code_count: 1,
                 expires_in_hours: Some(crate::launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
+                hosting_tier: None,
                 created_by_workos_user_id: "workos-test-operator".to_string(),
                 now: None,
             })
@@ -7101,6 +7386,7 @@ mod tests {
                     name: "Internal canary".to_string(),
                     code_count: 3,
                     expires_in_hours: Some(1),
+                    hosting_tier: None,
                     created_by_workos_user_id: "workos_operator".to_string(),
                     now: Some("2026-07-10T12:00:00Z".to_string()),
                 })
@@ -7240,6 +7526,7 @@ mod tests {
                     name: "Revocation race".to_string(),
                     code_count: 1,
                     expires_in_hours: Some(24),
+                    hosting_tier: None,
                     created_by_workos_user_id: "workos_operator".to_string(),
                     now: Some("2026-07-10T12:00:00Z".to_string()),
                 })
@@ -7309,6 +7596,7 @@ mod tests {
                     name: "Concurrent redemption".to_string(),
                     code_count: 1,
                     expires_in_hours: Some(24),
+                    hosting_tier: None,
                     created_by_workos_user_id: "workos_operator".to_string(),
                     now: Some("2026-07-10T12:00:00Z".to_string()),
                 })
@@ -7728,6 +8016,8 @@ mod tests {
                     source_machine_id: "row-native-agent-001".to_string(),
                     runtime_artifact_id: Some("artifact-row-native-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
@@ -7758,6 +8048,8 @@ mod tests {
                     source_machine_id: "row-native-agent-001".to_string(),
                     runtime_artifact_id: Some("artifact-row-native-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     display_name: Some("Row Native Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("row-native-host".to_string()),
@@ -7861,6 +8153,8 @@ mod tests {
                     source_machine_id: machine_id.clone(),
                     runtime_artifact_id: Some("artifact-admin-ops-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     display_name: Some("Admin Ops Agent".to_string()),
                     hostname: None,
                     runtime_host: Some("admin-ops-host".to_string()),
@@ -8056,7 +8350,9 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        runner_class: crate::RunnerClass::Kata,
+                        placement: Some(RuntimePlacement::for_hosting_tier(
+                            HostingTier::Standard,
+                        )),
                         profile_picture_url: None,
                     },
                 )
@@ -8095,6 +8391,8 @@ mod tests {
                     source_machine_id: machine.to_string(),
                     runtime_artifact_id: Some("artifact-rc-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     display_name: Some("RC Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(host.to_string()),
@@ -8220,18 +8518,57 @@ mod tests {
                 .unwrap();
             assert!(other_host_lease.is_none(), "partitioned by source host");
 
+            let wrong_class_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("phala-runner-{run}"),
+                    lease_token: format!("ctl-phala-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Phala],
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                wrong_class_lease.is_none(),
+                "Phala worker must not claim Kata control work"
+            );
+
+            let unspecified_class_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("unspecified-runner-{run}"),
+                    lease_token: format!("ctl-unspecified-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity::default()),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                unspecified_class_lease.is_none(),
+                "empty advertised class set supports nothing"
+            );
+
             let control_lease = store
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some(host.to_string()),
-                    runner_capacity: None,
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        draining: true,
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
                     now: None,
                 })
                 .await
                 .unwrap()
-                .expect("host runner should lease its own request");
+                .expect("draining host runner should still lease its own control request");
             assert_eq!(control_lease.request.id, restart.id);
             store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
@@ -9305,6 +9642,8 @@ mod tests {
                     source_machine_id: source_machine_id.clone(),
                     runtime_artifact_id: Some("artifact-golden-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     runtime_relay_token_hash: runtime_relay_token_hash(runtime_token).unwrap(),
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
@@ -9328,6 +9667,8 @@ mod tests {
                     source_machine_id: source_machine_id.clone(),
                     runtime_artifact_id: Some("artifact-golden-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
                     display_name: Some("Golden Agent".to_string()),
                     hostname: None,
                     runtime_host: Some(source_host_id.clone()),

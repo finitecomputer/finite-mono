@@ -5,6 +5,8 @@ use tokio_postgres::{Client, NoTls, error::SqlState};
 const CORE_SCHEMA_V1: &str = include_str!("../migrations/0001_core.sql");
 const RUNTIME_UPGRADE_V2: &str = include_str!("../migrations/0002_runtime_upgrade.sql");
 const LAUNCH_CODES_V3: &str = include_str!("../migrations/0003_launch_codes.sql");
+const MEMBERSHIP_ARCHIVE_V4: &str = include_str!("../migrations/0004_membership_archive.sql");
+const PHALA_EXPAND_V5: &str = include_str!("../migrations/0005_phala_expand.sql");
 
 static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -213,6 +215,167 @@ async fn populated_legacy_schema_migrates_launch_codes_without_retaining_plainte
             still_migrated.get::<_, Option<String>>(1).as_deref(),
             Some("code-one")
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn phala_expand_backfills_standard_without_moving_running_placement() {
+    with_legacy_database(|client| async move {
+        client.batch_execute(CORE_SCHEMA_V1).await.unwrap();
+        client.batch_execute(RUNTIME_UPGRADE_V2).await.unwrap();
+        client.batch_execute(LAUNCH_CODES_V3).await.unwrap();
+        client.batch_execute(MEMBERSHIP_ARCHIVE_V4).await.unwrap();
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                VALUES ('user-expand', 'expand@example.test', 'linked', 'workos-expand', now(), now());
+                INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                VALUES ('org-expand', 'user-expand', 'Expand org', 'standard', now(), now());
+                INSERT INTO customer_billing_accounts (
+                  customer_org_id, stripe_customer_id, subscription_status, created_at, updated_at
+                ) VALUES ('org-expand', 'cus_expand', 'active', now(), now());
+                INSERT INTO agent_creation_entitlements (
+                  id, customer_org_id, allowed_new_agent_runtimes, created_at, updated_at
+                ) VALUES ('entitlement-expand', 'org-expand', 2, now(), now());
+                INSERT INTO launch_code_batches (
+                  id, name, code_count, expires_at, created_by_workos_user_id, created_at
+                ) VALUES ('batch-expand', 'Expand batch', 1, now() + interval '1 day', 'operator-expand', now());
+                INSERT INTO launch_codes (id, batch_id, code_hash, created_at)
+                VALUES ('code-expand', 'batch-expand', 'expand-hash', now());
+
+                INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                VALUES
+                  ('project-running', 'org-expand', 'user-expand', 'Running Phala', now(), now()),
+                  ('project-unlaunched', 'org-expand', 'user-expand', 'Unlaunched default', now(), now());
+                INSERT INTO agent_runtimes (
+                  id, project_id, source_host_id, source_machine_id, source_import_key,
+                  host_facts, created_at, updated_at
+                ) VALUES (
+                  'runtime-running', 'project-running', 'phala-host', 'phala-machine',
+                  'phala-host:phala-machine',
+                  '{"display_name":"Running Phala","hostname":null,"runtime_host":"phala-host","runtime_status":"online","active_inference_profile":null,"hermes_available":true,"published_app_urls":[]}'::jsonb,
+                  now(), now()
+                );
+                INSERT INTO agent_creation_requests (
+                  id, customer_org_id, owner_user_id, project_id, idempotency_key,
+                  display_name, runner_class, status, agent_runtime_id, created_at, updated_at
+                ) VALUES
+                  ('request-running', 'org-expand', 'user-expand', 'project-running', 'running',
+                   'Running Phala', 'phala', 'running', 'runtime-running', now(), now()),
+                  ('request-unlaunched', 'org-expand', 'user-expand', 'project-unlaunched', 'unlaunched',
+                   'Unlaunched default', 'phala', 'requested', NULL, now(), now());
+                "#,
+            )
+            .await
+            .unwrap();
+
+        client.batch_execute(PHALA_EXPAND_V5).await.unwrap();
+
+        let running = client
+            .query_one(
+                "SELECT hosting_tier, placement_runner_class, runtime_resource_class
+                 FROM agent_creation_requests WHERE id = 'request-running'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(running.get::<_, String>(0), "standard");
+        assert_eq!(running.get::<_, String>(1), "phala");
+        assert_eq!(running.get::<_, String>(2), "vcpu2_memory4_gib");
+
+        let unlaunched = client
+            .query_one(
+                "SELECT runner_class, placement_runner_class, runtime_resource_class
+                 FROM agent_creation_requests WHERE id = 'request-unlaunched'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(unlaunched.get::<_, String>(0), "kata");
+        assert_eq!(unlaunched.get::<_, String>(1), "kata");
+        assert_eq!(unlaunched.get::<_, String>(2), "vcpu4_memory8_gib");
+
+        let runtime = client
+            .query_one(
+                "SELECT placement_runner_class, runtime_resource_class
+                 FROM agent_runtimes WHERE id = 'runtime-running'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime.get::<_, String>(0), "phala");
+        assert_eq!(runtime.get::<_, String>(1), "vcpu2_memory4_gib");
+
+        for (table, id_column, id) in [
+            ("customer_billing_accounts", "customer_org_id", "org-expand"),
+            ("agent_creation_entitlements", "id", "entitlement-expand"),
+            ("launch_code_batches", "id", "batch-expand"),
+        ] {
+            let query = format!("SELECT hosting_tier FROM {table} WHERE {id_column} = $1");
+            let row = client.query_one(&query, &[&id]).await.unwrap();
+            assert_eq!(row.get::<_, String>(0), "standard");
+        }
+
+        let default = client
+            .query_one(
+                "SELECT column_default FROM information_schema.columns
+                 WHERE table_name = 'agent_creation_requests' AND column_name = 'runner_class'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(default.get::<_, Option<String>>(0), None);
+
+        let unknown_tier = client
+            .execute(
+                "UPDATE projects SET hosting_tier = 'mystery' WHERE id = 'project-running'",
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unknown_tier.code(), Some(&SqlState::CHECK_VIOLATION));
+        let incomplete_placement = client
+            .execute(
+                "UPDATE projects SET runtime_resource_class = NULL WHERE id = 'project-running'",
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(incomplete_placement.code(), Some(&SqlState::CHECK_VIOLATION));
+
+        // Expansion stays compatible with an N-1 writer that supplies the
+        // legacy runner_class but knows nothing about the nullable new fields.
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                VALUES ('project-n-minus-one', 'org-expand', 'user-expand', 'N-1', now(), now());
+                INSERT INTO agent_creation_requests (
+                  id, customer_org_id, owner_user_id, project_id, idempotency_key,
+                  display_name, runner_class, status, created_at, updated_at
+                ) VALUES (
+                  'request-n-minus-one', 'org-expand', 'user-expand', 'project-n-minus-one', 'n-minus-one',
+                  'N-1', 'kata', 'requested', now(), now()
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+        let old_row = client
+            .query_one(
+                "SELECT runner_class, placement_runner_class, runtime_spec
+                 FROM agent_creation_requests WHERE id = 'request-n-minus-one'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_row.get::<_, String>(0), "kata");
+        assert_eq!(old_row.get::<_, Option<String>>(1), None);
+        assert_eq!(old_row.get::<_, Option<serde_json::Value>>(2), None);
+
+        client.batch_execute(PHALA_EXPAND_V5).await.unwrap();
     })
     .await;
 }
