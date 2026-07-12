@@ -9313,6 +9313,9 @@ const FiniteBrainProductClient = (() => {
     $("sessionSettingsButton")?.addEventListener("click", () => {
       openSettingsModal("session");
     });
+    $("sessionAccountVaultButton")?.addEventListener("click", () => {
+      openSettingsModal("vault");
+    });
     $("settingsConnectSignerButton")?.addEventListener("click", () => {
       connectSigner().catch((error) => {
         state.lastError = error.message;
