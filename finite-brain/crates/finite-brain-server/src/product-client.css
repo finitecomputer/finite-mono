@@ -531,10 +531,6 @@ label,
   gap: 10px;
 }
 
-.okf-controls {
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
-}
-
 .page-editor-label {
   display: grid;
   gap: 8px;
@@ -905,8 +901,7 @@ pre {
 @media (max-width: 880px) {
   .app-shell,
   .dashboard-grid,
-  .form-grid,
-  .okf-controls {
+  .form-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2066,8 +2061,7 @@ pre {
   overflow: visible;
 }
 
-.settings-access-section #accessSidebarPanel > .sidebar-section-title,
-.settings-access-section #accessSidebarPanel > .access-view-switch {
+.settings-access-section #accessSidebarPanel > .sidebar-section-title {
   position: static;
 }
 
@@ -2408,20 +2402,8 @@ pre {
   background: var(--obsi-panel);
 }
 
-#accessSidebarPanel > .access-view-switch {
-  position: sticky;
-  top: 33px;
-  z-index: 2;
-  margin-bottom: 10px;
-  background: var(--obsi-panel);
-}
-
 #accessSidebarPanel > * + * {
   margin-top: 8px;
-}
-
-#accessSidebarPanel > .access-view-switch + * {
-  margin-top: 0;
 }
 
 /* Legacy access inspector (keeping for compatibility during transition) */
@@ -2437,82 +2419,14 @@ pre {
 
 /* Dashboard-aligned access and collaboration UI */
 
-.access-view-switch {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px;
-  margin: 0 var(--access-panel-inset) 12px;
-  padding: 3px;
-  border-radius: 10px;
-  background: var(--access-surface-soft);
-  box-shadow: inset 0 0 0 1px var(--access-border);
-}
-
-.access-view-switch button {
-  min-width: 0;
-  min-height: var(--control-height);
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--access-muted);
-  font-size: 12px;
-  font-weight: 680;
-  cursor: pointer;
-  transition-duration: 140ms;
-  transition-property: background-color, box-shadow, color, transform;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-.access-view-switch button.active {
-  background: var(--access-surface-raised);
-  box-shadow: var(--shadow-access-ring-hover);
-  color: var(--access-accent-strong);
-}
-
-.access-view-switch button:not(.active):hover {
-  background: var(--access-surface-hover);
-  color: var(--access-text);
-}
-
-.access-view-switch button:active {
-  transform: scale(0.96);
-}
-
-.access-view-switch button:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-}
-
-.access-mode-panel:not([hidden]) {
-  animation: accessPanelEnter 180ms cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes accessPanelEnter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-    filter: blur(2px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    filter: blur(0);
-  }
-}
-
-.access-mode-panel {
+.access-content-panel {
   min-width: 0;
   overflow-x: hidden;
 }
 
-.access-mode-panel.is-busy {
+.access-content-panel.is-busy {
   opacity: 0.72;
   pointer-events: none;
-}
-
-.access-mode-panel[hidden] {
-  display: none !important;
 }
 
 /* Compact Folder Selector */
@@ -4706,10 +4620,6 @@ pre {
   margin-top: 8px;
 }
 
-.vault-primary-section {
-  padding-bottom: 14px;
-}
-
 .vault-switch-list {
   display: grid;
   gap: 4px;
@@ -4788,77 +4698,6 @@ pre {
 .vault-switch-button.selected .vault-switch-meta,
 .vault-switch-button.loaded .vault-switch-meta {
   color: var(--access-muted);
-}
-
-.vault-quick-actions {
-  margin-top: 10px;
-}
-
-.vault-quick-actions button {
-  flex: 1 1 112px;
-  min-width: 0;
-}
-
-.access-vault-create {
-  margin: 0 var(--access-panel-inset) 14px;
-  border: 0;
-  border-radius: var(--access-surface-radius);
-  background: var(--access-surface);
-  box-shadow: var(--shadow-access-ring);
-  overflow: hidden;
-}
-
-.access-vault-create[hidden] {
-  display: none !important;
-}
-
-.access-vault-create summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 40px;
-  padding: 9px 12px;
-  color: var(--access-muted);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 650;
-  list-style: none;
-  transition-duration: 150ms;
-  transition-property: background-color, color;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-.access-vault-create summary::-webkit-details-marker {
-  display: none;
-}
-
-.access-vault-create summary::after {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  opacity: 0.58;
-  transform: rotate(-45deg);
-  transition-duration: 150ms;
-  transition-property: opacity, transform;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
-}
-
-.access-vault-create[open] summary::after {
-  opacity: 0.86;
-  transform: rotate(45deg);
-}
-
-.access-vault-create summary:hover {
-  background: var(--access-surface-hover);
-  color: var(--access-text);
-}
-
-.access-vault-create-body {
-  padding: 10px;
-  border-top: 1px solid var(--access-border);
-  background: var(--access-surface-soft);
 }
 
 .vault-person-action {
@@ -5038,71 +4877,6 @@ pre {
   color: var(--access-danger);
 }
 
-/* Guided setup steps in the Vault tab */
-.vault-guide-steps {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--access-surface);
-  box-shadow: var(--shadow-access-ring);
-  list-style: none;
-  counter-reset: vault-guide;
-}
-
-.vault-guide-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 24px;
-  color: var(--access-text);
-  font-size: 12px;
-  font-weight: 540;
-  text-wrap: pretty;
-}
-
-.vault-guide-step.done {
-  color: var(--access-muted);
-  text-decoration: line-through;
-  text-decoration-color: var(--access-border-strong);
-}
-
-.vault-guide-marker {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  background: var(--access-accent-soft);
-  box-shadow: 0 0 0 1px var(--access-accent);
-  color: var(--access-accent-strong);
-  counter-increment: vault-guide;
-}
-
-.vault-guide-marker:empty::before {
-  content: counter(vault-guide);
-  font-size: 10px;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-
-.vault-guide-marker .icon {
-  width: 11px;
-  height: 11px;
-  stroke: currentColor;
-  stroke-width: 2.4;
-  fill: none;
-}
-
-.vault-guide-step.done .vault-guide-marker {
-  background: var(--access-success-bg);
-  box-shadow: 0 0 0 1px var(--access-success-border);
-  color: var(--access-success);
-}
-
 /* Vault Administration */
 .access-vault-admin {
   margin: 14px var(--access-panel-inset) 0;
@@ -5171,15 +4945,6 @@ pre {
   .obsidian-shell {
     grid-template-columns: 52px minmax(240px, 300px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
-  }
-
-  .vault-quick-actions {
-    flex-direction: column;
-  }
-
-  .vault-quick-actions button {
-    flex: 1 1 auto;
-    width: 100%;
   }
 
   .access-advanced-summary small {
@@ -5291,15 +5056,9 @@ pre {
   .access-folder-selector,
   .access-inspector-new,
   .vault-management-section,
-  .access-vault-create,
   .access-vault-admin,
   .access-result,
   .access-busy-status {
-    margin-left: 8px;
-    margin-right: 8px;
-  }
-
-  .access-view-switch {
     margin-left: 8px;
     margin-right: 8px;
   }

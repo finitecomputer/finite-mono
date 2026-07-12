@@ -104,77 +104,7 @@
             <span id="accessSidebarCount" class="pill muted" aria-live="polite">0</span>
           </div>
 
-          <div
-            class="access-view-switch"
-            role="tablist"
-            aria-label="Vault and access views"
-          >
-            <button
-              id="accessVaultViewButton"
-              class="active"
-              type="button"
-              role="tab"
-              aria-selected="true"
-              aria-controls="accessVaultPanel"
-              tabindex="0"
-            >
-              Vaults
-            </button>
-            <button
-              id="accessFolderViewButton"
-              type="button"
-              role="tab"
-              aria-selected="false"
-              aria-controls="accessFolderPanel"
-              tabindex="-1"
-            >
-              Access
-            </button>
-          </div>
-
-          <div
-            id="accessVaultPanel"
-            class="access-mode-panel"
-            role="tabpanel"
-            aria-labelledby="accessVaultViewButton"
-          >
-            <section class="vault-management-section vault-primary-section">
-              <div class="access-header">
-                <h3 id="vaultManagementTitle">Vaults</h3>
-                <p id="vaultManagementSummary" class="access-summary">Choose a Vault, then unlock it to open encrypted content.</p>
-              </div>
-              <ol id="vaultGuideSteps" class="vault-guide-steps" hidden></ol>
-              <ol id="vaultSwitchList" class="vault-switch-list" aria-label="Available Vaults"></ol>
-              <div class="access-button-row vault-quick-actions">
-                <button id="accessConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
-                <button id="accessLoadVaultButton" type="button" class="access-add-button">Unlock Vault</button>
-              </div>
-            </section>
-
-            <details id="accessCreateOrganizationPanel" class="access-vault-create">
-              <summary>Create organization vault</summary>
-              <div class="access-vault-create-body">
-                <label class="access-inline-field">
-                  <input
-                    id="accessOrganizationVaultNameInput"
-                    placeholder="New organization"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button id="accessCreateOrganizationVaultButton" type="button" class="access-add-button">Create</button>
-                </label>
-                <p class="access-field-hint">Create an organization Vault with the active signer as admin.</p>
-              </div>
-            </details>
-          </div>
-
-          <div
-            id="accessFolderPanel"
-            class="access-mode-panel"
-            role="tabpanel"
-            aria-labelledby="accessFolderViewButton"
-            hidden
-          >
+          <div id="accessFolderPanel" class="access-content-panel">
             <div id="accessInspector" class="access-inspector-new">
               <div id="accessBasicView" class="access-basic-view">
                 <div class="access-header">
@@ -182,13 +112,6 @@
                   <p id="accessSummaryLine" class="access-summary">Load a Vault and select a Folder to inspect access.</p>
                 </div>
               </div>
-
-              <input id="accessTargetNpubInput" type="hidden" />
-              <div id="accessFlowPanel" hidden></div>
-              <div id="accessOverviewPanel" hidden></div>
-              <div id="accessBadgeRow" hidden></div>
-              <button id="grantFolderAccessButton" type="button" hidden>Grant</button>
-              <button id="removeFolderAccessButton" type="button" hidden>Remove</button>
             </div>
 
             <div class="access-action-stack" aria-label="Access actions">
@@ -630,7 +553,6 @@
 Start writing here.</textarea>
                 </label>
               </div>
-              <button id="encryptDraftButton" type="button" hidden>Prepare encrypted revision</button>
             </details>
           </article>
         </section>
@@ -697,21 +619,6 @@ Start writing here.</textarea>
         <input id="pageFolderIdInput" value="getting-started" autocomplete="off" spellcheck="false" />
         <input id="pageObjectIdInput" value="obj_000000000001" autocomplete="off" spellcheck="false" />
         <input id="pageBaseRevisionInput" value="" autocomplete="off" spellcheck="false" />
-        <input id="folderKeyInput" value="" autocomplete="off" spellcheck="false" />
-        <input id="okfDestinationFolderInput" value="getting-started" autocomplete="off" spellcheck="false" />
-        <select id="okfConflictModeInput">
-          <option value="skip">skip</option>
-          <option value="copy">copy</option>
-          <option value="overwrite">overwrite</option>
-        </select>
-        <textarea id="okfBundleInput" spellcheck="false">{
-  "pages": [
-    {
-      "path": "content/General/imported-page.md",
-      "content": "# Imported Page\n\nImported through this client."
-    }
-  ]
-}</textarea>
       </div>
 
       <div id="contextMenu" class="context-menu" role="menu" hidden></div>
@@ -851,14 +758,23 @@ Start writing here.</textarea>
                     </div>
                   </dl>
                 </div>
-                <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
+              <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="7.5" cy="12.5" r="3.5" />
                     <path d="M11 12.5h9M16 12.5v3M19 12.5v2" />
-                  </svg>
-                  <span>Connect signer</span>
-                </button>
-                <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
+                </svg>
+                <span>Connect signer</span>
+              </button>
+              <button id="settingsManageVaultsButton" class="settings-primary-action" type="button">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16M4 12h16M4 17h16" />
+                  <circle cx="8" cy="7" r="1.5" />
+                  <circle cx="15" cy="12" r="1.5" />
+                  <circle cx="10" cy="17" r="1.5" />
+                </svg>
+                <span>Manage Vaults</span>
+              </button>
+              <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
               </section>
 
               <section id="settingsAccessPanel" class="settings-section settings-access-section" role="tabpanel" aria-labelledby="settingsNavAccess" hidden>

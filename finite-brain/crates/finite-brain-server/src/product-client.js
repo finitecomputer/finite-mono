@@ -18,7 +18,6 @@ const FiniteBrainProductClient = (() => {
     lastError: null,
     preparedWrite: null,
     preparedWriteTarget: null,
-    okfPlan: null,
     projection: createClientProjection(),
     readerBusy: false,
     selectedFolderId: null,
@@ -35,8 +34,8 @@ const FiniteBrainProductClient = (() => {
     vaultSwitcherPreviousFocus: null,
     manageVaultsModalOpen: false,
     manageVaultsModalPreviousFocus: null,
+    manageVaultsReturnToSettings: null,
     activeAccessFolderId: null,
-    activeAccessView: "vault",
     activeAccessIntent: "overview",
     accessBusy: false,
     accessResult: null,
@@ -53,7 +52,6 @@ const FiniteBrainProductClient = (() => {
     sharedFolderInvitations: null,
     sharedFolderConnections: null,
     editorMode: "visual",
-    vaultControlsCollapsedAfterLoad: false,
     expandedFolderIds: new Set(),
     contextMenuTarget: null,
     commandPaletteOpen: false,
@@ -102,17 +100,11 @@ const FiniteBrainProductClient = (() => {
   const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
   const SESSION_PLAINTEXT_INPUT_IDS = [
     "accessAddPersonInput",
-    "accessOrganizationVaultNameInput",
     "accessShareExpiresAtInput",
     "accessShareLinkInput",
     "accessShareMountInput",
     "accessShareTargetInput",
-    "accessTargetNpubInput",
     "commandPaletteInput",
-    "folderKeyInput",
-    "okfBundleInput",
-    "okfDestinationFolderInput",
-    "organizationVaultNameInput",
     "manageOrganizationVaultNameInput",
     "pageBaseRevisionInput",
     "pageDraftInput",
@@ -807,7 +799,6 @@ const FiniteBrainProductClient = (() => {
       "vaultInvitationList",
       "vaultPeopleList",
       "vaultSwitcherList",
-      "vaultSwitchList",
       "manageVaultsList",
     ]) {
       $(id)?.replaceChildren?.();
@@ -875,7 +866,6 @@ const FiniteBrainProductClient = (() => {
         target.metadata ||
         target.preparedWrite ||
         target.preparedWriteTarget ||
-        target.okfPlan ||
         target.lastEmailInviteSecret ||
         target.lastEmailInviteUrl ||
         target.lastEmailInvitePostProof ||
@@ -909,15 +899,7 @@ const FiniteBrainProductClient = (() => {
     const nextVaultId = vaultId || state.activeVaultId || personalVaultIdForPubkey(state.pubkeyHex);
     const changed = nextVaultId !== state.activeVaultId;
     state.activeVaultId = nextVaultId;
-    const input = $("vaultIdInput");
-    if (input) input.value = nextVaultId;
-    const select = $("vaultSelect");
-    if (select) select.value = nextVaultId;
     if (changed && options.reset !== false) resetVaultSessionState();
-  }
-
-  function selectedVaultIdFromControls() {
-    return $("vaultSelect")?.value || $("vaultIdInput")?.value || state.activeVaultId;
   }
 
   function lockedVaultSelection(status, activeVaultId, visibleVaults) {
@@ -948,76 +930,6 @@ const FiniteBrainProductClient = (() => {
     const personal = normalized.find((vault) => vault.kind === "personal");
     const fallbackVaultId = personal?.vaultId || normalized[0]?.vaultId || personalVaultIdForPubkey(pubkeyHex);
     return fallbackVaultId && fallbackVaultId !== activeVaultId ? fallbackVaultId : null;
-  }
-
-  function withActiveVaultOption(options, activeVaultId, metadata) {
-    if (
-      !activeVaultId ||
-      activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID ||
-      options.some((vault) => vault.vaultId === activeVaultId)
-    ) {
-      return options;
-    }
-    const currentMetadata = metadata?.vaultId === activeVaultId ? metadata : null;
-    const kind = currentMetadata?.kind === "personal" ? "personal" : "organization";
-    return [
-      ...options,
-      {
-        vaultId: activeVaultId,
-        kind,
-        name: currentMetadata?.name || activeVaultId,
-        role: currentMetadata?.role || (kind === "personal" ? "owner" : "member"),
-      },
-    ];
-  }
-
-  function renderVaultSelect() {
-    const select = $("vaultSelect");
-    if (!select) return;
-    const lockedSelection = lockedVaultSelection(
-      state.sessionStatus,
-      state.activeVaultId,
-      state.visibleVaults
-    );
-    if (lockedSelection) {
-      const option = document.createElement("option");
-      option.value = lockedSelection.value;
-      option.textContent = lockedSelection.label;
-      select.replaceChildren(option);
-      select.value = lockedSelection.value;
-      const input = $("vaultIdInput");
-      if (input) input.value = lockedSelection.value;
-      return;
-    }
-    const options = withActiveVaultOption(
-      visibleVaultOptions(),
-      state.activeVaultId,
-      state.metadata
-    );
-    const personalOptions = options.filter((vault) => vault.kind === "personal");
-    const organizationOptions = options.filter((vault) => vault.kind === "organization");
-    const groups = [
-      ["Personal", personalOptions],
-      ["Organizations", organizationOptions],
-    ];
-    const nodes = [];
-    for (const [label, vaults] of groups) {
-      if (!vaults.length) continue;
-      const group = document.createElement("optgroup");
-      group.label = label;
-      for (const vault of vaults) {
-        const option = document.createElement("option");
-        option.value = vault.vaultId;
-        option.textContent =
-          vault.kind === "personal" ? vault.name : `${vault.name} - ${vault.role}`;
-        group.appendChild(option);
-      }
-      nodes.push(group);
-    }
-    select.replaceChildren(...nodes);
-    select.value = state.activeVaultId;
-    const input = $("vaultIdInput");
-    if (input) input.value = state.activeVaultId;
   }
 
   function vaultIdFromName(prefix, name) {
@@ -1204,13 +1116,13 @@ const FiniteBrainProductClient = (() => {
   function accessActionRoute(action, target) {
     if (!target?.folderId) return null;
     if (action === "share-folder") {
-      return { folderId: target.folderId, intent: "links", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "links", settingsSection: "access" };
     }
     if (action === "manage-access") {
-      return { folderId: target.folderId, intent: "people", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "people", settingsSection: "access" };
     }
     if (action === "inspect-access") {
-      return { folderId: target.folderId, intent: "overview", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "overview", settingsSection: "access" };
     }
     return null;
   }
@@ -1221,27 +1133,14 @@ const FiniteBrainProductClient = (() => {
     return "overview";
   }
 
-  function normalizeAccessView(view) {
-    return view === "vault" ? "vault" : "folder";
-  }
-
-  function setAccessView(view) {
-    state.activeAccessView = normalizeAccessView(view);
-    state.accessResult = null;
-    render();
-    if (state.activeAccessView === "vault" && state.vaultInvitations === null) {
-      refreshAccessManagementListsInBackground();
-    }
-  }
-
-  // Vaults/Access tabs share one sidebar panel; intent (overview/people/links) only
-  // affects the Access tab chrome such as expanded share links or the add-person form.
+  // Intent only affects the Settings Access chrome such as expanded share links
+  // or the add-person form. Vault selection lives in the footer and Manage Vaults.
   function applyAccessIntentChrome(row) {
     const intent = accessIntentValue(state.activeAccessIntent);
     const advancedSection = $("accessAdvancedSection");
     const addPanel = $("accessAddPersonPanel");
     const addForm = $("accessAddPersonForm");
-    if (!row || normalizeAccessView(state.activeAccessView) !== "folder") return;
+    if (!row) return;
 
     if (intent === "links" && advancedSection) {
       advancedSection.open = true;
@@ -1954,7 +1853,6 @@ const FiniteBrainProductClient = (() => {
     target.projection = createClientProjection();
     target.preparedWrite = null;
     target.preparedWriteTarget = null;
-    target.okfPlan = null;
     target.lastError = null;
     target.accessResult = null;
     target.lastShareLinkId = null;
@@ -1976,10 +1874,8 @@ const FiniteBrainProductClient = (() => {
     target.activeWorkspaceView = "page";
     target.activeSidebarMode = "files";
     target.activeAccessFolderId = null;
-    target.activeAccessView = "vault";
     target.activeAccessIntent = "overview";
     target.editorMode = "visual";
-    target.vaultControlsCollapsedAfterLoad = false;
     target.expandedFolderIds = new Set();
     target.contextMenuTarget = null;
     target.commandPaletteOpen = false;
@@ -1988,6 +1884,7 @@ const FiniteBrainProductClient = (() => {
     target.editorSlashRange = null;
     target.readerBusy = false;
     target.accessBusy = false;
+    target.manageVaultsReturnToSettings = null;
     return target;
   }
 
@@ -2099,13 +1996,13 @@ const FiniteBrainProductClient = (() => {
     focusSettingsSection(state.settingsSection);
   }
 
-  function closeSettingsModal() {
+  function closeSettingsModal(options = {}) {
     if (!state.settingsModalOpen) return;
     state.settingsModalOpen = false;
     const previousFocus = state.settingsModalPreviousFocus;
     state.settingsModalPreviousFocus = null;
     render();
-    previousFocus?.focus?.();
+    if (options.restoreFocus !== false) previousFocus?.focus?.();
   }
 
   function overlayFocusableElements(id) {
@@ -2162,12 +2059,32 @@ const FiniteBrainProductClient = (() => {
     return overlayFocusableElements("manageVaultsModal");
   }
 
-  function openManageVaultsModal() {
+  function focusManageVaultsReturnTarget() {
+    const target = $("settingsManageVaultsButton");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => target?.focus?.());
+    } else {
+      target?.focus?.();
+    }
+  }
+
+  function openManageVaultsModal(options = {}) {
     if (state.manageVaultsModalOpen) return;
     const menuFocus = state.vaultSwitcherPreviousFocus;
-    state.manageVaultsModalPreviousFocus = menuFocus || document.activeElement || null;
+    const returnToSettings = Boolean(options.returnToSettings && state.settingsModalOpen);
+    state.manageVaultsReturnToSettings = returnToSettings
+      ? {
+          previousFocus: state.settingsModalPreviousFocus,
+          section: "vault",
+        }
+      : null;
+    state.manageVaultsModalPreviousFocus = returnToSettings
+      ? null
+      : menuFocus || document.activeElement || null;
     closeVaultSwitcher({ restoreFocus: false });
-    if (state.settingsModalOpen) closeSettingsModal();
+    if (state.settingsModalOpen) {
+      closeSettingsModal({ restoreFocus: false });
+    }
     state.manageVaultsModalOpen = true;
     closeContextMenu();
     closeCommandPalette();
@@ -2184,8 +2101,18 @@ const FiniteBrainProductClient = (() => {
   function closeManageVaultsModal() {
     if (!state.manageVaultsModalOpen) return;
     state.manageVaultsModalOpen = false;
+    const returnToSettings = state.manageVaultsReturnToSettings;
+    state.manageVaultsReturnToSettings = null;
     const previousFocus = state.manageVaultsModalPreviousFocus;
     state.manageVaultsModalPreviousFocus = null;
+    if (returnToSettings) {
+      state.settingsSection = returnToSettings.section;
+      state.settingsModalPreviousFocus = returnToSettings.previousFocus;
+      state.settingsModalOpen = true;
+      render();
+      focusManageVaultsReturnTarget();
+      return;
+    }
     render();
     previousFocus?.focus?.();
   }
@@ -4229,7 +4156,6 @@ const FiniteBrainProductClient = (() => {
   function sidebarModeLabel(mode) {
     return (
       {
-        access: "Access",
         files: "Files",
         search: "Search",
       }[normalizeSidebarMode(mode)] || "Files"
@@ -4237,23 +4163,14 @@ const FiniteBrainProductClient = (() => {
   }
 
   function normalizeSidebarMode(mode) {
-    return ["files", "search", "access"].includes(mode) ? mode : "files";
-  }
-
-  function globalVaultControlState(sidebarMode) {
-    return {
-      // Vault selection/loading now lives in the footer switcher and Manage Vaults
-      // dialog. Legacy callers can still ask for the chrome state while the old
-      // dense Files/Search controls remain absent from the rendered sidebar.
-      hidden: true,
-    };
+    return ["files", "search"].includes(mode) ? mode : "files";
   }
 
   function commandPaletteCommands() {
     return [
       { id: "files", kind: "command", label: "Files", detail: "Sidebar", target: "files" },
       { id: "search", kind: "command", label: "Search", detail: "Sidebar", target: "search" },
-      { id: "access", kind: "command", label: "Access", detail: "Sidebar", target: "access" },
+      { id: "access", kind: "command", label: "Vault access", detail: "Settings", target: "access" },
       { id: "graph", kind: "command", label: "Graph View", detail: "Workspace", target: "graph" },
       { id: "new-page", kind: "command", label: "New Page", detail: "Current Folder", target: "new-page" },
       { id: "refresh", kind: "command", label: "Refresh Vault", detail: "Sync", target: "refresh" },
@@ -4382,10 +4299,6 @@ const FiniteBrainProductClient = (() => {
 
   function setSidebarMode(mode) {
     const nextMode = normalizeSidebarMode(mode);
-    if (nextMode === "access") {
-      openSettingsModal("access");
-      return;
-    }
     state.activeSidebarMode = nextMode;
     closeContextMenu();
     render();
@@ -4417,23 +4330,6 @@ const FiniteBrainProductClient = (() => {
     $("ribbonGraphButton").className = chrome.ribbonGraphClass;
     setPressed("ribbonGraphButton", !chrome.graphHidden);
     document.title = chrome.shellView === "graph" ? "Graph View - FiniteBrain" : `${workspaceTitle} - FiniteBrain`;
-  }
-
-  function renderVaultControlChrome() {
-    const details = $("vaultControlDetails");
-    if (!details) return;
-    const chrome = globalVaultControlState(state.activeSidebarMode);
-    details.hidden = chrome.hidden;
-    setText("vaultControlSummary", activeVaultLabel());
-    if (chrome.hidden) return;
-    if (state.metadata && !state.vaultControlsCollapsedAfterLoad) {
-      details.open = false;
-      state.vaultControlsCollapsedAfterLoad = true;
-    }
-    if (!state.metadata && state.vaultControlsCollapsedAfterLoad) {
-      details.open = true;
-      state.vaultControlsCollapsedAfterLoad = false;
-    }
   }
 
   function nextDraftObjectId() {
@@ -4472,7 +4368,6 @@ const FiniteBrainProductClient = (() => {
     state.activeWorkspaceView = "page";
     state.expandedFolderIds.add(folderId);
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     $("pageObjectIdInput").value = objectId;
     $("pageBaseRevisionInput").value = "";
     setEditorDraftText(draftText);
@@ -4542,7 +4437,6 @@ const FiniteBrainProductClient = (() => {
     }
     state.activeWorkspaceView = "page";
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     render();
   }
 
@@ -4568,7 +4462,6 @@ const FiniteBrainProductClient = (() => {
     const isExpanded = state.expandedFolderIds.has(folderId);
     state.selectedFolderId = folderId;
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     if (isExpanded) {
       state.expandedFolderIds.delete(folderId);
       state.selectedPageKey = null;
@@ -4873,18 +4766,6 @@ const FiniteBrainProductClient = (() => {
       row.appendChild(element);
     }
     parent.appendChild(row);
-  }
-
-  function renderAccessBadgeRow(id, badges) {
-    const row = $(id);
-    if (!row) return;
-    row.replaceChildren();
-    for (const badge of badges) {
-      const element = document.createElement("span");
-      element.className = `access-badge ${badge.tone || "muted"}`;
-      element.textContent = badge.label;
-      row.appendChild(element);
-    }
   }
 
   function setText(id, text) {
@@ -5711,8 +5592,12 @@ const FiniteBrainProductClient = (() => {
       selectReaderPage(row.pageKey);
       return;
     }
-    if (row.target === "files" || row.target === "search" || row.target === "access") {
+    if (row.target === "files" || row.target === "search") {
       setSidebarMode(row.target);
+      return;
+    }
+    if (row.target === "access") {
+      openSettingsModal("access");
       return;
     }
     if (row.target === "graph") {
@@ -5849,14 +5734,12 @@ const FiniteBrainProductClient = (() => {
     const accessRoute = accessActionRoute(item.action, target);
     if (accessRoute) {
       state.accessResult = null;
-      state.activeAccessView = "folder";
       state.activeAccessFolderId = accessRoute.folderId;
       state.activeAccessIntent = accessRoute.intent;
       state.selectedFolderId = accessRoute.folderId;
       state.expandedFolderIds.add(accessRoute.folderId);
       $("pageFolderIdInput").value = accessRoute.folderId;
-      $("okfDestinationFolderInput").value = accessRoute.folderId;
-      setSidebarMode(accessRoute.sidebarMode);
+      openSettingsModal(accessRoute.settingsSection);
       log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
         folderId: accessRoute.folderId,
         intent: accessRoute.intent,
@@ -6032,26 +5915,15 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderAccessFlowPanel(activeRow) {
-    const restricted = activeRow?.access === "restricted";
-    const keyOpen = hasOpenedAccessFolderKey(activeRow);
-    const busy = state.accessBusy;
-
-    safeSetHidden("accessFlowPanel", true);
-    safeSetHidden("accessOverviewPanel", true);
-
-    // Set up share expiry defaults (these fields still exist in advanced section)
+  function renderAccessFlowPanel() {
+    // Keep visible share controls initialized without retaining hidden legacy
+    // controls that used to proxy Folder grants and removals.
     if (!$("accessShareExpiresAtInput").value) {
       $("accessShareExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
     }
     if (state.lastShareLinkId && !$("accessShareLinkInput").value) {
       $("accessShareLinkInput").value = state.lastShareLinkId;
     }
-
-    // Legacy buttons that may still be referenced elsewhere
-    const canUseFolderFlow = restricted && keyOpen && !busy && state.signerStatus === "connected";
-    safeSetElement("grantFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
-    safeSetElement("removeFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
 
     renderAccessResultPanel();
   }
@@ -6099,8 +5971,7 @@ const FiniteBrainProductClient = (() => {
       state.activeAccessFolderId = activeRow.id;
     }
 
-    renderAccessSidebarCount(rows, state.metadata);
-    renderAccessViewSwitch();
+    renderAccessSidebarCount(rows);
     renderAccessBusyChrome();
 
     // Render folder selector
@@ -6109,7 +5980,7 @@ const FiniteBrainProductClient = (() => {
     // Render main access inspector
     renderAccessInspector(activeRow, state.metadata, openedFolders);
 
-    renderVaultManagementPanel(state.metadata);
+    renderVaultAccessManagement(state.metadata);
 
     // Update access result panel (for feedback)
     renderAccessResultPanel();
@@ -6118,13 +5989,7 @@ const FiniteBrainProductClient = (() => {
     renderVaultInvitationPanel();
   }
 
-  function renderAccessSidebarCount(folderRows, metadata) {
-    const view = normalizeAccessView(state.activeAccessView);
-    if (view === "vault") {
-      const vaultCount = visibleVaultOptions().length;
-      setPill("accessSidebarCount", `${vaultCount}`, vaultCount ? "ready" : "muted");
-      return;
-    }
+  function renderAccessSidebarCount(folderRows) {
     const folderCount = folderRows.length;
     setPill("accessSidebarCount", `${folderCount}`, folderCount ? "ready" : "muted");
   }
@@ -6132,29 +5997,7 @@ const FiniteBrainProductClient = (() => {
   function renderAccessBusyChrome() {
     const busy = state.accessBusy;
     safeSetHidden("accessBusyStatus", !busy);
-    for (const id of ["accessFolderPanel", "accessVaultPanel"]) {
-      safeSetElement(id, (panel) => panel.classList.toggle("is-busy", busy));
-    }
-  }
-
-  function renderAccessViewSwitch() {
-    const view = normalizeAccessView(state.activeAccessView);
-    state.activeAccessView = view;
-    const folderPanel = $("accessFolderPanel");
-    const vaultPanel = $("accessVaultPanel");
-    if (folderPanel) folderPanel.hidden = view !== "folder";
-    if (vaultPanel) vaultPanel.hidden = view !== "vault";
-    for (const [id, value] of [
-      ["accessVaultViewButton", "vault"],
-      ["accessFolderViewButton", "folder"],
-    ]) {
-      const button = $(id);
-      if (!button) continue;
-      const active = view === value;
-      button.className = active ? "active" : "";
-      button.setAttribute("aria-selected", String(active));
-      button.setAttribute("tabindex", active ? "0" : "-1");
-    }
+    safeSetElement("accessFolderPanel", (panel) => panel.classList.toggle("is-busy", busy));
   }
 
   function actorIsVaultAdmin(metadata) {
@@ -6257,20 +6100,6 @@ const FiniteBrainProductClient = (() => {
     return rows.sort(
       (left, right) => linkStatusRank(left.status) - linkStatusRank(right.status)
     );
-  }
-
-  function vaultGuideStepRows(signerStatus, metadata, isAdmin) {
-    const signerDone = signerStatus === "connected";
-    const organizationLoaded = metadata?.kind === "organization";
-    return [
-      { done: signerDone, id: "signer", label: "Connect a NIP-07 signer" },
-      { done: organizationLoaded, id: "vault", label: "Load or create an organization Vault" },
-      {
-        done: Boolean(organizationLoaded && isAdmin),
-        id: "admin",
-        label: "Use a Vault admin email",
-      },
-    ];
   }
 
   function vaultPeopleRows(metadata) {
@@ -6401,29 +6230,13 @@ const FiniteBrainProductClient = (() => {
     return button;
   }
 
-  function renderVaultSwitchList() {
-    const rows = visibleVaultOptions();
-    const emptyText = state.signerStatus === "connected"
-      ? "No Vaults available."
-      : "Connect a signer to list Vaults.";
-    setList("vaultSwitchList", rows, emptyText, (item, vault) => {
-      item.appendChild(vaultSwitchButton(vault));
-    });
-  }
-
-  function renderVaultManagementPanel(metadata) {
-    const signerConnected = state.signerStatus === "connected";
+  function renderVaultAccessManagement(metadata) {
     const organizationVault = hasOrganizationVaultControls(metadata);
     const inviteInProgress = Boolean(
       state.lastVaultInvitationCode ||
         $("vaultInviteCodeInput")?.value.trim() ||
         $("vaultInviteSecretInput")?.value.trim()
     );
-    setText("vaultManagementTitle", "Vaults");
-    setText("vaultManagementSummary", vaultManagementSummary(metadata));
-    renderVaultSwitchList();
-    safeSetHidden("accessConnectSignerButton", signerConnected);
-    safeSetHidden("accessCreateOrganizationPanel", !showsCreateOrganizationControl(metadata));
     safeSetHidden("vaultInvitationActionSection", !(organizationVault || inviteInProgress));
     safeSetElement("vaultPeopleActionPanel", (panel) => {
       panel.hidden = !organizationVault;
@@ -6440,33 +6253,8 @@ const FiniteBrainProductClient = (() => {
         panel.open = true;
       }
     });
-    setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    const vaultAction = state.sessionStatus === SESSION_STATUS.LOCKED
-      ? "Unlock Vault"
-      : state.sessionStatus === SESSION_STATUS.RESUMING
-        ? "Unlocking…"
-        : "Load";
-    setText("accessLoadVaultButton", vaultAction);
-    const accessLoadVaultButton = $("accessLoadVaultButton");
-    accessLoadVaultButton?.setAttribute(
-      "aria-label",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock Vault" : "Load and decrypt Vault"
-    );
-    accessLoadVaultButton?.setAttribute(
-      "title",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock Vault" : "Load and decrypt Vault"
-    );
-    setOptionalDisabled(
-      "accessLoadVaultButton",
-      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
-    );
-    setOptionalDisabled(
-      "accessCreateOrganizationVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
-    );
     renderVaultPeopleList(metadata);
     renderVaultPeopleControls(metadata);
-    renderVaultGuide(metadata);
     renderVaultInvitationList();
     renderSharedFolderList();
   }
@@ -6595,36 +6383,6 @@ const FiniteBrainProductClient = (() => {
     statusSpan.textContent = status;
     info.appendChild(statusSpan);
     item.appendChild(info);
-  }
-
-  function renderVaultGuide(metadata) {
-    const list = $("vaultGuideSteps");
-    if (!list) return;
-    const isAdmin = actorIsVaultAdmin(metadata);
-    const fullyManaged =
-      metadata?.kind === "organization" && state.signerStatus === "connected" && isAdmin;
-    const showGuide = metadata?.kind === "organization" && !fullyManaged;
-    list.hidden = !showGuide;
-    if (!showGuide) {
-      list.replaceChildren();
-      return;
-    }
-    list.replaceChildren();
-    for (const step of vaultGuideStepRows(state.signerStatus, metadata, isAdmin)) {
-      const item = document.createElement("li");
-      item.className = `vault-guide-step${step.done ? " done" : ""}`;
-      const marker = document.createElement("span");
-      marker.className = "vault-guide-marker";
-      marker.innerHTML = step.done
-        ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4L19 7" /></svg>'
-        : "";
-      const label = document.createElement("span");
-      label.className = "vault-guide-label";
-      label.textContent = step.label;
-      item.appendChild(marker);
-      item.appendChild(label);
-      list.appendChild(item);
-    }
   }
 
   function renderVaultInvitationList() {
@@ -6770,7 +6528,7 @@ const FiniteBrainProductClient = (() => {
       setText("accessCurrentFolder", "No folder selected");
       setText("accessSummaryLine", "Load a Vault and select a Folder to inspect access.");
       renderWhoHasAccessList(null, metadata, openedFolders);
-      renderAccessFlowPanel(null);
+      renderAccessFlowPanel();
       updateAdvancedOptions(null, metadata, openedFolders);
       return;
     }
@@ -6783,8 +6541,8 @@ const FiniteBrainProductClient = (() => {
     renderWhoHasAccessList(activeRow, metadata, openedFolders);
     applyAccessIntentChrome(activeRow);
 
-    // Share-link defaults and legacy hidden controls stay in sync here.
-    renderAccessFlowPanel(activeRow);
+    // Share-link defaults stay in sync with the visible access controls.
+    renderAccessFlowPanel();
 
     // Update advanced options
     updateAdvancedOptions(activeRow, metadata, openedFolders);
@@ -6979,11 +6737,15 @@ const FiniteBrainProductClient = (() => {
     addButton.onclick = () => {
       const email = addInput.value.trim();
       if (email && row) {
-        // Set the target field that the existing function expects
-        $("accessTargetNpubInput").value = email;
         state.activeAccessIntent = "people";
-        grantFolderAccessFromPanel();
-        addInput.value = "";
+        grantFolderAccessFromPanel(email)
+          .then(() => {
+            addInput.value = "";
+          })
+          .catch((error) => {
+            reportClientActionFailure(error);
+            log("Failed to grant Folder access.", { error: error.message });
+          });
       }
     };
 
@@ -7007,10 +6769,14 @@ const FiniteBrainProductClient = (() => {
   function removePersonAccess(personId, folderId) {
     if (state.accessBusy || state.signerStatus !== "connected") return;
 
-    // Use existing remove access functionality
     state.activeAccessIntent = "people";
-    $("accessTargetNpubInput").value = personId;
-    $("removeFolderAccessButton").click();
+    if (folderId && folderId !== state.activeAccessFolderId) {
+      state.activeAccessFolderId = folderId;
+    }
+    removeFolderAccessFromPanel(personId).catch((error) => {
+      reportClientActionFailure(error);
+      log("Failed to remove Folder access.", { error: error.message });
+    });
   }
 
   function updateAdvancedOptions(row, metadata, openedFolders) {
@@ -7237,24 +7003,14 @@ const FiniteBrainProductClient = (() => {
     );
     setOptionalDisabled("obsidianNewPageButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED);
     setOptionalDisabled("obsidianNewFolderButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.metadata);
-    setOptionalDisabled("openFolderKeyButton", !state.metadata);
-    setOptionalDisabled("encryptDraftButton", !state.keyring);
     setOptionalDisabled(
       "refreshReaderButton",
       state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.readerBusy || state.signerStatus !== "connected" || !state.metadata
     );
-    setOptionalDisabled("planOkfImportButton", !state.metadata);
-    setOptionalDisabled(
-      "executeOkfImportButton",
-      !state.okfPlan || !state.keyring || state.signerStatus !== "connected"
-    );
-    renderVaultSelect();
-
     renderSessionSecurity();
     renderSettingsModal();
     renderVaultSwitcher();
     renderManageVaultsModal();
-    renderVaultControlChrome();
     renderSidebarMode();
     renderReader();
     if (state.activeWorkspaceView === "graph") renderGraphView();
@@ -7262,7 +7018,6 @@ const FiniteBrainProductClient = (() => {
     renderSearchPanel();
     renderAccessPanel();
     renderCommandPalette();
-    renderOkfPlan();
   }
 
   function utf8Base64(text) {
@@ -7631,7 +7386,6 @@ const FiniteBrainProductClient = (() => {
   async function connectSigner(options = {}) {
     const operationEpoch = options.sessionEpoch ?? state.sessionEpoch;
     const derived = deriveSignerState(window.nostr);
-    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     if (!derived.canConnect) {
       state.signerStatus = derived.status;
       setText("signerDetail", derived.detail);
@@ -7673,7 +7427,6 @@ const FiniteBrainProductClient = (() => {
 
   async function loadVaultMetadata(options = {}) {
     if (!options.preserveActive) {
-      setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
       await ensureInvitedVaultAcceptedForActiveSelection();
       await ensurePersonalVaultForActiveSelection();
     }
@@ -7860,7 +7613,6 @@ const FiniteBrainProductClient = (() => {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
       throw new Error("Session is locked. Use Unlock session before loading protected Vault state");
     }
-    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     let relockOnFailure = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
     let sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
@@ -7994,13 +7746,12 @@ const FiniteBrainProductClient = (() => {
     return Boolean(state.keyring?.keys.has(folderKeyId(state.activeVaultId, row.id, keyVersion)));
   }
 
-  async function normalizedTargetNpub() {
-    return normalizedNpubInput("accessTargetNpubInput", "Paste an email first");
+  async function normalizedNpubInput(inputId, message) {
+    return normalizedNpubValue($(inputId).value, message);
   }
 
-  async function normalizedNpubInput(inputId, message) {
-    const value = $(inputId).value.trim();
-    const identity = await resolveIdentityInputValue(value, message);
+  async function normalizedNpubValue(value, message) {
+    const identity = await resolveIdentityInputValue(String(value || "").trim(), message);
     return identity.npub;
   }
 
@@ -8172,7 +7923,6 @@ const FiniteBrainProductClient = (() => {
     state.selectedFolderId = folderId;
     state.expandedFolderIds.add(folderId);
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     log("Created Folder from toolbar.", { folderId, recipients: recipients.length });
     render();
   }
@@ -9213,11 +8963,11 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  async function grantFolderAccessFromPanel() {
+  async function grantFolderAccessFromPanel(targetValue) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireGrantableAccessRow();
-    const targetNpub = await normalizedTargetNpub();
+    const targetNpub = await normalizedNpubValue(targetValue, "Enter an email first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -9254,11 +9004,11 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  async function removeFolderAccessFromPanel() {
+  async function removeFolderAccessFromPanel(targetValue) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
-    const targetNpub = await normalizedTargetNpub();
+    const targetNpub = await normalizedNpubValue(targetValue, "Enter an email first");
     requireCurrentSessionEpoch(sessionEpoch);
     const operationKeyring = cloneSessionKeyring(state.keyring);
     const metadataSnapshot = state.metadata;
@@ -9724,35 +9474,6 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  async function openEnteredFolderKey() {
-    const sessionEpoch = captureSessionOperationEpoch();
-    const keyring = state.keyring || createSessionKeyring();
-    const input = activePageInput();
-    const folderKey = $("folderKeyInput").value.trim();
-    if (!folderKey) throw new Error("Paste a base64 raw Folder Key first");
-    await openFolderKeyGrantPlaintext(
-      keyring,
-      {
-        version: "finite-folder-key-grant-v1",
-        vaultId: state.activeVaultId,
-        folderId: input.folderId,
-        keyVersion: currentFolderKeyVersion(input.folderId),
-        issuerNpub: "npub-local-session",
-        recipientNpub: state.pubkeyHex ? npubFromHex(state.pubkeyHex) : "npub-local-session",
-        folderKey,
-        issuedAt: new Date().toISOString(),
-      },
-      { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
-    );
-    requireCurrentSessionEpoch(sessionEpoch);
-    state.keyring = keyring;
-    log("Opened Folder Key into the in-memory session keyring.", {
-      folderId: input.folderId,
-      keyVersion: currentFolderKeyVersion(input.folderId),
-    });
-    render();
-  }
-
   async function prepareDraftWrite(options = {}) {
     if (!state.keyring) throw new Error("Open a Folder Key before encrypting a Page draft");
     if (!state.pubkeyHex) throw new Error("Connect a signer before preparing a signed Page write");
@@ -9871,86 +9592,6 @@ const FiniteBrainProductClient = (() => {
     log("Reset graph zoom.");
   }
 
-  function renderOkfPlan() {
-    return state.okfPlan;
-  }
-
-  function folderKeyVersionMap() {
-    return new Map(
-      (state.metadata?.folders || []).map((folder) => [folder.id, folder.currentKeyVersion || 1])
-    );
-  }
-
-  function planEnteredOkfImport() {
-    const destinationFolderId = $("okfDestinationFolderInput").value.trim() || activePageInput().folderId;
-    const bundle = parseOkfBundle($("okfBundleInput").value, { destinationFolderId });
-    state.okfPlan = planOkfImport(bundle, existingPagesForImport(), {
-      conflictMode: $("okfConflictModeInput").value,
-      destinationFolderId,
-    });
-    log("Planned OKF import.", state.okfPlan.summary);
-    render();
-  }
-
-  async function executePlannedOkfImport() {
-    if (!state.okfPlan) throw new Error("Plan an OKF import before executing it");
-    if (!state.keyring) throw new Error("Open destination Folder Keys before importing OKF");
-    if (!state.pubkeyHex) throw new Error("Connect a signer before importing OKF");
-    const sessionEpoch = state.sessionEpoch;
-    const plan = state.okfPlan;
-    const keyring = state.keyring;
-    const vaultId = state.activeVaultId;
-    const folderKeyVersions = folderKeyVersionMap();
-    const authorNpub = npubFromHex(state.pubkeyHex);
-    const prepared = await prepareOkfImportWrites(keyring, plan, {
-      authorNpub,
-      currentKeyVersion: (folderId) => folderKeyVersions.get(folderId) || 1,
-      signEvent: requireNip07SignEvent(),
-      vaultId,
-    });
-    requireCurrentSessionEpoch(sessionEpoch);
-    const results = [];
-    for (const write of prepared.writes) {
-      requireCurrentSessionEpoch(sessionEpoch);
-      const result = await protectedRequest(write.path, {
-        method: "PUT",
-        body: JSON.stringify(write.body),
-      });
-      requireCurrentSessionEpoch(sessionEpoch);
-      const importedEntry = plan.entries.find((entry) => entry.objectId === write.objectId);
-      const importedAsset = importedEntry?.kind === "asset";
-      const projectionObject = {
-        folderId: write.folderId,
-        objectId: write.objectId,
-        path: write.targetPath,
-        revision: result.revision,
-        status: "ready",
-        type: importedAsset ? "asset" : "page",
-      };
-      if (importedAsset) {
-        const importedBytes = base64ToBytes(importedEntry?.bytesBase64 || "");
-        projectionObject.bytesBase64 = importedEntry?.bytesBase64 || "";
-        projectionObject.contentHash = await sha256HexBytes(importedBytes);
-        requireCurrentSessionEpoch(sessionEpoch);
-        projectionObject.contentType = importedEntry?.contentType || "application/octet-stream";
-        projectionObject.size = importedBytes.length;
-      } else {
-        const importedText = importedEntry?.markdown || "";
-        projectionObject.text = importedText;
-        projectionObject.title = pageTitleFromText(importedText, write.targetPath);
-      }
-      state.projection.pages.set(pageKey(write.folderId, write.objectId), projectionObject);
-      results.push({ ...result, targetPath: write.targetPath });
-    }
-    state.okfPlan = null;
-    log("Executed OKF import through encrypted secure object routes.", {
-      imported: results.length,
-      skipped: prepared.skipped.length,
-      results,
-    });
-    render();
-  }
-
   function bind() {
     window.addEventListener?.("pagehide", handlePageHide);
     window.addEventListener?.("pageshow", handlePageShow);
@@ -9970,10 +9611,6 @@ const FiniteBrainProductClient = (() => {
         log("Failed to unlock Product Client session.", { error: error.message });
         render();
       });
-    });
-    $("vaultSelect")?.addEventListener("change", () => {
-      setActiveVaultId($("vaultSelect").value);
-      render();
     });
     $("sessionSettingsButton")?.addEventListener("click", () => {
       openSettingsModal("session");
@@ -10018,6 +9655,9 @@ const FiniteBrainProductClient = (() => {
         log("Failed to connect signer from Settings.", { error: error.message });
         render();
       });
+    });
+    $("settingsManageVaultsButton")?.addEventListener("click", () => {
+      openManageVaultsModal({ returnToSettings: true });
     });
     $("closeSettingsButton")?.addEventListener("click", () => {
       closeSettingsModal();
@@ -10119,100 +9759,8 @@ const FiniteBrainProductClient = (() => {
       }
     });
     $("ribbonAccessButton").addEventListener("click", () => {
-      setSidebarMode("access");
+      openSettingsModal("access");
     });
-    onOptionalClick("accessOverviewButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessIntent = "overview";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder access overview.", { folderId });
-      render();
-    });
-    onOptionalClick("accessManageButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessIntent = "people";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder Member Identity access panel.", { folderId });
-      render();
-    });
-    onOptionalClick("accessShareButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessView = "folder";
-      state.activeAccessIntent = "links";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder links panel.", { folderId });
-      render();
-    });
-    onOptionalClick("accessFolderViewButton", () => setAccessView("folder"));
-    onOptionalClick("accessVaultViewButton", () => setAccessView("vault"));
-    const accessViewSwitch = document.querySelector(".access-view-switch");
-    if (accessViewSwitch) {
-      accessViewSwitch.addEventListener("keydown", (event) => {
-        const tabs = ["accessVaultViewButton", "accessFolderViewButton"]
-          .map((id) => $(id))
-          .filter(Boolean);
-        const activeIndex = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
-        if (activeIndex < 0) return;
-        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-          event.preventDefault();
-          const direction = event.key === "ArrowRight" ? 1 : -1;
-          const nextIndex = (activeIndex + direction + tabs.length) % tabs.length;
-          setAccessView(nextIndex === 0 ? "vault" : "folder");
-          tabs[nextIndex]?.focus();
-        }
-        if (event.key === "Home") {
-          event.preventDefault();
-          setAccessView("vault");
-          tabs[0]?.focus();
-        }
-        if (event.key === "End") {
-          event.preventDefault();
-          setAccessView("folder");
-          tabs[tabs.length - 1]?.focus();
-        }
-      });
-    }
-    onOptionalClick("accessConnectSignerButton", () => {
-      connectSigner().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to connect signer.", { error: error.message });
-        render();
-      });
-    });
-    onOptionalClick("accessLoadVaultButton", () => {
-      const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
-      operation.catch((error) => {
-        reportClientActionFailure(error);
-        log("Failed to unlock or load Vault reader.", { error: error.message });
-        state.readerBusy = false;
-        render();
-      });
-    });
-    onOptionalClick("accessCreateOrganizationVaultButton", () => {
-      createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
-        state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
-        render();
-      });
-    });
-    const accessOrgNameInput = $("accessOrganizationVaultNameInput");
-    if (accessOrgNameInput) {
-      accessOrgNameInput.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
-          state.lastError = error.message;
-          log("Failed to create organization Vault.", { error: error.message });
-          render();
-        });
-      });
-    }
     onOptionalClick("addVaultMemberButton", () => {
       addVaultMemberFromPanel().catch((error) => {
         reportClientActionFailure(error);
@@ -10238,18 +9786,6 @@ const FiniteBrainProductClient = (() => {
         if (!button?.disabled) button.click();
       });
     }
-    onOptionalClick("grantFolderAccessButton", () => {
-      grantFolderAccessFromPanel().catch((error) => {
-        reportClientActionFailure(error);
-        log("Failed to grant Folder access.", { error: error.message });
-      });
-    });
-    onOptionalClick("removeFolderAccessButton", () => {
-      removeFolderAccessFromPanel().catch((error) => {
-        reportClientActionFailure(error);
-        log("Failed to remove Folder access.", { error: error.message });
-      });
-    });
     onOptionalClick("createShareLinkButton", () => {
       createShareLinkFromPanel().catch((error) => {
         reportClientActionFailure(error);
@@ -10371,20 +9907,6 @@ const FiniteBrainProductClient = (() => {
     $("editorDrawer").addEventListener("toggle", () => {
       setEditorMode($("editorDrawer").open ? "markdown" : "visual");
     });
-    onOptionalClick("openFolderKeyButton", () => {
-      openEnteredFolderKey().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to open Folder Key.", { error: error.message });
-        render();
-      });
-    });
-    onOptionalClick("encryptDraftButton", () => {
-      prepareDraftWrite().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to encrypt Page draft.", { error: error.message });
-        render();
-      });
-    });
     $("zoomInGraphButton").addEventListener("click", () => {
       zoomGraphView(1);
     });
@@ -10398,22 +9920,6 @@ const FiniteBrainProductClient = (() => {
       toggleGraphFullscreen();
     });
     document.addEventListener("fullscreenchange", updateGraphFullscreenControl);
-    onOptionalClick("planOkfImportButton", () => {
-      try {
-        planEnteredOkfImport();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to plan OKF import.", { error: error.message });
-        render();
-      }
-    });
-    onOptionalClick("executeOkfImportButton", () => {
-      executePlannedOkfImport().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to execute OKF import.", { error: error.message });
-        render();
-      });
-    });
     document.addEventListener("click", (event) => {
       const menu = $("contextMenu");
       if (!menu.hidden && !menu.contains(event.target)) closeContextMenu();
@@ -10617,7 +10123,6 @@ const FiniteBrainProductClient = (() => {
       populated = true;
     }
     if (!populated) return false;
-    state.activeAccessView = "vault";
     state.settingsSection = "invitations";
     state.settingsModalOpen = true;
     return true;
@@ -10707,10 +10212,8 @@ const FiniteBrainProductClient = (() => {
     metadataFolderRows,
     metadataMountRows,
     nextDraftObjectId,
-    normalizeAccessView,
     normalizeSidebarMode,
     normalizeVisibleVault,
-    globalVaultControlState,
     npubFromHex,
     npubToHex,
     openFolderKeyGrants,
@@ -10774,9 +10277,7 @@ const FiniteBrainProductClient = (() => {
     vaultInvitationRevokeTarget,
     vaultInvitationRows,
     vaultInvitationUnavailableDetail,
-    vaultGuideStepRows,
     vaultPeopleRows,
-    withActiveVaultOption,
     toggleMarkdownTask,
     taskCheckboxAriaLabel,
   };

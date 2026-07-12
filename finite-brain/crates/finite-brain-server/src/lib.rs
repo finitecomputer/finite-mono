@@ -2304,6 +2304,7 @@ mod tests {
         assert!(client_body.contains("sessionAccountVaultButton"));
         assert!(client_body.contains("vaultSwitcherMenu"));
         assert!(client_body.contains("manageVaultsModal"));
+        assert!(client_body.contains("settingsManageVaultsButton"));
         assert!(client_body.contains("readerFolderList"));
         assert!(client_body.contains("searchSidebarPanel"));
         assert!(client_body.contains("commandPalette"));
@@ -2324,7 +2325,14 @@ mod tests {
         assert!(client_body.contains("accessWhoHasList"));
         assert!(client_body.contains("accessAdvancedSection"));
         assert!(!client_body.contains("accessChangeMode"));
-        assert!(client_body.contains("removeFolderAccessButton"));
+        assert!(!client_body.contains("accessVaultViewButton"));
+        assert!(!client_body.contains("accessFolderViewButton"));
+        assert!(!client_body.contains("accessVaultPanel"));
+        assert!(!client_body.contains("vaultSwitchList"));
+        assert!(!client_body.contains("removeFolderAccessButton"));
+        assert!(!client_body.contains("folderKeyInput"));
+        assert!(!client_body.contains("okfBundleInput"));
+        assert!(!client_body.contains("encryptDraftButton"));
         assert!(client_body.contains("createVaultInvitationButton"));
         assert!(client_body.contains("acceptVaultInvitationButton"));
         assert!(client_body.contains("revokeVaultInvitationButton"));
@@ -2421,7 +2429,9 @@ mod tests {
         assert!(css_body.contains(".edge.hover-connected"));
         assert!(css_body.contains(".access-inspector"));
         assert!(css_body.contains(".access-badge"));
-        assert!(css_body.contains(".okf-controls"));
+        assert!(css_body.contains(".access-content-panel"));
+        assert!(!css_body.contains(".access-view-switch"));
+        assert!(!css_body.contains(".okf-controls"));
         assert!(css_body.contains(".session-security-status"));
 
         let js_response = router
@@ -2454,6 +2464,9 @@ mod tests {
         assert!(js_body.contains("personalVaultIdForPubkey"));
         assert!(js_body.contains("accessBadgesForFolder"));
         assert!(js_body.contains("accessActionRoute"));
+        assert!(js_body.contains("openManageVaultsModal"));
+        assert!(js_body.contains("removeFolderAccessFromPanel"));
+        assert!(!js_body.contains("removeFolderAccessButton"));
         assert!(js_body.contains("readerFolderRows"));
         assert!(js_body.contains("readerPageRows"));
         assert!(js_body.contains("buildGraphProjection"));

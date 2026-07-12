@@ -212,7 +212,7 @@ const claimEmailVaultInvitationFromPanelSource = source.slice(
 );
 const revokeVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function revokeVaultInvitationFromPanel()"),
-  source.indexOf("async function openEnteredFolderKey()")
+  source.indexOf("async function prepareDraftWrite(options = {})")
 );
 const revokeVaultInvitationByIdSource = source.slice(
   source.indexOf("async function revokeVaultInvitationById(invitationId)"),
@@ -361,11 +361,11 @@ assert.deepEqual(
 );
 assert.equal(
   JSON.stringify(client.accessActionRoute("share-folder", { folderId: "restricted" })),
-  JSON.stringify({ folderId: "restricted", intent: "links", sidebarMode: "access" })
+  JSON.stringify({ folderId: "restricted", intent: "links", settingsSection: "access" })
 );
 assert.equal(
   JSON.stringify(client.accessActionRoute("manage-access", { folderId: "restricted" })),
-  JSON.stringify({ folderId: "restricted", intent: "people", sidebarMode: "access" })
+  JSON.stringify({ folderId: "restricted", intent: "people", settingsSection: "access" })
 );
 assert.equal(client.accessActionRoute("delete-folder", { folderId: "restricted" }), null);
 assert.equal(client.accessIntentValue("share"), "links");
@@ -390,6 +390,38 @@ assert.match(htmlSource, /id="accessFolderButton"/);
 assert.equal((htmlSource.match(/id="accessFolderButton"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderDropdown"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderList"/g) || []).length, 1);
+// Public Product Client shell seam: Settings exposes one Access surface and
+// delegates Vault selection/management to the dedicated Manage Vaults dialog.
+for (const legacyMarker of [
+  "accessVaultViewButton",
+  "accessVaultPanel",
+  "accessFolderViewButton",
+  "vaultSwitchList",
+  "accessConnectSignerButton",
+  "accessLoadVaultButton",
+  "accessCreateOrganizationPanel",
+  "accessOrganizationVaultNameInput",
+  "folderKeyInput",
+  "okfDestinationFolderInput",
+  "okfConflictModeInput",
+  "okfBundleInput",
+  "encryptDraftButton",
+]) {
+  assert.doesNotMatch(htmlSource, new RegExp(`id="${legacyMarker}"`));
+}
+assert.match(htmlSource, /id="settingsManageVaultsButton"/);
+assert.match(htmlSource, />\s*Manage Vaults\s*</);
+const vaultAccessCommand = client.commandPaletteCommands().find((command) => command.id === "access");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(vaultAccessCommand)),
+  {
+    id: "access",
+    kind: "command",
+    label: "Vault access",
+    detail: "Settings",
+    target: "access",
+  }
+);
 assert.match(htmlSource, /id="accessAddPersonPanel"[\s\S]*class="access-folder-selector"[\s\S]*id="accessAddPersonForm"/);
 assert.doesNotMatch(htmlSource, /class="access-folder-selector"[\s\S]*id="accessInspector"/);
 assert.match(htmlSource, /id="accessWhoHasList"/);
@@ -410,14 +442,7 @@ assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
 assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
 assert.match(htmlSource, /placeholder="name@example\.com"/);
 assert.doesNotMatch(htmlSource, /placeholder="[^"]*(npub|hex|NIP-05)/);
-assert.match(htmlSource, /role="tablist"/);
-assert.match(htmlSource, /id="accessFolderViewButton"/);
-assert.match(htmlSource, /id="accessVaultViewButton"/);
-assert.match(htmlSource, />\s*Vaults\s*</);
-assert.match(htmlSource, />\s*Access\s*</);
 assert.match(htmlSource, /id="accessFolderPanel"/);
-assert.match(htmlSource, /id="accessVaultPanel"/);
-assert.match(htmlSource, /id="vaultSwitchList"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
@@ -441,7 +466,6 @@ assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
-assert.match(htmlSource, /id="accessCreateOrganizationPanel"/);
 assert.match(htmlSource, /id="manageVaultCreateDetails"/);
 assert.doesNotMatch(htmlSource, /id="vaultControlDetails"/);
 assert.doesNotMatch(htmlSource, /id="vaultSelect"/);
@@ -456,7 +480,7 @@ assert.doesNotMatch(htmlSource, /id="accessChangeMode"/);
 assert.doesNotMatch(htmlSource, /id="accessManageToggle"/);
 assert.doesNotMatch(htmlSource, /id="accessManageSection"/);
 assert.match(cssSource, /\[hidden\]\s*\{[^}]*display: none !important;/s);
-assert.match(cssSource, /\.access-view-switch/);
+assert.doesNotMatch(cssSource, /\.access-view-switch/);
 assert.match(cssSource, /\.access-action-stack\s*\{[^}]*gap:\s*8px;/s);
 assert.match(cssSource, /\.access-state-stack\s*\{[^}]*gap:\s*12px;/s);
 assert.match(cssSource, /\.access-advanced-summary,\s*\.access-admin-summary\s*\{[^}]*grid-template-areas:/s);
@@ -467,7 +491,7 @@ assert.match(cssSource, /\.access-checkbox-hint\s*\{[^}]*margin:\s*-6px 0 0 23px
 assert.match(cssSource, /\.vault-management-section/);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*10px;/s);
-assert.match(cssSource, /\.access-mode-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
+assert.match(cssSource, /\.access-content-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /\.access-who-has-list\s+li\s*\{[^}]*flex-wrap:\s*wrap;/s);
 assert.match(cssSource, /\.access-button-row\s*\{[^}]*display:\s*grid;/s);
 assert.doesNotMatch(cssSource, /\.vault-person-action\s*\{[^}]*min-width:\s*max-content/s);
@@ -478,7 +502,7 @@ assert.match(cssSource, /#vaultPeopleSection\s+\.access-person-name\s*\{[^}]*whi
 assert.match(cssSource, /#vaultInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
 assert.match(cssSource, /\.vault-switch-list/);
 assert.match(cssSource, /\.vault-switch-button/);
-assert.match(cssSource, /\.access-vault-create/);
+assert.doesNotMatch(cssSource, /\.access-vault-create/);
 assert.match(cssSource, /\.vault-picker\s+\.vault-load-button/);
 assert.doesNotMatch(cssSource, /\.file-sidebar:has\(> \.vault-control-strip/);
 assert.match(cssSource, /\.file-sidebar\s*>\s*#accessSidebarPanel\s*\{[^}]*display:\s*none;/s);
@@ -487,9 +511,6 @@ assert.doesNotMatch(cssSource, /\.ribbon-button\.active::before/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown\s*\{[^}]*position:\s*absolute/s);
 assert.match(cssSource, /\.folder-option-button/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown-list\s+\.obsidian-folder-button/);
-assert.equal(client.normalizeAccessView("vault"), "vault");
-assert.equal(client.normalizeAccessView("folder"), "folder");
-assert.equal(client.normalizeAccessView("other"), "folder");
 assert.equal(client.hasOrganizationVaultControls({ kind: "personal" }), false);
 assert.equal(client.hasOrganizationVaultControls({ kind: "organization" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "personal" }), true);
@@ -634,7 +655,6 @@ const sessionState = {
   lastEmailInviteSecret: "invite-secret-sentinel",
   lastEmailInviteUrl: "https://finite.test/#inviteSecret=invite-secret-sentinel",
   metadata: { name: "private-vault-sentinel" },
-  okfPlan: { entries: [{ markdown: "okf-plaintext-sentinel" }] },
   preparedWrite: { envelopeJson: "encrypted-write", plaintext: "prepared-plaintext-sentinel" },
   preparedWriteTarget: { folderId: "general", objectId: "draft" },
   projection: sessionProjection,
@@ -654,7 +674,6 @@ assert.equal(sessionState.projection.localDrafts.size, 0);
 assert.equal(sessionState.projection.conflicts.length, 0);
 assert.equal(sessionState.preparedWrite, null);
 assert.equal(sessionState.preparedWriteTarget, null);
-assert.equal(sessionState.okfPlan, null);
 assert.equal(sessionState.identityByNpub.size, 0);
 assert.equal(sessionState.accessResult, null);
 assert.equal(sessionState.vaultInvitations, null);
@@ -766,15 +785,12 @@ assert.match(htmlSource, /id="manageVaultsModal"[^>]*role="dialog"[^>]*aria-moda
 assert.match(htmlSource, /id="manageVaultsList"/);
 assert.match(htmlSource, /id="manageVaultsLoadButton"/);
 assert.match(htmlSource, /id="manageVaultsLoadButton"[^>]*>Unlock Vault</);
-assert.match(htmlSource, /id="accessLoadVaultButton"[^>]*>Unlock Vault</);
+assert.doesNotMatch(htmlSource, /id="accessLoadVaultButton"/);
 assert.match(htmlSource, /id="manageVaultsConnectSignerButton"/);
 assert.match(htmlSource, /id="manageCreateOrganizationVaultButton"/);
 assert.match(source, /manageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\)/);
 assert.match(source, /manageVaultsLoadButton[\s\S]{0,120}manageVaultsLoadAction\(\)/);
-assert.match(
-  source,
-  /onOptionalClick\("accessLoadVaultButton",[\s\S]{0,180}state\.sessionStatus === SESSION_STATUS\.LOCKED \? resumeSession\(\) : loadVaultReader\(\)/
-);
+assert.doesNotMatch(source, /accessLoadVaultButton/);
 assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
 assert.match(
   htmlSource,
@@ -792,6 +808,7 @@ assert.match(htmlSource, /id="settingsAccessPanelMount"/);
 assert.match(htmlSource, /id="settingsInvitationsPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsInvitationsPanelMount"/);
 assert.match(htmlSource, /id="settingsConnectSignerButton"/);
+assert.match(htmlSource, /id="settingsManageVaultsButton"/);
 assert.match(source, /openSettingsModal\("session"\)/);
 assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
 assert.match(source, /settingsNavInvitations[\s\S]{0,120}setSettingsSection\("invitations"\)/);
@@ -801,7 +818,13 @@ assert.match(source, /mount\.appendChild\(panel\)/);
 assert.match(source, /for \(const node of invitationNodes\) \{[\s\S]{0,160}mount\.appendChild\(node\)/);
 assert.match(source, /start\(\) \{[\s\S]{0,180}mountAccessPanelInSettings\(\);[\s\S]{0,120}mountInvitationPanelInSettings\(\);/);
 assert.match(source, /state\.settingsSection = "invitations"/);
-assert.match(source, /nextMode === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
+assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"\)/);
+assert.match(source, /row\.target === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
+assert.match(
+  source,
+  /settingsManageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\{ returnToSettings: true \}\)/
+);
+assert.match(source, /closeManageVaultsModal\(\)[\s\S]{0,500}state\.settingsModalOpen = true;/);
 assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "access"/);
 assert.match(source, /state\.settingsModalOpen && state\.settingsSection === "access"[\s\S]{0,100}refreshAccessManagementListsInBackground\(\)/);
 assert.match(source, /closeSettingsModal\(\)/);
@@ -915,17 +938,6 @@ assert.equal(
   ),
   "org-testr-mr9bmjs"
 );
-assert.deepEqual(
-  Array.from(
-    client.withActiveVaultOption(
-      [{ vaultId: "personal-a", kind: "personal", name: "Personal vault", role: "owner" }],
-      "org-acme",
-      { vaultId: "org-acme", kind: "organization", name: "Acme", role: "admin" }
-    ),
-    (vault) => vault.vaultId
-  ),
-  ["personal-a", "org-acme"]
-);
 assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "bb".repeat(32)), true);
@@ -1021,8 +1033,8 @@ assert.match(historyReplacements[0], /replaceState\(null, "", fallbackUrl\)/);
 assert.equal((source.match(/console\.(?:debug|info|log|warn|error)\(/g) || []).length, 1);
 assert.match(source, /console\.debug\(`\[FiniteBrain\] \$\{message\}`\);/);
 assert.match(source, /SESSION_PLAINTEXT_INPUT_IDS/);
-assert.match(source, /"folderKeyInput"/);
-assert.match(source, /"okfBundleInput"/);
+assert.doesNotMatch(source, /"folderKeyInput"/);
+assert.doesNotMatch(source, /"okfBundleInput"/);
 assert.match(source, /"pageDraftInput"/);
 assert.match(source, /"vaultInviteSecretInput"/);
 
@@ -1895,7 +1907,7 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
   assert.match(htmlSource, /id="pageFolderIdInput" value="getting-started"/);
-  assert.match(htmlSource, /id="okfDestinationFolderInput" value="getting-started"/);
+  assert.doesNotMatch(htmlSource, /id="okfDestinationFolderInput"/);
   const defaultPages = client.defaultVaultPages("organization");
   assert.equal(
     JSON.stringify(defaultPages.slice(0, 5).map((page) => [page.folderId, page.objectId, page.path])),
@@ -2500,14 +2512,10 @@ assert.match(source, /"vaultInviteSecretInput"/);
   );
   assert.equal(client.graphEmptyStateCopy({ readablePageCount: 3 }).title, "No links yet");
   assert.equal(client.normalizeSidebarMode("search"), "search");
-  assert.equal(client.normalizeSidebarMode("access"), "access");
+  assert.equal(client.normalizeSidebarMode("access"), "files");
   assert.equal(client.normalizeSidebarMode("bogus"), "files");
   assert.equal(client.sidebarModeLabel("search"), "Search");
   assert.equal(client.sidebarModeLabel("bogus"), "Files");
-  assert.equal(client.globalVaultControlState("files").hidden, true);
-  assert.equal(client.globalVaultControlState("search").hidden, true);
-  assert.equal(client.globalVaultControlState("access").hidden, true);
-  assert.equal(client.globalVaultControlState("bogus").hidden, true);
   assert.equal(
     JSON.stringify(client.commandPaletteCommands().map((row) => row.id)),
     JSON.stringify(["files", "search", "access", "graph", "new-page", "refresh"])
@@ -3555,30 +3563,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(outgoingConnectionRow.acceptable, false);
   assert.equal(client.sharedFolderRelationshipRows(null, null).length, 0);
 
-  const guideAllTodo = client.vaultGuideStepRows("missing", null, false);
-  assert.deepEqual(
-    Array.from(guideAllTodo.map((step) => step.done)),
-    [false, false, false]
-  );
-  const guideAdminReady = client.vaultGuideStepRows(
-    "connected",
-    { kind: "organization" },
-    true
-  );
-  assert.deepEqual(
-    Array.from(guideAdminReady.map((step) => step.done)),
-    [true, true, true]
-  );
-  const guidePersonalVault = client.vaultGuideStepRows(
-    "connected",
-    { kind: "personal" },
-    true
-  );
-  assert.deepEqual(
-    Array.from(guidePersonalVault.map((step) => step.done)),
-    [true, false, false]
-  );
-
   const accessFailure = accessFailureTestSeams();
   const handledAccessError = new Error("handled-access-error-sentinel");
   accessFailure.seams.state.sessionEpoch = 41;
@@ -3667,8 +3651,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(staleAccessLoss.seams.state.sessionStatus, "unlocked");
 
   context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
-  context.document.getElementById("folderKeyInput").value = "runtime-folder-key-sentinel";
-  context.document.getElementById("okfBundleInput").value = "runtime-okf-sentinel";
   context.document.getElementById("vaultInviteSecretInput").value = "runtime-invite-secret-sentinel";
   context.document.getElementById("graphStats").textContent = "12 nodes / 18 links";
   context.document.getElementById("obsidianNewPageButton");
@@ -3689,8 +3671,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
-  assert.equal(elements.get("folderKeyInput").value, "");
-  assert.equal(elements.get("okfBundleInput").value, "");
   assert.equal(elements.get("vaultInviteSecretInput").value, "");
   assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
   assert.equal(
