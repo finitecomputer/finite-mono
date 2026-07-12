@@ -6029,43 +6029,31 @@ const FiniteBrainProductClient = (() => {
     if ($("vaultInviteEmailProofCreatedAtInput") && !$("vaultInviteEmailProofCreatedAtInput").value) {
       $("vaultInviteEmailProofCreatedAtInput").value = dateTimeLocalFromIso(new Date().toISOString());
     }
-    if (state.lastVaultInvitationCode && !$("vaultInviteCodeInput").value) {
-      $("vaultInviteCodeInput").value = state.lastVaultInvitationCode;
-    }
     if (state.lastEmailInviteSecret && $("vaultInviteSecretInput") && !$("vaultInviteSecretInput").value) {
       $("vaultInviteSecretInput").value = state.lastEmailInviteSecret;
     }
     if (state.lastEmailInviteUrl && $("vaultInviteUrlInput")) {
       $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
     }
-    const connected = state.signerStatus === "connected";
-    const busy = state.accessBusy;
-    const organizationVault = state.metadata?.kind === "organization";
-    const invitationInput = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode || "";
-    const codeAvailable = Boolean(invitationInput);
-    const codeHint = vaultInvitationIdentifierHint(invitationInput);
-    const inviteCodeUsable = codeAvailable && !codeHint;
-    const emailClaimReady = Boolean(
-      inviteCodeUsable &&
-        $("vaultInviteEmailInput")?.value.trim() &&
-        $("vaultInviteSecretInput")?.value.trim()
-    );
-    safeSetHidden("vaultInviteConnectSignerButton", connected);
-    setOptionalDisabled("vaultInviteConnectSignerButton", busy || !deriveSignerState(window.nostr).canConnect);
-    $("createVaultInvitationButton").disabled = !connected || busy || !state.activeVaultId || !organizationVault;
-    $("getVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
-    setOptionalDisabled("getEmailInviteInstructionsButton", !connected || busy || !emailClaimReady);
-    $("acceptVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
-    $("revokeVaultInvitationButton").disabled = !connected || busy || !codeAvailable || !organizationVault;
-    if (!connected) {
-      setText("vaultInvitationHint", "Connect signer");
-    } else if (codeHint) {
-      setText("vaultInvitationHint", codeHint);
-    } else if (inviteCodeUsable) {
-      setText("vaultInvitationHint", "Ready to join");
-    } else {
-      setText("vaultInvitationHint", "Accept invite code");
-    }
+    const controls = vaultInvitationPanelState({
+      activeVaultAvailable: Boolean(state.activeVaultId),
+      busy: state.accessBusy,
+      code: $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode || "",
+      email: $("vaultInviteEmailInput")?.value,
+      inviteSecret: $("vaultInviteSecretInput")?.value,
+      organizationVault: state.metadata?.kind === "organization",
+      sessionStatus: state.sessionStatus,
+      signerCanConnect: deriveSignerState(window.nostr).canConnect,
+      signerStatus: state.signerStatus,
+    });
+    safeSetHidden("vaultInviteConnectSignerButton", controls.connected);
+    setOptionalDisabled("vaultInviteConnectSignerButton", controls.connectDisabled);
+    $("createVaultInvitationButton").disabled = controls.createDisabled;
+    $("getVaultInvitationButton").disabled = controls.inspectDisabled;
+    setOptionalDisabled("getEmailInviteInstructionsButton", controls.emailScopeDisabled);
+    $("acceptVaultInvitationButton").disabled = controls.acceptDisabled;
+    $("revokeVaultInvitationButton").disabled = controls.revokeDisabled;
+    setText("vaultInvitationHint", controls.hint);
   }
 
   function renderAccessPanel() {
@@ -6617,7 +6605,7 @@ const FiniteBrainProductClient = (() => {
       if (!row.revocable) return;
       item.appendChild(
         linkRowActionButton("Use code", async () => {
-          $("vaultInviteCodeInput").value = row.inviteCode;
+          rememberVaultInvitationSelection(row);
           setAccessResult("ready", "Invite code loaded", `${row.inviteCode} is in the invite field.`, {
             invitationId: row.id,
           });
@@ -7555,8 +7543,7 @@ const FiniteBrainProductClient = (() => {
     const invitation = await protectedRequest(vaultInvitationAcceptPath(active.inviteCode), {
       method: "POST",
     });
-    state.lastVaultInvitationId = invitation.id;
-    state.lastVaultInvitationCode = invitation.inviteCode;
+    rememberVaultInvitationSelection(invitation);
     setActiveVaultId(invitation.vaultId, { reset: false });
     await loadVisibleVaults();
   }
@@ -7718,6 +7705,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function revokeVaultInvitationById(invitationId) {
+    requireUnlockedVaultInvitationAction("revoking an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     beginAccessOperation(sessionEpoch);
@@ -8178,9 +8166,131 @@ const FiniteBrainProductClient = (() => {
     return null;
   }
 
+  function vaultInvitationPanelState(input = {}) {
+    const code = String(input.code || "").trim();
+    const connected = input.signerStatus === "connected";
+    const unlocked = input.sessionStatus === SESSION_STATUS.UNLOCKED;
+    const busy = Boolean(input.busy);
+    const organizationVault = Boolean(input.organizationVault);
+    const codeHint = vaultInvitationIdentifierHint(code);
+    const inviteCodeUsable = Boolean(code) && !codeHint;
+    const emailClaimReady = Boolean(
+      inviteCodeUsable && String(input.email || "").trim() && String(input.inviteSecret || "").trim()
+    );
+    const protectedActionDisabled = !connected || !unlocked || busy;
+    let hint;
+    if (!unlocked) {
+      hint = "Unlock the session to inspect, accept, or manage invitations.";
+    } else if (!connected) {
+      hint = "Connect signer";
+    } else if (codeHint) {
+      hint = codeHint;
+    } else if (inviteCodeUsable) {
+      hint = "Ready to join";
+    } else {
+      hint = "Accept invite code";
+    }
+    return {
+      acceptDisabled: protectedActionDisabled || !inviteCodeUsable,
+      codeHint,
+      connectDisabled: busy || !input.signerCanConnect,
+      connected,
+      createDisabled:
+        protectedActionDisabled || !organizationVault || input.activeVaultAvailable === false,
+      emailScopeDisabled: protectedActionDisabled || !emailClaimReady,
+      hint,
+      inspectDisabled: protectedActionDisabled || !inviteCodeUsable,
+      inviteCodeUsable,
+      revokeDisabled: protectedActionDisabled || !organizationVault || !code,
+    };
+  }
+
+  function requireUnlockedVaultInvitationAction(action) {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error(`Session is locked. Unlock the session before ${action}`);
+    }
+  }
+
+  function clearRememberedEmailInvitationMaterial() {
+    const rememberedSecret = state.lastEmailInviteSecret;
+    const secretInput = $("vaultInviteSecretInput");
+    if (rememberedSecret && secretInput?.value === rememberedSecret) {
+      secretInput.value = "";
+    }
+    state.lastEmailInviteSecret = null;
+    state.lastEmailInviteUrl = null;
+    const inviteUrlInput = $("vaultInviteUrlInput");
+    if (inviteUrlInput) inviteUrlInput.value = "";
+  }
+
+  function rememberVaultInvitationSelection(invitation) {
+    const inviteCode = String(invitation?.inviteCode || "").trim();
+    const invitationId = String(invitation?.id || "").trim() || null;
+    const changed = inviteCode !== state.lastVaultInvitationCode;
+    state.lastVaultInvitationCode = inviteCode || null;
+    state.lastVaultInvitationId = invitationId;
+    if (changed) {
+      state.lastEmailInvitePostProof = null;
+      clearRememberedEmailInvitationMaterial();
+    }
+    const codeInput = $("vaultInviteCodeInput");
+    if (codeInput) codeInput.value = inviteCode;
+  }
+
+  function handleVaultInvitationInput(inputId) {
+    if (inputId === "vaultInviteCodeInput") {
+      const inviteCode = $("vaultInviteCodeInput")?.value.trim() || "";
+      if (inviteCode !== state.lastVaultInvitationCode) {
+        state.lastVaultInvitationCode = inviteCode || null;
+        state.lastVaultInvitationId = null;
+        state.lastEmailInvitePostProof = null;
+        clearRememberedEmailInvitationMaterial();
+      }
+    } else if (
+      inputId === "vaultInviteEmailInput" ||
+      inputId === "vaultInviteEmailProofCreatedAtInput" ||
+      inputId === "vaultInviteSecretInput"
+    ) {
+      state.lastEmailInvitePostProof = null;
+      if (
+        inputId === "vaultInviteSecretInput" &&
+        $("vaultInviteSecretInput")?.value.trim() !== state.lastEmailInviteSecret
+      ) {
+        clearRememberedEmailInvitationMaterial();
+      }
+    }
+    renderVaultInvitationPanel();
+  }
+
+  function vaultInvitationRevokeTarget(input = {}) {
+    const value = String(input.input || "").trim();
+    if (!value) throw new Error("Paste an Invite Code or invitation id first");
+    const vaultId = String(input.activeVaultId || "").trim();
+    if (!vaultId) throw new Error("Select a Vault before revoking an invitation");
+    const invitations = input.invitations || [];
+    const knownInvitation = invitations.find(
+      (invitation) => invitation?.id === value || invitation?.inviteCode === value
+    );
+    if (knownInvitation?.id) {
+      return { invitationId: knownInvitation.id, vaultId: knownInvitation.vaultId || vaultId };
+    }
+    if (
+      value === String(input.lastVaultInvitationCode || "").trim() &&
+      input.lastVaultInvitationId
+    ) {
+      return { invitationId: input.lastVaultInvitationId, vaultId };
+    }
+    if (value.startsWith("invitation-")) {
+      return { invitationId: value, vaultId };
+    }
+    throw new Error(
+      "Revoke an invitation created by this Vault admin from the pending invitation list, or paste its invitation id."
+    );
+  }
+
   function currentVaultInvitationInput() {
     const value = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode;
-    if (!value) throw new Error("Paste an Invite Code first");
+    if (!value) throw new Error("Paste an Invite Code or invitation id first");
     return value;
   }
 
@@ -9243,9 +9353,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createVaultInvitationFromPanel() {
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Unlock the session before creating an invitation");
-    }
+    requireUnlockedVaultInvitationAction("creating an invitation");
     const sessionEpoch = state.sessionEpoch;
     const vaultId = state.activeVaultId;
     const metadata = state.metadata;
@@ -9314,9 +9422,7 @@ const FiniteBrainProductClient = (() => {
         { method: "POST", body }
       );
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
-      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       if (localInviteSecret && invitation.targetKind === "email_bootstrap") {
         const invitedEmail = invitation.invitedEmail || canonicalInviteEmail(targetInput);
         state.lastEmailInviteSecret = localInviteSecret;
@@ -9330,9 +9436,7 @@ const FiniteBrainProductClient = (() => {
         $("vaultInviteEmailInput").value = invitedEmail;
         $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
       } else {
-        state.lastEmailInviteSecret = null;
-        state.lastEmailInviteUrl = null;
-        $("vaultInviteUrlInput").value = "";
+        clearRememberedEmailInvitationMaterial();
       }
       setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}.`, {
         inviteCode: invitation.inviteCode,
@@ -9364,15 +9468,14 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function inspectVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("inspecting an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(vaultInvitationLinkPath(code));
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
-      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       setAccessResult("ready", "Invitation loaded", `${identityDisplay(invitation.userId)} is ${invitation.status}.`, {
         vaultId: invitation.vaultId,
         invitationId: invitation.id,
@@ -9391,6 +9494,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function loadEmailInviteInstructionsFromPanel() {
+    requireUnlockedVaultInvitationAction("loading email invitation scope");
     const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
@@ -9412,8 +9516,7 @@ const FiniteBrainProductClient = (() => {
         invitedEmail: email,
       });
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       state.lastEmailInvitePostProof = invitation;
       const folderScope = (invitation.bootstrapScope || [])
         .map((folder) => `${folder.folderId} v${folder.keyVersion}`)
@@ -9437,6 +9540,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function acceptVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("accepting an invitation");
     const code = currentVaultInvitationCode();
     const email = $("vaultInviteEmailInput")?.value.trim();
     const inviteSecret = $("vaultInviteSecretInput")?.value.trim();
@@ -9464,9 +9568,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function claimEmailVaultInvitationFromPanel(code) {
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Unlock the session before claiming encrypted Folder Key Grants");
-    }
+    requireUnlockedVaultInvitationAction("claiming encrypted Folder Key Grants");
     const sessionEpoch = captureSessionOperationEpoch();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
     const inviteSecret = $("vaultInviteSecretInput").value.trim();
@@ -9520,31 +9622,24 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function revokeVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("revoking an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const value = currentVaultInvitationInput();
+    const target = vaultInvitationRevokeTarget({
+      activeVaultId: state.activeVaultId,
+      input: value,
+      invitations: state.vaultInvitations,
+      lastVaultInvitationCode: state.lastVaultInvitationCode,
+      lastVaultInvitationId: state.lastVaultInvitationId,
+    });
     beginAccessOperation(sessionEpoch);
     try {
-      let invitationId = state.lastVaultInvitationId;
-      let vaultId = state.activeVaultId;
-      if (!invitationId || value !== invitationId) {
-        if (value.startsWith("invitation-")) {
-          invitationId = value;
-        } else {
-          const invitation = await protectedRequest(vaultInvitationLinkPath(value));
-          requireCurrentSessionEpoch(sessionEpoch);
-          invitationId = invitation.id;
-          vaultId = invitation.vaultId;
-          state.lastVaultInvitationId = invitation.id;
-          state.lastVaultInvitationCode = invitation.inviteCode;
-        }
-      }
       const invitation = await protectedRequest(
-        vaultInvitationRevokePath(vaultId, invitationId),
+        vaultInvitationRevokePath(target.vaultId, target.invitationId),
         { method: "DELETE" }
       );
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
         updatedAt: invitation.updatedAt,
       });
@@ -10137,6 +10232,15 @@ const FiniteBrainProductClient = (() => {
         log("Failed to revoke Vault invitation.", { error: error.message });
       });
     });
+    for (const inputId of [
+      "vaultInviteCodeInput",
+      "vaultInviteEmailInput",
+      "vaultInviteEmailProofCreatedAtInput",
+      "vaultInviteSecretInput",
+    ]) {
+      const input = $(inputId);
+      if (input) input.addEventListener("input", () => handleVaultInvitationInput(inputId));
+    }
     $("sidebarSearchInput").addEventListener("input", () => {
       if (state.searchHighlight) {
         const query = $("sidebarSearchInput").value.trim();
@@ -10431,8 +10535,7 @@ const FiniteBrainProductClient = (() => {
     if (!pending) return false;
     let populated = false;
     if (pending.inviteCode) {
-      state.lastVaultInvitationCode = pending.inviteCode;
-      if ($("vaultInviteCodeInput")) $("vaultInviteCodeInput").value = pending.inviteCode;
+      rememberVaultInvitationSelection({ inviteCode: pending.inviteCode });
       populated = true;
     }
     if (pending.inviteEmail) {
@@ -10595,7 +10698,9 @@ const FiniteBrainProductClient = (() => {
     vaultInvitationCreatePath,
     vaultInvitationIdentifierHint,
     vaultInvitationLinkPath,
+    vaultInvitationPanelState,
     vaultInvitationRevokePath,
+    vaultInvitationRevokeTarget,
     vaultInvitationRows,
     vaultInvitationUnavailableDetail,
     vaultGuideStepRows,

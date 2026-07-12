@@ -127,6 +127,41 @@ function accessFailureTestSeams() {
   return { context: testContext, elements: testElements, seams };
 }
 
+function invitationPanelTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element());
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      nostr: {
+        getPublicKey() {},
+        signEvent() {},
+      },
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleVaultInvitationInput, renderVaultInvitationPanel, revokeVaultInvitationById });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured invitation panel seams to this deterministic test");
+  return { context: testContext, elements: testElements, seams };
+}
+
 const prepareDraftWriteSource = source.slice(
   source.indexOf("async function prepareDraftWrite(options = {})"),
   source.indexOf("async function savePreparedPage()")
@@ -158,6 +193,26 @@ const failAccessOperationSource = source.slice(
 const createVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function createVaultInvitationFromPanel()"),
   source.indexOf("async function inspectVaultInvitationFromPanel()")
+);
+const inspectVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function inspectVaultInvitationFromPanel()"),
+  source.indexOf("async function loadEmailInviteInstructionsFromPanel()")
+);
+const loadEmailInviteInstructionsFromPanelSource = source.slice(
+  source.indexOf("async function loadEmailInviteInstructionsFromPanel()"),
+  source.indexOf("async function acceptVaultInvitationFromPanel()")
+);
+const acceptVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function acceptVaultInvitationFromPanel()"),
+  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)")
+);
+const revokeVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function revokeVaultInvitationFromPanel()"),
+  source.indexOf("async function openEnteredFolderKey()")
+);
+const revokeVaultInvitationByIdSource = source.slice(
+  source.indexOf("async function revokeVaultInvitationById(invitationId)"),
+  source.indexOf("async function revokeShareLinkById(shareLinkId)")
 );
 const protectedRequestSource = source.slice(
   source.indexOf("async function protectedRequest(path, options = {})"),
@@ -1171,6 +1226,153 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.match(htmlSource, /id="vaultInviteSecretInput"/);
   assert.match(htmlSource, /id="vaultInviteConnectSignerButton"/);
   assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
+
+  const lockedInvitationControls = client.vaultInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "manual-invite-secret",
+    organizationVault: true,
+    sessionStatus: "locked",
+    signerCanConnect: true,
+    signerStatus: "unavailable",
+  });
+  assert.match(lockedInvitationControls.hint, /Unlock the session/);
+  assert.equal(lockedInvitationControls.connectDisabled, false);
+  assert.equal(lockedInvitationControls.createDisabled, true);
+  assert.equal(lockedInvitationControls.inspectDisabled, true);
+  assert.equal(lockedInvitationControls.emailScopeDisabled, true);
+  assert.equal(lockedInvitationControls.acceptDisabled, true);
+  assert.equal(lockedInvitationControls.revokeDisabled, true);
+
+  const unlockedInvitationControls = client.vaultInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "manual-invite-secret",
+    organizationVault: true,
+    sessionStatus: "unlocked",
+    signerCanConnect: true,
+    signerStatus: "connected",
+  });
+  assert.equal(unlockedInvitationControls.createDisabled, false);
+  assert.equal(unlockedInvitationControls.inspectDisabled, false);
+  assert.equal(unlockedInvitationControls.emailScopeDisabled, false);
+  assert.equal(unlockedInvitationControls.acceptDisabled, false);
+  assert.equal(unlockedInvitationControls.revokeDisabled, false);
+
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invitation-explicit",
+        invitations: [],
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-explicit", vaultId: "vault-admin" })
+  );
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invite-just-created",
+        lastVaultInvitationCode: "invite-just-created",
+        lastVaultInvitationId: "invitation-just-created",
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-just-created", vaultId: "vault-admin" })
+  );
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invite-pending-row",
+        invitations: [{ id: "invitation-pending-row", inviteCode: "invite-pending-row", status: "pending" }],
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-pending-row", vaultId: "vault-admin" })
+  );
+  assert.throws(
+    () => client.vaultInvitationRevokeTarget({ activeVaultId: "vault-admin", input: "invite-unknown" }),
+    /created by this Vault admin|pending invitation list/
+  );
+
+  for (const actionSource of [
+    createVaultInvitationFromPanelSource,
+    inspectVaultInvitationFromPanelSource,
+    loadEmailInviteInstructionsFromPanelSource,
+    acceptVaultInvitationFromPanelSource,
+    revokeVaultInvitationFromPanelSource,
+    revokeVaultInvitationByIdSource,
+  ]) {
+    assert.match(
+      actionSource,
+      /\{\s*requireUnlockedVaultInvitationAction\(/,
+      "Protected invitation actions must fail closed before capturing a session epoch"
+    );
+  }
+  assert.match(revokeVaultInvitationFromPanelSource, /vaultInvitationRevokeTarget\(/);
+  assert.doesNotMatch(
+    revokeVaultInvitationFromPanelSource,
+    /vaultInvitationLinkPath/,
+    "Admin revocation must not inspect a recipient-only invitation link"
+  );
+  assert.match(
+    source,
+    /for \(const inputId of \[\s*"vaultInviteCodeInput",\s*"vaultInviteEmailInput",\s*"vaultInviteEmailProofCreatedAtInput",\s*"vaultInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleVaultInvitationInput\(inputId\)/,
+    "Invitation inputs must update the panel as the Member changes code, email proof, or Invite Secret"
+  );
+
+  const invitationPanel = invitationPanelTestSeams();
+  const invitationState = invitationPanel.seams.state;
+  const invitationElement = (id) => invitationPanel.context.document.getElementById(id);
+  invitationState.accessBusy = false;
+  invitationState.metadata = { kind: "organization" };
+  invitationState.sessionStatus = "locked";
+  invitationState.signerStatus = "unavailable";
+  invitationElement("vaultInviteCodeInput").value = "invite-old";
+  invitationElement("vaultInviteEmailInput").value = "member@example.com";
+  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.renderVaultInvitationPanel();
+  assert.equal(invitationElement("vaultInviteConnectSignerButton").disabled, false);
+  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
+  assert.match(invitationElement("vaultInvitationHint").textContent, /Unlock the session/);
+
+  invitationState.sessionStatus = "unlocked";
+  invitationState.signerStatus = "connected";
+  invitationState.lastVaultInvitationCode = "invite-old";
+  invitationState.lastVaultInvitationId = "invitation-old";
+  invitationState.lastEmailInviteSecret = "stored-invite-secret-sentinel";
+  invitationState.lastEmailInviteUrl = "https://finite.test/#inviteSecret=stored-invite-secret-sentinel";
+  invitationState.lastEmailInvitePostProof = { inviteCode: "invite-old" };
+  invitationElement("vaultInviteCodeInput").value = "invite-new";
+  invitationElement("vaultInviteSecretInput").value = "stored-invite-secret-sentinel";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
+  assert.equal(invitationState.lastVaultInvitationCode, "invite-new");
+  assert.equal(invitationState.lastVaultInvitationId, null);
+  assert.equal(invitationState.lastEmailInvitePostProof, null);
+  assert.equal(invitationState.lastEmailInviteSecret, null);
+  assert.equal(invitationState.lastEmailInviteUrl, null);
+  assert.equal(invitationElement("vaultInviteSecretInput").value, "");
+
+  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteSecretInput");
+  assert.equal(invitationState.lastEmailInviteSecret, null, "Manual Invite Secrets must stay out of client state");
+  assert.equal(invitationElement("getEmailInviteInstructionsButton").disabled, false);
+
+  invitationElement("vaultInviteCodeInput").value = "";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
+  assert.equal(invitationState.lastVaultInvitationCode, null);
+  assert.equal(invitationState.lastVaultInvitationId, null);
+  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
+  invitationPanel.seams.renderVaultInvitationPanel();
+  assert.equal(invitationElement("vaultInviteCodeInput").value, "");
+
+  invitationState.sessionStatus = "locked";
+  await assert.rejects(
+    () => invitationPanel.seams.revokeVaultInvitationById("invitation-pending-row"),
+    /Session is locked\. Unlock the session before revoking an invitation/
+  );
 
   const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
   assert.equal(
