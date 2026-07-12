@@ -651,15 +651,11 @@ Start writing here.</textarea>
                 autocomplete="off"
                 spellcheck="false"
               />
-              <button id="renderGraphButton" class="graph-icon-button primary-action" type="button" title="Render graph" aria-label="Render graph">
+              <button id="toggleGraphHistoryButton" class="graph-icon-button" type="button" title="Show local page sequence" aria-label="Show local page sequence" aria-pressed="false">
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                  <path d="M21 3v6h-6" />
-                </svg>
-              </button>
-              <button id="replayGraphButton" class="graph-icon-button" type="button" title="Replay graph" aria-label="Replay graph">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M8 5v14l11-7z" />
+                  <path d="M3 12a9 9 0 1 1 2.64 6.36" />
+                  <path d="M3 21v-6h6" />
+                  <path d="M12 7v5l3.5 2" />
                 </svg>
               </button>
             </div>
@@ -672,19 +668,32 @@ Start writing here.</textarea>
               <p id="graphEmptyCopy">Open a vault to build the local graph.</p>
             </div>
             <div class="graph-floating-controls" aria-label="Graph controls">
-              <button id="fitGraphButton" type="button" title="Fit graph" aria-label="Fit graph">
+              <span id="graphZoomValue" class="graph-zoom-value" aria-live="polite">100%</span>
+              <button id="zoomInGraphButton" type="button" title="Zoom in" aria-label="Zoom in">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" />
+                  <path d="M11 8v6M8 11h6M16 16l4 4" />
+                </svg>
+              </button>
+              <button id="zoomOutGraphButton" type="button" title="Zoom out" aria-label="Zoom out">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" />
+                  <path d="M8 11h6M16 16l4 4" />
+                </svg>
+              </button>
+              <button id="fitGraphButton" type="button" title="Reset zoom" aria-label="Reset zoom">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 11a8 8 0 1 1-2.34-5.66" />
+                  <path d="M20 4v7h-7" />
+                </svg>
+              </button>
+              <button id="fullscreenGraphButton" type="button" title="Enter full screen" aria-label="Enter full screen" aria-pressed="false">
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
                 </svg>
               </button>
-              <button id="resetGraphButton" type="button" title="Reset graph" aria-label="Reset graph">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
-                </svg>
-              </button>
             </div>
-            <ol id="replayList" class="plain-list replay-list graph-replay-overlay"></ol>
+            <ol id="replayList" class="plain-list replay-list graph-replay-overlay" hidden></ol>
           </div>
         </section>
       </main>

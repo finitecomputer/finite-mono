@@ -23,6 +23,8 @@ const FiniteBrainProductClient = (() => {
     readerBusy: false,
     selectedFolderId: null,
     selectedPageKey: null,
+    graphZoom: 1,
+    graphHistoryOpen: false,
     searchHighlight: null,
     searchHighlightShouldScroll: false,
     activeWorkspaceView: "page",
@@ -522,6 +524,9 @@ const FiniteBrainProductClient = (() => {
   ]);
   const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
   const graphViewport = { height: 560, width: 900 };
+  const GRAPH_ZOOM_MAX = 2.5;
+  const GRAPH_ZOOM_MIN = 0.5;
+  const GRAPH_ZOOM_STEP = 1.25;
   const EDITOR_SLASH_COMMANDS = [
     { id: "paragraph", label: "Paragraph", detail: "Normal text", aliases: ["p", "text"] },
     { id: "heading1", label: "Heading 1", detail: "Large section title", aliases: ["h1", "title"] },
@@ -781,8 +786,11 @@ const FiniteBrainProductClient = (() => {
     setPill("graphStats", "0 nodes / 0 links", "muted");
     setText("graphEmptyTitle", "No graph yet");
     setText("graphEmptyCopy", "Unlock the session to rebuild the local graph.");
+    setText("graphZoomValue", "100%");
     const graphEmptyState = $("graphEmptyState");
     if (graphEmptyState) graphEmptyState.hidden = false;
+    const replayList = $("replayList");
+    if (replayList) replayList.hidden = true;
     const editorDrawer = $("editorDrawer");
     if (editorDrawer) editorDrawer.open = false;
     for (const id of ["commandPalette", "contextMenu", "editorSlashMenu"]) {
@@ -1910,6 +1918,8 @@ const FiniteBrainProductClient = (() => {
     target.sharedFolderConnections = null;
     target.selectedFolderId = null;
     target.selectedPageKey = null;
+    target.graphZoom = 1;
+    target.graphHistoryOpen = false;
     target.searchHighlight = null;
     target.searchHighlightShouldScroll = false;
     target.activeWorkspaceView = "page";
@@ -4369,7 +4379,6 @@ const FiniteBrainProductClient = (() => {
 
   function setWorkspaceView(view) {
     state.activeWorkspaceView = view === "graph" ? "graph" : "page";
-    if (state.activeWorkspaceView === "graph") renderGraphView();
     render();
   }
 
@@ -4657,12 +4666,84 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function graphViewBoxForZoom(zoom) {
+    const requestedZoom = Number(zoom);
+    const normalizedZoom = Math.min(
+      GRAPH_ZOOM_MAX,
+      Math.max(GRAPH_ZOOM_MIN, Number.isFinite(requestedZoom) ? requestedZoom : 1)
+    );
+    const width = graphViewport.width / normalizedZoom;
+    const height = graphViewport.height / normalizedZoom;
+    return {
+      height,
+      width,
+      x: (graphViewport.width - width) / 2,
+      y: (graphViewport.height - height) / 2,
+      zoom: normalizedZoom,
+    };
+  }
+
+  function graphViewBoxString(zoom) {
+    const viewBox = graphViewBoxForZoom(zoom);
+    return `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`;
+  }
+
+  function updateGraphZoomControls() {
+    const viewBox = graphViewBoxForZoom(state.graphZoom);
+    state.graphZoom = viewBox.zoom;
+    setText("graphZoomValue", `${Math.round(viewBox.zoom * 100)}%`);
+    setOptionalDisabled("zoomInGraphButton", viewBox.zoom >= GRAPH_ZOOM_MAX);
+    setOptionalDisabled("zoomOutGraphButton", viewBox.zoom <= GRAPH_ZOOM_MIN);
+    setOptionalDisabled("fitGraphButton", viewBox.zoom === 1);
+  }
+
+  function setGraphZoom(zoom) {
+    const viewBox = graphViewBoxForZoom(zoom);
+    state.graphZoom = viewBox.zoom;
+    const svg = $("graphCanvas");
+    svg?.setAttribute("viewBox", graphViewBoxString(viewBox.zoom));
+    updateGraphZoomControls();
+  }
+
+  function zoomGraphView(direction) {
+    setGraphZoom(state.graphZoom * (direction > 0 ? GRAPH_ZOOM_STEP : 1 / GRAPH_ZOOM_STEP));
+    log("Updated graph zoom.", { zoom: state.graphZoom });
+  }
+
+  function graphFullscreenSupported() {
+    return Boolean($("graphWorkspace")?.requestFullscreen && document.exitFullscreen);
+  }
+
+  function updateGraphFullscreenControl() {
+    const button = $("fullscreenGraphButton");
+    if (!button) return;
+    const isFullscreen = document.fullscreenElement === $("graphWorkspace");
+    button.disabled = !graphFullscreenSupported();
+    button.setAttribute("aria-pressed", String(isFullscreen));
+    button.setAttribute("aria-label", isFullscreen ? "Exit full screen" : "Enter full screen");
+    button.setAttribute("title", isFullscreen ? "Exit full screen" : "Enter full screen");
+  }
+
+  async function toggleGraphFullscreen() {
+    const workspace = $("graphWorkspace");
+    if (!graphFullscreenSupported() || !workspace) return;
+    try {
+      if (document.fullscreenElement === workspace) await document.exitFullscreen();
+      else await workspace.requestFullscreen();
+    } catch (error) {
+      state.lastError = "Full screen is unavailable in this browser.";
+      log("Failed to change graph full screen state.", { error: error.message });
+    } finally {
+      updateGraphFullscreenControl();
+    }
+  }
+
   function drawGraph(graph, options = {}) {
     const svg = $("graphCanvas");
     const emptyState = $("graphEmptyState");
     svg.replaceChildren();
     svg.classList.remove("is-hovering");
-    svg.setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
+    setGraphZoom(state.graphZoom);
     if (!graph.nodes.length) {
       if (emptyState) {
         const copy = graphEmptyStateCopy(options);
@@ -7130,6 +7211,7 @@ const FiniteBrainProductClient = (() => {
     renderVaultControlChrome();
     renderSidebarMode();
     renderReader();
+    if (state.activeWorkspaceView === "graph") renderGraphView();
     updateEditorChrome();
     renderSearchPanel();
     renderAccessPanel();
@@ -9555,6 +9637,8 @@ const FiniteBrainProductClient = (() => {
     const graph = buildGraphProjection(pages, filterText);
     drawGraph(graph, { filterText, readablePageCount: pages.length });
     setGraphStats(graph, pages.length);
+    updateGraphFullscreenControl();
+    if (state.graphHistoryOpen) renderGraphHistory();
     log("Rendered graph from decrypted client index.", {
       edges: graph.edges.length,
       nodes: graph.nodes.length,
@@ -9562,16 +9646,20 @@ const FiniteBrainProductClient = (() => {
   }
 
   function fitGraphView() {
-    $("graphCanvas").setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
-    log("Fit graph view to readable graph bounds.");
+    setGraphZoom(1);
+    log("Reset graph zoom.");
   }
 
-  function resetGraphView() {
-    $("graphFilterInput").value = "";
-    renderGraphView();
+  function updateGraphHistoryControl() {
+    const button = $("toggleGraphHistoryButton");
+    if (!button) return;
+    const action = state.graphHistoryOpen ? "Hide" : "Show";
+    button.setAttribute("aria-pressed", String(state.graphHistoryOpen));
+    button.setAttribute("aria-label", `${action} local page sequence`);
+    button.setAttribute("title", `${action} local page sequence`);
   }
 
-  function renderReplayFrames() {
+  function renderGraphHistory(options = {}) {
     const changes = [];
     let sequence = 1;
     for (const [key, draft] of state.projection.localDrafts.entries()) {
@@ -9605,18 +9693,31 @@ const FiniteBrainProductClient = (() => {
       sequence += 1;
     }
     const frames = buildReplayFrames(changes);
-    setList("replayList", frames, "No replay frames", (item, frame) => {
+    const replayList = $("replayList");
+    if (replayList) replayList.hidden = false;
+    setList("replayList", frames, "No local page sequence", (item, frame) => {
       item.textContent = `#${frame.sequence} ${frame.action}: ${frame.nodeCount} nodes, ${frame.edgeCount} edges`;
     });
-    if (frames.length) {
-      drawGraph(frames[frames.length - 1].graph, { readablePageCount: decryptedPagesForGraph().length });
-      setGraphStats(frames[frames.length - 1].graph, decryptedPagesForGraph().length);
+    updateGraphHistoryControl();
+    if (options.log) {
+      log("Rendered local graph page sequence.", frames.map((frame) => ({
+        edgeCount: frame.edgeCount,
+        nodeCount: frame.nodeCount,
+        sequence: frame.sequence,
+      })));
     }
-    log("Built graph replay frames.", frames.map((frame) => ({
-      edgeCount: frame.edgeCount,
-      nodeCount: frame.nodeCount,
-      sequence: frame.sequence,
-    })));
+  }
+
+  function toggleGraphHistory() {
+    state.graphHistoryOpen = !state.graphHistoryOpen;
+    if (state.graphHistoryOpen) {
+      renderGraphHistory({ log: true });
+      return;
+    }
+    const replayList = $("replayList");
+    if (replayList) replayList.hidden = true;
+    updateGraphHistoryControl();
+    log("Hid local graph page sequence.");
   }
 
   function renderOkfPlan() {
@@ -10117,33 +10218,30 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
-    $("renderGraphButton").addEventListener("click", () => {
-      try {
-        renderGraphView();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to render graph.", { error: error.message });
-      }
+    $("graphFilterInput").addEventListener("input", () => {
+      renderGraphView();
     });
     $("graphFilterInput").addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
       renderGraphView();
     });
+    $("zoomInGraphButton").addEventListener("click", () => {
+      zoomGraphView(1);
+    });
+    $("zoomOutGraphButton").addEventListener("click", () => {
+      zoomGraphView(-1);
+    });
     $("fitGraphButton").addEventListener("click", () => {
       fitGraphView();
     });
-    $("resetGraphButton").addEventListener("click", () => {
-      resetGraphView();
+    $("fullscreenGraphButton").addEventListener("click", () => {
+      toggleGraphFullscreen();
     });
-    $("replayGraphButton").addEventListener("click", () => {
-      try {
-        renderReplayFrames();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to build replay.", { error: error.message });
-      }
+    $("toggleGraphHistoryButton").addEventListener("click", () => {
+      toggleGraphHistory();
     });
+    document.addEventListener("fullscreenchange", updateGraphFullscreenControl);
     onOptionalClick("planOkfImportButton", () => {
       try {
         planEnteredOkfImport();
@@ -10436,6 +10534,7 @@ const FiniteBrainProductClient = (() => {
     graphLayout,
     graphNeighborIds,
     graphStats,
+    graphViewBoxForZoom,
     handlePageHide,
     handlePageShow,
     inlineLinkSegments,

@@ -583,6 +583,20 @@ assert.match(
   cssSource,
   /\.graph-topbar #graphStats\s*\{[^}]*font-variant-numeric:\s*tabular-nums;[^}]*padding:\s*2px 8px;/s,
 );
+assert.match(htmlSource, /id="zoomInGraphButton"[^>]*title="Zoom in"/);
+assert.match(htmlSource, /id="zoomOutGraphButton"[^>]*title="Zoom out"/);
+assert.match(htmlSource, /id="fitGraphButton"[^>]*title="Reset zoom"/);
+assert.match(htmlSource, /id="fullscreenGraphButton"[^>]*title="Enter full screen"/);
+assert.match(htmlSource, /id="toggleGraphHistoryButton"[^>]*Show local page sequence/);
+assert.doesNotMatch(htmlSource, /id="resetGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="renderGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="replayGraphButton"/);
+assert.match(source, /requestFullscreen\(\)/);
+assert.match(source, /document\.addEventListener\("fullscreenchange", updateGraphFullscreenControl\)/);
+assert.match(source, /zoomGraphView\(1\)/);
+assert.match(source, /zoomGraphView\(-1\)/);
+assert.match(cssSource, /\.graph-icon-button,[\s\S]*?width:\s*40px;[\s\S]*?min-height:\s*40px;/);
+assert.match(cssSource, /\.graph-icon-button:active:not\(:disabled\),[\s\S]*?transform:\s*scale\(0\.96\);/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
@@ -2876,6 +2890,15 @@ assert.match(source, /"vaultInviteSecretInput"/);
   ]);
   const hubLayout = client.graphLayout(hubGraph, { height: 300, margin: 60, width: 400 });
   assert.equal(JSON.stringify(hubLayout.get("general/hub")), JSON.stringify({ x: 200, y: 150 }));
+  assert.equal(
+    JSON.stringify(client.graphViewBoxForZoom(1)),
+    JSON.stringify({ height: 560, width: 900, x: 0, y: 0, zoom: 1 })
+  );
+  assert.equal(
+    JSON.stringify(client.graphViewBoxForZoom(99)),
+    JSON.stringify({ height: 224, width: 360, x: 270, y: 168, zoom: 2.5 })
+  );
+  assert.equal(client.graphViewBoxForZoom(0).zoom, 0.5);
 
   const replay = client.buildReplayFrames([
     {
