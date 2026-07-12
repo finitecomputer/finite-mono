@@ -31,9 +31,9 @@ security lifecycle semantics.
 - Tickets: #11, #12, #13, #14, #15 (all labeled `ready-for-agent`)
 - Ticket sessions: #11 and #12 recorded below
 - Agent briefs: published in GitHub issue bodies
-- Review packets: #11 and #12 recorded below
-- Local CodeRabbit report: pending
-- PR URL: pending
+- Review packets: #11–#15 recorded below
+- Local CodeRabbit report: `2026-07-11-settings-vault-local-coderabbit-round.md` (bounded timeout; fallback review passed)
+- PR URL: https://github.com/finitecomputer/finite-mono/pull/16
 
 ## Commands
 
