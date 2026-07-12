@@ -5782,7 +5782,7 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     if (item.action === "new-folder") {
-      createFolderFromToolbar().catch((error) => {
+      createFolderFromToolbar(target.folderId).catch((error) => {
         state.lastError = error.message;
         log("Failed to create Folder from context menu.", { error: error.message });
         render();
@@ -8008,6 +8008,36 @@ const FiniteBrainProductClient = (() => {
     return candidate;
   }
 
+  function folderCreationParent(parentFolderId, folders = []) {
+    if (parentFolderId === null || parentFolderId === undefined) return null;
+    const normalizedParentFolderId = String(parentFolderId).trim();
+    if (!normalizedParentFolderId) throw new Error("Select a valid parent Folder");
+    const parentFolder = (folders || []).find(
+      (folder) => folder?.id === normalizedParentFolderId
+    );
+    if (!parentFolder || !String(parentFolder.path || "").trim()) {
+      throw new Error("The selected parent Folder is no longer available");
+    }
+    return parentFolder;
+  }
+
+  function folderCreationHierarchy(parentFolder, name, folderId) {
+    const normalizedName = String(name || "").trim();
+    const normalizedFolderId = String(folderId || "").trim();
+    if (!normalizedName || !normalizedFolderId) {
+      throw new Error("Folder name and identifier are required");
+    }
+    if (!parentFolder) {
+      return { parentFolderId: null, path: normalizedFolderId };
+    }
+    const parentFolderId = String(parentFolder.id || "").trim();
+    const parentPath = String(parentFolder.path || "").trim();
+    if (!parentFolderId || !parentPath) {
+      throw new Error("The selected parent Folder is no longer available");
+    }
+    return { parentFolderId, path: `${parentPath}/${normalizedName}` };
+  }
+
   function folderRecipientsForAccess(access, accessUserIds = []) {
     const recipients = new Set();
     if (access === "owner") {
@@ -8028,7 +8058,7 @@ const FiniteBrainProductClient = (() => {
     return [...recipients];
   }
 
-  async function createFolderFromToolbar() {
+  async function createFolderFromToolbar(parentFolderId = null) {
     if (!state.metadata) throw new Error("Open a Vault before creating a Folder");
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
       throw new Error("Session is locked. Unlock the session before creating a Folder");
@@ -8043,6 +8073,8 @@ const FiniteBrainProductClient = (() => {
     const name = window.prompt("Folder name", "Notes")?.trim();
     if (!name) return;
     const folderId = uniqueFolderId(slugFromFolderName(name));
+    const parentFolder = folderCreationParent(parentFolderId, state.metadata?.folders || []);
+    const hierarchy = folderCreationHierarchy(parentFolder, name, folderId);
     const access = state.metadata.kind === "personal" ? "owner" : "all_members";
     const accessUserIds = [];
     const rawKey = randomFolderKeyBytes();
@@ -8091,8 +8123,8 @@ const FiniteBrainProductClient = (() => {
           folderId,
           grants,
           name,
-          parentFolderId: null,
-          path: folderId,
+          parentFolderId: hierarchy.parentFolderId,
+          path: hierarchy.path,
           role: "folder",
           sharedFolderSource: false,
         }),
@@ -10614,6 +10646,8 @@ const FiniteBrainProductClient = (() => {
     editorSlashCommandRows,
     extractPageLinks,
     folderAllowsDirectGrant,
+    folderCreationHierarchy,
+    folderCreationParent,
     folderShareLinkRows,
     graphEmptyStateCopy,
     graphLayout,

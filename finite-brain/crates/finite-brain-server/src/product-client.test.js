@@ -218,6 +218,14 @@ const protectedRequestSource = source.slice(
   source.indexOf("async function protectedRequest(path, options = {})"),
   source.indexOf("async function loadVisibleVaults()")
 );
+const createFolderFromToolbarSource = source.slice(
+  source.indexOf("async function createFolderFromToolbar("),
+  source.indexOf("function shareExpiryIso()")
+);
+const handleContextMenuActionSource = source.slice(
+  source.indexOf("function handleContextMenuAction(item, target)"),
+  source.indexOf("function openContextMenu(target, x, y)")
+);
 assert.match(
   reportClientActionFailureSource,
   /handledAccessFailures\.has\(error\)\) return;/,
@@ -2537,6 +2545,69 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(folderMenu.some((item) => item.action === "new-page"), true);
   assert.equal(folderMenu.some((item) => item.action === "share-folder"), true);
   assert.equal(folderMenu.find((item) => item.action === "delete-folder").disabled, true);
+  const restrictedParent = client.folderCreationParent("restricted", [
+    {
+      access: "restricted",
+      accessUserIds: ["npub-restricted-member"],
+      id: "restricted",
+      path: "Private Work",
+    },
+  ]);
+  assert.equal(restrictedParent.access, "restricted");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.folderCreationHierarchy(null, "Notes", "notes"))),
+    { parentFolderId: null, path: "notes" }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.folderCreationHierarchy(restrictedParent, "Nested Notes", "nested-notes"))),
+    { parentFolderId: "restricted", path: "Private Work/Nested Notes" }
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        client.folderCreationHierarchy(
+          { id: "nested-notes", path: "Private Work/Nested Notes" },
+          "Research",
+          "research"
+        )
+      )
+    ),
+    { parentFolderId: "nested-notes", path: "Private Work/Nested Notes/Research" }
+  );
+  assert.throws(
+    () => client.folderCreationParent("removed-parent", [{ id: "restricted", path: "Private Work" }]),
+    /no longer available/
+  );
+  assert.match(
+    handleContextMenuActionSource,
+    /if \(item\.action === "new-folder"\) \{\s*createFolderFromToolbar\(target\.folderId\)/s,
+    "New Folder Inside must pass its context Folder as the hierarchy parent"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const parentFolder = folderCreationParent\(parentFolderId, state\.metadata\?\.folders \|\| \[\]\);/,
+    "Folder creation must resolve the context parent from current Vault metadata"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const access = state\.metadata\.kind === "personal" \? "owner" : "all_members";\s*const accessUserIds = \[\];/s,
+    "A Child Folder must keep the normal independent access defaults instead of inheriting parent recipients"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const rawKey = randomFolderKeyBytes\(\);\s*const recipients = folderRecipientsForAccess\(access, accessUserIds\);/s,
+    "A Child Folder must generate its own Folder Key from the normal creation flow"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /await buildFolderKeyGrantRequest\(\{\s*createdAtUnix,\s*folderId,\s*keyVersion: 1,\s*rawKey,/s,
+    "A Child Folder must create fresh grants for its independent Folder Key"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /parentFolderId: hierarchy\.parentFolderId,\s*path: hierarchy\.path,/s,
+    "Folder creation must submit the resolved hierarchy metadata"
+  );
   const pageMenu = client.contextMenuItemsForTarget({
     type: "page",
     folderId: "crypto",
