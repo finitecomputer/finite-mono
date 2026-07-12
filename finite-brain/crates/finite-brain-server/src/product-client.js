@@ -9574,6 +9574,7 @@ const FiniteBrainProductClient = (() => {
       state.sessionNotice = invitation.duplicateAccept
         ? "Invitation was already accepted. Unlock the session to open the selected Vault."
         : "Invitation accepted. Unlock the session to open the selected Vault.";
+      render();
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
       failAccessOperation(sessionEpoch, "Accept failed", error, vaultInvitationUnavailableDetail);
@@ -9625,6 +9626,7 @@ const FiniteBrainProductClient = (() => {
       state.sessionNotice = claimed.duplicateAccept
         ? "Email invitation was already claimed. Unlock the session to open the selected Vault."
         : "Email invitation claimed. Unlock the session to open the selected Vault.";
+      render();
       log("Claimed email Vault invitation.", {
         invitationId: claimed.id,
         vaultId: claimed.vaultId,

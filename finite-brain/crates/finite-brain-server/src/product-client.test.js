@@ -206,6 +206,10 @@ const acceptVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function acceptVaultInvitationFromPanel()"),
   source.indexOf("async function claimEmailVaultInvitationFromPanel(code)")
 );
+const claimEmailVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)"),
+  source.indexOf("async function revokeVaultInvitationFromPanel()")
+);
 const revokeVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function revokeVaultInvitationFromPanel()"),
   source.indexOf("async function openEnteredFolderKey()")
@@ -241,6 +245,16 @@ assert.match(
   /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
   "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
 );
+for (const invitationAcceptanceSource of [
+  acceptVaultInvitationFromPanelSource,
+  claimEmailVaultInvitationFromPanelSource,
+]) {
+  assert.match(
+    invitationAcceptanceSource,
+    /setActiveVaultId\(\w+\.vaultId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
+    "Accepting an invitation must render the newly locked Session and its safe unlock notice"
+  );
+}
 assert.match(
   protectedRequestSource,
   /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForVaultAccessChange\(error, sessionEpoch\);\s*throw error;/s,
