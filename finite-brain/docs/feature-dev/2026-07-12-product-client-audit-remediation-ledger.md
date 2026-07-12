@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: tickets published; implementation in progress
+- Current status: #18 and #19 complete; dependent implementation in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and `finite-brain/docs/agents/`)
 
 ## Goal
@@ -42,8 +42,8 @@ undefined or ambiguous.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| #18 | AFK | ready | pending | signed Page save/delete | pending |
-| #19 | AFK | ready | pending | safe visible client feedback | pending |
+| #18 | AFK | complete | standards pass; spec pass with integrated browser proof pending | signed Page save/delete | Node contract; syntax; diff |
+| #19 | AFK | complete | standards/spec pass after three P2 corrections; integrated browser proof pending | safe visible client feedback | Node contract; syntax; diff |
 | #20 | AFK | blocked by #19 | pending | authorization-loss Session Lock | pending |
 | #21 | AFK | blocked by #19, #20 | pending | invitation Session Lock/reactivity/revoke | pending |
 | #22 | AFK | ready | pending | Child Folder hierarchy metadata | pending |
@@ -59,7 +59,8 @@ undefined or ambiguous.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- |
-| #18 | `4a59dd5` (rebased current branch baseline) | pending | pending | pending | pending |
+| #18 | `3c828e0` | `/root/ticket_18_page_persistence` | `7fc85c4` | standards pass; spec pass | Node contract; syntax; diff |
+| #19 | `7fc85c4` | `/root/ticket_19_client_feedback` | `cae93df` | standards/spec pass after corrections | Node contract; syntax; diff |
 
 ## Open Questions
 
