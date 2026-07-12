@@ -5915,7 +5915,7 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderAccessFlowPanel() {
+  function renderAccessShareControls() {
     // Keep visible share controls initialized without retaining hidden legacy
     // controls that used to proxy Folder grants and removals.
     if (!$("accessShareExpiresAtInput").value) {
@@ -6528,7 +6528,7 @@ const FiniteBrainProductClient = (() => {
       setText("accessCurrentFolder", "No folder selected");
       setText("accessSummaryLine", "Load a Vault and select a Folder to inspect access.");
       renderWhoHasAccessList(null, metadata, openedFolders);
-      renderAccessFlowPanel();
+      renderAccessShareControls();
       updateAdvancedOptions(null, metadata, openedFolders);
       return;
     }
@@ -6542,7 +6542,7 @@ const FiniteBrainProductClient = (() => {
     applyAccessIntentChrome(activeRow);
 
     // Share-link defaults stay in sync with the visible access controls.
-    renderAccessFlowPanel();
+    renderAccessShareControls();
 
     // Update advanced options
     updateAdvancedOptions(activeRow, metadata, openedFolders);

@@ -58,3 +58,10 @@
 - The full smoke verifier could not run because this workspace lacks the
   documented prebootstrap `/tmp/finite-brain-smoke-vault-keys.json` manifest;
   the verifier and its seeding script both require that local-only fixture.
+
+## Follow-up review
+
+- Standards review found no documented-standard breaches. Its sole
+  judgement-level P3 was stale hidden-panel terminology in an internal render
+  helper; the follow-up commit renames it to `renderAccessShareControls` to
+  match the visible controls it initializes.
