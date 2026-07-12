@@ -120,6 +120,14 @@ counts.
 
 ## Preflight
 
+The dispatch-only `Phala read-only preflight` workflow runs the typed
+`finite-saas-runner phala-preflight` command behind the `phala-staging`
+GitHub Environment. It performs authenticated reads only and retains a
+redacted shape/price/capacity/count summary. Configure the environment-scoped
+secret named `PHALA_CLOUD_API_KEY`; never put its value in a workflow input or
+repository variable. A green read-only preflight is not the live Phala rung
+and does not authorize a provision.
+
 Before the worker may advertise a new lease, its startup preflight performs:
 
 | Check | HTTPS operation | Pass condition |

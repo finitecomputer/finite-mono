@@ -1,0 +1,93 @@
+name: Phala read-only preflight
+
+run-name: Phala read-only preflight (${{ github.ref_name }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_read_only:
+        description: "Run authenticated GET-only shape, price, capacity, and inventory checks"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Pinned API and inventory preflight
+    if: ${{ inputs.confirm_read_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: phala-staging
+    env:
+      FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: Require the environment-scoped API key
+        run: test -n "$FC_RUNNER_PHALA_API_KEY"
+
+      - name: Run typed GET-only preflight
+        run: |
+          cargo run --locked --quiet --package finite-saas-runner -- phala-preflight \
+            > phala-preflight.json
+
+      - name: Validate the redacted summary contract
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("phala-preflight.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          expected = {
+              "apiVersion",
+              "instanceType",
+              "vcpu",
+              "memoryMb",
+              "diskSizeGb",
+              "hourlyPriceUsdMicros",
+              "providerReportedMaxInstances",
+              "availableNodeCount",
+              "activeFiniteCvmCount",
+          }
+          if set(report) != expected:
+              raise SystemExit("unexpected Phala preflight summary fields")
+          if report["instanceType"] != "tdx.medium":
+              raise SystemExit("unexpected Phala instance type")
+          if (report["vcpu"], report["memoryMb"], report["diskSizeGb"]) != (2, 4096, 40):
+              raise SystemExit("unexpected Phala resource shape")
+          if report["activeFiniteCvmCount"] > 1:
+              raise SystemExit("Phala billable-resource cap is exceeded")
+          PY
+
+      - name: Upload redacted preflight summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: phala-readonly-preflight
+          path: phala-preflight.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize safe facts
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+
+          report = json.load(open("phala-preflight.json", encoding="utf-8"))
+          print("### Phala read-only preflight")
+          print()
+          print(f"- API version: `{report['apiVersion']}`")
+          print(f"- Shape: `{report['instanceType']}` / {report['vcpu']} vCPU / {report['memoryMb']} MB / {report['diskSizeGb']} GB")
+          print(f"- Hourly price (USD micros): `{report['hourlyPriceUsdMicros']}`")
+          print(f"- Available matching nodes: `{report['availableNodeCount']}`")
+          print(f"- Active Finite CVMs: `{report['activeFiniteCvmCount']}`")
+          print()
+          print("This workflow performs authenticated reads only. It does not provision, update, stop, restart, or delete a CVM.")
+          PY
