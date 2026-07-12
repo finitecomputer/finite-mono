@@ -38,6 +38,7 @@ workspace="${FINITECHAT_WORKSPACE:-/workspace}"
 managed_skills_dir="${agent_home}/managed-skills/finite/current"
 bundled_skills_dir="${FINITE_BUNDLED_SKILLS_DIR:-/runtime/finite-skills}"
 config_reconciler="${FINITE_HERMES_CONFIG_RECONCILER:-/opt/reconcile_hermes_config.py}"
+recover_chat_boot="${FINITE_RECOVER_CHAT_BOOT:-/opt/recover_chat_boot.py}"
 
 export FINITECHAT_HOME="$agent_home"
 # Shared Finite identity on the durable mount (identity/identity.json).
@@ -51,6 +52,49 @@ export FINITE_ALLOW_ALL_USERS="${FINITE_ALLOW_ALL_USERS:-true}"
 export GATEWAY_ALLOW_ALL_USERS="${GATEWAY_ALLOW_ALL_USERS:-true}"
 export FINITE_AGENT_ID="${FINITE_AGENT_ID:-agent_${device_id}}"
 export FINITE_AGENT_NAME="$agent_name"
+
+managed_skills_config_dir=""
+if [[ -d "$managed_skills_dir" ]]; then
+    managed_skills_config_dir="$managed_skills_dir"
+fi
+
+run_with_config_environment() {
+    FINITE_CONFIG_MODEL="$model" \
+    FINITE_CONFIG_PROVIDER="$provider" \
+    FINITE_CONFIG_BASE_URL="$base_url" \
+    FINITE_CONFIG_API_MODE="$api_mode" \
+    FINITE_CONFIG_API_KEY_REFERENCE="$api_key_reference" \
+    FINITE_CONFIG_PLUGIN_NAME="$plugin_name" \
+    FINITE_CONFIG_TITLE_TIMEOUT_SECS="$title_generation_timeout_secs" \
+    FINITE_CONFIG_AGENT_HOME="$agent_home" \
+    FINITE_CONFIG_FINITECHAT_BIN="$finitechat_bin" \
+    FINITE_CONFIG_SERVICE_ADDR="$service_addr" \
+    FINITE_CONFIG_POLL_TIMEOUT_SECS="$poll_timeout_secs" \
+    FINITE_CONFIG_POLL_LIMIT="$poll_limit" \
+    FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}" \
+    FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir" \
+    FINITE_CONFIG_WORKSPACE="$workspace" \
+    "$@"
+}
+
+run_config_reconciler() {
+    run_with_config_environment \
+        python "$config_reconciler" --config "${hermes_home}/config.yaml"
+}
+
+run_recover_chat_boot() {
+    run_with_config_environment \
+        python "$recover_chat_boot" --config "${hermes_home}/config.yaml"
+}
+
+recover_boot=0
+if [[ -n "${FINITE_AGENT_BOOT_INTENT_JSON:-}" ]]; then
+    # A recover-known-good intent must run before any fresh-agent initialization.
+    # The dedicated boot module validates identity/config/client state, performs
+    # only the image-owned allowlisted repairs, and journals the operation.
+    run_recover_chat_boot
+    recover_boot=1
+fi
 
 mkdir -p "$agent_home" "$hermes_home/plugins" "$workspace"
 
@@ -92,13 +136,15 @@ if [[ ! -f "${agent_home}/config.json" ]]; then
         >/dev/null
 fi
 
-"$finitechat_bin" hermes --home "$agent_home" install \
-    --plugins-dir "${hermes_home}/plugins" \
-    --plugin-name "$plugin_name" \
-    --finitechat-bin "$finitechat_bin" \
-    --force \
-    --json \
-    >/dev/null
+if [[ "$recover_boot" -ne 1 ]]; then
+    "$finitechat_bin" hermes --home "$agent_home" install \
+        --plugins-dir "${hermes_home}/plugins" \
+        --plugin-name "$plugin_name" \
+        --finitechat-bin "$finitechat_bin" \
+        --force \
+        --json \
+        >/dev/null
+fi
 
 # Room admission is Welcome-first: the Hosted Web Device publishes its
 # KeyPackage and starts a profile chat with the Agent Principal. The runtime
@@ -106,31 +152,17 @@ fi
 # a real Device asks to chat. Once a room exists, normal inbound routing and an
 # explicit local home-channel choice remain owned by Finite Chat/Hermes state.
 
-managed_skills_config_dir=""
-if [[ -d "$managed_skills_dir" ]]; then
-    managed_skills_config_dir="$managed_skills_dir"
-fi
-
 # Seed product defaults only when config.yaml is absent. Thereafter the image
 # repairs only the Finite Chat transport and managed-skills registration. In
 # particular, model/provider settings and Telegram/other Hermes platforms are
 # Hermes/user-owned and must survive every runtime restart and image upgrade.
-FINITE_CONFIG_MODEL="$model" \
-FINITE_CONFIG_PROVIDER="$provider" \
-FINITE_CONFIG_BASE_URL="$base_url" \
-FINITE_CONFIG_API_MODE="$api_mode" \
-FINITE_CONFIG_API_KEY_REFERENCE="$api_key_reference" \
-FINITE_CONFIG_PLUGIN_NAME="$plugin_name" \
-FINITE_CONFIG_TITLE_TIMEOUT_SECS="$title_generation_timeout_secs" \
-FINITE_CONFIG_AGENT_HOME="$agent_home" \
-FINITE_CONFIG_FINITECHAT_BIN="$finitechat_bin" \
-FINITE_CONFIG_SERVICE_ADDR="$service_addr" \
-FINITE_CONFIG_POLL_TIMEOUT_SECS="$poll_timeout_secs" \
-FINITE_CONFIG_POLL_LIMIT="$poll_limit" \
-FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}" \
-FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir" \
-FINITE_CONFIG_WORKSPACE="$workspace" \
-python "$config_reconciler" --config "${hermes_home}/config.yaml"
+if [[ "$recover_boot" -ne 1 ]]; then
+    managed_skills_config_dir=""
+    if [[ -d "$managed_skills_dir" ]]; then
+        managed_skills_config_dir="$managed_skills_dir"
+    fi
+    run_config_reconciler
+fi
 
 if [[ "${1:-}" == "--prepare-only" ]]; then
     echo "FINITE_AGENT_RUNTIME_PREPARED hermes_home=${hermes_home} agent_home=${agent_home}"

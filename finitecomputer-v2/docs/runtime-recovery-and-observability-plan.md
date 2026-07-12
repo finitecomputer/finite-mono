@@ -282,6 +282,55 @@ Acceptance criteria:
 - If identity/client-store corruption is detected, recover-chat stops with an
   explicit escalation state instead of minting a replacement identity.
 
+### Image-side contract implemented 2026-07-11
+
+The runtime image now has the image-owned half of this phase. This is a dormant
+boot contract until Core and Runner explicitly deliver it; it is not evidence
+that RuntimeSpec delivery, provider conformance, Kata acceptance, or Phala
+acceptance exists.
+
+`run_hermes_gateway.sh` checks `FINITE_AGENT_BOOT_INTENT_JSON` before any
+directory creation, fresh-agent initialization, or ordinary plugin/config
+reconciliation. Version 1 accepts exactly:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "recover_known_good",
+  "operation_id": "control-plane-generated-opaque-id"
+}
+```
+
+The raw operation ID is never written to the startup report or child-process
+environment. The image journals by SHA-256 under
+`/data/agent/recover-chat-operations/`; a completed operation with the same ID
+is a true no-op only while its terminal startup report still matches the
+journal; a missing, corrupt, or mismatched projection fails closed. An
+interrupted operation resumes its allowlisted repair.
+The redacted versioned report is `/data/agent/startup-report.json` and its safe
+projection appears under `startup` in `/healthz` and `/contact`.
+While the boot-intent environment remains active, health also treats a missing
+startup report as invalid instead of silently reverting to normal readiness.
+
+Before mutation, the image requires the existing durable state root, Agent and
+Hermes homes, workspace, agent config, shared identity, current Finite Chat
+SQLite schema/integrity, and parseable Hermes config. Missing, corrupt, or
+identity-mismatched state exits with a fixed refusal code and never falls
+through to `finitechat hermes init`. The repair may replace only the canonical
+`finitechat` plugin, reconcile Finite-owned generated config and home-channel
+metadata, invoke the typed `finitechat hermes recover` command for interrupted
+turns, clear the documented ready/PID/health/temp allowlist, and update its own
+journal/report. It does not create an invite: current admission is Welcome-first
+and the deleted invite-session protocol must not be reintroduced.
+
+The implementation deliberately does not hash the workspace, memory, user
+skills, or other protected trees during production boot. Preservation is
+enforced by the narrow mutation allowlist, targeted identity/client-store
+reuse checks, and focused before/after tests; the report does not claim a
+whole-tree checksum or provider-level proof. It records
+`runtime_spec_delivery`, `provider_conformance`, and `phala_acceptance` as
+`not_proven`.
+
 ## Phase 4: New Topic With Same Agent
 
 Goal: give users a legacy-`/new`-like escape hatch without re-pairing the agent.

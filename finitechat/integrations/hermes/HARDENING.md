@@ -44,6 +44,81 @@ That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
   inbound streaming disabled.
 - Prefer machine-readable JSON contracts over logs as the test oracle.
 
+## Recover-Known-Good Image Boot Contract
+
+The packaged agent image has a versioned, one-shot repair mode for an existing
+Finite Chat/Hermes runtime. It is selected only when
+`FINITE_AGENT_BOOT_INTENT_JSON` is present and has exactly this version 1
+shape:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "recover_known_good",
+  "operation_id": "opaque-operation-id"
+}
+```
+
+Normal boot is unchanged when the variable is absent. When it is present,
+`run_hermes_gateway.sh` runs `/opt/recover_chat_boot.py` before `mkdir`, fresh
+skill seeding, `finitechat hermes init`, or the normal config reconciler. A
+refusal therefore cannot silently initialize a new identity or workspace.
+
+The preflight requires all four durable roots (`/data`, `/data/agent`,
+`/data/agent/hermes-home`, and `/data/workspace`), `config.json`, the shared
+`identity/identity.json`, `client.sqlite3` with the current Finite Chat tables
+and a successful SQLite `quick_check`, and a parseable existing Hermes
+`config.yaml`. `finitechat auth status` must return the account from agent
+config. Identity and client-store device/inode identity plus integrity are
+checked again after repair. Corruption produces a fixed refusal code and exit
+65; exception text, command stderr, filesystem paths, secrets, and the raw
+operation ID are not copied into the startup report.
+
+The mutation allowlist is intentionally small:
+
+- replace `hermes-home/plugins/finitechat` from the image-embedded
+  `finitechat hermes install --force` implementation and record only its small
+  before/after digest;
+- reconcile `plugins.enabled`, `gateway.platforms.finitechat`, exact legacy
+  `finite-platform`/`finite` activation, canonical managed-skills registration,
+  and existing home-channel metadata without changing user model/provider,
+  non-Finite platforms, or user extensions;
+- use the typed `finitechat hermes recover --json` command when
+  `hermes-running.json` contains interrupted turns;
+- update `hermes-home-channel.json` through the typed Finite Chat command when
+  a durable/configured room supplies a safe repair source;
+- remove only agent `hermes-service.json`, `hermes-bridge-status.json`,
+  `hermes-gateway.pid`, and `finitechat-hermes.pid`; agentd
+  `finitechat-ready.json`, `status.json`, `finitechat.pid`, `health.pid`, and
+  `hermes.pid`; Hermes `.config.yaml.*` incomplete writes; and the canonical
+  plugin's `__pycache__`;
+- write `/data/agent/startup-report.json`, the operation journal, and its lock.
+
+Everything else—including identity, agent config, the client DB and room
+membership, Hermes memory/session data, workspace, user tools, connections,
+skills, platforms, model/provider choice, and noncanonical plugins—is outside
+the direct mutation set. The boot code does not recursively hash those trees:
+doing so would make startup proportional to user data and could falsely refuse
+on legitimate concurrent changes. Focused tests snapshot representative
+protected paths before/after instead; the report makes no whole-tree
+preservation claim.
+
+Operations are keyed by `sha256(operation_id)`. A completed replay is a true
+no-op only when `/data/agent/startup-report.json` is a regular, valid, exact
+terminal projection of that journal; missing, corrupt, or mismatched reports
+fail closed without rerunning repair. A journal left `running` resumes safely.
+While a boot intent is active, health also treats a missing report as invalid.
+The redacted schema-version-1 report records fixed action/refusal values and
+explicitly marks
+`runtime_spec_delivery`, `provider_conformance`, and `phala_acceptance` as
+`not_proven`. Health exposes only an allowlisted projection and is not ready
+while a report is running, refused, or invalid.
+
+This is only the image-side receiver. No Core/Runner delivery, rescue shell,
+new control plane, provider guarantee, or Phala acceptance is claimed here.
+Current Welcome-first admission remains unchanged; recovery does not recreate
+the deleted invite-session protocol.
+
 ## RCA: 2026-06-26 Tinfoil Join Pending Failure
 
 Symptom: the iOS app reached "Waiting for approval / waiting for room

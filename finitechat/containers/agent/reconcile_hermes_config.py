@@ -18,6 +18,9 @@ class ConfigError(RuntimeError):
     """The durable Hermes config cannot be safely reconciled."""
 
 
+LEGACY_PLUGIN_NAMES = ("finite-platform", "finite")
+
+
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
     value = parent.get(key)
     if value is None:
@@ -51,6 +54,8 @@ def _integer(settings: dict[str, str], key: str, *, minimum: int = 0) -> int:
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
+    *,
+    recover_known_good: bool = False,
 ) -> dict[str, Any]:
     """Return first-boot defaults plus the narrow Finite-owned config merge.
 
@@ -103,9 +108,18 @@ def reconcile_config(
     plugin_name = settings["FINITE_CONFIG_PLUGIN_NAME"]
     if plugin_name not in enabled_plugins:
         enabled_plugins.append(plugin_name)
+    if recover_known_good:
+        enabled_plugins[:] = [name for name in enabled_plugins if name not in LEGACY_PLUGIN_NAMES]
 
     gateway = _mapping(config, "gateway")
     platforms = _mapping(gateway, "platforms")
+    if recover_known_good:
+        for legacy_name in LEGACY_PLUGIN_NAMES:
+            legacy = platforms.get(legacy_name)
+            if legacy is not None and not isinstance(legacy, dict):
+                platforms[legacy_name] = {"enabled": False}
+            elif isinstance(legacy, dict) and legacy.get("enabled") is not False:
+                legacy["enabled"] = False
     finitechat = _mapping(platforms, "finitechat")
     finitechat["enabled"] = True
     extra = _mapping(finitechat, "extra")
