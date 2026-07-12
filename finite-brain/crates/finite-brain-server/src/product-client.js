@@ -23,6 +23,8 @@ const FiniteBrainProductClient = (() => {
     readerBusy: false,
     selectedFolderId: null,
     selectedPageKey: null,
+    searchHighlight: null,
+    searchHighlightShouldScroll: false,
     activeWorkspaceView: "page",
     activeSidebarMode: "files",
     settingsModalOpen: false,
@@ -1908,6 +1910,8 @@ const FiniteBrainProductClient = (() => {
     target.sharedFolderConnections = null;
     target.selectedFolderId = null;
     target.selectedPageKey = null;
+    target.searchHighlight = null;
+    target.searchHighlightShouldScroll = false;
     target.activeWorkspaceView = "page";
     target.activeSidebarMode = "files";
     target.activeAccessFolderId = null;
@@ -4182,6 +4186,11 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function clearSearchHighlight() {
+    state.searchHighlight = null;
+    state.searchHighlightShouldScroll = false;
+  }
+
   function selectedReaderPage() {
     if (!state.selectedPageKey) return null;
     return projectionPages().find((page) => page.key === state.selectedPageKey) || null;
@@ -4271,6 +4280,11 @@ const FiniteBrainProductClient = (() => {
       segments.push({ match: false, text: source.slice(cursor) });
     }
     return segments.length ? segments : [{ match: false, text: source }];
+  }
+
+  function readerSearchHighlightForPage(pageKeyValue, searchHighlight) {
+    const query = String(searchHighlight?.query || "").trim();
+    return searchHighlight?.pageKey === pageKeyValue ? query : "";
   }
 
   function searchTextSnippet(text, query, maxLength = 96) {
@@ -4423,6 +4437,7 @@ const FiniteBrainProductClient = (() => {
 
   function startNewPageDraft(folderIdOverride = null) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return;
+    clearSearchHighlight();
     const folderId = folderIdOverride || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
     const objectId = nextDraftObjectId();
     const draftKey = pageKey(folderId, objectId);
@@ -4494,6 +4509,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function selectReaderFolder(folderId, options = {}) {
+    clearSearchHighlight();
     state.selectedFolderId = folderId;
     state.expandedFolderIds.add(folderId);
     if (options.selectFirstPage !== false) {
@@ -4524,6 +4540,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function toggleReaderFolder(folderId) {
+    clearSearchHighlight();
     const isExpanded = state.expandedFolderIds.has(folderId);
     state.selectedFolderId = folderId;
     $("pageFolderIdInput").value = folderId;
@@ -4541,7 +4558,10 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
-  function selectReaderPage(pageKeyValue) {
+  function selectReaderPage(pageKeyValue, options = {}) {
+    const searchQuery = String(options.searchQuery || "").trim();
+    state.searchHighlight = searchQuery ? { pageKey: pageKeyValue, query: searchQuery } : null;
+    state.searchHighlightShouldScroll = Boolean(searchQuery);
     state.selectedPageKey = pageKeyValue;
     state.activeWorkspaceView = "page";
     const page = selectedReaderPage();
@@ -5404,6 +5424,45 @@ const FiniteBrainProductClient = (() => {
     content.removeAttribute("aria-multiline");
   }
 
+  function highlightReaderSearchMatches(container, query) {
+    if (!container || !query) return [];
+
+    const textNodes = [];
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (node.parentElement?.closest?.(".reader-search-match")) continue;
+      const segments = searchHighlightSegments(node.nodeValue, query);
+      if (segments.some((segment) => segment.match)) textNodes.push({ node, segments });
+    }
+
+    const matches = [];
+    for (const { node, segments } of textNodes) {
+      const fragment = document.createDocumentFragment();
+      for (const segment of segments) {
+        if (!segment.match) {
+          fragment.appendChild(document.createTextNode(segment.text));
+          continue;
+        }
+        const match = document.createElement("mark");
+        match.className = "reader-search-match";
+        match.textContent = segment.text;
+        fragment.appendChild(match);
+        matches.push(match);
+      }
+      node.replaceWith(fragment);
+    }
+    return matches;
+  }
+
+  function scrollReaderSearchMatchIntoView(match) {
+    if (!match) return;
+    const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth";
+    const scroll = () => match.scrollIntoView?.({ behavior, block: "center", inline: "nearest" });
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(scroll);
+    else scroll();
+  }
+
   function renderPageContent(page) {
     const content = $("readerPageContent");
     content.replaceChildren();
@@ -5429,6 +5488,13 @@ const FiniteBrainProductClient = (() => {
     content.className = `note-content note-markdown inline-page-editor${page.localDraft ? " inline-page-editor-dirty" : ""}`;
     setPageContentEditable(content, state.editorMode !== "source");
     renderMarkdownEditor(content, page.text || "");
+    const searchQuery = readerSearchHighlightForPage(page.key, state.searchHighlight);
+    if (!searchQuery) return;
+    const matches = highlightReaderSearchMatches(content, searchQuery);
+    if (state.searchHighlightShouldScroll) {
+      state.searchHighlightShouldScroll = false;
+      scrollReaderSearchMatchIntoView(matches[0]);
+    }
   }
 
   function renderPageStatus(page) {
@@ -5785,7 +5851,7 @@ const FiniteBrainProductClient = (() => {
           row.label,
           row.detail,
           `obsidian-page-button ${row.key === state.selectedPageKey ? " active" : ""}`,
-          () => selectReaderPage(row.key),
+          () => selectReaderPage(row.key, { searchQuery: query }),
           {
             contextTarget: {
               type: "page",
@@ -9984,6 +10050,13 @@ const FiniteBrainProductClient = (() => {
       });
     });
     $("sidebarSearchInput").addEventListener("input", () => {
+      if (state.searchHighlight) {
+        const query = $("sidebarSearchInput").value.trim();
+        state.searchHighlight = query ? { ...state.searchHighlight, query } : null;
+        state.searchHighlightShouldScroll = Boolean(query);
+        render();
+        return;
+      }
       renderSearchPanel();
     });
     $("commandPaletteInput").addEventListener("input", () => {
@@ -10406,6 +10479,7 @@ const FiniteBrainProductClient = (() => {
     publicKeyIdentityFromInput,
     readerFolderDetail,
     readerFolderRows,
+    readerSearchHighlightForPage,
     readerPageDetail,
     readerPageRows,
     resumeSession,

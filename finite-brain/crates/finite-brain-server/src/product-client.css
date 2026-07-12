@@ -3965,6 +3965,17 @@ pre {
   font: 400 15px/1.68 var(--font-sans);
 }
 
+.reader-search-match {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--status-warning) 36%, var(--surface-raised));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-warning) 54%, transparent);
+  color: var(--text);
+  padding: 0 1px;
+  scroll-margin-block: 28px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 .note-markdown > * {
   width: min(100%, 760px);
   max-width: 760px;

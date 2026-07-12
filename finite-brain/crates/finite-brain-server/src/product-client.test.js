@@ -2136,6 +2136,24 @@ assert.match(source, /"vaultInviteSecretInput"/);
     ),
     "A focused keyword appears in this sentence."
   );
+  assert.equal(
+    client.readerSearchHighlightForPage("crypto/page-a", {
+      pageKey: "crypto/page-a",
+      query: " folder key ",
+    }),
+    "folder key"
+  );
+  assert.equal(
+    client.readerSearchHighlightForPage("crypto/page-b", {
+      pageKey: "crypto/page-a",
+      query: "folder key",
+    }),
+    ""
+  );
+  assert.match(source, /selectReaderPage\(row\.key, \{ searchQuery: query \}\)/);
+  assert.match(source, /highlightReaderSearchMatches\(content, searchQuery\)/);
+  assert.match(source, /scrollIntoView\?\.\(\{ behavior, block: "center", inline: "nearest" \}\)/);
+  assert.match(cssSource, /\.reader-search-match\s*\{[\s\S]*?scroll-margin-block: 28px;/);
   const paletteRows = client.commandPaletteRows("folder", [
     {
       folderId: "crypto",
