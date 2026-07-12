@@ -101,10 +101,11 @@ Before enabling the connection:
    `GOOGLE_WORKSPACE_CLIENT_SECRET`. `WORKOS_COOKIE_PASSWORD` is also required
    there to seal the short-lived, user-bound OAuth state. Never copy those
    values into this repository, a command transcript, or logs.
-5. Keep the checked-in public-origin setting
-   `NEXT_PUBLIC_WORKOS_REDIRECT_URI` (or an explicit
-   `FC_DASHBOARD_PUBLIC_URL` override) pointed at the production dashboard
-   origin. The dashboard derives the Google callback path from that origin.
+5. Keep the checked-in `FC_DASHBOARD_BASE_URL` and
+   `NEXT_PUBLIC_WORKOS_REDIRECT_URI` origins (or an explicit
+   `FC_DASHBOARD_PUBLIC_URL` override) pointed at the production dashboard.
+   Browser-facing OAuth redirects must use that configured origin rather than
+   the dashboard container's loopback request URL.
 
 Acceptance is not a configuration inspection or a callback-only probe. From
 one real, authorized production account, click **Connect**, complete Google's
