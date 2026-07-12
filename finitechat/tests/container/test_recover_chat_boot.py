@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
@@ -10,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RECOVERY_BOOT = REPO_ROOT / "containers/agent/recover_chat_boot.py"
@@ -28,6 +30,18 @@ CLIENT_TABLES = (
     "client_app_state",
     "client_app_profiles",
 )
+
+
+def load_hermes_config(path: Path) -> dict[str, Any]:
+    spec = importlib.util.spec_from_file_location(
+        "reconcile_hermes_config_for_recovery_test", RECONCILER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    loader = cast(Callable[[Path], dict[str, Any]], module.__dict__["_load"])
+    return loader(path)
+
 
 FAKE_FINITECHAT = r"""#!/usr/bin/env python3
 import json
@@ -329,7 +343,7 @@ class RecoverChatBootTest(unittest.TestCase):
         fixture = self.make_fixture()
         preserved = fixture.preservation_snapshot()
         client_key = (fixture.client_store.stat().st_dev, fixture.client_store.stat().st_ino)
-        before_config = json.loads(fixture.config_path.read_text(encoding="utf-8"))
+        before_config = load_hermes_config(fixture.config_path)
 
         result = fixture.run()
 
@@ -378,7 +392,7 @@ class RecoverChatBootTest(unittest.TestCase):
             "canonical-adapter\n",
         )
 
-        config = json.loads(fixture.config_path.read_text(encoding="utf-8"))
+        config = load_hermes_config(fixture.config_path)
         for key in ("model", "platforms", "tools", "connections", "user_extension"):
             self.assertEqual(config[key], before_config[key])
         self.assertEqual(
