@@ -1564,9 +1564,9 @@ pre {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  min-width: 34px;
-  min-height: 34px;
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
   align-self: center;
   border-color: transparent;
   border-radius: 8px;
@@ -1598,7 +1598,7 @@ pre {
   max-width: min(320px, calc(100% - 16px));
   max-height: min(420px, calc(100vh - 32px));
   overflow: hidden;
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-radius: var(--radius-popover);
   background: var(--surface-raised);
   box-shadow: var(--shadow-obsi-popover);
@@ -1666,7 +1666,7 @@ pre {
   justify-content: flex-start;
   gap: 8px;
   width: 100%;
-  min-height: 32px;
+  min-height: 40px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -1740,9 +1740,10 @@ pre {
 
 .manage-vaults-list {
   max-height: min(330px, 42vh);
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 10px;
   background: var(--surface-soft);
+  box-shadow: var(--shadow-control);
   padding: 6px;
 }
 
@@ -1753,7 +1754,7 @@ pre {
 }
 
 .manage-vault-actions button {
-  min-height: 36px;
+  min-height: 40px;
 }
 
 .manage-vault-create {
@@ -1818,6 +1819,7 @@ pre {
   padding: 24px;
   background: color-mix(in srgb, var(--knowledge-overlay) 72%, transparent);
   backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
 }
 
 .settings-modal-panel {
@@ -1827,10 +1829,115 @@ pre {
   max-height: min(720px, calc(100vh - 48px));
   min-height: min(480px, calc(100vh - 48px));
   overflow: hidden;
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-radius: var(--radius-panel);
   background: var(--surface);
   box-shadow: var(--shadow-popover);
+}
+
+@keyframes settings-overlay-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes settings-panel-enter {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes settings-section-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes vault-switcher-enter {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(6px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+.settings-modal-backdrop:not([hidden]) {
+  animation: settings-overlay-enter 180ms ease-out both;
+}
+
+.settings-modal-backdrop:not([hidden]) > .settings-modal-panel {
+  animation: settings-panel-enter 240ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.settings-modal-backdrop:not([hidden]) .settings-modal-header {
+  animation: settings-section-enter 220ms cubic-bezier(0.2, 0, 0, 1) 40ms both;
+}
+
+.settings-modal-backdrop:not([hidden]) .settings-modal-layout {
+  animation: settings-section-enter 240ms cubic-bezier(0.2, 0, 0, 1) 80ms both;
+}
+
+.settings-modal-content > .settings-section:not([hidden]) {
+  animation: settings-section-enter 220ms cubic-bezier(0.2, 0, 0, 1) 100ms both;
+}
+
+.manage-vaults-modal-content > * {
+  animation: settings-section-enter 220ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.manage-vaults-modal-content > *:nth-child(2) {
+  animation-delay: 70ms;
+}
+
+.manage-vaults-modal-content > *:nth-child(3) {
+  animation-delay: 140ms;
+}
+
+.manage-vaults-modal-content > *:nth-child(4) {
+  animation-delay: 210ms;
+}
+
+.vault-switcher-menu:not([hidden]) {
+  animation: vault-switcher-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
+  transform-origin: bottom left;
+}
+
+.vault-switcher-menu:not([hidden]) > .vault-switcher-header,
+.vault-switcher-menu:not([hidden]) > .vault-switcher-list,
+.vault-switcher-menu:not([hidden]) > .vault-switcher-footer {
+  animation: settings-section-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.vault-switcher-menu:not([hidden]) > .vault-switcher-list {
+  animation-delay: 60ms;
+}
+
+.vault-switcher-menu:not([hidden]) > .vault-switcher-footer {
+  animation-delay: 120ms;
 }
 
 .settings-modal-header {
@@ -1846,6 +1953,12 @@ pre {
 .settings-modal-header h2 {
   margin-top: 2px;
   font-size: 20px;
+}
+
+.settings-modal-header .sidebar-icon-button {
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
 }
 
 .settings-modal-layout {
@@ -2005,9 +2118,10 @@ pre {
 
 .settings-card {
   min-width: 0;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 10px;
   background: var(--surface-soft);
+  box-shadow: var(--shadow-control);
   padding: 16px;
 }
 
@@ -2046,7 +2160,16 @@ pre {
 
 .settings-section .session-security-status button {
   justify-self: start;
+  min-height: 40px;
   min-width: 142px;
+}
+
+.settings-section .session-security-status button:disabled {
+  opacity: 1;
+  border-color: transparent;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-control);
+  color: var(--soft);
 }
 
 .settings-info-card {
@@ -2131,6 +2254,7 @@ pre {
   gap: 8px;
   width: max-content;
   min-width: 148px;
+  min-height: 40px;
   border-color: transparent;
   background: var(--blue-soft);
   color: var(--blue-strong);
@@ -4593,7 +4717,7 @@ pre {
 }
 
 .vault-switch-button:not(:disabled):active {
-  transform: scale(0.98);
+  transform: scale(0.96);
 }
 
 .vault-switch-button.selected,
