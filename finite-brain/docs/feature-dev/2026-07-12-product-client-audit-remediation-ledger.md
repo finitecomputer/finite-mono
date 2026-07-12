@@ -1,0 +1,73 @@
+# FiniteBrain Product Client Audit Remediation Ledger
+
+## Run
+
+- Run ID: 2026-07-12-product-client-audit-remediation
+- Loop: Feature Dev continuation
+- Target repo: finitecomputer/finite-mono
+- Base branch: `main` (`origin/main`)
+- Feature branch: `feature/finitebrain-settings-vault-ui`
+- Human owner: Austin
+- Started: 2026-07-12
+- Current status: tickets published; implementation in progress
+- Skill setup status: present (`finite-brain/AGENTS.md` and `finite-brain/docs/agents/`)
+
+## Goal
+
+Deal with every audit must-fix end to end, using the existing FiniteBrain
+terminology, ADRs, and product truths; pause only if behavior is genuinely
+undefined or ambiguous.
+
+## Durable Artifacts
+
+- CONTEXT updates: none; established terms govern this continuation
+- ADRs: none planned; no new hard-to-reverse decision is needed
+- Prototype source branch, if any: none
+- Spec issue: #17 — https://github.com/finitecomputer/finite-mono/issues/17
+- Tickets: #18, #19, #20, #21, #22, #23
+- Ticket sessions: pending
+- Agent briefs: audit and alignment evidence are recorded in this ledger/spec
+- Review packets: pending
+- Local CodeRabbit report: pending
+- PR URL: https://github.com/finitecomputer/finite-mono/pull/16
+
+## Commands
+
+- Typecheck: `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+- Test: `scripts/with-dev-env node --test finite-brain/crates/finite-brain-server/src/product-client.test.js`; focused Rust Product Client/server tests
+- Build: `scripts/with-dev-env cargo build -p finite-brain-server`
+- Visual verification: isolated Rust-served `/client` with disposable local Vault and Member Identities
+
+## Ticket Ledger
+
+| Issue | Type | Status | Review thread | Fixes needed | Verified |
+| --- | --- | --- | --- | --- | --- |
+| #18 | AFK | ready | pending | signed Page save/delete | pending |
+| #19 | AFK | ready | pending | safe visible client feedback | pending |
+| #20 | AFK | blocked by #19 | pending | authorization-loss Session Lock | pending |
+| #21 | AFK | blocked by #19, #20 | pending | invitation Session Lock/reactivity/revoke | pending |
+| #22 | AFK | ready | pending | Child Folder hierarchy metadata | pending |
+| #23 | AFK | ready | pending | hidden Graph filter removal | pending |
+
+## Parked HITL Slices
+
+| Issue | Why parked | Blocks | Required human action | Final PR decision |
+| --- | --- | --- | --- | --- |
+| None | | | | |
+
+## Issue Session Ledger
+
+| Issue | Fixed point | Worker session | Commit | Review result | Checks |
+| --- | --- | --- | --- | --- |
+| #18 | `4a59dd5` (rebased current branch baseline) | pending | pending | pending | pending |
+
+## Open Questions
+
+- Child Folder access intentionally remains independent. This continuation
+  preserves current creation defaults rather than inventing restricted-access
+  inheritance.
+
+## Escalations
+
+- None. Existing Product Client, Session Lock, Folder, and invitation product
+  truths resolve the remediation behavior.
