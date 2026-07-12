@@ -1051,6 +1051,10 @@ pre {
   grid-column: 2;
   grid-row: 1;
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.file-sidebar:has(> .vault-control-strip:not([hidden])[open]) {
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 
