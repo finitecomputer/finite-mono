@@ -119,12 +119,12 @@ function accessFailureTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, lockSessionForVaultAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The access-failure test must capture the Product Client's real closure seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-access-failure.test.js" });
   assert.ok(seams, "The Product Client must expose the captured access-failure seams to this deterministic test");
-  return { elements: testElements, seams };
+  return { context: testContext, elements: testElements, seams };
 }
 
 const prepareDraftWriteSource = source.slice(
@@ -159,6 +159,10 @@ const createVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function createVaultInvitationFromPanel()"),
   source.indexOf("async function inspectVaultInvitationFromPanel()")
 );
+const protectedRequestSource = source.slice(
+  source.indexOf("async function protectedRequest(path, options = {})"),
+  source.indexOf("async function loadVisibleVaults()")
+);
 assert.match(
   reportClientActionFailureSource,
   /handledAccessFailures\.has\(error\)\) return;/,
@@ -173,6 +177,11 @@ assert.match(
   createVaultInvitationFromPanelSource,
   /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
   "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
+);
+assert.match(
+  protectedRequestSource,
+  /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForVaultAccessChange\(error, sessionEpoch\);\s*throw error;/s,
+  "Confirmed active-Vault authorization loss must lock before protected work can continue"
 );
 
 function objectIdCandidateBaseForTest(value) {
@@ -595,6 +604,42 @@ assert.equal(
     title: "Unlocking session",
   })
 );
+const activeVaultAccessLoss = client.protectedRequestError(
+  "/_admin/vaults/acme/metadata",
+  403,
+  { error: "vault access required" }
+);
+assert.equal(activeVaultAccessLoss.status, 403);
+assert.equal(activeVaultAccessLoss.reason, "vault access required");
+assert.equal(activeVaultAccessLoss.path, "/_admin/vaults/acme/metadata");
+for (const path of [
+  "/_admin/vaults/acme/metadata",
+  "/_admin/vaults/acme/export",
+  "/_admin/vaults/acme/sync/bootstrap",
+]) {
+  assert.equal(
+    client.isActiveVaultAuthorizationLoss(
+      client.protectedRequestError(path, 403, { error: "vault access required" }),
+      "acme"
+    ),
+    true,
+    `A confirmed membership loss must lock for the active Vault state read ${path}`
+  );
+}
+for (const [status, reason, path] of [
+  [401, "vault access required", "/_admin/vaults/acme/metadata"],
+  [403, "replayed Nostr authorization event", "/_admin/vaults/acme/metadata"],
+  [403, "stale Nostr event timestamp", "/_admin/vaults/acme/metadata"],
+  [403, "vault admin access required", "/_admin/vaults/acme/invitations"],
+  [403, "folder access required", "/_admin/vaults/acme/folders/restricted/objects/page"],
+  [403, "vault access required", "/_admin/vaults/other/metadata"],
+]) {
+  assert.equal(
+    client.isActiveVaultAuthorizationLoss(client.protectedRequestError(path, status, { error: reason }), "acme"),
+    false,
+    `Only a confirmed active-Vault membership loss may lock the session (${status} ${reason} ${path})`
+  );
+}
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
 assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
@@ -3142,6 +3187,70 @@ assert.match(source, /"vaultInviteSecretInput"/);
   accessFailure.seams.reportClientActionFailure(staleAccessError);
   assert.equal(accessFeedback.hidden, true);
   assert.equal(accessFeedback.textContent, "");
+
+  const accessLoss = accessFailureTestSeams();
+  accessLoss.context.window.nostr = {
+    signEvent: async (event) => ({ ...event, id: "auth-event", pubkey: "00".repeat(32), sig: "signature" }),
+  };
+  accessLoss.context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    text: async () => JSON.stringify({ error: "vault access required" }),
+  });
+  const accessLossState = accessLoss.seams.state;
+  accessLossState.activeVaultId = "acme";
+  accessLossState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+  accessLossState.keyring = accessLoss.context.window.FiniteBrainProductClient.createSessionKeyring();
+  accessLossState.keyring.keys.set("acme/general@1", { rawKey: "folder-key-sentinel" });
+  accessLossState.keyring.openedGrants.push({ folderId: "general", keyVersion: 1, vaultId: "acme" });
+  accessLossState.metadata = { name: "Acme private metadata" };
+  accessLossState.projection.pages.set("general/page", {
+    folderId: "general",
+    objectId: "page",
+    text: "decrypted-page-sentinel",
+  });
+  accessLossState.readerBusy = true;
+  accessLossState.sessionEpoch = 52;
+  accessLossState.sessionStatus = "unlocked";
+  accessLoss.context.document.getElementById("pageDraftInput").value = "plaintext-draft-sentinel";
+  let capturedAccessLoss = null;
+  await assert.rejects(
+    () => accessLoss.seams.protectedRequest("/_admin/vaults/acme/metadata"),
+    (error) => {
+      capturedAccessLoss = error;
+      assert.equal(error.status, 403);
+      assert.equal(error.reason, "vault access required");
+      assert.equal(error.path, "/_admin/vaults/acme/metadata");
+      return true;
+    }
+  );
+  assert.equal(accessLossState.sessionEpoch, 53);
+  assert.equal(accessLossState.sessionStatus, "locked");
+  assert.equal(
+    accessLossState.sessionNotice,
+    "Vault access changed. This session was locked. Select a Vault you can open, then unlock again."
+  );
+  assert.equal(accessLossState.keyring, null);
+  assert.equal(accessLossState.metadata, null);
+  assert.equal(accessLossState.projection.pages.size, 0);
+  assert.equal(accessLossState.readerBusy, false);
+  assert.equal(accessLoss.context.document.getElementById("pageDraftInput").value, "");
+  accessLoss.seams.reportClientActionFailure(capturedAccessLoss);
+  const accessLossFeedback = accessLoss.elements.get("clientActionFeedback");
+  assert.equal(accessLossFeedback.hidden, true);
+  assert.equal(accessLossFeedback.textContent, "");
+
+  const staleAccessLoss = accessFailureTestSeams();
+  staleAccessLoss.seams.state.activeVaultId = "acme";
+  staleAccessLoss.seams.state.sessionEpoch = 81;
+  staleAccessLoss.seams.state.sessionStatus = "unlocked";
+  assert.equal(
+    staleAccessLoss.seams.lockSessionForVaultAccessChange(activeVaultAccessLoss, 80),
+    false,
+    "A stale request must not lock or overwrite a newer session"
+  );
+  assert.equal(staleAccessLoss.seams.state.sessionEpoch, 81);
+  assert.equal(staleAccessLoss.seams.state.sessionStatus, "unlocked");
 
   context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
   context.document.getElementById("folderKeyInput").value = "runtime-folder-key-sentinel";

@@ -65,6 +65,7 @@ const FiniteBrainProductClient = (() => {
     accessFolderDropdownListenerBound: false,
   };
   const handledAccessFailures = new WeakSet();
+  const handledSessionLockFailures = new WeakSet();
   let pendingInviteNavigation = null;
 
   const $ = (id) => document.getElementById(id);
@@ -97,6 +98,9 @@ const FiniteBrainProductClient = (() => {
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
   const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
+  const VAULT_ACCESS_CHANGED_NOTICE =
+    "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
+  const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
   const SESSION_PLAINTEXT_INPUT_IDS = [
     "accessAddPersonInput",
     "accessOrganizationVaultNameInput",
@@ -571,11 +575,16 @@ const FiniteBrainProductClient = (() => {
 
   function reportClientActionFailure(error) {
     if (error && typeof error === "object" && handledAccessFailures.has(error)) return;
+    if (error && typeof error === "object" && handledSessionLockFailures.has(error)) return;
     state.lastError = error instanceof Error ? error.message : String(error || "Action failed");
   }
 
   function markAccessFailureHandled(error) {
     if (error && typeof error === "object") handledAccessFailures.add(error);
+  }
+
+  function markSessionLockFailureHandled(error) {
+    if (error && typeof error === "object") handledSessionLockFailures.add(error);
   }
 
   function publicKeyIdentityFromInput(input) {
@@ -831,6 +840,23 @@ const FiniteBrainProductClient = (() => {
     resetVaultSessionState();
     render();
     log("Locked Product Client session.", { status: state.sessionStatus });
+  }
+
+  function lockSessionForVaultAccessChange(error, requestEpoch) {
+    if (
+      !sessionOperationIsCurrent(state.sessionEpoch, requestEpoch, state.sessionStatus) ||
+      !isActiveVaultAuthorizationLoss(error, state.activeVaultId)
+    ) {
+      return false;
+    }
+    markSessionLockFailureHandled(error);
+    resetVaultSessionState();
+    state.sessionNotice = VAULT_ACCESS_CHANGED_NOTICE;
+    render();
+    log("Locked Product Client session after Vault access changed.", {
+      status: state.sessionStatus,
+    });
+    return true;
   }
 
   function handlePageHide() {
@@ -2172,7 +2198,7 @@ const FiniteBrainProductClient = (() => {
       ? resumeSession()
       : loadVaultReader();
     operation.catch((error) => {
-      state.lastError = error.message;
+      reportClientActionFailure(error);
       log("Failed to load Vault from Manage Vaults.", { error: error.message });
       state.readerBusy = false;
       render();
@@ -5664,7 +5690,7 @@ const FiniteBrainProductClient = (() => {
     }
     if (row.target === "refresh") {
       refreshReader().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to refresh Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
@@ -7262,6 +7288,33 @@ const FiniteBrainProductClient = (() => {
     return `${state.config.authScheme} ${utf8Base64(JSON.stringify(signed))}`;
   }
 
+  function protectedRequestError(path, status, body) {
+    const reason = typeof body?.error === "string" ? body.error : null;
+    const error = new Error(reason || `Request failed with ${status}`);
+    error.status = status;
+    error.reason = reason;
+    error.path = path;
+    return error;
+  }
+
+  function isActiveVaultAuthorizationLoss(error, activeVaultId) {
+    if (
+      !error ||
+      error.status !== 403 ||
+      error.reason !== VAULT_ACCESS_REQUIRED_REASON
+    ) {
+      return false;
+    }
+    const vaultId = String(activeVaultId || "").trim();
+    if (!vaultId) return false;
+    const vaultPath = `/_admin/vaults/${encodeURIComponent(vaultId)}`;
+    return [
+      `${vaultPath}/metadata`,
+      `${vaultPath}/export`,
+      `${vaultPath}/sync/bootstrap`,
+    ].includes(error.path);
+  }
+
   async function protectedRequest(path, options = {}) {
     const sessionEpoch = state.sessionEpoch;
     requireCurrentSessionEpoch(sessionEpoch);
@@ -7285,8 +7338,9 @@ const FiniteBrainProductClient = (() => {
       body = text;
     }
     if (!response.ok) {
-      const message = body?.error || `Request failed with ${response.status}`;
-      throw new Error(message);
+      const error = protectedRequestError(path, response.status, body);
+      lockSessionForVaultAccessChange(error, sessionEpoch);
+      throw error;
     }
     rememberIdentitiesFrom(body);
     return body;
@@ -9748,7 +9802,7 @@ const FiniteBrainProductClient = (() => {
     });
     onOptionalClick("resumeSessionButton", () => {
       resumeSession().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to unlock Product Client session.", { error: error.message });
         render();
       });
@@ -9845,7 +9899,7 @@ const FiniteBrainProductClient = (() => {
     $("loadVaultButton")?.addEventListener("click", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
       operation.catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to load Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
@@ -9869,7 +9923,7 @@ const FiniteBrainProductClient = (() => {
     });
     $("refreshReaderButton").addEventListener("click", () => {
       refreshReader().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to refresh Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
@@ -9966,7 +10020,7 @@ const FiniteBrainProductClient = (() => {
     onOptionalClick("accessLoadVaultButton", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
       operation.catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to unlock or load Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
@@ -10467,6 +10521,7 @@ const FiniteBrainProductClient = (() => {
     handlePageShow,
     inlineLinkSegments,
     initialVaultInvitationFolders,
+    isActiveVaultAuthorizationLoss,
     applyPendingInviteNavigation,
     inviteNavigationFromHash,
     inviteUnwrapKeypairFromSecret,
@@ -10503,6 +10558,7 @@ const FiniteBrainProductClient = (() => {
     populateInviteFromHash,
     prepareOkfImportWrites,
     projectionPagesFromProjection,
+    protectedRequestError,
     publicKeyIdentityFromInput,
     readerFolderDetail,
     readerFolderRows,
