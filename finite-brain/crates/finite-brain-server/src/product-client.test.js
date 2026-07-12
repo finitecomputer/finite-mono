@@ -541,6 +541,10 @@ assert.match(
   /onOptionalClick\("accessLoadVaultButton",[\s\S]{0,180}state\.sessionStatus === SESSION_STATUS\.LOCKED \? resumeSession\(\) : loadVaultReader\(\)/
 );
 assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
+assert.match(
+  htmlSource,
+  /id="sessionSettingsButton"[\s\S]{0,900}<circle cx="12" cy="12" r="3"\s*\/>[\s\S]{0,900}M19\.4 15a1\.65 1\.65/,
+);
 assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavVault"[^>]*role="tab"/);
