@@ -52,7 +52,6 @@ const FiniteBrainProductClient = (() => {
     folderShareLinksFolderId: null,
     sharedFolderInvitations: null,
     sharedFolderConnections: null,
-    readerMode: "reading",
     editorMode: "visual",
     vaultControlsCollapsedAfterLoad: false,
     expandedFolderIds: new Set(),
@@ -1979,7 +1978,6 @@ const FiniteBrainProductClient = (() => {
     target.activeAccessFolderId = null;
     target.activeAccessView = "vault";
     target.activeAccessIntent = "overview";
-    target.readerMode = "reading";
     target.editorMode = "visual";
     target.vaultControlsCollapsedAfterLoad = false;
     target.expandedFolderIds = new Set();
@@ -4377,8 +4375,6 @@ const FiniteBrainProductClient = (() => {
       { action: "copy-folder-id", label: "Copy Folder ID" },
       { action: "manage-access", label: "Manage Access" },
       { action: "share-folder", label: "Share Folder" },
-      { separator: true },
-      { action: "delete-folder", label: "Delete Folder", disabled: true, danger: true },
     ];
   }
 
@@ -4448,7 +4444,7 @@ const FiniteBrainProductClient = (() => {
 
   function focusInlineEditor() {
     const focusDraft = () => {
-      if (state.editorMode === "source") {
+      if (state.editorMode === "markdown") {
         const draft = $("pageDraftInput");
         draft.focus?.();
         draft.setSelectionRange?.(draft.value.length, draft.value.length);
@@ -4945,8 +4941,9 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderMarkdownPreview(container, markdown) {
+  function renderMarkdownPreview(container, markdown, options = {}) {
     container.replaceChildren();
+    let taskIndex = 0;
     for (const block of markdownPreviewBlocks(markdown)) {
       if (block.type === "heading") {
         const heading = document.createElement(`h${block.level}`);
@@ -4967,7 +4964,12 @@ const FiniteBrainProductClient = (() => {
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.checked = Boolean(itemBlock.checked);
-            checkbox.disabled = true;
+            checkbox.disabled = !options.editable;
+            checkbox.dataset.taskIndex = String(taskIndex);
+            checkbox.dataset.taskChecked = String(Boolean(itemBlock.checked));
+            checkbox.setAttribute?.("aria-label", taskCheckboxAriaLabel(itemBlock.text, checkbox.checked));
+            checkbox.setAttribute?.("contenteditable", "false");
+            taskIndex += 1;
             item.appendChild(checkbox);
           }
           appendInlineSegments(item, itemBlock.text);
@@ -5033,8 +5035,8 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderMarkdownEditor(container, markdown) {
-    renderMarkdownPreview(container, markdown);
+  function renderMarkdownEditor(container, markdown, options = {}) {
+    renderMarkdownPreview(container, markdown, options);
     if (!container.childNodes.length) {
       const paragraph = document.createElement("p");
       paragraph.appendChild(document.createElement("br"));
@@ -5163,11 +5165,31 @@ const FiniteBrainProductClient = (() => {
     return String(editor?.textContent || "").trim();
   }
 
+  function toggleMarkdownTask(markdown, taskIndex, checked) {
+    const source = String(markdown ?? "");
+    const lineEnding = source.includes("\r\n") ? "\r\n" : "\n";
+    const selectedIndex = Number(taskIndex);
+    let foundTasks = 0;
+    return source
+      .split(/\r?\n/)
+      .map((line) => {
+        const task = line.match(/^(\s*[-*+]\s+\[)[ xX](\]\s+.*)$/);
+        if (!task || foundTasks++ !== selectedIndex) return line;
+        return `${task[1]}${checked ? "x" : " "}${task[2]}`;
+      })
+      .join(lineEnding);
+  }
+
+  function taskCheckboxAriaLabel(taskText, checked) {
+    const text = String(taskText || "Task").replace(/\s+/g, " ").trim() || "Task";
+    return `${checked ? "Mark task incomplete" : "Mark task complete"}: ${text}`;
+  }
+
   function setEditorDraftText(markdown, options = {}) {
     const draft = $("pageDraftInput");
     if (draft) draft.value = markdown;
-    if (options.syncVisual && state.readerMode !== "source") {
-      renderMarkdownEditor(visualEditorElement(), markdown);
+    if (options.syncVisual && state.editorMode === "visual") {
+      renderMarkdownEditor(visualEditorElement(), markdown, { editable: true });
     }
     updateEditorChrome();
   }
@@ -5193,7 +5215,9 @@ const FiniteBrainProductClient = (() => {
   }
 
   function updateSaveControls() {
-    return canSaveActiveDraft();
+    const canSave = canSaveActiveDraft();
+    setOptionalDisabled("savePageButton", !canSave);
+    return canSave;
   }
 
   function rememberActiveDraft(markdown) {
@@ -5222,14 +5246,45 @@ const FiniteBrainProductClient = (() => {
     return markdown;
   }
 
+  function updateActiveTaskDraft(taskCheckbox) {
+    const editor = visualEditorElement();
+    const restoreInitialState = () => {
+      if (taskCheckbox) taskCheckbox.checked = taskCheckbox.dataset?.taskChecked === "true";
+    };
+    if (
+      !taskCheckbox ||
+      taskCheckbox.type !== "checkbox" ||
+      taskCheckbox.disabled ||
+      !editor?.contains?.(taskCheckbox) ||
+      editor.getAttribute?.("contenteditable") !== "true"
+    ) {
+      restoreInitialState();
+      return false;
+    }
+    const taskIndex = Array.from(editor.querySelectorAll?.("input[data-task-index]") || []).indexOf(taskCheckbox);
+    if (taskIndex < 0) {
+      restoreInitialState();
+      return false;
+    }
+    const currentMarkdown = $("pageDraftInput")?.value || "";
+    const markdown = toggleMarkdownTask(currentMarkdown, taskIndex, taskCheckbox.checked);
+    if (markdown !== currentMarkdown) rememberActiveDraft(markdown);
+    taskCheckbox.dataset.taskChecked = String(Boolean(taskCheckbox.checked));
+    taskCheckbox.setAttribute?.(
+      "aria-label",
+      taskCheckboxAriaLabel(taskCheckbox.closest?.("li")?.textContent || "Task", taskCheckbox.checked)
+    );
+    return true;
+  }
+
   function setEditorMode(mode) {
-    state.editorMode = mode === "source" ? "source" : "visual";
-    if (state.editorMode === "source") {
+    state.editorMode = mode === "markdown" ? "markdown" : "visual";
+    if (state.editorMode === "markdown") {
       syncDraftFromVisualEditor();
       setPageContentEditable(visualEditorElement(), false);
     } else {
-      renderMarkdownEditor(visualEditorElement(), $("pageDraftInput").value);
-      if (isReadablePage(selectedReaderPage()) && state.readerMode !== "source") {
+      renderMarkdownEditor(visualEditorElement(), $("pageDraftInput").value, { editable: true });
+      if (isReadablePage(selectedReaderPage())) {
         setPageContentEditable(visualEditorElement(), true);
       }
     }
@@ -5237,19 +5292,17 @@ const FiniteBrainProductClient = (() => {
   }
 
   function updateEditorChrome() {
-    const source = $("pageSourceEditorLabel");
+    const markdownEditor = $("pageMarkdownEditorLabel");
     const page = selectedReaderPage();
-    const canEditInline = isReadablePage(page) && state.readerMode !== "source" && state.editorMode !== "source";
-    if (source) source.hidden = state.editorMode !== "source";
+    const canEditInline = isReadablePage(page) && state.editorMode === "visual";
+    if (markdownEditor) markdownEditor.hidden = state.editorMode !== "markdown";
     let statusText = "Reading mode";
     if (!isReadablePage(page)) {
       statusText = "No page loaded";
-    } else if (state.editorMode === "source") {
-      statusText = "Raw Markdown editor";
+    } else if (state.editorMode === "markdown") {
+      statusText = "Markdown editor";
     } else if (canEditInline) {
       statusText = "Click to edit inline";
-    } else if (state.readerMode === "source") {
-      statusText = "Source reading mode";
     }
     setText("editorStatusText", statusText);
     updateSaveControls();
@@ -5571,14 +5624,9 @@ const FiniteBrainProductClient = (() => {
       content.textContent = "This page is locked in this session.";
       return;
     }
-    if (state.readerMode === "source") {
-      content.className = "note-content note-source";
-      content.textContent = page.text || "";
-      return;
-    }
     content.className = `note-content note-markdown inline-page-editor${page.localDraft ? " inline-page-editor-dirty" : ""}`;
-    setPageContentEditable(content, state.editorMode !== "source");
-    renderMarkdownEditor(content, page.text || "");
+    setPageContentEditable(content, state.editorMode === "visual");
+    renderMarkdownEditor(content, page.text || "", { editable: state.editorMode === "visual" });
     const searchQuery = readerSearchHighlightForPage(page.key, state.searchHighlight);
     if (!searchQuery) return;
     const matches = highlightReaderSearchMatches(content, searchQuery);
@@ -7096,9 +7144,6 @@ const FiniteBrainProductClient = (() => {
     });
 
     const page = selectedReaderPage();
-    $("readerModeButton").textContent = state.readerMode === "source" ? "Source" : "Reading";
-    setPressed("readerModeButton", state.readerMode === "source");
-    $("readerModeButton").disabled = !isReadablePage(page);
     if (!page) {
       const sessionLocked = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
       setText(
@@ -7876,7 +7921,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function activePageInput() {
-    if (state.editorMode === "source") {
+    if (state.editorMode === "markdown") {
       rememberActiveDraft($("pageDraftInput").value);
     } else if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
       syncDraftFromVisualEditor();
@@ -10041,9 +10086,13 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
-    $("readerModeButton").addEventListener("click", () => {
-      state.readerMode = state.readerMode === "source" ? "reading" : "source";
-      render();
+    onOptionalClick("savePageButton", () => {
+      if (!canSaveActiveDraft()) return;
+      saveActivePage().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to save Page.", { error: error.message });
+        render();
+      });
     });
     $("ribbonGraphButton").addEventListener("click", () => {
       setWorkspaceView("graph");
@@ -10292,11 +10341,15 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
-    $("readerPageContent").addEventListener("input", () => {
+    $("readerPageContent").addEventListener("input", (event) => {
+      if (event.target?.matches?.("input[data-task-index]")) return;
       if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
         syncDraftFromVisualEditor({ remember: true });
         refreshEditorSlashMenu();
       }
+    });
+    $("readerPageContent").addEventListener("change", (event) => {
+      updateActiveTaskDraft(event.target);
     });
     $("readerPageContent").addEventListener("click", (event) => {
       activatePageContentLink(event);
@@ -10309,7 +10362,7 @@ const FiniteBrainProductClient = (() => {
       rememberActiveDraft($("pageDraftInput").value);
     });
     $("editorDrawer").addEventListener("toggle", () => {
-      setEditorMode($("editorDrawer").open ? "source" : "visual");
+      setEditorMode($("editorDrawer").open ? "markdown" : "visual");
     });
     onOptionalClick("openFolderKeyButton", () => {
       openEnteredFolderKey().catch((error) => {
@@ -10717,6 +10770,8 @@ const FiniteBrainProductClient = (() => {
     vaultGuideStepRows,
     vaultPeopleRows,
     withActiveVaultOption,
+    toggleMarkdownTask,
+    taskCheckboxAriaLabel,
   };
 })();
 

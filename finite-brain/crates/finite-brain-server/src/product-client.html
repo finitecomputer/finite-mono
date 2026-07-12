@@ -603,9 +603,14 @@
               </div>
               <div class="page-header-actions">
                 <span id="readerPageMeta" class="pill muted">locked</span>
-                <button id="readerModeButton" class="reader-mode-button" type="button" aria-pressed="false">
-                  Reading
-                </button>
+                <button
+                  id="savePageButton"
+                  class="page-save-button"
+                  type="button"
+                  title="Save Page (Ctrl/Cmd+S)"
+                  aria-keyshortcuts="Control+S Meta+S"
+                  disabled
+                >Save Page</button>
               </div>
             </header>
             <div id="readerPageContent" class="note-content note-markdown">
@@ -614,12 +619,12 @@
             <div id="editorSlashMenu" class="editor-slash-menu" role="listbox" aria-label="Editor slash commands" hidden></div>
             <details id="editorDrawer" class="editor-drawer">
               <summary>
-                <span>Markdown source</span>
+                <span>Edit Markdown</span>
                 <span id="editorStatusText">No page loaded</span>
               </summary>
               <div class="editor-shell">
-                <label id="pageSourceEditorLabel" class="page-editor-label page-source-editor" hidden>
-                  Markdown source
+                <label id="pageMarkdownEditorLabel" class="page-editor-label page-markdown-editor" hidden>
+                  Edit Markdown
                   <textarea id="pageDraftInput" rows="8" spellcheck="true"># New Page
 
 Start writing here.</textarea>

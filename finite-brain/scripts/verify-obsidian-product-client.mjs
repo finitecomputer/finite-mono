@@ -256,10 +256,10 @@ function checkStaticShell() {
     "getVaultInvitationButton",
     "getEmailInviteInstructionsButton",
     "acceptVaultInvitationButton",
-    "readerModeButton",
+    "savePageButton",
     "editorSlashMenu",
     "readerPageContent",
-    "pageSourceEditorLabel",
+    "pageMarkdownEditorLabel",
     "readerPagePath",
     "commandPalette",
     "commandPaletteInput",
@@ -274,9 +274,12 @@ function checkStaticShell() {
   assertNotIncludes(html, "graphFilterInput", "Product Client HTML");
   assertNotIncludes(html, "aria-label=\"Filter graph\"", "Product Client HTML");
   assertNotIncludes(html, "graph-icon-button", "Product Client HTML");
+  assertNotIncludes(html, "readerModeButton", "Product Client HTML");
   assertNotIncludes(css, ".graph-controls", "Product Client CSS");
   assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");
+  assertNotIncludes(js, "readerMode", "Product Client JS");
+  assertNotIncludes(js, 'action: "delete-folder"', "Product Client JS");
 
   for (const marker of [
     ".obsidian-shell",
@@ -333,8 +336,8 @@ function checkStaticShell() {
     ".note-markdown table",
     ".note-markdown pre[data-language]",
     ".task-list",
-    ".page-source-editor",
-    ".note-source",
+    ".page-markdown-editor",
+    ".page-save-button",
     ".internal-link",
   ]) {
     assertIncludes(css, marker, "Product Client CSS");
@@ -397,6 +400,7 @@ function checkStaticShell() {
     "parseMarkdownListItem",
     "visualEditorElement",
     "markdownPreviewBlocks",
+    "toggleMarkdownTask",
     "pageLinkContext",
     "readerFolderRows",
     "readerPageRows",
@@ -417,7 +421,6 @@ function checkStaticShell() {
     "editorToolbar",
     "inline-editor-toolbar",
     "data-editor-command",
-    "savePageButton",
     "syncBootstrapButton",
     "workspace-status-cluster",
     "folderCount",

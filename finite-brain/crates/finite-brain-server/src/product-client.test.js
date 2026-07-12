@@ -230,6 +230,10 @@ const handleContextMenuActionSource = source.slice(
   source.indexOf("function handleContextMenuAction(item, target)"),
   source.indexOf("function openContextMenu(target, x, y)")
 );
+const updateActiveTaskDraftSource = source.slice(
+  source.indexOf("function updateActiveTaskDraft(taskCheckbox)"),
+  source.indexOf("function setEditorMode(mode)")
+);
 assert.match(
   reportClientActionFailureSource,
   /handledAccessFailures\.has\(error\)\) return;/,
@@ -721,6 +725,21 @@ assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
 assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
 assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(
+  htmlSource,
+  /id="savePageButton"[^>]*aria-keyshortcuts="Control\+S Meta\+S"[^>]*>Save Page</,
+  "A visible Save Page action must advertise the existing platform shortcut"
+);
+assert.match(htmlSource, />Edit Markdown</, "The one raw Markdown editor must be named clearly");
+assert.doesNotMatch(htmlSource, /readerModeButton/, "The duplicate reader Reading/Source control must be absent");
+assert.doesNotMatch(htmlSource, />\s*Markdown source\s*</, "Reader UI must not overload the Source Note term");
+assert.doesNotMatch(source, /readerMode/, "Reader source-mode state must be removed with its control");
+assert.doesNotMatch(cssSource, /\.reader-mode-button\b/, "Reader source-mode styling must be removed");
+assert.match(
+  source,
+  /savePageButton[\s\S]{0,420}saveActivePage\(\)\.catch/,
+  "The visible Save Page action must use the existing signed save workflow"
+);
 assert.match(
   htmlSource,
   /id="clientActionFeedback"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/
@@ -2567,7 +2586,11 @@ assert.match(source, /"vaultInviteSecretInput"/);
   const folderMenu = client.contextMenuItemsForTarget({ type: "folder", folderId: "crypto" });
   assert.equal(folderMenu.some((item) => item.action === "new-page"), true);
   assert.equal(folderMenu.some((item) => item.action === "share-folder"), true);
-  assert.equal(folderMenu.find((item) => item.action === "delete-folder").disabled, true);
+  assert.equal(
+    folderMenu.some((item) => item.action === "delete-folder" || item.label === "Delete Folder"),
+    false,
+    "Folder context menus must not advertise deletion before the server contract exists"
+  );
   const restrictedParent = client.folderCreationParent("restricted", [
     {
       access: "restricted",
@@ -2883,6 +2906,56 @@ assert.match(source, /"vaultInviteSecretInput"/);
       "| Name | Status |\n| --- | --- |\n| Brain | **ready** |",
       "---",
     ].join("\n\n")
+  );
+  assert.equal(
+    client.toggleMarkdownTask(
+      [
+        "# Tasks",
+        "",
+        "- [ ] Preserve this task",
+        "- [x] Keep this task checked",
+        "- Plain list item",
+      ].join("\n"),
+      0,
+      true
+    ),
+    [
+      "# Tasks",
+      "",
+      "- [x] Preserve this task",
+      "- [x] Keep this task checked",
+      "- Plain list item",
+    ].join("\n")
+  );
+  assert.equal(
+    client.toggleMarkdownTask("- [x] First\r\n- [ ] Second", 1, true),
+    "- [x] First\r\n- [x] Second",
+    "A task toggle must preserve the normal draft's line ending style"
+  );
+  assert.equal(
+    client.taskCheckboxAriaLabel("Ship the explicit draft", false),
+    "Mark task complete: Ship the explicit draft",
+    "An unchecked visual task must announce the action as well as its task text"
+  );
+  assert.equal(
+    client.taskCheckboxAriaLabel("Ship the explicit draft", true),
+    "Mark task incomplete: Ship the explicit draft",
+    "A checked visual task must announce the inverse action"
+  );
+  assert.match(
+    source,
+    /readerPageContent"\)\.addEventListener\("change",[\s\S]{0,220}updateActiveTaskDraft\(event\.target\)/,
+    "Visual task changes must update the active Page draft"
+  );
+  assert.match(
+    updateActiveTaskDraftSource,
+    /rememberActiveDraft\(markdown\);/,
+    "A task toggle must remain a normal local Page draft until Save"
+  );
+  assert.doesNotMatch(
+    updateActiveTaskDraftSource,
+    /protectedRequest|saveActivePage/,
+    "A task toggle must not trigger a background encrypted write"
   );
   assert.equal(JSON.stringify(client.pageStatsForText("# Title\n\nSee [[Roadmap]] and words.")), JSON.stringify({
     links: 1,

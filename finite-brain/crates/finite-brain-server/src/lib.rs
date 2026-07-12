@@ -2328,7 +2328,9 @@ mod tests {
         assert!(client_body.contains("createVaultInvitationButton"));
         assert!(client_body.contains("acceptVaultInvitationButton"));
         assert!(client_body.contains("revokeVaultInvitationButton"));
-        assert!(!client_body.contains("savePageButton"));
+        assert!(client_body.contains("savePageButton"));
+        assert!(!client_body.contains("readerModeButton"));
+        assert!(client_body.contains("Edit Markdown"));
         assert!(!client_body.contains("syncBootstrapButton"));
         assert!(client_body.contains("Graph View"));
         assert!(client_body.contains("Zoom in"));
