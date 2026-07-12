@@ -1307,55 +1307,79 @@ pre {
 }
 
 .session-security-status {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  min-height: 40px;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--blue-soft) 56%, var(--sidebar));
-  padding: 8px 12px;
+  background: color-mix(in srgb, var(--blue-soft) 42%, var(--sidebar));
+  padding: 4px 10px;
 }
 
 .session-security-copy {
-  display: grid;
+  display: flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
-  gap: 2px;
 }
 
 .session-security-copy strong {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  text-wrap: balance;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-security-copy strong::before {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin-right: 1px;
+  border-radius: 50%;
+  background: var(--status-warning);
+  content: "";
+}
+
+.obsidian-shell[data-session-status="unlocked"] .session-security-copy strong::before {
+  background: var(--status-success);
 }
 
 .session-security-copy span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-  text-wrap: pretty;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .session-security-status button {
-  height: var(--control-height);
-  min-height: var(--control-height);
-  border-color: transparent;
-  border-radius: var(--radius-pill);
-  background: var(--blue);
-  box-shadow: var(--shadow-control);
-  color: #f6f8ff;
-  font-size: 13px;
+  height: 32px;
+  min-height: 32px;
+  border-color: color-mix(in srgb, var(--blue) 56%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--blue-soft);
+  box-shadow: none;
+  color: var(--blue-strong);
+  font-size: 12px;
   font-weight: 600;
-  padding: 0 13px;
+  padding: 0 11px;
   transition-duration: 140ms;
   transition-property: background-color, box-shadow, color, transform;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
 .session-security-status button:not(:disabled):hover {
-  background: var(--blue-strong);
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue-soft) 76%, var(--blue));
   box-shadow: var(--shadow-control-hover);
-  color: #ffffff;
+  color: var(--blue-strong);
 }
 
 .session-security-status button:not(:disabled):active {
@@ -4254,12 +4278,8 @@ pre {
     display: none;
   }
 
-  .session-security-status {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .session-security-status button {
-    width: 100%;
+    width: auto;
   }
 
   .access-folder-selector,
