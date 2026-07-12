@@ -57,6 +57,18 @@ export function googleWorkspaceOAuthConfig(
   };
 }
 
+/**
+ * Resolve browser-facing redirects from configured public origin rather than
+ * Next's loopback request URL behind Caddy/host networking.
+ */
+export function googleWorkspaceDashboardUrl(
+  path: string,
+  requestUrl: string,
+  env: Record<string, string | undefined> = process.env
+) {
+  return new URL(path, dashboardBaseUrl(requestUrl, env));
+}
+
 export async function sealGoogleWorkspaceState(
   state: GoogleWorkspaceOAuthState,
   env: Record<string, string | undefined> = process.env
@@ -102,6 +114,7 @@ function dashboardBaseUrl(requestUrl: string, env: Record<string, string | undef
   for (const candidate of [
     env.FC_DASHBOARD_PUBLIC_URL,
     env.NEXT_PUBLIC_APP_URL,
+    env.FC_DASHBOARD_BASE_URL,
     env.NEXT_PUBLIC_WORKOS_REDIRECT_URI,
     requestUrl,
   ]) {

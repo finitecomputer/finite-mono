@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   googleWorkspaceOAuthConfig,
   googleWorkspaceOAuthConfigured,
+  googleWorkspaceDashboardUrl,
   GOOGLE_WORKSPACE_SCOPES,
   sealGoogleWorkspaceState,
   unsealGoogleWorkspaceState,
@@ -41,12 +42,22 @@ test("Google Workspace OAuth uses the dashboard callback and sealed user-bound s
 });
 
 test("Google Workspace OAuth derives the exact production callback from the configured public origin", () => {
+  const productionEnv = {
+    ...env,
+    FC_DASHBOARD_BASE_URL: "https://finite.computer",
+    NEXT_PUBLIC_WORKOS_REDIRECT_URI: "https://finite.computer/callback",
+  };
   assert.equal(
-    googleWorkspaceOAuthConfig("http://127.0.0.1:3000/internal", {
-      ...env,
-      NEXT_PUBLIC_WORKOS_REDIRECT_URI: "https://finite.computer/callback",
-    })?.redirectUri,
+    googleWorkspaceOAuthConfig("http://127.0.0.1:3000/internal", productionEnv)?.redirectUri,
     "https://finite.computer/google-workspace/callback"
+  );
+  assert.equal(
+    googleWorkspaceDashboardUrl(
+      "/dashboard/machines/runtime-a/connections?google=connected",
+      "http://127.0.0.1:3000/google-workspace/callback",
+      productionEnv
+    ).toString(),
+    "https://finite.computer/dashboard/machines/runtime-a/connections?google=connected"
   );
 });
 

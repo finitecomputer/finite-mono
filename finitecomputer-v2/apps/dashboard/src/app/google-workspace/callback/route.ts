@@ -8,6 +8,7 @@ import {
 } from "@/lib/hosted-agent-controls";
 import {
   googleWorkspaceOAuthConfig,
+  googleWorkspaceDashboardUrl,
   GOOGLE_WORKSPACE_SCOPES,
   unsealGoogleWorkspaceState,
 } from "@/lib/google-workspace-oauth";
@@ -18,11 +19,13 @@ export async function GET(request: Request) {
     requestUrl.searchParams.get("state")?.trim() ?? ""
   );
   if (!state) {
-    return NextResponse.redirect(new URL("/dashboard", requestUrl));
+    return NextResponse.redirect(googleWorkspaceDashboardUrl("/dashboard", request.url));
   }
   const redirectPath = `/dashboard/machines/${encodeURIComponent(state.machineId)}/connections`;
   const redirect = (result: string) =>
-    NextResponse.redirect(new URL(`${redirectPath}?google=${result}`, requestUrl));
+    NextResponse.redirect(
+      googleWorkspaceDashboardUrl(`${redirectPath}?google=${result}`, request.url)
+    );
   if (requestUrl.searchParams.get("error")) {
     return redirect("cancelled");
   }
