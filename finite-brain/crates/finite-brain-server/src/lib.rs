@@ -2336,6 +2336,9 @@ mod tests {
         assert!(client_body.contains("createVaultInvitationButton"));
         assert!(client_body.contains("acceptVaultInvitationButton"));
         assert!(client_body.contains("revokeVaultInvitationButton"));
+        assert!(client_body.contains("vaultInviteUrlOutput"));
+        assert!(client_body.contains("copyVaultInviteUrlButton"));
+        assert!(client_body.contains("Copy client-only invite link"));
         assert!(client_body.contains("savePageButton"));
         assert!(!client_body.contains("readerModeButton"));
         assert!(client_body.contains("Edit Markdown"));
@@ -2430,6 +2433,7 @@ mod tests {
         assert!(css_body.contains(".access-inspector"));
         assert!(css_body.contains(".access-badge"));
         assert!(css_body.contains(".access-content-panel"));
+        assert!(css_body.contains(".vault-invite-url-output"));
         assert!(!css_body.contains(".access-view-switch"));
         assert!(!css_body.contains(".okf-controls"));
         assert!(css_body.contains(".session-security-status"));
@@ -2476,6 +2480,8 @@ mod tests {
         assert!(js_body.contains("setGraphHover"));
         assert!(js_body.contains("createSessionKeyring"));
         assert!(js_body.contains("clearSessionSecretsAndPlaintext"));
+        assert!(js_body.contains("copyToClipboard"));
+        assert!(js_body.contains("copyVaultInviteUrl"));
         assert!(js_body.contains("sessionStatusView"));
         assert!(js_body.contains("sessionGrantOpeningAllowed"));
         assert!(js_body.contains("extractPageLinks"));

@@ -265,16 +265,27 @@
                         <button id="createVaultInvitationButton" type="button">Create invite</button>
                         <button id="revokeVaultInvitationButton" class="danger-action" type="button">Revoke invite</button>
                       </div>
-                      <label class="access-field">
-                        <span>Client-only invite URL</span>
-                        <input
-                          id="vaultInviteUrlInput"
-                          type="password"
-                          autocomplete="off"
-                          spellcheck="false"
-                          readonly
-                        />
-                      </label>
+                      <div id="vaultInviteUrlOutput" class="vault-invite-url-output" hidden>
+                        <label class="access-field">
+                          <span>Client-only invite URL</span>
+                          <input
+                            id="vaultInviteUrlInput"
+                            type="text"
+                            autocomplete="off"
+                            spellcheck="false"
+                            readonly
+                          />
+                        </label>
+                        <button
+                          id="copyVaultInviteUrlButton"
+                          class="access-primary-button"
+                          type="button"
+                          aria-label="Copy client-only invite link"
+                          disabled
+                        >
+                          Copy client-only invite link
+                        </button>
+                      </div>
                     </section>
 
                     <section class="access-admin-section vault-access-option">

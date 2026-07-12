@@ -238,7 +238,9 @@ function checkStaticShell() {
     "vaultInviteExpiresAtInput",
     "createVaultInvitationButton",
     "revokeVaultInvitationButton",
+    "vaultInviteUrlOutput",
     "vaultInviteUrlInput",
+    "copyVaultInviteUrlButton",
     "vaultInviteCodeInput",
     "vaultInviteEmailInput",
     "vaultInviteEmailProofCreatedAtInput",
@@ -333,6 +335,7 @@ function checkStaticShell() {
     ".access-share-hint",
     ".access-link-status",
     ".access-busy-status",
+    ".vault-invite-url-output",
     ".access-content-panel.is-busy",
     ".access-badge",
     ".note-content-empty",
@@ -385,6 +388,8 @@ function checkStaticShell() {
     "addVaultAdminFromPanel",
     "buildFolderAccessRemovalRequest",
     "buildEmailVaultInvitationRequest",
+    "copyToClipboard",
+    "copyVaultInviteUrl",
     "buildEmailInviteClaimRequest",
     "emailInviteBootstrapPath",
     "emailInviteClientUrl",
@@ -414,6 +419,37 @@ function checkStaticShell() {
   ]) {
     assertIncludes(js, marker, "Product Client JS");
   }
+
+  assert.match(
+    html,
+    /id="vaultInviteUrlOutput"[^>]*hidden/,
+    "Product Client HTML must keep generated invite URLs hidden before an unlocked session creates one"
+  );
+  assert.match(
+    html,
+    /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+    "Product Client HTML must expose a generated invite URL as readable local output"
+  );
+  assert.match(
+    html,
+    /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
+    "Product Client HTML must name the client-only invite copy action"
+  );
+  assert.match(
+    html,
+    /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+    "Product Client HTML must keep manually entered Invite Secrets masked"
+  );
+  assert.match(
+    js,
+    /async function copyToClipboard\(text\)/,
+    "Product Client JS must route copy actions through one safe helper"
+  );
+  assert.doesNotMatch(
+    js,
+    /log\("Copied (?:Page|Folder) ID\./,
+    "Product Client JS must not log copied identifiers"
+  );
 
   for (const marker of [
     "obsidian-titlebar",

@@ -3777,6 +3777,12 @@ pre {
   display: none;
 }
 
+.client-action-feedback[data-tone="success"] {
+  border-top-color: var(--status-success-border);
+  background: var(--status-success-bg);
+  color: var(--status-success);
+}
+
 .workspace-view {
   min-width: 0;
   min-height: 0;
@@ -4926,6 +4932,16 @@ pre {
   width: 100%;
   line-height: 1.25;
   white-space: normal;
+}
+
+.vault-invite-url-output {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vault-invite-url-output .access-primary-button {
+  width: 100%;
 }
 
 @media (prefers-reduced-motion: reduce) {

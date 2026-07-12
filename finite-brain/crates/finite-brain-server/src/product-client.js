@@ -16,6 +16,7 @@ const FiniteBrainProductClient = (() => {
     metadata: null,
     keyring: null,
     lastError: null,
+    clientActionFeedback: null,
     preparedWrite: null,
     preparedWriteTarget: null,
     projection: createClientProjection(),
@@ -98,6 +99,12 @@ const FiniteBrainProductClient = (() => {
   const VAULT_ACCESS_CHANGED_NOTICE =
     "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
   const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
+  const CLIENT_ACTION_FEEDBACK = Object.freeze({
+    copyFailure: "Could not copy to clipboard. Try again.",
+    copySuccess: "Copied to clipboard.",
+    failure:
+      "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session.",
+  });
   const SESSION_PLAINTEXT_INPUT_IDS = [
     "accessAddPersonInput",
     "accessShareExpiresAtInput",
@@ -556,11 +563,18 @@ const FiniteBrainProductClient = (() => {
   function renderClientActionFeedback() {
     const feedback = $("clientActionFeedback");
     if (!feedback) return;
-    const visible = Boolean(lastErrorValue);
+    const feedbackState = state.clientActionFeedback ||
+      (lastErrorValue ? { message: CLIENT_ACTION_FEEDBACK.failure, tone: "error" } : null);
+    const visible = Boolean(feedbackState);
     feedback.hidden = !visible;
-    feedback.textContent = visible
-      ? "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
-      : "";
+    feedback.textContent = feedbackState?.message || "";
+    if (feedbackState) feedback.dataset.tone = feedbackState.tone;
+    else delete feedback.dataset.tone;
+  }
+
+  function setClientActionFeedback(tone, message) {
+    state.clientActionFeedback = { message, tone };
+    renderClientActionFeedback();
   }
 
   function reportClientActionFailure(error) {
@@ -1853,6 +1867,7 @@ const FiniteBrainProductClient = (() => {
     target.projection = createClientProjection();
     target.preparedWrite = null;
     target.preparedWriteTarget = null;
+    target.clientActionFeedback = null;
     target.lastError = null;
     target.accessResult = null;
     target.lastShareLinkId = null;
@@ -5681,9 +5696,26 @@ const FiniteBrainProductClient = (() => {
     menu.style.top = `${Math.min(Math.max(8, y), maxTop)}px`;
   }
 
-  function writeClipboard(text) {
-    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
-    return Promise.resolve();
+  async function copyToClipboard(text) {
+    try {
+      if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      setClientActionFeedback("success", CLIENT_ACTION_FEEDBACK.copySuccess);
+      return true;
+    } catch (_) {
+      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.copyFailure);
+      return false;
+    }
+  }
+
+  async function copyVaultInviteUrl() {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.lastEmailInviteUrl) {
+      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.copyFailure);
+      return false;
+    }
+    return copyToClipboard(state.lastEmailInviteUrl);
   }
 
   function handleContextMenuAction(item, target) {
@@ -5714,13 +5746,11 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     if (item.action === "copy-page-id") {
-      writeClipboard(target.objectId).catch(() => {});
-      log("Copied Page ID.", { objectId: target.objectId });
+      void copyToClipboard(target.objectId);
       return;
     }
     if (item.action === "copy-folder-id") {
-      writeClipboard(target.folderId).catch(() => {});
-      log("Copied Folder ID.", { folderId: target.folderId });
+      void copyToClipboard(target.folderId);
       return;
     }
     if (item.action === "delete-page") {
@@ -5938,9 +5968,12 @@ const FiniteBrainProductClient = (() => {
     if (state.lastEmailInviteSecret && $("vaultInviteSecretInput") && !$("vaultInviteSecretInput").value) {
       $("vaultInviteSecretInput").value = state.lastEmailInviteSecret;
     }
-    if (state.lastEmailInviteUrl && $("vaultInviteUrlInput")) {
-      $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
-    }
+    const inviteUrlVisible =
+      state.sessionStatus === SESSION_STATUS.UNLOCKED && Boolean(state.lastEmailInviteUrl);
+    safeSetHidden("vaultInviteUrlOutput", !inviteUrlVisible);
+    const inviteUrlInput = $("vaultInviteUrlInput");
+    if (inviteUrlInput) inviteUrlInput.value = inviteUrlVisible ? state.lastEmailInviteUrl : "";
+    setOptionalDisabled("copyVaultInviteUrlButton", !inviteUrlVisible);
     const controls = vaultInvitationPanelState({
       activeVaultAvailable: Boolean(state.activeVaultId),
       busy: state.accessBusy,
@@ -7998,6 +8031,8 @@ const FiniteBrainProductClient = (() => {
     state.lastEmailInviteUrl = null;
     const inviteUrlInput = $("vaultInviteUrlInput");
     if (inviteUrlInput) inviteUrlInput.value = "";
+    safeSetHidden("vaultInviteUrlOutput", true);
+    setOptionalDisabled("copyVaultInviteUrlButton", true);
   }
 
   function rememberVaultInvitationSelection(invitation) {
@@ -9736,6 +9771,9 @@ const FiniteBrainProductClient = (() => {
         reportClientActionFailure(error);
         log("Failed to create Vault invitation.", { error: error.message });
       });
+    });
+    onOptionalClick("copyVaultInviteUrlButton", () => {
+      void copyVaultInviteUrl();
     });
     onOptionalClick("getVaultInvitationButton", () => {
       inspectVaultInvitationFromPanel().catch((error) => {

@@ -162,6 +162,48 @@ function invitationPanelTestSeams() {
   return { context: testContext, elements: testElements, seams };
 }
 
+function clipboardInvitationFeedbackTestSeams(navigatorValue) {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    navigator: navigatorValue,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element());
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      nostr: {
+        getPublicKey() {},
+        signEvent() {},
+      },
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, copyToClipboard, copyVaultInviteUrl, handleContextMenuAction, lockSession, renderVaultInvitationPanel });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The clipboard test must capture the Product Client's real feedback and session seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-clipboard-invitation-feedback.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured clipboard and invitation seams");
+  return { context: testContext, elements: testElements, seams };
+}
+
 const prepareDraftWriteSource = source.slice(
   source.indexOf("async function prepareDraftWrite(options = {})"),
   source.indexOf("async function savePreparedPage()")
@@ -193,6 +235,10 @@ const failAccessOperationSource = source.slice(
 const createVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function createVaultInvitationFromPanel()"),
   source.indexOf("async function inspectVaultInvitationFromPanel()")
+);
+const successfulVaultInvitationResultSource = createVaultInvitationFromPanelSource.slice(
+  createVaultInvitationFromPanelSource.indexOf('setAccessResult("ready", "Invitation created"'),
+  createVaultInvitationFromPanelSource.indexOf('log("Created Vault invitation."')
 );
 const inspectVaultInvitationFromPanelSource = source.slice(
   source.indexOf("async function inspectVaultInvitationFromPanel()"),
@@ -267,6 +313,46 @@ assert.match(
   protectedRequestSource,
   /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForVaultAccessChange\(error, sessionEpoch\);\s*throw error;/s,
   "Confirmed active-Vault authorization loss must lock before protected work can continue"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteUrlOutput"[^>]*hidden/,
+  "The client-only invite URL output must stay hidden until an unlocked session creates it"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+  "A generated client-only invite URL must be readable local output rather than a masked field"
+);
+assert.match(
+  htmlSource,
+  /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
+  "The generated invite URL must have an explicitly named copy action"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+  "Manually entered Invite Secrets must remain masked"
+);
+assert.match(
+  source,
+  /async function copyToClipboard\(text\)/,
+  "Copy actions must use one safe asynchronous feedback path"
+);
+assert.match(
+  source,
+  /async function copyVaultInviteUrl\(\)/,
+  "The client-only invite URL must have a session-gated copy action"
+);
+assert.doesNotMatch(
+  handleContextMenuActionSource,
+  /log\("Copied (?:Page|Folder) ID\./,
+  "Copy actions must not write copied identifiers into client logs"
+);
+assert.doesNotMatch(
+  successfulVaultInvitationResultSource,
+  /(?:inviteUrl|lastEmailInviteUrl)/,
+  "Invitation result metadata must not repeat the client-only invite URL"
 );
 
 function objectIdCandidateBaseForTest(value) {
@@ -648,6 +734,7 @@ sessionProjection.localDrafts.set("general/draft", {
 sessionProjection.conflicts.push({ plaintext: "conflict-plaintext-sentinel" });
 const sessionState = {
   accessResult: { detail: "member-access-sentinel" },
+  clientActionFeedback: { message: "Copied to clipboard.", tone: "success" },
   folderShareLinks: [{ id: "share-link-sentinel" }],
   identityByNpub: new Map([["npub-member", { display: "member@example.com" }]]),
   keyring: sessionKeyring,
@@ -676,11 +763,109 @@ assert.equal(sessionState.preparedWrite, null);
 assert.equal(sessionState.preparedWriteTarget, null);
 assert.equal(sessionState.identityByNpub.size, 0);
 assert.equal(sessionState.accessResult, null);
+assert.equal(sessionState.clientActionFeedback, null);
 assert.equal(sessionState.vaultInvitations, null);
 assert.equal(sessionState.folderShareLinks, null);
 assert.equal(sessionState.lastEmailInviteSecret, null);
 assert.equal(sessionState.lastEmailInviteUrl, null);
 assert.equal(sessionState.lastEmailInvitePostProof, null);
+
+async function assertClipboardInvitationFeedbackContracts() {
+  const copiedValues = [];
+  const clipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: async (value) => {
+        copiedValues.push(value);
+      },
+    },
+  });
+  const clipboardFeedbackState = clipboardFeedback.seams.state;
+  const clipboardFeedbackElement = clipboardFeedback.context.document.getElementById("clientActionFeedback");
+  const copiedPageId = "page-id-fixture-sentinel";
+  assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
+  assert.deepEqual(copiedValues, [copiedPageId]);
+  assert.equal(clipboardFeedbackElement.hidden, false);
+  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /page-id-fixture-sentinel/);
+
+  clipboardFeedback.seams.handleContextMenuAction(
+    { action: "copy-page-id" },
+    { objectId: "context-page-id-sentinel" }
+  );
+  clipboardFeedback.seams.handleContextMenuAction(
+    { action: "copy-folder-id" },
+    { folderId: "context-folder-id-sentinel" }
+  );
+  await Promise.resolve();
+  assert.deepEqual(copiedValues, [
+    copiedPageId,
+    "context-page-id-sentinel",
+    "context-folder-id-sentinel",
+  ]);
+  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /context-(page|folder)-id-sentinel/);
+
+  clipboardFeedbackState.sessionStatus = "unlocked";
+  clipboardFeedbackState.metadata = { kind: "organization" };
+  clipboardFeedbackState.signerStatus = "connected";
+  clipboardFeedbackState.lastEmailInviteSecret = "invite-secret-fixture-sentinel";
+  clipboardFeedbackState.lastEmailInviteUrl =
+    "https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel";
+  const inviteUrlInput = clipboardFeedback.context.document.getElementById("vaultInviteUrlInput");
+  const inviteUrlOutput = clipboardFeedback.context.document.getElementById("vaultInviteUrlOutput");
+  const copyInviteUrlButton = clipboardFeedback.context.document.getElementById("copyVaultInviteUrlButton");
+  const inviteSecretInput = clipboardFeedback.context.document.getElementById("vaultInviteSecretInput");
+  inviteSecretInput.value = "invite-secret-fixture-sentinel";
+  clipboardFeedback.seams.renderVaultInvitationPanel();
+  assert.equal(inviteUrlOutput.hidden, false);
+  assert.equal(inviteUrlInput.value, clipboardFeedbackState.lastEmailInviteUrl);
+  assert.equal(copyInviteUrlButton.disabled, false);
+  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), true);
+  assert.equal(copiedValues.at(-1), clipboardFeedbackState.lastEmailInviteUrl);
+  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
+
+  clipboardFeedback.seams.lockSession();
+  assert.equal(clipboardFeedbackState.sessionStatus, "locked");
+  assert.equal(clipboardFeedbackState.lastEmailInviteSecret, null);
+  assert.equal(clipboardFeedbackState.lastEmailInviteUrl, null);
+  assert.equal(inviteSecretInput.value, "");
+  assert.equal(inviteUrlInput.value, "");
+  assert.equal(inviteUrlOutput.hidden, true);
+  assert.equal(copyInviteUrlButton.disabled, true);
+  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), false);
+  assert.equal(
+    copiedValues.includes("https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel"),
+    true
+  );
+
+  const rejectedClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: async () => {
+        throw new Error("clipboard-rejection-detail-sentinel");
+      },
+    },
+  });
+  assert.equal(
+    await rejectedClipboardFeedback.seams.copyToClipboard("rejected-copy-value-sentinel"),
+    false
+  );
+  const rejectedFeedbackElement = rejectedClipboardFeedback.elements.get("clientActionFeedback");
+  assert.equal(rejectedFeedbackElement.hidden, false);
+  assert.equal(rejectedFeedbackElement.textContent, "Could not copy to clipboard. Try again.");
+  assert.doesNotMatch(rejectedFeedbackElement.textContent, /rejected-copy-value-sentinel/);
+  assert.doesNotMatch(rejectedFeedbackElement.textContent, /clipboard-rejection-detail-sentinel/);
+
+  const unavailableClipboardFeedback = clipboardInvitationFeedbackTestSeams({});
+  assert.equal(
+    await unavailableClipboardFeedback.seams.copyToClipboard("missing-clipboard-value-sentinel"),
+    false
+  );
+  const unavailableFeedbackElement = unavailableClipboardFeedback.elements.get("clientActionFeedback");
+  assert.equal(unavailableFeedbackElement.hidden, false);
+  assert.equal(unavailableFeedbackElement.textContent, "Could not copy to clipboard. Try again.");
+  assert.doesNotMatch(unavailableFeedbackElement.textContent, /missing-clipboard-value-sentinel/);
+}
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
   JSON.stringify({
@@ -1039,6 +1224,8 @@ assert.match(source, /"pageDraftInput"/);
 assert.match(source, /"vaultInviteSecretInput"/);
 
 (async () => {
+  await assertClipboardInvitationFeedbackContracts();
+
   const event = await client.buildAuthEventTemplate(
     "post",
     "http://finite.test/_admin/vaults/smoke/metadata",
