@@ -1011,9 +1011,9 @@ assert.match(source, /window\.addEventListener\?\.\("pagehide", handlePageHide\)
 assert.match(source, /window\.addEventListener\?\.\("pageshow", handlePageShow\)/);
 assert.match(source, /openFolderKeyGrants\(keyring, exported, expectedRecipient, \{[\s\S]{0,120}assertCurrent/);
 assert.match(source, /state\.sessionStatus = SESSION_STATUS\.UNLOCKED;[\s\S]{0,160}applyPendingInviteNavigation\(\)/);
-assert.match(
+assert.doesNotMatch(
   source,
-  /setOptionalDisabled\([\s\S]{0,120}loadVaultButton[\s\S]{0,180}state\.sessionStatus === SESSION_STATUS\.RESUMING/
+  /\b(?:accessManageToggle|connectSignerButton|loadVaultButton|createOrganizationVaultButton|organizationVaultNameInput)\b/
 );
 for (const [surface, pattern] of [
   ["localStorage", /\blocalStorage\b/],

@@ -65,3 +65,18 @@
   judgement-level P3 was stale hidden-panel terminology in an internal render
   helper; the follow-up commit renames it to `renderAccessShareControls` to
   match the visible controls it initializes.
+
+## Post-commit P2 follow-up
+
+- Removed the remaining absent-control render and event plumbing for the old
+  Access manage toggle, standalone signer/load controls, and old organization
+  Vault input. `createOrganizationVaultFromInput` now receives the live Manage
+  Vaults input explicitly.
+- Kept the live Settings and Manage Vaults controls intact: Settings owns its
+  signer and Manage Vaults actions, while Manage Vaults owns Vault unlock and
+  organization creation.
+- Replaced the stale assertion for the absent `loadVaultButton` with a source
+  guard that rejects all five retired control identifiers.
+- Passed: focused Product Client deterministic test, JavaScript syntax check,
+  a word-boundary `rg` sweep with no retired identifiers in
+  `product-client.js`, and `git diff --check`.

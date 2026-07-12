@@ -6561,7 +6561,6 @@ const FiniteBrainProductClient = (() => {
   function renderWhoHasAccessList(row, metadata, openedFolders) {
     const list = $("accessWhoHasList");
     const addPanel = $("accessAddPersonPanel");
-    const manageToggle = $("accessManageToggle");
     const addForm = $("accessAddPersonForm");
 
     if (!row) {
@@ -6570,7 +6569,6 @@ const FiniteBrainProductClient = (() => {
         addPanel.hidden = true;
         addPanel.open = false;
       }
-      if (manageToggle) manageToggle.hidden = true;
       if (addForm) addForm.hidden = true;
       return;
     }
@@ -6587,12 +6585,6 @@ const FiniteBrainProductClient = (() => {
       addForm.classList.toggle("is-ready", canManage);
       addForm.classList.toggle("is-locked", !canManage);
     }
-    if (manageToggle) {
-      manageToggle.hidden = !canManage;
-      setText("accessManageToggleLabel", addForm?.hidden ? "Manage" : "Cancel");
-      manageToggle.setAttribute("aria-expanded", String(!addForm?.hidden));
-    }
-
     const accessList = buildAccessList(row, metadata);
 
     if (accessList.length === 0) {
@@ -6639,13 +6631,6 @@ const FiniteBrainProductClient = (() => {
         list.appendChild(item);
       });
     }
-
-    if (manageToggle && addForm) manageToggle.onclick = () => {
-      const isShowing = !addForm.hidden;
-      addForm.hidden = isShowing;
-      setText("accessManageToggleLabel", isShowing ? "Manage" : "Cancel");
-      manageToggle.setAttribute("aria-expanded", String(!addForm.hidden));
-    };
 
     setupAddPersonForm(row);
   }
@@ -6950,22 +6935,6 @@ const FiniteBrainProductClient = (() => {
 
   function renderSessionSecurity() {
     const view = sessionStatusView(state.sessionStatus);
-    const vaultAction =
-      state.sessionStatus === SESSION_STATUS.LOCKED
-        ? "Unlock"
-        : state.sessionStatus === SESSION_STATUS.RESUMING
-          ? "Unlocking…"
-          : "Load";
-    setText("loadVaultButton", vaultAction);
-    const loadVaultButton = $("loadVaultButton");
-    loadVaultButton?.setAttribute(
-      "aria-label",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock session" : "Load and decrypt vault"
-    );
-    loadVaultButton?.setAttribute(
-      "title",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock session" : "Load and decrypt vault"
-    );
     setText("sessionAccountVault", activeVaultLabel());
     setText("sessionAccountIdentity", sessionIdentityLabel());
     setText("sessionAccountStatus", view.title);
@@ -6991,16 +6960,6 @@ const FiniteBrainProductClient = (() => {
       clearSessionOwnedDom();
     }
     renderClientActionFeedback();
-    safeSetHidden("connectSignerButton", state.signerStatus === "connected");
-    setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled(
-      "loadVaultButton",
-      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
-    );
-    setOptionalDisabled(
-      "createOrganizationVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
-    );
     setOptionalDisabled("obsidianNewPageButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED);
     setOptionalDisabled("obsidianNewFolderButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.metadata);
     setOptionalDisabled(
@@ -7339,7 +7298,7 @@ const FiniteBrainProductClient = (() => {
     await loadVisibleVaults();
   }
 
-  async function createOrganizationVaultFromInput(inputId = "organizationVaultNameInput") {
+  async function createOrganizationVaultFromInput(inputId) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
       throw new Error("Session is locked. Unlock the session before creating a Vault");
     }
@@ -9595,13 +9554,6 @@ const FiniteBrainProductClient = (() => {
   function bind() {
     window.addEventListener?.("pagehide", handlePageHide);
     window.addEventListener?.("pageshow", handlePageShow);
-    onOptionalClick("connectSignerButton", () => {
-      connectSigner().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to connect signer.", { error: error.message });
-        render();
-      });
-    });
     onOptionalClick("lockSessionButton", () => {
       lockSession();
     });
@@ -9699,31 +9651,6 @@ const FiniteBrainProductClient = (() => {
       const direction = event.key === "ArrowDown" ? 1 : -1;
       const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
       setSettingsSection(["session", "vault", "access", "invitations"][nextIndex] || "session");
-    });
-    $("loadVaultButton")?.addEventListener("click", () => {
-      const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
-      operation.catch((error) => {
-        reportClientActionFailure(error);
-        log("Failed to load Vault reader.", { error: error.message });
-        state.readerBusy = false;
-        render();
-      });
-    });
-    $("createOrganizationVaultButton")?.addEventListener("click", () => {
-      createOrganizationVaultFromInput().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
-        render();
-      });
-    });
-    $("organizationVaultNameInput")?.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      createOrganizationVaultFromInput().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
-        render();
-      });
     });
     $("refreshReaderButton").addEventListener("click", () => {
       refreshReader().catch((error) => {
