@@ -4203,7 +4203,7 @@ pre {
   font-variant-numeric: tabular-nums;
   margin-left: 0;
   opacity: 1;
-  padding: 0;
+  padding: 2px 8px;
   pointer-events: auto;
 }
 

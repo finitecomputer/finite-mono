@@ -575,6 +575,10 @@ assert.match(
   cssSource,
   /\.command-palette-backdrop\s*\{[^}]*display:\s*grid;[^}]*align-items:\s*start;[^}]*justify-items:\s*center;[^}]*padding:\s*max\(24px, calc\(\(100vh - 480px\) \/ 2\)\) 24px 24px;/s,
 );
+assert.match(
+  cssSource,
+  /\.graph-topbar #graphStats\s*\{[^}]*font-variant-numeric:\s*tabular-nums;[^}]*padding:\s*2px 8px;/s,
+);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
