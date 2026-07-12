@@ -16,9 +16,10 @@ use crate::{
     FinitePrivateSettlementKind, FinitePrivateUsageDecision, HostingTier, ImportCandidateStatus,
     IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
     LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
     RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
@@ -151,6 +152,16 @@ pub struct LeaseAgentCreationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordProviderOperationTransitionRequest {
+    pub runner_id: String,
+    pub lease_token: String,
+    pub correlation_id: String,
+    pub placement: crate::RuntimePlacement,
+    pub transition: ProviderOperationTransition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaseRuntimeControlRequest {
     pub runner_id: String,
@@ -229,6 +240,8 @@ pub struct CompleteRuntimeControlRequest {
     pub lease_token: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_host: Option<String>,
     pub published_app_urls: Option<Vec<String>>,
     pub now: Option<String>,
@@ -306,6 +319,8 @@ pub struct UpsertRuntimeArtifactRequest {
     pub finite_platform_plugin_ref: Option<String>,
     pub state_schema_version: String,
     pub base_image: Option<String>,
+    #[serde(default)]
+    pub recover_known_good_chat: bool,
     pub promoted: bool,
     pub now: Option<String>,
 }
@@ -845,6 +860,10 @@ pub fn router_with_runtime_upgrades(
             post(complete_agent_creation_request),
         )
         .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/provider-operation/transitions",
+            post(record_provider_operation_transition),
+        )
+        .route(
             "/api/core/v1/agent-creation-requests/{request_id}/runtime",
             post(register_agent_creation_runtime),
         )
@@ -1038,6 +1057,7 @@ async fn upsert_runtime_artifact(
                 finite_platform_plugin_ref: input.finite_platform_plugin_ref,
                 state_schema_version: input.state_schema_version,
                 base_image: input.base_image,
+                recover_known_good_chat: input.recover_known_good_chat,
                 promoted: input.promoted,
                 now: input.now,
             })
@@ -1758,6 +1778,35 @@ async fn lease_agent_creation_request(
     ))
 }
 
+async fn record_provider_operation_transition(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<RecordProviderOperationTransitionRequest>,
+) -> Result<Json<ProviderOperationEnvelope>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    if !credential
+        .runner_classes
+        .contains(&input.placement.runner_class)
+    {
+        return Err(runner_binding_error());
+    }
+    Ok(Json(
+        state
+            .store
+            .record_provider_operation_transition(RecordProviderOperationTransitionInput {
+                request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                correlation_id: input.correlation_id,
+                placement: input.placement,
+                transition: input.transition,
+            })
+            .await?,
+    ))
+}
+
 async fn lease_runtime_control_request(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -1791,6 +1840,10 @@ async fn complete_runtime_control_request(
 ) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
     let credential = require_runner_auth(&state, &headers)?;
     authorize_runner_id(&credential, &input.runner_id)?;
+    let runtime_capabilities = input
+        .runtime_capabilities
+        .map(|capabilities| authorize_runner_runtime_capabilities(&credential, Some(capabilities)))
+        .transpose()?;
     Ok(Json(
         state
             .store
@@ -1800,6 +1853,7 @@ async fn complete_runtime_control_request(
                 lease_token: input.lease_token,
                 runtime_artifact_id: input.runtime_artifact_id,
                 state_schema_version: input.state_schema_version,
+                runtime_capabilities,
                 runtime_host: input.runtime_host,
                 published_app_urls: input.published_app_urls,
                 now: input.now,
@@ -2956,6 +3010,8 @@ impl From<CoreError> for ApiError {
             | CoreError::InvalidFinitePrivateUsageEstimate
             | CoreError::MissingAgentCreationFailureMessage
             | CoreError::MissingRuntimeControlFailureMessage
+            | CoreError::InvalidProviderOperationCorrelation
+            | CoreError::InvalidProviderOperationFacts
             | CoreError::InvalidTimestamp => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: error.to_string(),
@@ -2981,6 +3037,9 @@ impl From<CoreError> for ApiError {
             | CoreError::AgentCreationRequestLeaseConflict
             | CoreError::AgentCreationRequestNotLaunching
             | CoreError::AgentCreationRequestNotCancellable
+            | CoreError::ProviderOperationIdentityMismatch
+            | CoreError::ProviderOperationTransitionConflict
+            | CoreError::ProviderOperationBoundaryNotReached
             | CoreError::RuntimeArtifactNotPromoted
             | CoreError::RuntimeArtifactRetired
             | CoreError::RuntimeArtifactImmutable
@@ -3216,28 +3275,37 @@ mod tests {
             legacy_kata_runtime_capabilities()
         );
 
-        for overclaim in [
-            RuntimeCapabilitiesV1 {
-                recover_known_good_chat: true,
-                ..RuntimeCapabilitiesV1::default()
-            },
-            RuntimeCapabilitiesV1 {
-                runtime_retirement: true,
-                ..RuntimeCapabilitiesV1::default()
-            },
-        ] {
-            assert!(
-                authorize_runner_capacity(
-                    &current_kata,
-                    Some(RunnerLeaseCapacity {
-                        runner_classes: vec![RunnerClass::Kata],
-                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(overclaim)),
-                        ..RunnerLeaseCapacity::default()
-                    })
-                )
-                .is_err()
-            );
-        }
+        assert!(
+            authorize_runner_capacity(
+                &current_kata,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        }
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_ok()
+        );
+        let overclaim = RuntimeCapabilitiesV1 {
+            runtime_retirement: true,
+            ..RuntimeCapabilitiesV1::default()
+        };
+        assert!(
+            authorize_runner_capacity(
+                &current_kata,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(overclaim)),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_err()
+        );
 
         let current_phala = VerifiedRunnerCredential {
             credential_id: "phala-current".to_string(),
@@ -3254,6 +3322,22 @@ mod tests {
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             runtime_upgrade: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        }
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_runner_capacity(
+                &current_phala,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
                             ..RuntimeCapabilitiesV1::default()
                         }
                     )),
@@ -4444,8 +4528,7 @@ mod tests {
                             "runnerId": "runner-oslo-1",
                             "leaseToken": "lease-token-1",
                             "leaseSeconds": 300,
-                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
-                            "now": "2026-05-25T13:00:00Z"
+                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
                         })
                         .to_string(),
                     ))
@@ -4464,6 +4547,77 @@ mod tests {
             crate::AgentCreationRequestStatus::Launching
         );
         assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-1"));
+
+        let operation_uri = format!(
+            "/api/core/v1/agent-creation-requests/{}/provider-operation/transitions",
+            lease.request.id
+        );
+        let runner_headers = vec![("authorization".to_string(), runner_authorization())];
+        let transition =
+            |lease_token: &str, correlation_id: &str, transition: serde_json::Value| {
+                serde_json::json!({
+                    "runnerId": "runner-oslo-1",
+                    "leaseToken": lease_token,
+                    "correlationId": correlation_id,
+                    "placement": {
+                        "runnerClass": "kata",
+                        "runtimeResourceClass": "vcpu4_memory8_gib"
+                    },
+                    "transition": transition
+                })
+            };
+        let reserve = transition(
+            "lease-token-1",
+            "api-correlation-1",
+            serde_json::json!({"kind": "correlation_reserved"}),
+        );
+        let (status, first_ack) = send_json(
+            &app,
+            "POST",
+            &operation_uri,
+            &runner_headers,
+            Some(reserve.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, replay_ack) =
+            send_json(&app, "POST", &operation_uri, &runner_headers, Some(reserve)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay_ack, first_ack);
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            &operation_uri,
+            &runner_headers,
+            Some(transition(
+                "wrong-token",
+                "api-correlation-1",
+                serde_json::json!({"kind": "provisioned", "provider_facts": {}}),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        for provider_transition in [
+            serde_json::json!({
+                "kind": "provisioned",
+                "provider_facts": {"provider_id": "opaque-api-1"}
+            }),
+            serde_json::json!({"kind": "commit_started"}),
+        ] {
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                &operation_uri,
+                &runner_headers,
+                Some(transition(
+                    "lease-token-1",
+                    "api-correlation-1",
+                    provider_transition,
+                )),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
 
         let response = app
             .clone()
@@ -4516,6 +4670,13 @@ mod tests {
                             "sourceHostId": "oslo-host-1",
                             "sourceMachineId": "oslo-agent-001",
                             "runtimeArtifactId": "artifact-v1",
+                            "providerRuntimeHandle": {
+                                "schema": "provider_runtime_handle.v1",
+                                "handle": {
+                                    "runnerClass": "kata",
+                                    "opaque": {"sandbox_id": "opaque-api-1"}
+                                }
+                            },
                             "contactEndpoint": "https://oslo-agent.example.test/contact/",
                             "hostname": "oslo-agent-001.finite.computer",
                             "runtimeHost": "oslo-host-1",
@@ -4542,6 +4703,17 @@ mod tests {
             crate::AgentCreationRequestStatus::Running
         );
         assert!(completed.request.agent_runtime_id.is_some());
+        assert!(matches!(
+            completed
+                .provider_operation
+                .unwrap()
+                .v1()
+                .transitions
+                .last()
+                .unwrap()
+                .transition,
+            ProviderOperationTransition::Ready
+        ));
 
         let response = app
             .clone()

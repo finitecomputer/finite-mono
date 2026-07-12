@@ -21,7 +21,13 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0005_phala_expand.sql"),
     "\n",
-    include_str!("../migrations/0006_runtime_capabilities_expand.sql")
+    include_str!("../migrations/0006_runtime_capabilities_expand.sql"),
+    "\n",
+    include_str!("../migrations/0007_provider_creation_operations.sql"),
+    "\n",
+    include_str!("../migrations/0008_agent_creation_provisional_runtime.sql"),
+    "\n",
+    include_str!("../migrations/0009_artifact_recovery_support.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -227,6 +233,72 @@ impl ProviderRuntimeHandleEnvelope {
     }
 }
 
+/// Versioned, provider-neutral journal for one creation request. Provider
+/// identifiers remain opaque to Core; the request, placement, correlation, and
+/// transition order are Core-owned invariants.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "operation")]
+pub enum ProviderOperationEnvelope {
+    #[serde(rename = "provider_operation.v1")]
+    V1(ProviderOperationV1),
+}
+
+impl ProviderOperationEnvelope {
+    pub const fn v1(&self) -> &ProviderOperationV1 {
+        match self {
+            Self::V1(operation) => operation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderOperationV1 {
+    pub agent_creation_request_id: String,
+    pub correlation_id: String,
+    pub placement: RuntimePlacement,
+    pub transitions: Vec<ProviderOperationTransitionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderOperationTransitionRecord {
+    pub sequence: u32,
+    pub transition: ProviderOperationTransition,
+    pub recorded_at: String,
+}
+
+/// Append-only creation states. `provider_facts` is deliberately untyped and
+/// bounded: adapters can persist reconciliation evidence without teaching Core
+/// provider vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderOperationTransition {
+    CorrelationReserved,
+    Provisioned {
+        provider_facts: Value,
+    },
+    ProvisionUnknown {
+        provider_facts: Value,
+    },
+    CommitStarted,
+    ProviderHandleRecorded {
+        provider_runtime_handle: ProviderRuntimeHandleEnvelope,
+    },
+    Ready,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordProviderOperationTransitionInput {
+    pub request_id: String,
+    pub runner_id: String,
+    pub lease_token: String,
+    pub correlation_id: String,
+    pub placement: RuntimePlacement,
+    pub transition: ProviderOperationTransition,
+}
+
 /// Provider-neutral controls the current Runtime can actually perform. This
 /// deliberately excludes the not-yet-proven ensure/inspect/adopt contract;
 /// internal adapter helpers are not product capabilities.
@@ -358,6 +430,16 @@ pub enum CoreError {
     InvalidRuntimeContactEndpoint,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
+    #[error("provider operation correlation id is required or invalid")]
+    InvalidProviderOperationCorrelation,
+    #[error("provider operation facts are invalid or contain secret material")]
+    InvalidProviderOperationFacts,
+    #[error("provider operation identity does not match the creation request")]
+    ProviderOperationIdentityMismatch,
+    #[error("provider operation transition is out of order")]
+    ProviderOperationTransitionConflict,
+    #[error("provider operation boundary has not been reached")]
+    ProviderOperationBoundaryNotReached,
     #[error("runtime spec does not match its persisted project, placement, runtime, or artifact")]
     RuntimeSpecMismatch,
     #[error("runtime capability advertisement changed during creation")]
@@ -669,6 +751,8 @@ pub struct RuntimeArtifact {
     pub finite_platform_plugin_ref: Option<String>,
     pub state_schema_version: String,
     pub base_image: Option<String>,
+    #[serde(default)]
+    pub recover_known_good_chat: bool,
     pub created_at: String,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
@@ -885,6 +969,8 @@ pub struct UpsertRuntimeArtifactInput {
     pub finite_platform_plugin_ref: Option<String>,
     pub state_schema_version: String,
     pub base_image: Option<String>,
+    #[serde(default)]
+    pub recover_known_good_chat: bool,
     pub promoted: bool,
     pub now: Option<String>,
 }
@@ -1137,6 +1223,8 @@ pub struct BridgeCoreState {
     pub project_room_memberships: BTreeMap<String, ProjectRoomMembership>,
     pub agent_creation_entitlements: BTreeMap<String, AgentCreationEntitlement>,
     pub agent_creation_requests: BTreeMap<String, AgentCreationRequest>,
+    #[serde(skip)]
+    pub(crate) provider_operations: BTreeMap<String, ProviderOperationEnvelope>,
     pub launch_code_batches: BTreeMap<String, launch_codes::LaunchCodeBatch>,
     #[serde(skip)]
     pub(crate) launch_codes: BTreeMap<String, launch_codes::LaunchCodeRecord>,
@@ -1343,6 +1431,10 @@ pub struct CompleteRuntimeControlRequestInput {
     /// these fields empty.
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    /// Optional expand-generation refresh, accepted only on successful Kata
+    /// Upgrade completion. Omission preserves the persisted N-1 envelope.
+    #[serde(default)]
+    pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_host: Option<String>,
     pub published_app_urls: Option<Vec<String>>,
     pub now: Option<String>,
@@ -1409,7 +1501,16 @@ impl RunnerLeaseCapacity {
             return Ok(());
         };
         let capabilities = capabilities.v1();
-        if capabilities.recover_known_good_chat || capabilities.runtime_retirement {
+        if capabilities.runtime_retirement {
+            return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+        }
+        if capabilities.recover_known_good_chat
+            && (self.runner_classes.is_empty()
+                || self
+                    .runner_classes
+                    .iter()
+                    .any(|runner_class| *runner_class != RunnerClass::Kata))
+        {
             return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
         }
         if capabilities.runtime_upgrade
@@ -1470,6 +1571,11 @@ impl RunnerLeaseCapacity {
 pub struct AgentCreationLease {
     pub project: Project,
     pub request: AgentCreationRequest,
+    /// Present after a current runner reserves its provider correlation. N-1
+    /// workers ignore the additive field; re-leases receive the exact durable
+    /// acknowledgment needed to reconcile an interrupted provider call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_operation: Option<ProviderOperationEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2483,13 +2589,70 @@ impl BridgeCoreState {
             request.updated_at = now;
             request.clone()
         };
-        Ok(Some(AgentCreationLease { project, request }))
+        let provider_operation = self.provider_operations.get(&request.id).cloned();
+        Ok(Some(AgentCreationLease {
+            project,
+            request,
+            provider_operation,
+        }))
+    }
+
+    pub fn record_provider_operation_transition(
+        &mut self,
+        input: RecordProviderOperationTransitionInput,
+    ) -> CoreResult<ProviderOperationEnvelope> {
+        if matches!(
+            input.transition,
+            ProviderOperationTransition::ProviderHandleRecorded { .. }
+                | ProviderOperationTransition::Ready
+        ) {
+            return Err(CoreError::ProviderOperationBoundaryNotReached);
+        }
+        let now = current_time_iso()?;
+        let request = self.verified_active_launching_request(
+            &input.request_id,
+            &input.runner_id,
+            &input.lease_token,
+            &now,
+        )?;
+        let project = self
+            .projects
+            .get(&request.project_id)
+            .ok_or_else(|| CoreError::Store(format!("request {} has no project", request.id)))?;
+        let placement = request
+            .placement
+            .or(project.placement)
+            .or_else(|| RuntimePlacement::from_legacy_runner_class(request.runner_class))
+            .ok_or(CoreError::ProviderOperationIdentityMismatch)?;
+        if placement != input.placement {
+            return Err(CoreError::ProviderOperationIdentityMismatch);
+        }
+        let updated = append_provider_operation_transition(
+            self.provider_operations.get(&input.request_id),
+            &input.request_id,
+            &input.correlation_id,
+            input.placement,
+            input.transition,
+            &now,
+        )?;
+        self.provider_operations
+            .insert(input.request_id, updated.clone());
+        Ok(updated)
     }
 
     pub fn lease_runtime_control_request(
         &mut self,
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
+        self.lease_runtime_control_request_with_runtime_environment(input, &BTreeMap::new())
+    }
+
+    pub(crate) fn lease_runtime_control_request_with_runtime_environment(
+        &mut self,
+        input: LeaseRuntimeControlRequestInput,
+        runtime_environment: &BTreeMap<String, String>,
+    ) -> CoreResult<Option<RuntimeControlLease>> {
+        validate_runtime_spec_environment(runtime_environment)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -2591,14 +2754,70 @@ impl BridgeCoreState {
                 }
                 Err(error) => return Err(error),
             };
-            let runtime_spec = self
+            let creation = self
                 .agent_creation_requests
                 .values()
                 .find(|request| {
                     request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
-                        && request.runtime_spec.is_some()
+                        && request.project_id == runtime.project_id
+                        && request.status == AgentCreationRequestStatus::Running
                 })
-                .and_then(|request| request.runtime_spec.as_ref())
+                .cloned();
+            let mut current_spec = creation
+                .as_ref()
+                .and_then(|request| request.runtime_spec.clone());
+            if current_spec.is_none()
+                && let Some(creation) = creation.as_ref()
+            {
+                let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+                let project = self
+                    .projects
+                    .get(&runtime.project_id)
+                    .ok_or(CoreError::ProjectNotFound)?;
+                if placement.runner_class != RunnerClass::Kata
+                    || project.placement != Some(placement)
+                    || creation.runner_class != RunnerClass::Kata
+                {
+                    return Err(CoreError::RuntimeSpecMismatch);
+                }
+                let current_artifact_id = runtime
+                    .runtime_artifact_id
+                    .as_deref()
+                    .ok_or(CoreError::RuntimeSpecMismatch)?;
+                let current_artifact = self
+                    .runtime_artifacts
+                    .get(current_artifact_id)
+                    .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                if current_artifact.promoted_at.is_none()
+                    || runtime.state_schema_version.as_deref()
+                        != Some(current_artifact.state_schema_version.as_str())
+                {
+                    return Err(CoreError::RuntimeSpecMismatch);
+                }
+                let synthesized = build_runtime_spec_v1(
+                    RuntimeSpecIdentity {
+                        operation_id: &creation.id,
+                        project_id: &runtime.project_id,
+                        agent_runtime_id: &runtime.id,
+                        placement,
+                    },
+                    current_artifact,
+                    &runtime.id,
+                    runtime_environment.clone(),
+                    vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+                    RuntimeBootIntent::Normal,
+                )?;
+                let stored = self
+                    .agent_creation_requests
+                    .get_mut(&creation.id)
+                    .ok_or(CoreError::AgentCreationRequestNotFound)?;
+                stored.desired_runtime_artifact_id = Some(current_artifact.id.clone());
+                stored.runtime_spec = Some(synthesized.clone());
+                stored.updated_at = now.clone();
+                current_spec = Some(synthesized);
+            }
+            let runtime_spec = current_spec
+                .as_ref()
                 .map(|current_spec| {
                     let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
                     let current_artifact_id = runtime
@@ -2681,6 +2900,11 @@ impl BridgeCoreState {
                 .get(target_id)
                 .cloned()
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            validate_runtime_capabilities_artifact_policy(
+                input.runtime_capabilities.as_ref(),
+                runtime.placement,
+                &target,
+            )?;
             // Retirement after lease must not strand Core behind a target the
             // runner has already atomically swapped into place. Material is
             // immutable, so completion verifies exact identity/schema but does
@@ -2735,12 +2959,14 @@ impl BridgeCoreState {
                 runtime_host,
                 published_app_urls,
                 upgraded_spec,
+                input.runtime_capabilities.clone(),
             ))
         } else {
             if input.runtime_artifact_id.is_some()
                 || input.state_schema_version.is_some()
                 || input.runtime_host.is_some()
                 || input.published_app_urls.is_some()
+                || input.runtime_capabilities.is_some()
             {
                 return Err(CoreError::RuntimeUpgradeCompletionMismatch);
             }
@@ -2766,7 +2992,7 @@ impl BridgeCoreState {
         };
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = completed_status;
-            if let Some((artifact_id, schema, runtime_host, published_app_urls, _)) =
+            if let Some((artifact_id, schema, runtime_host, published_app_urls, _, capabilities)) =
                 upgrade_facts.as_ref()
             {
                 runtime.runtime_artifact_id = Some(artifact_id.clone());
@@ -2774,6 +3000,9 @@ impl BridgeCoreState {
                 runtime.host_facts.runtime_host = runtime_host.clone();
                 runtime.host_facts.published_app_urls = published_app_urls.clone();
                 runtime.host_facts.hermes_available = Some(true);
+                if let Some(capabilities) = capabilities {
+                    runtime.runtime_capabilities = Some(capabilities.clone());
+                }
             }
             if request.kind == RuntimeControlKind::Destroy {
                 runtime.host_facts.hermes_available = Some(false);
@@ -2786,7 +3015,7 @@ impl BridgeCoreState {
             .get_mut(&request.agent_runtime_id)
         {
             snapshot.status = completed_status;
-            if let Some((_, _, runtime_host, _, _)) = upgrade_facts.as_ref() {
+            if let Some((_, _, runtime_host, _, _, _)) = upgrade_facts.as_ref() {
                 snapshot.runtime_host = runtime_host.clone();
                 snapshot.hermes_available = Some(true);
             }
@@ -2795,7 +3024,7 @@ impl BridgeCoreState {
             }
             snapshot.updated_at = now.clone();
         }
-        if let Some((artifact_id, _, _, _, Some(runtime_spec))) = upgrade_facts.as_ref()
+        if let Some((artifact_id, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
             && let Some(creation) = self.agent_creation_requests.values_mut().find(|creation| {
                 creation.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
             })
@@ -2867,6 +3096,19 @@ impl BridgeCoreState {
             &input.runner_id,
             &input.lease_token,
         )?;
+        let provider_operation = self.provider_operations.get(&input.request_id).cloned();
+        let provider_operation_now = provider_operation
+            .as_ref()
+            .map(|_| current_time_iso())
+            .transpose()?;
+        if let Some(provider_operation_now) = provider_operation_now.as_deref() {
+            self.verified_active_launching_request(
+                &input.request_id,
+                &input.runner_id,
+                &input.lease_token,
+                provider_operation_now,
+            )?;
+        }
         let project = self
             .projects
             .get(&request.project_id)
@@ -2934,11 +3176,11 @@ impl BridgeCoreState {
         let contact_endpoint =
             normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
                 .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-        validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
-        let runtime_capabilities = merge_runtime_capabilities(
-            existing_runtime.as_ref(),
-            input.runtime_capabilities.clone(),
-        )?;
+        let bounded_runtime_capabilities =
+            bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
+        validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
+        let runtime_capabilities =
+            merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -2971,6 +3213,16 @@ impl BridgeCoreState {
                 .unwrap_or_else(|| now.clone()),
             updated_at: now.clone(),
         };
+        let updated_provider_operation = provider_operation_at_runtime_boundary(
+            provider_operation.as_ref(),
+            runtime.provider_runtime_handle.as_ref(),
+            false,
+            provider_operation_now.as_deref().unwrap_or(&now),
+        )?;
+        if let Some(operation) = updated_provider_operation {
+            self.provider_operations
+                .insert(input.request_id.clone(), operation);
+        }
         self.agent_runtimes
             .insert(runtime.id.clone(), runtime.clone());
         self.runtime_relay_credentials.insert(
@@ -3009,6 +3261,7 @@ impl BridgeCoreState {
         Ok(AgentCreationLease {
             project,
             request: request.clone(),
+            provider_operation: self.provider_operations.get(&input.request_id).cloned(),
         })
     }
 
@@ -3027,6 +3280,19 @@ impl BridgeCoreState {
             &input.runner_id,
             &input.lease_token,
         )?;
+        let provider_operation = self.provider_operations.get(&input.request_id).cloned();
+        let provider_operation_now = provider_operation
+            .as_ref()
+            .map(|_| current_time_iso())
+            .transpose()?;
+        if let Some(provider_operation_now) = provider_operation_now.as_deref() {
+            self.verified_active_launching_request(
+                &input.request_id,
+                &input.runner_id,
+                &input.lease_token,
+                provider_operation_now,
+            )?;
+        }
         let existing_runtime = request
             .agent_runtime_id
             .as_ref()
@@ -3112,11 +3378,11 @@ impl BridgeCoreState {
         let contact_endpoint =
             normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
                 .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-        validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
-        let runtime_capabilities = merge_runtime_capabilities(
-            existing_runtime.as_ref(),
-            input.runtime_capabilities.clone(),
-        )?;
+        let bounded_runtime_capabilities =
+            bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
+        validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
+        let runtime_capabilities =
+            merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
         let host_facts = HostOwnedRuntimeFacts {
             display_name: trim_to_option(input.display_name.as_deref())
                 .unwrap_or_else(|| request.display_name.clone()),
@@ -3149,6 +3415,16 @@ impl BridgeCoreState {
                 .unwrap_or_else(|| now.clone()),
             updated_at: now.clone(),
         };
+        let updated_provider_operation = provider_operation_at_runtime_boundary(
+            provider_operation.as_ref(),
+            runtime.provider_runtime_handle.as_ref(),
+            true,
+            provider_operation_now.as_deref().unwrap_or(&now),
+        )?;
+        if let Some(operation) = updated_provider_operation {
+            self.provider_operations
+                .insert(input.request_id.clone(), operation);
+        }
         self.agent_runtimes
             .insert(runtime.id.clone(), runtime.clone());
 
@@ -3181,6 +3457,7 @@ impl BridgeCoreState {
         Ok(AgentCreationLease {
             project,
             request: request.clone(),
+            provider_operation: self.provider_operations.get(&input.request_id).cloned(),
         })
     }
 
@@ -3430,6 +3707,26 @@ impl BridgeCoreState {
         if request.runner_id.as_deref() != Some(runner_id.as_str())
             || request.lease_token.as_deref() != Some(lease_token.as_str())
         {
+            return Err(CoreError::AgentCreationRequestLeaseConflict);
+        }
+        Ok(request)
+    }
+
+    fn verified_active_launching_request(
+        &self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+        now: &str,
+    ) -> CoreResult<AgentCreationRequest> {
+        let request = self.verified_launching_request(request_id, runner_id, lease_token)?;
+        let now = parse_time(now)?;
+        let active = request
+            .lease_expires_at
+            .as_deref()
+            .and_then(|expires_at| parse_time(expires_at).ok())
+            .is_some_and(|expires_at| expires_at > now);
+        if !active {
             return Err(CoreError::AgentCreationRequestLeaseConflict);
         }
         Ok(request)
@@ -4739,6 +5036,7 @@ impl BridgeCoreState {
             finite_platform_plugin_ref: trim_to_option(input.finite_platform_plugin_ref.as_deref()),
             state_schema_version,
             base_image: trim_to_option(input.base_image.as_deref()),
+            recover_known_good_chat: input.recover_known_good_chat,
             created_at,
             promoted_at,
             retired_at: existing
@@ -5574,6 +5872,8 @@ fn runtime_spec_reserved_environment_key(key: &str) -> bool {
             | "FINITECHAT_HERMES_PROVIDER"
             | "FINITECHAT_HERMES_BASE_URL"
             | "FINITECHAT_HERMES_API_MODE"
+            | "FINITE_AGENT_BOOT_INTENT_JSON"
+            | "FINITE_AGENT_STATE_ROOT"
             | "OPENAI_API_KEY"
     )
 }
@@ -5652,6 +5952,233 @@ pub(crate) fn merge_provider_runtime_handle(
     Ok((current, history))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderOperationTransitionKind {
+    CorrelationReserved,
+    Provisioned,
+    ProvisionUnknown,
+    CommitStarted,
+    ProviderHandleRecorded,
+    Ready,
+}
+
+impl ProviderOperationTransition {
+    fn kind(&self) -> ProviderOperationTransitionKind {
+        match self {
+            Self::CorrelationReserved => ProviderOperationTransitionKind::CorrelationReserved,
+            Self::Provisioned { .. } => ProviderOperationTransitionKind::Provisioned,
+            Self::ProvisionUnknown { .. } => ProviderOperationTransitionKind::ProvisionUnknown,
+            Self::CommitStarted => ProviderOperationTransitionKind::CommitStarted,
+            Self::ProviderHandleRecorded { .. } => {
+                ProviderOperationTransitionKind::ProviderHandleRecorded
+            }
+            Self::Ready => ProviderOperationTransitionKind::Ready,
+        }
+    }
+}
+
+fn normalize_provider_operation_correlation(value: &str) -> CoreResult<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(CoreError::InvalidProviderOperationCorrelation);
+    }
+    Ok(value.to_string())
+}
+
+fn provider_operation_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace('-', "_");
+    [
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "authorization",
+        "api_key",
+        "private_key",
+        "environment",
+        "env",
+    ]
+    .iter()
+    .any(|term| key == *term || key.ends_with(&format!("_{term}")))
+}
+
+fn validate_provider_operation_facts(value: &Value) -> CoreResult<()> {
+    if !value.is_object()
+        || serde_json::to_vec(value)
+            .map_err(|_| CoreError::InvalidProviderOperationFacts)?
+            .len()
+            > 16 * 1024
+    {
+        return Err(CoreError::InvalidProviderOperationFacts);
+    }
+
+    fn visit(value: &Value, depth: usize, entries: &mut usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match value {
+            Value::Object(object) => object.iter().all(|(key, value)| {
+                *entries += 1;
+                *entries <= 256
+                    && key.len() <= 128
+                    && !provider_operation_secret_key(key)
+                    && visit(value, depth + 1, entries)
+            }),
+            Value::Array(array) => {
+                *entries += array.len();
+                *entries <= 256 && array.iter().all(|value| visit(value, depth + 1, entries))
+            }
+            Value::String(value) => value.len() <= 2_048,
+            Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        }
+    }
+
+    if visit(value, 0, &mut 0) {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidProviderOperationFacts)
+    }
+}
+
+fn validate_provider_operation_transition(
+    transition: &ProviderOperationTransition,
+) -> CoreResult<()> {
+    match transition {
+        ProviderOperationTransition::Provisioned { provider_facts }
+        | ProviderOperationTransition::ProvisionUnknown { provider_facts } => {
+            validate_provider_operation_facts(provider_facts)
+        }
+        ProviderOperationTransition::CorrelationReserved
+        | ProviderOperationTransition::CommitStarted
+        | ProviderOperationTransition::ProviderHandleRecorded { .. }
+        | ProviderOperationTransition::Ready => Ok(()),
+    }
+}
+
+pub(crate) fn append_provider_operation_transition(
+    existing: Option<&ProviderOperationEnvelope>,
+    request_id: &str,
+    correlation_id: &str,
+    placement: RuntimePlacement,
+    transition: ProviderOperationTransition,
+    recorded_at: &str,
+) -> CoreResult<ProviderOperationEnvelope> {
+    let correlation_id = normalize_provider_operation_correlation(correlation_id)?;
+    validate_provider_operation_transition(&transition)?;
+
+    let mut operation = match existing {
+        Some(ProviderOperationEnvelope::V1(operation)) => {
+            if operation.agent_creation_request_id != request_id
+                || operation.correlation_id != correlation_id
+                || operation.placement != placement
+            {
+                return Err(CoreError::ProviderOperationIdentityMismatch);
+            }
+            operation.clone()
+        }
+        None => ProviderOperationV1 {
+            agent_creation_request_id: request_id.to_string(),
+            correlation_id,
+            placement,
+            transitions: Vec::new(),
+        },
+    };
+
+    if let Some(persisted) = operation
+        .transitions
+        .iter()
+        .find(|persisted| persisted.transition.kind() == transition.kind())
+    {
+        if persisted.transition == transition {
+            return Ok(ProviderOperationEnvelope::V1(operation));
+        }
+        return Err(CoreError::ProviderOperationTransitionConflict);
+    }
+
+    let previous = operation
+        .transitions
+        .last()
+        .map(|record| record.transition.kind());
+    let legal = matches!(
+        (previous, transition.kind()),
+        (None, ProviderOperationTransitionKind::CorrelationReserved)
+            | (
+                Some(ProviderOperationTransitionKind::CorrelationReserved),
+                ProviderOperationTransitionKind::Provisioned
+                    | ProviderOperationTransitionKind::ProvisionUnknown
+            )
+            | (
+                Some(ProviderOperationTransitionKind::ProvisionUnknown),
+                ProviderOperationTransitionKind::Provisioned
+            )
+            | (
+                Some(ProviderOperationTransitionKind::Provisioned),
+                ProviderOperationTransitionKind::CommitStarted
+            )
+            | (
+                Some(ProviderOperationTransitionKind::CommitStarted),
+                ProviderOperationTransitionKind::ProviderHandleRecorded
+            )
+            | (
+                Some(ProviderOperationTransitionKind::ProviderHandleRecorded),
+                ProviderOperationTransitionKind::Ready
+            )
+    );
+    if !legal {
+        return Err(CoreError::ProviderOperationTransitionConflict);
+    }
+
+    operation
+        .transitions
+        .push(ProviderOperationTransitionRecord {
+            sequence: operation.transitions.len() as u32,
+            transition,
+            recorded_at: recorded_at.to_string(),
+        });
+    Ok(ProviderOperationEnvelope::V1(operation))
+}
+
+pub(crate) fn provider_operation_at_runtime_boundary(
+    existing: Option<&ProviderOperationEnvelope>,
+    provider_runtime_handle: Option<&ProviderRuntimeHandleEnvelope>,
+    ready: bool,
+    recorded_at: &str,
+) -> CoreResult<Option<ProviderOperationEnvelope>> {
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let operation = existing.v1();
+    let handle = provider_runtime_handle
+        .cloned()
+        .ok_or(CoreError::ProviderOperationBoundaryNotReached)?;
+    let mut updated = append_provider_operation_transition(
+        Some(existing),
+        &operation.agent_creation_request_id,
+        &operation.correlation_id,
+        operation.placement,
+        ProviderOperationTransition::ProviderHandleRecorded {
+            provider_runtime_handle: handle,
+        },
+        recorded_at,
+    )?;
+    if ready {
+        updated = append_provider_operation_transition(
+            Some(&updated),
+            &operation.agent_creation_request_id,
+            &operation.correlation_id,
+            operation.placement,
+            ProviderOperationTransition::Ready,
+            recorded_at,
+        )?;
+    }
+    Ok(Some(updated))
+}
+
 /// Preserve an explicit Core backfill when an N-1 worker omits the new field,
 /// but never allow a current worker to change its advertisement between
 /// registration retries or final completion.
@@ -5680,7 +6207,12 @@ pub(crate) fn validate_runtime_capabilities_policy(
         return Ok(());
     };
     let capabilities = capabilities.v1();
-    if capabilities.recover_known_good_chat || capabilities.runtime_retirement {
+    if capabilities.runtime_retirement {
+        return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+    }
+    if capabilities.recover_known_good_chat
+        && placement.is_none_or(|placement| placement.runner_class != RunnerClass::Kata)
+    {
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
     }
     if capabilities.runtime_upgrade
@@ -5689,6 +6221,31 @@ pub(crate) fn validate_runtime_capabilities_policy(
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
     }
     Ok(())
+}
+
+pub(crate) fn validate_runtime_capabilities_artifact_policy(
+    capabilities: Option<&RuntimeCapabilitiesEnvelope>,
+    placement: Option<RuntimePlacement>,
+    artifact: &RuntimeArtifact,
+) -> CoreResult<()> {
+    validate_runtime_capabilities_policy(capabilities, placement)?;
+    if capabilities.is_some_and(|capabilities| capabilities.v1().recover_known_good_chat)
+        && !artifact.recover_known_good_chat
+    {
+        return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
+    }
+    Ok(())
+}
+
+pub(crate) fn bound_runtime_capabilities_to_artifact(
+    capabilities: Option<RuntimeCapabilitiesEnvelope>,
+    artifact: &RuntimeArtifact,
+) -> Option<RuntimeCapabilitiesEnvelope> {
+    capabilities.map(|mut envelope| {
+        let RuntimeCapabilitiesEnvelope::V1(capabilities) = &mut envelope;
+        capabilities.recover_known_good_chat &= artifact.recover_known_good_chat;
+        envelope
+    })
 }
 
 fn current_time_iso() -> CoreResult<String> {
@@ -5869,6 +6426,7 @@ pub(crate) fn runtime_artifact_material_matches(
         && existing.finite_platform_plugin_ref == candidate.finite_platform_plugin_ref
         && existing.state_schema_version == candidate.state_schema_version
         && existing.base_image == candidate.base_image
+        && existing.recover_known_good_chat == candidate.recover_known_good_chat
 }
 
 pub(crate) fn runtime_upgrade_prelease_rejection_is_terminal(error: &CoreError) -> bool {
@@ -6619,10 +7177,361 @@ mod tests {
     }
 
     #[test]
+    fn provider_operation_ledger_is_fenced_monotonic_and_survives_re_lease() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let launch_code = issue_test_launch_code(&mut state);
+        let requested = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "ledger@finite.vip".to_string(),
+                workos_user_id: "workos-ledger".to_string(),
+                display_name: "Ledger Agent".to_string(),
+                launch_code,
+                idempotency_key: "ledger-submit".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let request_id = requested.request.id;
+        state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "runner-a".to_string(),
+                lease_token: "token-a".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                source_host_id: None,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        state
+            .agent_creation_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .lease_expires_at = Some("2099-01-01T00:00:00Z".to_string());
+        let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+        let input = |runner: &str,
+                     token: &str,
+                     correlation: &str,
+                     transition: ProviderOperationTransition| {
+            RecordProviderOperationTransitionInput {
+                request_id: request_id.clone(),
+                runner_id: runner.to_string(),
+                lease_token: token.to_string(),
+                correlation_id: correlation.to_string(),
+                placement,
+                transition,
+            }
+        };
+
+        let reserved = state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::CorrelationReserved,
+            ))
+            .unwrap();
+        let replay = state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::CorrelationReserved,
+            ))
+            .unwrap();
+        assert_eq!(replay, reserved, "replay returns the exact persisted ack");
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-a",
+                "wrong-token",
+                "provider-correlation-1",
+                ProviderOperationTransition::CorrelationReserved,
+            )),
+            Err(CoreError::AgentCreationRequestLeaseConflict)
+        ));
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::Provisioned {
+                    provider_facts: json!({"api_token": "must-not-persist"}),
+                },
+            )),
+            Err(CoreError::InvalidProviderOperationFacts)
+        ));
+
+        state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::ProvisionUnknown {
+                    provider_facts: json!({"attempt": "timed_out"}),
+                },
+            ))
+            .unwrap();
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::CommitStarted,
+            )),
+            Err(CoreError::ProviderOperationTransitionConflict)
+        ));
+        state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::Provisioned {
+                    provider_facts: json!({"provider_id": "opaque-123", "region": "test"}),
+                },
+            ))
+            .unwrap();
+        let committed = state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::CommitStarted,
+            ))
+            .unwrap();
+
+        state
+            .agent_creation_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .lease_expires_at = Some("2097-01-01T00:00:00Z".to_string());
+        let second = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "runner-b".to_string(),
+                lease_token: "token-b".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                source_host_id: None,
+                now: Some("2098-01-01T00:00:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.provider_operation.as_ref(), Some(&committed));
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::CommitStarted,
+            )),
+            Err(CoreError::AgentCreationRequestLeaseConflict)
+        ));
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-b",
+                "token-b",
+                "different-correlation",
+                ProviderOperationTransition::CommitStarted,
+            )),
+            Err(CoreError::ProviderOperationIdentityMismatch)
+        ));
+        let replay_after_crash = state
+            .record_provider_operation_transition(input(
+                "runner-b",
+                "token-b",
+                "provider-correlation-1",
+                ProviderOperationTransition::CommitStarted,
+            ))
+            .unwrap();
+        assert_eq!(replay_after_crash, committed);
+
+        let handle = ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
+            runner_class: RunnerClass::Kata,
+            opaque: json!({"sandbox_id": "opaque-123"}),
+        });
+        let registered = state
+            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                request_id: request_id.clone(),
+                runner_id: "runner-b".to_string(),
+                lease_token: "token-b".to_string(),
+                source_host_id: "ledger-host".to_string(),
+                source_machine_id: "ledger-machine".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: None,
+                provider_runtime_handle: Some(handle.clone()),
+                contact_endpoint: None,
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        recover_known_good_chat: true,
+                        ..*kata_runtime_capabilities().v1()
+                    },
+                )),
+                runtime_relay_token_hash: runtime_relay_token_hash("ledger-relay").unwrap(),
+                display_name: None,
+                hostname: None,
+                runtime_host: None,
+                runtime_status: None,
+                active_inference_profile: None,
+                hermes_available: None,
+                published_app_urls: Vec::new(),
+                now: Some("2098-01-01T00:01:00Z".to_string()),
+            })
+            .unwrap();
+        assert!(
+            !state.agent_runtimes[registered.request.agent_runtime_id.as_ref().unwrap()]
+                .runtime_capabilities
+                .as_ref()
+                .unwrap()
+                .v1()
+                .recover_known_good_chat,
+            "an old artifact bounds the worker's process-wide recovery maximum"
+        );
+        assert!(matches!(
+            registered
+                .provider_operation
+                .as_ref()
+                .unwrap()
+                .v1()
+                .transitions
+                .last()
+                .unwrap()
+                .transition,
+            ProviderOperationTransition::ProviderHandleRecorded { .. }
+        ));
+        let completed = state
+            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                request_id,
+                runner_id: "runner-b".to_string(),
+                lease_token: "token-b".to_string(),
+                source_host_id: "ledger-host".to_string(),
+                source_machine_id: "ledger-machine".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: None,
+                provider_runtime_handle: Some(handle),
+                contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: None,
+                hostname: None,
+                runtime_host: None,
+                runtime_status: Some(RuntimeSummaryStatus::Online),
+                active_inference_profile: None,
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+                now: Some("2098-01-01T00:02:00Z".to_string()),
+            })
+            .unwrap();
+        assert!(matches!(
+            completed
+                .provider_operation
+                .unwrap()
+                .v1()
+                .transitions
+                .last()
+                .unwrap()
+                .transition,
+            ProviderOperationTransition::Ready
+        ));
+    }
+
+    #[test]
+    fn kata_is_the_only_runtime_recovery_capability_boundary() {
+        let recover = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            recover_known_good_chat: true,
+            ..RuntimeCapabilitiesV1::default()
+        });
+        assert!(
+            RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(recover.clone()),
+                ..RunnerLeaseCapacity::default()
+            }
+            .validate_runtime_capability_policy()
+            .is_ok()
+        );
+        for runner_classes in [
+            Vec::new(),
+            vec![RunnerClass::Phala],
+            vec![RunnerClass::Kata, RunnerClass::Phala],
+        ] {
+            assert!(matches!(
+                (RunnerLeaseCapacity {
+                    runner_classes,
+                    runtime_capabilities: Some(recover.clone()),
+                    ..RunnerLeaseCapacity::default()
+                })
+                .validate_runtime_capability_policy(),
+                Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+            ));
+        }
+        assert!(
+            validate_runtime_capabilities_policy(
+                Some(&recover),
+                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard))
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_runtime_capabilities_policy(
+                Some(&recover),
+                Some(RuntimePlacement::for_hosting_tier(
+                    HostingTier::Confidential
+                ))
+            ),
+            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+        ));
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let legacy_artifact = state.runtime_artifacts["artifact-v1"].clone();
+        assert!(matches!(
+            validate_runtime_capabilities_artifact_policy(
+                Some(&recover),
+                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                &legacy_artifact,
+            ),
+            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+        ));
+        let capable_artifact = RuntimeArtifact {
+            recover_known_good_chat: true,
+            ..legacy_artifact.clone()
+        };
+        assert!(
+            validate_runtime_capabilities_artifact_policy(
+                Some(&recover),
+                Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                &capable_artifact,
+            )
+            .is_ok()
+        );
+        assert!(
+            !runtime_artifact_material_matches(&legacy_artifact, &capable_artifact),
+            "artifact recovery support is immutable release material"
+        );
+        for key in ["FINITE_AGENT_BOOT_INTENT_JSON", "FINITE_AGENT_STATE_ROOT"] {
+            assert!(matches!(
+                validate_runtime_spec_environment(&BTreeMap::from([(
+                    key.to_string(),
+                    "caller-owned".to_string()
+                )])),
+                Err(CoreError::RuntimeSpecMismatch)
+            ));
+        }
+    }
+
+    #[test]
     fn runner_leases_and_completes_self_serve_agent_request() {
         let mut state = BridgeCoreState::default();
         let launch_code = issue_test_launch_code(&mut state);
         promote_runtime_artifact(&mut state);
+        state
+            .runtime_artifacts
+            .get_mut("artifact-v1")
+            .unwrap()
+            .recover_known_good_chat = true;
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "new@finite.vip".to_string(),
@@ -6682,7 +7591,12 @@ mod tests {
                     },
                 )),
                 contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
-                runtime_capabilities: Some(kata_runtime_capabilities()),
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        recover_known_good_chat: true,
+                        ..*kata_runtime_capabilities().v1()
+                    },
+                )),
                 display_name: None,
                 hostname: Some("oslo-agent-001.finite.computer".to_string()),
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6701,6 +7615,14 @@ mod tests {
         assert!(completed.request.lease_token.is_none());
         let runtime_id = completed.request.agent_runtime_id.unwrap();
         let runtime = state.agent_runtimes.get(&runtime_id).unwrap();
+        assert!(
+            runtime
+                .runtime_capabilities
+                .as_ref()
+                .unwrap()
+                .v1()
+                .recover_known_good_chat
+        );
         assert_eq!(runtime.project_id, requested.project.id);
         assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v1"));
         assert_eq!(runtime.state_schema_version.as_deref(), Some("state-v1"));
@@ -6795,6 +7717,7 @@ mod tests {
             finite_platform_plugin_ref: Some("plugin-v1".to_string()),
             state_schema_version: "state-v1".to_string(),
             base_image: Some("base-v1".to_string()),
+            recover_known_good_chat: false,
             promoted: false,
             now: Some(NOW.to_string()),
         };
@@ -6880,6 +7803,7 @@ mod tests {
                 finite_platform_plugin_ref: None,
                 state_schema_version: "state-v1".to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
+                recover_known_good_chat: false,
                 promoted: false,
                 now: Some(NOW.to_string()),
             })
@@ -6968,23 +7892,16 @@ mod tests {
             published_app_urls: Vec::new(),
             now: Some("2026-05-25T13:01:30Z".to_string()),
         };
-        for unauthorized in [
-            RuntimeCapabilitiesV1 {
-                recover_known_good_chat: true,
-                ..*kata_runtime_capabilities().v1()
-            },
-            RuntimeCapabilitiesV1 {
-                runtime_retirement: true,
-                ..*kata_runtime_capabilities().v1()
-            },
-        ] {
-            let mut rejected = register_input.clone();
-            rejected.runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(unauthorized));
-            assert!(matches!(
-                state.register_agent_creation_runtime(rejected),
-                Err(CoreError::RuntimeCapabilitiesNotAuthorized)
-            ));
-        }
+        let unauthorized = RuntimeCapabilitiesV1 {
+            runtime_retirement: true,
+            ..*kata_runtime_capabilities().v1()
+        };
+        let mut rejected = register_input.clone();
+        rejected.runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(unauthorized));
+        assert!(matches!(
+            state.register_agent_creation_runtime(rejected),
+            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
+        ));
         let registered = state
             .register_agent_creation_runtime(register_input)
             .unwrap();
@@ -7132,6 +8049,7 @@ mod tests {
                 lease_token: "wrong-token".to_string(),
                 runtime_artifact_id: None,
                 state_schema_version: None,
+                runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
                 now: Some("2026-05-25T13:04:30Z".to_string()),
@@ -7142,6 +8060,29 @@ mod tests {
             CoreError::RuntimeControlRequestLeaseConflict
         ));
 
+        let forbidden_refresh = state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: restart.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "restart-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        recover_known_good_chat: true,
+                        ..*kata_runtime_capabilities().v1()
+                    },
+                )),
+                runtime_host: None,
+                published_app_urls: None,
+                now: Some("2026-05-25T13:04:45Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            forbidden_refresh,
+            CoreError::RuntimeUpgradeCompletionMismatch
+        ));
+
         let completed = state
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                 request_id: restart.id,
@@ -7149,6 +8090,7 @@ mod tests {
                 lease_token: "restart-lease-1".to_string(),
                 runtime_artifact_id: None,
                 state_schema_version: None,
+                runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
@@ -7307,6 +8249,7 @@ mod tests {
                 lease_token: "stop-lease-1".to_string(),
                 runtime_artifact_id: None,
                 state_schema_version: None,
+                runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
@@ -9205,6 +10148,7 @@ mod tests {
                 lease_token: "admin-restart-lease-1".to_string(),
                 runtime_artifact_id: None,
                 state_schema_version: None,
+                runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
@@ -9588,6 +10532,11 @@ mod tests {
             "state-v1",
             "2026-05-25T13:03:00Z",
         );
+        state
+            .runtime_artifacts
+            .get_mut("artifact-v2")
+            .unwrap()
+            .recover_known_good_chat = true;
 
         let upgrade = state
             .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
@@ -9681,6 +10630,12 @@ mod tests {
             .get_mut("artifact-v2")
             .unwrap()
             .retired_at = None;
+        let legacy_creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .unwrap();
+        legacy_creation.runtime_spec = None;
         let upgrade = state
             .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
                 admin_verified_email: "admin@finite.vip".to_string(),
@@ -9712,6 +10667,15 @@ mod tests {
                 .map(|artifact| artifact.id.as_str()),
             Some("artifact-v2")
         );
+        let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
+        assert_eq!(
+            runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
+            runtime_id
+        );
+        assert_eq!(
+            runtime_spec_v1(synthesized_upgrade_spec).operation_id,
+            upgrade.id
+        );
 
         let mismatch = state
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
@@ -9720,6 +10684,7 @@ mod tests {
                 lease_token: "upgrade-lease".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
+                runtime_capabilities: None,
                 runtime_host: Some("http://127.0.0.1:41002".to_string()),
                 published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
                 now: Some("2026-05-25T13:06:00Z".to_string()),
@@ -9752,6 +10717,12 @@ mod tests {
                 lease_token: "upgrade-lease".to_string(),
                 runtime_artifact_id: Some("artifact-v2".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        recover_known_good_chat: true,
+                        ..*kata_runtime_capabilities().v1()
+                    },
+                )),
                 runtime_host: Some("http://127.0.0.1:41002".to_string()),
                 published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
                 now: Some("2026-05-25T13:06:40Z".to_string()),
@@ -9761,6 +10732,14 @@ mod tests {
         assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
         assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
         assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
+        assert!(
+            runtime
+                .runtime_capabilities
+                .as_ref()
+                .unwrap()
+                .v1()
+                .recover_known_good_chat
+        );
         assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
         assert!(
             state
@@ -9781,6 +10760,41 @@ mod tests {
                         && event.metadata["targetRuntimeArtifactId"] == "artifact-v2"
                 })
         );
+
+        let recovery = state
+            .request_runtime_recover_known_good_chat(RequestRuntimeRecoverKnownGoodChatInput {
+                verified_email: "upgrade@finite.vip".to_string(),
+                workos_user_id: "workos-upgrade".to_string(),
+                project_id: requested.project.id,
+                now: Some("2026-05-25T13:07:00Z".to_string()),
+            })
+            .unwrap();
+        let recovery_capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            recover_known_good_chat: true,
+            ..*kata_runtime_capabilities().v1()
+        });
+        let recovery_lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "kata-runner".to_string(),
+                lease_token: "recovery-lease".to_string(),
+                lease_seconds: Some(300),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(recovery_capabilities),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:07:01Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery_lease.request.id, recovery.id);
+        let recovery_spec = runtime_spec_v1(recovery_lease.runtime_spec.as_ref().unwrap());
+        assert_eq!(
+            recovery_spec.boot_intent,
+            RuntimeBootIntent::RecoverKnownGood
+        );
+        assert_eq!(recovery_spec.runtime_artifact_id, "artifact-v2");
     }
 
     #[test]
@@ -9852,6 +10866,7 @@ mod tests {
                 finite_platform_plugin_ref: Some("plugin-ref".to_string()),
                 state_schema_version: state_schema_version.to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
+                recover_known_good_chat: false,
                 promoted: true,
                 now: Some(now.to_string()),
             })

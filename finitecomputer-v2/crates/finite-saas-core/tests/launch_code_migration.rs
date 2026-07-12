@@ -9,6 +9,12 @@ const MEMBERSHIP_ARCHIVE_V4: &str = include_str!("../migrations/0004_membership_
 const PHALA_EXPAND_V5: &str = include_str!("../migrations/0005_phala_expand.sql");
 const RUNTIME_CAPABILITIES_V6: &str =
     include_str!("../migrations/0006_runtime_capabilities_expand.sql");
+const PROVIDER_OPERATIONS_V7: &str =
+    include_str!("../migrations/0007_provider_creation_operations.sql");
+const PROVISIONAL_RUNTIME_V8: &str =
+    include_str!("../migrations/0008_agent_creation_provisional_runtime.sql");
+const ARTIFACT_RECOVERY_SUPPORT_V9: &str =
+    include_str!("../migrations/0009_artifact_recovery_support.sql");
 
 static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -398,8 +404,12 @@ async fn phala_expand_backfills_standard_without_moving_running_placement() {
                     now(), now()
                   );
                 UPDATE agent_creation_requests
-                  SET status = 'running', agent_runtime_id = 'runtime-kata'
+                  SET status = 'running', agent_runtime_id = 'runtime-kata',
+                      runtime_spec = '{"schema":"runtime_spec.v1"}'::jsonb
                   WHERE id = 'request-unlaunched';
+                UPDATE agent_creation_requests
+                  SET status = 'running', agent_runtime_id = 'runtime-imported'
+                  WHERE id = 'request-n-minus-one';
                 "#,
             )
             .await
@@ -428,16 +438,29 @@ async fn phala_expand_backfills_standard_without_moving_running_placement() {
                 }
             })
         );
-        for runtime_id in ["runtime-running", "runtime-imported"] {
-            let capabilities = client
-                .query_one(
-                    "SELECT runtime_capabilities FROM agent_runtimes WHERE id = $1",
-                    &[&runtime_id],
-                )
-                .await
-                .unwrap();
-            assert_eq!(capabilities.get::<_, Option<serde_json::Value>>(0), None);
-        }
+        let phala_capabilities = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-running'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            phala_capabilities.get::<_, Option<serde_json::Value>>(0),
+            None
+        );
+        let legacy_kata_capabilities = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-imported'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, serde_json::Value>(0);
+        assert_eq!(
+            legacy_kata_capabilities["capabilities"]["recover_known_good_chat"],
+            false
+        );
 
         // The expand column remains nullable for N-1 writers and accepts only
         // object envelopes when a value is present.
@@ -477,6 +500,106 @@ async fn phala_expand_backfills_standard_without_moving_running_placement() {
             Some(&SqlState::CHECK_VIOLATION)
         );
         client.batch_execute(RUNTIME_CAPABILITIES_V6).await.unwrap();
+        client.batch_execute(PROVIDER_OPERATIONS_V7).await.unwrap();
+        client.batch_execute(PROVISIONAL_RUNTIME_V8).await.unwrap();
+        client
+            .batch_execute(ARTIFACT_RECOVERY_SUPPORT_V9)
+            .await
+            .unwrap();
+        let kata_capabilities = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-kata'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, serde_json::Value>(0);
+        assert_eq!(
+            kata_capabilities["capabilities"]["recover_known_good_chat"],
+            false,
+            "schema replay must not re-enable recovery on an older runtime image"
+        );
+        let legacy_capabilities = client
+            .query_one(
+                "SELECT runtime_capabilities FROM agent_runtimes WHERE id = 'runtime-imported'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy_capabilities
+                .get::<_, serde_json::Value>(0)["capabilities"]
+                ["recover_known_good_chat"],
+            false,
+            "a legacy injected Kata worker must remain fail-closed"
+        );
+
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO agent_creation_provider_operations (
+                  agent_creation_request_id, schema_name, correlation_id,
+                  placement_runner_class, runtime_resource_class, created_at, updated_at
+                ) VALUES (
+                  'request-unlaunched', 'provider_operation.v1', 'opaque-correlation',
+                  'kata', 'vcpu4_memory8_gib', now(), now()
+                );
+                INSERT INTO agent_creation_provider_operation_transitions (
+                  agent_creation_request_id, sequence, transition, recorded_at
+                ) VALUES (
+                  'request-unlaunched', 0, '{"kind":"correlation_reserved"}'::jsonb, now()
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+        client.batch_execute(PROVIDER_OPERATIONS_V7).await.unwrap();
+        client.batch_execute(PROVISIONAL_RUNTIME_V8).await.unwrap();
+        client
+            .batch_execute(ARTIFACT_RECOVERY_SUPPORT_V9)
+            .await
+            .unwrap();
+        let transition_count = client
+            .query_one(
+                "SELECT count(*) FROM agent_creation_provider_operation_transitions
+                 WHERE agent_creation_request_id = 'request-unlaunched'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(transition_count.get::<_, i64>(0), 1);
+        let legacy_runtime_fk_count = client
+            .query_one(
+                "SELECT count(*) FROM pg_constraint
+                 WHERE conrelid = 'agent_creation_requests'::regclass
+                   AND conname = 'agent_creation_requests_agent_runtime_id_fkey'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_runtime_fk_count.get::<_, i64>(0), 0);
+        client
+            .execute(
+                "INSERT INTO runtime_artifacts (
+                   id, kind, reference, version_label, state_schema_version, created_at
+                 ) VALUES (
+                   'artifact-n-minus-one', 'oci_image',
+                   'ghcr.io/finitecomputer/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'n-minus-one', 'state-v1', now()
+                 )",
+                &[],
+            )
+            .await
+            .unwrap();
+        let artifact_support = client
+            .query_one(
+                "SELECT recover_known_good_chat FROM runtime_artifacts
+                 WHERE id = 'artifact-n-minus-one'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(!artifact_support.get::<_, bool>(0));
     })
     .await;
 }

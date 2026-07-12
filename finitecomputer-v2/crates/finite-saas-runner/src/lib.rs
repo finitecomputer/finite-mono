@@ -78,6 +78,16 @@ pub(crate) fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
     })
 }
 
+fn artifact_bounded_upgrade_runtime_capabilities(
+    mut capabilities: RuntimeCapabilitiesEnvelope,
+    target_artifact: Option<&RuntimeArtifact>,
+) -> RuntimeCapabilitiesEnvelope {
+    let RuntimeCapabilitiesEnvelope::V1(bounded) = &mut capabilities;
+    bounded.recover_known_good_chat &=
+        target_artifact.is_some_and(|artifact| artifact.recover_known_good_chat);
+    capabilities
+}
+
 fn wait_with_captured_output(
     mut child: Child,
     program: &Path,
@@ -615,6 +625,12 @@ where
                 previous_heartbeat.as_deref(),
             ) {
                 Ok(()) => {
+                    let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
+                        artifact_bounded_upgrade_runtime_capabilities(
+                            self.launcher.runtime_capabilities(),
+                            lease.target_runtime_artifact.as_ref(),
+                        )
+                    });
                     let completed = self.queue.complete_runtime_control(
                         &request_id,
                         CompleteRuntimeControlRequestInput {
@@ -627,8 +643,7 @@ where
                             state_schema_version: upgrade_facts
                                 .as_ref()
                                 .map(|facts| facts.state_schema_version.clone()),
-                            runtime_capabilities: (kind == RuntimeControlKind::Upgrade)
-                                .then(|| self.launcher.runtime_capabilities()),
+                            runtime_capabilities,
                             runtime_host: upgrade_facts
                                 .as_ref()
                                 .map(|facts| facts.runtime_host.clone()),
@@ -3690,7 +3705,12 @@ mod tests {
 
     #[test]
     fn run_once_upgrades_only_the_core_bound_artifact_and_reports_actual_facts() {
-        let runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
+        let mut runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
+        runtime_control
+            .target_runtime_artifact
+            .as_mut()
+            .unwrap()
+            .recover_known_good_chat = true;
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample())
@@ -3733,6 +3753,24 @@ mod tests {
             Some(["http://127.0.0.1:41002/contact".to_string()].as_slice())
         );
         assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn upgrade_capabilities_are_bounded_by_exact_target_artifact() {
+        let legacy = sample_runtime_upgrade_lease("runtime_ctl_legacy");
+        let bounded = artifact_bounded_upgrade_runtime_capabilities(
+            kata_runtime_capabilities(),
+            legacy.target_runtime_artifact.as_ref(),
+        );
+        assert!(!bounded.v1().recover_known_good_chat);
+
+        let mut capable = legacy.target_runtime_artifact.unwrap();
+        capable.recover_known_good_chat = true;
+        let bounded = artifact_bounded_upgrade_runtime_capabilities(
+            kata_runtime_capabilities(),
+            Some(&capable),
+        );
+        assert!(bounded.v1().recover_known_good_chat);
     }
 
     #[test]
@@ -5444,6 +5482,7 @@ mod tests {
             finite_platform_plugin_ref: Some("plugin-v2".to_string()),
             state_schema_version: "state-v1".to_string(),
             base_image: None,
+            recover_known_good_chat: false,
             created_at: "2026-05-25T13:00:00Z".to_string(),
             promoted_at: Some("2026-05-25T13:01:00Z".to_string()),
             retired_at: None,

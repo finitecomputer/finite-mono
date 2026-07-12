@@ -101,6 +101,9 @@ enum Command {
         /// finite-platform plugin revision/ref.
         #[arg(long)]
         finite_platform_plugin_ref: Option<String>,
+        /// Exact image implements recover-known-good-chat receiver semantics.
+        #[arg(long, default_value_t = false)]
+        recover_known_good_chat: bool,
         /// Store the artifact as promoted and launchable.
         #[arg(long, default_value_t = true)]
         promoted: bool,
@@ -320,6 +323,7 @@ async fn main() -> Result<()> {
             finitec_version,
             hermes_source_ref,
             finite_platform_plugin_ref,
+            recover_known_good_chat,
             promoted,
             now,
             dry_run,
@@ -336,6 +340,7 @@ async fn main() -> Result<()> {
                     finite_platform_plugin_ref,
                     state_schema_version,
                     base_image,
+                    recover_known_good_chat,
                     promoted,
                     now,
                 },

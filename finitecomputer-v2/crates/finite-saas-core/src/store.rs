@@ -20,21 +20,23 @@ use crate::{
     FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
     IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
     LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProvisionFinitePrivateRuntimeKeyInput,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
-    RelayHeartbeat, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlKind, RuntimeControlLease,
-    RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential,
-    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
-    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
-    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
-    agent_creation_entitlement_id_for, build_runtime_spec_v1, chat_identity_id_for_user,
+    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
+    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
+    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlKind,
+    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
+    RuntimeRelayCredential, RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeStatusSnapshot,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
+    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
+    agent_creation_entitlement_id_for, append_provider_operation_transition,
+    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, chat_identity_id_for_user,
     current_time_iso, finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
@@ -47,12 +49,13 @@ use crate::{
     parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
     parse_runtime_control_request_status, parse_runtime_resource_class,
     parse_runtime_summary_status, parse_time, parse_user_link_status,
-    project_room_membership_id_for, project_runtime_link_id_for, runtime_artifact_material_matches,
+    project_room_membership_id_for, project_runtime_link_id_for,
+    provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
     runtime_artifact_reference_is_immutable_oci, runtime_operation_spec_v1,
     runtime_relay_token_hash, runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
     should_replace_stripe_subscription, source_import_key, trim_to_option,
-    validate_runtime_capabilities_policy, validate_runtime_spec_binding,
-    validate_runtime_spec_environment,
+    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
+    validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -302,6 +305,16 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.lease_agent_creation_request(input).await,
             Self::Postgres(store) => store.lease_agent_creation_request(input).await,
+        }
+    }
+
+    pub async fn record_provider_operation_transition(
+        &self,
+        input: RecordProviderOperationTransitionInput,
+    ) -> CoreResult<ProviderOperationEnvelope> {
+        match self {
+            Self::Memory(store) => store.record_provider_operation_transition(input).await,
+            Self::Postgres(store) => store.record_provider_operation_transition(input).await,
         }
     }
 
@@ -851,12 +864,23 @@ impl MemoryCoreStore {
         )
     }
 
+    pub async fn record_provider_operation_transition(
+        &self,
+        input: RecordProviderOperationTransitionInput,
+    ) -> CoreResult<ProviderOperationEnvelope> {
+        let mut state = self.state.lock().await;
+        state.record_provider_operation_transition(input)
+    }
+
     pub async fn lease_runtime_control_request(
         &self,
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
         let mut state = self.state.lock().await;
-        state.lease_runtime_control_request(input)
+        state.lease_runtime_control_request_with_runtime_environment(
+            input,
+            self.runtime_environment.as_ref(),
+        )
     }
 
     pub async fn complete_runtime_control_request(
@@ -1478,13 +1502,26 @@ impl PostgresCoreStore {
         Ok(result)
     }
 
+    pub async fn record_provider_operation_transition(
+        &self,
+        input: RecordProviderOperationTransitionInput,
+    ) -> CoreResult<ProviderOperationEnvelope> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_record_provider_operation_transition(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
     pub async fn lease_runtime_control_request(
         &self,
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_lease_runtime_control_request(&tx, input).await?;
+        let result =
+            postgres_lease_runtime_control_request(&tx, input, self.runtime_environment.as_ref())
+                .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2824,7 +2861,60 @@ where
         request.desired_runtime_artifact_id = Some(artifact_id);
         request.runtime_spec = Some(runtime_spec);
     }
-    Ok(Some(AgentCreationLease { project, request }))
+    let provider_operation = select_provider_operation(client, &request.id).await?;
+    Ok(Some(AgentCreationLease {
+        project,
+        request,
+        provider_operation,
+    }))
+}
+
+async fn postgres_record_provider_operation_transition<C>(
+    client: &C,
+    input: RecordProviderOperationTransitionInput,
+) -> CoreResult<ProviderOperationEnvelope>
+where
+    C: GenericClient + Sync,
+{
+    if matches!(
+        input.transition,
+        ProviderOperationTransition::ProviderHandleRecorded { .. }
+            | ProviderOperationTransition::Ready
+    ) {
+        return Err(CoreError::ProviderOperationBoundaryNotReached);
+    }
+    let request = locked_agent_creation_request(client, &input.request_id).await?;
+    let now = current_time_iso()?;
+    verify_agent_creation_lease_active(client, &request, &input.runner_id, &input.lease_token)
+        .await?;
+    let project = select_project(client, &request.project_id)
+        .await?
+        .ok_or_else(|| missing_request_project_error(&request))?;
+    let placement = request
+        .placement
+        .or(project.placement)
+        .or_else(|| RuntimePlacement::from_legacy_runner_class(request.runner_class))
+        .ok_or(CoreError::ProviderOperationIdentityMismatch)?;
+    if placement != input.placement {
+        return Err(CoreError::ProviderOperationIdentityMismatch);
+    }
+    let existing = select_provider_operation(client, &input.request_id).await?;
+    let previous_len = existing
+        .as_ref()
+        .map(|operation| operation.v1().transitions.len())
+        .unwrap_or_default();
+    let updated = append_provider_operation_transition(
+        existing.as_ref(),
+        &input.request_id,
+        &input.correlation_id,
+        input.placement,
+        input.transition,
+        &now,
+    )?;
+    persist_provider_operation_delta(client, previous_len, &updated).await?;
+    select_provider_operation(client, &input.request_id)
+        .await?
+        .ok_or(CoreError::ProviderOperationTransitionConflict)
 }
 
 async fn postgres_register_agent_creation_runtime<C>(
@@ -2852,6 +2942,15 @@ where
         .unwrap_or_else(|| artifact.state_schema_version.clone());
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    let provider_operation = select_provider_operation(client, &input.request_id).await?;
+    let provider_operation_now = provider_operation
+        .as_ref()
+        .map(|_| current_time_iso())
+        .transpose()?;
+    if provider_operation_now.is_some() {
+        verify_agent_creation_lease_active(client, &request, &input.runner_id, &input.lease_token)
+            .await?;
+    }
     let project = select_project(client, &request.project_id)
         .await?
         .ok_or_else(|| missing_request_project_error(&request))?;
@@ -2903,11 +3002,11 @@ where
     )?;
     let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
         .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-    validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
-    let runtime_capabilities = merge_runtime_capabilities(
-        existing_runtime.as_ref(),
-        input.runtime_capabilities.clone(),
-    )?;
+    let bounded_runtime_capabilities =
+        bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
+    validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
+    let runtime_capabilities =
+        merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -2927,6 +3026,28 @@ where
             .unwrap_or_else(|| now.clone()),
         updated_at: now.clone(),
     };
+    let updated_provider_operation = provider_operation_at_runtime_boundary(
+        provider_operation.as_ref(),
+        runtime.provider_runtime_handle.as_ref(),
+        false,
+        provider_operation_now.as_deref().unwrap_or(&now),
+    )?;
+    if let Some(operation) = updated_provider_operation.as_ref() {
+        persist_provider_operation_delta(
+            client,
+            provider_operation
+                .as_ref()
+                .map(|operation| operation.v1().transitions.len())
+                .unwrap_or_default(),
+            operation,
+        )
+        .await?;
+    }
+    let provider_operation_ack = if updated_provider_operation.is_some() {
+        select_provider_operation(client, &input.request_id).await?
+    } else {
+        provider_operation.clone()
+    };
     upsert_agent_runtime_row(client, &runtime).await?;
     upsert_runtime_relay_credential_row(
         client,
@@ -2942,7 +3063,11 @@ where
     let request =
         update_agent_creation_runtime_registered(client, &input.request_id, &runtime_id, &now)
             .await?;
-    Ok(AgentCreationLease { project, request })
+    Ok(AgentCreationLease {
+        project,
+        request,
+        provider_operation: provider_operation_ack,
+    })
 }
 
 async fn postgres_complete_agent_creation_request<C>(
@@ -2960,6 +3085,15 @@ where
     }
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    let provider_operation = select_provider_operation(client, &input.request_id).await?;
+    let provider_operation_now = provider_operation
+        .as_ref()
+        .map(|_| current_time_iso())
+        .transpose()?;
+    if provider_operation_now.is_some() {
+        verify_agent_creation_lease_active(client, &request, &input.runner_id, &input.lease_token)
+            .await?;
+    }
     let existing_runtime = match request.agent_runtime_id.as_deref() {
         Some(runtime_id) => select_agent_runtime(client, runtime_id).await?,
         None => None,
@@ -3025,11 +3159,11 @@ where
     )?;
     let contact_endpoint = normalize_runtime_contact_endpoint(input.contact_endpoint.as_deref())?
         .or_else(|| existing_runtime.as_ref()?.contact_endpoint.clone());
-    validate_runtime_capabilities_policy(input.runtime_capabilities.as_ref(), placement)?;
-    let runtime_capabilities = merge_runtime_capabilities(
-        existing_runtime.as_ref(),
-        input.runtime_capabilities.clone(),
-    )?;
+    let bounded_runtime_capabilities =
+        bound_runtime_capabilities_to_artifact(input.runtime_capabilities.clone(), &artifact);
+    validate_runtime_capabilities_policy(bounded_runtime_capabilities.as_ref(), placement)?;
+    let runtime_capabilities =
+        merge_runtime_capabilities(existing_runtime.as_ref(), bounded_runtime_capabilities)?;
     let runtime = AgentRuntime {
         id: runtime_id.clone(),
         project_id: project.id.clone(),
@@ -3049,11 +3183,42 @@ where
             .unwrap_or_else(|| now.clone()),
         updated_at: now.clone(),
     };
+    let updated_provider_operation = provider_operation_at_runtime_boundary(
+        provider_operation.as_ref(),
+        runtime.provider_runtime_handle.as_ref(),
+        true,
+        provider_operation_now.as_deref().unwrap_or(&now),
+    )?;
+    if let Some(operation) = updated_provider_operation.as_ref() {
+        let previous_len = provider_operation
+            .as_ref()
+            .map(|operation| operation.v1().transitions.len())
+            .unwrap_or_default();
+        // Completion may atomically cross both server-owned boundaries.
+        for length in previous_len..operation.v1().transitions.len() {
+            let partial = ProviderOperationEnvelope::V1(ProviderOperationV1 {
+                agent_creation_request_id: operation.v1().agent_creation_request_id.clone(),
+                correlation_id: operation.v1().correlation_id.clone(),
+                placement: operation.v1().placement,
+                transitions: operation.v1().transitions[..=length].to_vec(),
+            });
+            persist_provider_operation_delta(client, length, &partial).await?;
+        }
+    }
+    let provider_operation_ack = if updated_provider_operation.is_some() {
+        select_provider_operation(client, &input.request_id).await?
+    } else {
+        provider_operation.clone()
+    };
     upsert_agent_runtime_row(client, &runtime).await?;
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_completed(client, &input.request_id, &runtime_id, &now).await?;
-    Ok(AgentCreationLease { project, request })
+    Ok(AgentCreationLease {
+        project,
+        request,
+        provider_operation: provider_operation_ack,
+    })
 }
 
 async fn postgres_fail_agent_creation_request<C>(
@@ -3677,6 +3842,7 @@ fn runtime_artifact_from_row(row: &Row) -> CoreResult<RuntimeArtifact> {
         finite_platform_plugin_ref: row.get("finite_platform_plugin_ref"),
         state_schema_version: row.get("state_schema_version"),
         base_image: row.get("base_image"),
+        recover_known_good_chat: row.get("recover_known_good_chat"),
         created_at: row.get("created_at"),
         promoted_at: row.get("promoted_at"),
         retired_at: row.get("retired_at"),
@@ -3897,7 +4063,8 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, created_at::text, promoted_at::text, retired_at::text
+                    base_image, recover_known_good_chat,
+                    created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1",
             &[&artifact_id],
         )
@@ -3915,7 +4082,8 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, created_at::text, promoted_at::text, retired_at::text
+                    base_image, recover_known_good_chat,
+                    created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
              ORDER BY promoted_at DESC, created_at DESC, id DESC
@@ -4788,6 +4956,159 @@ fn verify_agent_creation_lease(
     Ok(())
 }
 
+async fn verify_agent_creation_lease_active<C>(
+    client: &C,
+    request: &AgentCreationRequest,
+    runner_id: &str,
+    lease_token: &str,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    verify_agent_creation_lease(request, runner_id, lease_token)?;
+    let active: bool = client
+        .query_one(
+            "SELECT COALESCE(lease_expires_at > CURRENT_TIMESTAMP, false)
+             FROM agent_creation_requests WHERE id = $1",
+            &[&request.id],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0);
+    if !active {
+        return Err(CoreError::AgentCreationRequestLeaseConflict);
+    }
+    Ok(())
+}
+
+async fn select_provider_operation<C>(
+    client: &C,
+    request_id: &str,
+) -> CoreResult<Option<ProviderOperationEnvelope>>
+where
+    C: GenericClient + Sync,
+{
+    let Some(header) = client
+        .query_opt(
+            "SELECT agent_creation_request_id, schema_name, correlation_id,
+                    placement_runner_class, runtime_resource_class
+             FROM agent_creation_provider_operations
+             WHERE agent_creation_request_id = $1",
+            &[&request_id],
+        )
+        .await
+        .map_err(store_error)?
+    else {
+        return Ok(None);
+    };
+    let schema_name: String = header.get("schema_name");
+    if schema_name != "provider_operation.v1" {
+        return Err(CoreError::Store(format!(
+            "unsupported provider operation schema {schema_name}"
+        )));
+    }
+    let placement_runner_class: String = header.get("placement_runner_class");
+    let runtime_resource_class: String = header.get("runtime_resource_class");
+    let placement = RuntimePlacement {
+        runner_class: parse_runner_class(&placement_runner_class).ok_or_else(|| {
+            CoreError::Store(format!(
+                "invalid provider operation runner class {placement_runner_class}"
+            ))
+        })?,
+        runtime_resource_class: parse_runtime_resource_class(&runtime_resource_class).ok_or_else(
+            || {
+                CoreError::Store(format!(
+                    "invalid provider operation resource class {runtime_resource_class}"
+                ))
+            },
+        )?,
+    };
+    let rows = client
+        .query(
+            "SELECT sequence, transition, recorded_at::text
+             FROM agent_creation_provider_operation_transitions
+             WHERE agent_creation_request_id = $1
+             ORDER BY sequence",
+            &[&request_id],
+        )
+        .await
+        .map_err(store_error)?;
+    let mut transitions = Vec::with_capacity(rows.len());
+    for (expected, row) in rows.into_iter().enumerate() {
+        let sequence: i32 = row.get("sequence");
+        if sequence != expected as i32 {
+            return Err(CoreError::ProviderOperationTransitionConflict);
+        }
+        let value: Value = row.get("transition");
+        transitions.push(ProviderOperationTransitionRecord {
+            sequence: sequence as u32,
+            transition: serde_json::from_value(value).map_err(json_error)?,
+            recorded_at: row.get("recorded_at"),
+        });
+    }
+    Ok(Some(ProviderOperationEnvelope::V1(ProviderOperationV1 {
+        agent_creation_request_id: header.get("agent_creation_request_id"),
+        correlation_id: header.get("correlation_id"),
+        placement,
+        transitions,
+    })))
+}
+
+async fn persist_provider_operation_delta<C>(
+    client: &C,
+    previous_len: usize,
+    operation: &ProviderOperationEnvelope,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    let operation = operation.v1();
+    let Some(last) = operation.transitions.last() else {
+        return Err(CoreError::ProviderOperationTransitionConflict);
+    };
+    if operation.transitions.len() == previous_len {
+        return Ok(());
+    }
+    if operation.transitions.len() != previous_len + 1 || last.sequence as usize != previous_len {
+        return Err(CoreError::ProviderOperationTransitionConflict);
+    }
+    client
+        .execute(
+            "INSERT INTO agent_creation_provider_operations (
+                 agent_creation_request_id, schema_name, correlation_id,
+                 placement_runner_class, runtime_resource_class, created_at, updated_at
+             ) VALUES ($1, 'provider_operation.v1', $2, $3, $4,
+                       $5::text::timestamptz, $5::text::timestamptz)
+             ON CONFLICT (agent_creation_request_id) DO UPDATE
+             SET updated_at = EXCLUDED.updated_at",
+            &[
+                &operation.agent_creation_request_id,
+                &operation.correlation_id,
+                &operation.placement.runner_class.as_str(),
+                &operation.placement.runtime_resource_class.as_str(),
+                &last.recorded_at,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    let transition = serde_json::to_value(&last.transition).map_err(json_error)?;
+    client
+        .execute(
+            "INSERT INTO agent_creation_provider_operation_transitions (
+                 agent_creation_request_id, sequence, transition, recorded_at
+             ) VALUES ($1, $2, $3, $4::text::timestamptz)",
+            &[
+                &operation.agent_creation_request_id,
+                &(last.sequence as i32),
+                &transition,
+                &last.recorded_at,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(())
+}
+
 fn missing_request_project_error(request: &AgentCreationRequest) -> CoreError {
     CoreError::Store(format!(
         "agent creation request {} references missing project {}",
@@ -5298,10 +5619,12 @@ where
 async fn postgres_lease_runtime_control_request<C>(
     client: &C,
     input: LeaseRuntimeControlRequestInput,
+    runtime_environment: &BTreeMap<String, String>,
 ) -> CoreResult<Option<RuntimeControlLease>>
 where
     C: GenericClient + Sync,
 {
+    validate_runtime_spec_environment(runtime_environment)?;
     let now = input.now.unwrap_or(current_time_iso()?);
     let now_time = parse_time(&now)?;
     let runner_id =
@@ -5453,9 +5776,9 @@ where
         };
         let runtime_spec = if let Some(row) = client
             .query_opt(
-                "SELECT runtime_spec
+                "SELECT id, project_id, runner_class, runtime_spec
                  FROM agent_creation_requests
-                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 WHERE agent_runtime_id = $1 AND status = 'running'
                  ORDER BY created_at DESC, id DESC
                  LIMIT 1",
                 &[&runtime.id],
@@ -5463,9 +5786,6 @@ where
             .await
             .map_err(store_error)?
         {
-            let value: Value = row.get("runtime_spec");
-            let current_spec: RuntimeSpecEnvelope =
-                serde_json::from_value(value).map_err(json_error)?;
             let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
             let current_artifact_id = runtime
                 .runtime_artifact_id
@@ -5474,6 +5794,51 @@ where
             let current_artifact = select_runtime_artifact(client, current_artifact_id)
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            let current_spec = if let Some(value) = row.get::<_, Option<Value>>("runtime_spec") {
+                serde_json::from_value(value).map_err(json_error)?
+            } else {
+                let creation_id: String = row.get("id");
+                let creation_project_id: String = row.get("project_id");
+                let creation_runner_class: String = row.get("runner_class");
+                let project = select_project(client, &runtime.project_id)
+                    .await?
+                    .ok_or(CoreError::ProjectNotFound)?;
+                if placement.runner_class != crate::RunnerClass::Kata
+                    || project.placement != Some(placement)
+                    || creation_project_id != runtime.project_id
+                    || parse_runner_class(&creation_runner_class) != Some(crate::RunnerClass::Kata)
+                    || current_artifact.promoted_at.is_none()
+                    || runtime.state_schema_version.as_deref()
+                        != Some(current_artifact.state_schema_version.as_str())
+                {
+                    return Err(CoreError::RuntimeSpecMismatch);
+                }
+                let synthesized = build_runtime_spec_v1(
+                    RuntimeSpecIdentity {
+                        operation_id: &creation_id,
+                        project_id: &runtime.project_id,
+                        agent_runtime_id: &runtime.id,
+                        placement,
+                    },
+                    &current_artifact,
+                    &runtime.id,
+                    runtime_environment.clone(),
+                    vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+                    RuntimeBootIntent::Normal,
+                )?;
+                let value = serde_json::to_value(&synthesized).map_err(json_error)?;
+                client
+                    .execute(
+                        "UPDATE agent_creation_requests
+                         SET desired_runtime_artifact_id = $2, runtime_spec = $3,
+                             updated_at = $4::text::timestamptz
+                         WHERE id = $1 AND runtime_spec IS NULL",
+                        &[&creation_id, &current_artifact.id, &value, &now],
+                    )
+                    .await
+                    .map_err(store_error)?;
+                synthesized
+            };
             let desired_artifact = target_runtime_artifact
                 .as_ref()
                 .unwrap_or(&current_artifact);
@@ -5538,6 +5903,7 @@ struct RuntimeUpgradeCompletion {
     runtime_host: String,
     published_app_urls: Vec<String>,
     runtime_spec: Option<RuntimeSpecEnvelope>,
+    runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
 }
 
 async fn apply_runtime_control_completion<C>(
@@ -5559,6 +5925,9 @@ where
             runtime.host_facts.runtime_host = upgrade.runtime_host.clone();
             runtime.host_facts.published_app_urls = upgrade.published_app_urls.clone();
             runtime.host_facts.hermes_available = Some(true);
+            if let Some(capabilities) = upgrade.runtime_capabilities.as_ref() {
+                runtime.runtime_capabilities = Some(capabilities.clone());
+            }
         }
         if destroy {
             runtime.host_facts.hermes_available = Some(false);
@@ -5630,6 +5999,11 @@ where
         let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
             .await?
             .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        validate_runtime_capabilities_artifact_policy(
+            input.runtime_capabilities.as_ref(),
+            runtime.placement,
+            &target,
+        )?;
         // A target may be retired after the runner leased and swapped it.
         // Immutable material remains authoritative for committing the actual
         // compute state; lifecycle policy is enforced at request and lease.
@@ -5689,12 +6063,14 @@ where
             runtime_host,
             published_app_urls,
             runtime_spec,
+            runtime_capabilities: input.runtime_capabilities.clone(),
         })
     } else {
         if input.runtime_artifact_id.is_some()
             || input.state_schema_version.is_some()
             || input.runtime_host.is_some()
             || input.published_app_urls.is_some()
+            || input.runtime_capabilities.is_some()
         {
             return Err(CoreError::RuntimeUpgradeCompletionMismatch);
         }
@@ -6021,7 +6397,8 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, created_at::text, promoted_at::text, retired_at::text
+                    base_image, recover_known_good_chat,
+                    created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
         )
@@ -6055,6 +6432,7 @@ where
         finite_platform_plugin_ref: trim_to_option(input.finite_platform_plugin_ref.as_deref()),
         state_schema_version,
         base_image: trim_to_option(input.base_image.as_deref()),
+        recover_known_good_chat: input.recover_known_good_chat,
         created_at,
         promoted_at,
         retired_at: existing_retired_at,
@@ -6081,10 +6459,11 @@ where
             "INSERT INTO runtime_artifacts (
                id, kind, reference, version_label, source_git_sha, finitec_version,
                hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-               base_image, created_at, promoted_at, retired_at
+               base_image, recover_known_good_chat, created_at, promoted_at, retired_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                     $11::text::timestamptz, $12::text::timestamptz, $13::text::timestamptz)
+                     $11, $12::text::timestamptz, $13::text::timestamptz,
+                     $14::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                kind = EXCLUDED.kind,
                reference = EXCLUDED.reference,
@@ -6095,11 +6474,13 @@ where
                finite_platform_plugin_ref = EXCLUDED.finite_platform_plugin_ref,
                state_schema_version = EXCLUDED.state_schema_version,
                base_image = EXCLUDED.base_image,
+               recover_known_good_chat = EXCLUDED.recover_known_good_chat,
                promoted_at = EXCLUDED.promoted_at,
                retired_at = EXCLUDED.retired_at
              RETURNING id, kind, reference, version_label, source_git_sha, finitec_version,
                        hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                       base_image, created_at::text, promoted_at::text, retired_at::text",
+                       base_image, recover_known_good_chat,
+                       created_at::text, promoted_at::text, retired_at::text",
             &[
                 &artifact.id,
                 &artifact.kind.as_str(),
@@ -6111,6 +6492,7 @@ where
                 &artifact.finite_platform_plugin_ref,
                 &artifact.state_schema_version,
                 &artifact.base_image,
+                &artifact.recover_known_good_chat,
                 &artifact.created_at,
                 &artifact.promoted_at,
                 &artifact.retired_at,
@@ -7627,6 +8009,31 @@ mod tests {
         let url = replace_database(&admin_url, &db_name);
         let store = CoreStore::connect_postgres(&url).await.unwrap();
         store.migrate().await.unwrap();
+        // Every creation test exercises the current Core contract: a request
+        // is bound to an exact, promoted OCI artifact before it can lease.
+        // Keep this older than test-specific promotions so focused artifact
+        // tests still select their own fixture.
+        store
+            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: "artifact-postgres-fixture".to_string(),
+                kind: crate::RuntimeArtifactKind::OciImage,
+                reference: format!(
+                    "ghcr.io/finitecomputer/agent-runtime:postgres-fixture@sha256:{}",
+                    "f".repeat(64)
+                ),
+                version_label: "postgres-fixture".to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".to_string(),
+                base_image: Some("python:3.11-trixie".to_string()),
+                recover_known_good_chat: false,
+                promoted: true,
+                now: Some("2000-01-01T00:00:00Z".to_string()),
+            })
+            .await
+            .unwrap();
 
         // Capture panics so the database is always torn down, then re-raise.
         let outcome = std::panic::AssertUnwindSafe(test(TestDb { store, url }))
@@ -8268,6 +8675,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_provider_operation_ledger_replays_and_crosses_runtime_boundaries() {
+        with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "unused").await;
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "provider-ledger@finite.vip".to_string(),
+                    workos_user_id: "workos_provider_ledger".to_string(),
+                    display_name: "Provider Ledger".to_string(),
+                    launch_code,
+                    idempotency_key: "provider-ledger-create".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let request_id = created.request.id;
+            let first = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "ledger-runner-a".to_string(),
+                    lease_token: "ledger-token-a".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+            let input = |runner: &str,
+                         token: &str,
+                         correlation: &str,
+                         transition: ProviderOperationTransition| {
+                RecordProviderOperationTransitionInput {
+                    request_id: request_id.clone(),
+                    runner_id: runner.to_string(),
+                    lease_token: token.to_string(),
+                    correlation_id: correlation.to_string(),
+                    placement,
+                    transition,
+                }
+            };
+            let reserved = store
+                .record_provider_operation_transition(input(
+                    "ledger-runner-a",
+                    "ledger-token-a",
+                    "opaque-ledger-correlation",
+                    ProviderOperationTransition::CorrelationReserved,
+                ))
+                .await
+                .unwrap();
+            let replay = store
+                .record_provider_operation_transition(input(
+                    "ledger-runner-a",
+                    "ledger-token-a",
+                    "opaque-ledger-correlation",
+                    ProviderOperationTransition::CorrelationReserved,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(replay, reserved);
+            assert!(matches!(
+                store
+                    .record_provider_operation_transition(input(
+                        "ledger-runner-a",
+                        "wrong-token",
+                        "opaque-ledger-correlation",
+                        ProviderOperationTransition::Provisioned {
+                            provider_facts: json!({}),
+                        },
+                    ))
+                    .await,
+                Err(CoreError::AgentCreationRequestLeaseConflict)
+            ));
+            for transition in [
+                ProviderOperationTransition::Provisioned {
+                    provider_facts: json!({"provider_id": "opaque-ledger-runtime"}),
+                },
+                ProviderOperationTransition::CommitStarted,
+            ] {
+                store
+                    .record_provider_operation_transition(input(
+                        "ledger-runner-a",
+                        "ledger-token-a",
+                        "opaque-ledger-correlation",
+                        transition,
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.execute(
+                "UPDATE agent_creation_requests
+                 SET lease_expires_at = CURRENT_TIMESTAMP - interval '1 second'
+                 WHERE id = $1",
+                &[&request_id],
+            )
+            .await
+            .unwrap();
+            let second = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "ledger-runner-b".to_string(),
+                    lease_token: "ledger-token-b".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.request.id, first.request.id);
+            assert_eq!(second.provider_operation.unwrap().v1().transitions.len(), 3);
+
+            let handle = crate::ProviderRuntimeHandleEnvelope::V1(crate::ProviderRuntimeHandleV1 {
+                runner_class: crate::RunnerClass::Kata,
+                opaque: json!({"sandbox_id": "opaque-ledger-runtime"}),
+            });
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: "ledger-runner-b".to_string(),
+                    lease_token: "ledger-token-b".to_string(),
+                    source_host_id: "ledger-host".to_string(),
+                    source_machine_id: "ledger-machine".to_string(),
+                    runtime_artifact_id: Some("artifact-postgres-fixture".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: Some(handle),
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                completed.provider_operation.unwrap().v1().transitions.len(),
+                5
+            );
+            let sequences = raw
+                .query(
+                    "SELECT sequence FROM agent_creation_provider_operation_transitions
+                     WHERE agent_creation_request_id = $1 ORDER BY sequence",
+                    &[&request_id],
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.get::<_, i32>(0))
+                .collect::<Vec<_>>();
+            assert_eq!(sequences, vec![0, 1, 2, 3, 4]);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn postgres_row_native_create_lease_complete_and_visible_reads() {
         with_isolated_postgres(|store| async move {
             let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
@@ -8275,8 +8849,10 @@ mod tests {
                 .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                     id: "artifact-row-native-v1".to_string(),
                     kind: RuntimeArtifactKind::OciImage,
-                    reference: "ghcr.io/finitecomputer/finite-agent-runtime:row-native-v1"
-                        .to_string(),
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:row-native-v1@sha256:{}",
+                        "1".repeat(64)
+                    ),
                     version_label: "row-native-v1".to_string(),
                     source_git_sha: None,
                     finitec_version: None,
@@ -8284,6 +8860,7 @@ mod tests {
                     finite_platform_plugin_ref: None,
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
                     promoted: true,
                     now: Some("2026-05-28T12:00:00Z".to_string()),
                 })
@@ -8446,8 +9023,10 @@ mod tests {
                 .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                     id: "artifact-admin-ops-v1".to_string(),
                     kind: RuntimeArtifactKind::OciImage,
-                    reference: "ghcr.io/finitecomputer/finite-agent-runtime:admin-ops-v1"
-                        .to_string(),
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:admin-ops-v1@sha256:{}",
+                        "2".repeat(64)
+                    ),
                     version_label: "admin-ops-v1".to_string(),
                     source_git_sha: None,
                     finitec_version: None,
@@ -8455,6 +9034,7 @@ mod tests {
                     finite_platform_plugin_ref: None,
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
                     promoted: true,
                     now: None,
                 })
@@ -8564,6 +9144,7 @@ mod tests {
                     lease_token: format!("control-lease-{run}"),
                     runtime_artifact_id: None,
                     state_schema_version: None,
+                    runtime_capabilities: None,
                     runtime_host: None,
                     published_app_urls: None,
                     now: None,
@@ -8675,7 +9256,10 @@ mod tests {
                 .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                     id: "artifact-rc-v1".to_string(),
                     kind: RuntimeArtifactKind::OciImage,
-                    reference: "ghcr.io/finitecomputer/finite-agent-runtime:rc-v1".to_string(),
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:rc-v1@sha256:{}",
+                        "3".repeat(64)
+                    ),
                     version_label: "rc-v1".to_string(),
                     source_git_sha: None,
                     finitec_version: None,
@@ -8683,6 +9267,7 @@ mod tests {
                     finite_platform_plugin_ref: None,
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
+                    recover_known_good_chat: false,
                     promoted: true,
                     now: None,
                 })
@@ -8699,9 +9284,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(
-                            HostingTier::Standard,
-                        )),
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         profile_picture_url: None,
                     },
                 )
@@ -8758,8 +9341,7 @@ mod tests {
             let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
             let unrelated_project_id = format!("project-unrelated-{run}");
             let unrelated_membership_id = format!("membership-unrelated-{run}");
-            let (raw, raw_connection) =
-                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let (raw, raw_connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
             let raw_connection = tokio::spawn(async move {
                 let _ = raw_connection.await;
             });
@@ -8782,11 +9364,7 @@ mod tests {
                  FROM project_room_memberships
                  WHERE project_id = $1 AND archived_at IS NULL
                  LIMIT 1",
-                &[
-                    &project_id,
-                    &unrelated_membership_id,
-                    &unrelated_project_id,
-                ],
+                &[&project_id, &unrelated_membership_id, &unrelated_project_id],
             )
             .await
             .unwrap();
@@ -8807,7 +9385,10 @@ mod tests {
             let exact_artifact_retry = UpsertRuntimeArtifactInput {
                 id: "artifact-rc-v1".to_string(),
                 kind: RuntimeArtifactKind::OciImage,
-                reference: "ghcr.io/finitecomputer/finite-agent-runtime:rc-v1".to_string(),
+                reference: format!(
+                    "ghcr.io/finitecomputer/finite-agent-runtime:rc-v1@sha256:{}",
+                    "3".repeat(64)
+                ),
                 version_label: "rc-v1".to_string(),
                 source_git_sha: None,
                 finitec_version: None,
@@ -8815,6 +9396,7 @@ mod tests {
                 finite_platform_plugin_ref: None,
                 state_schema_version: "state-v1".to_string(),
                 base_image: None,
+                recover_known_good_chat: false,
                 promoted: true,
                 now: None,
             };
@@ -8912,6 +9494,7 @@ mod tests {
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
                         draining: true,
                         runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
@@ -8927,6 +9510,7 @@ mod tests {
                     lease_token: format!("ctl-{run}"),
                     runtime_artifact_id: None,
                     state_schema_version: None,
+                    runtime_capabilities: None,
                     runtime_host: None,
                     published_app_urls: None,
                     now: None,
@@ -8961,6 +9545,7 @@ mod tests {
                     finite_platform_plugin_ref: Some("plugin-v2".to_string()),
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
+                    recover_known_good_chat: true,
                     promoted: true,
                     now: None,
                 })
@@ -8995,7 +9580,9 @@ mod tests {
                 let _ = raw_connection.await;
             });
             raw.execute(
-                "UPDATE runtime_artifacts SET retired_at = CURRENT_TIMESTAMP WHERE id = 'artifact-rc-v2'",
+                "UPDATE runtime_artifacts
+                 SET retired_at = GREATEST(clock_timestamp(), promoted_at)
+                 WHERE id = 'artifact-rc-v2'",
                 &[],
             )
             .await
@@ -9003,11 +9590,15 @@ mod tests {
             raw.execute(
                 "INSERT INTO agent_runtimes (
                    id, project_id, source_host_id, source_machine_id, source_import_key,
-                   runtime_artifact_id, state_schema_version, host_facts, created_at, updated_at
+                   runtime_artifact_id, state_schema_version,
+                   placement_runner_class, runtime_resource_class, runtime_capabilities,
+                   host_facts, created_at, updated_at
                  )
                  SELECT 'runtime-healthy-behind-poison', project_id, source_host_id,
                         'healthy-behind-poison', 'rchost/healthy-behind-poison',
-                        runtime_artifact_id, state_schema_version, host_facts,
+                        runtime_artifact_id, state_schema_version,
+                        placement_runner_class, runtime_resource_class, runtime_capabilities,
+                        host_facts,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                  FROM agent_runtimes WHERE id = $1",
                 &[&runtime_id],
@@ -9035,7 +9626,11 @@ mod tests {
                     lease_token: format!("ctl-retired-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some(host.to_string()),
-                    runner_capacity: None,
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
                     now: None,
                 })
                 .await
@@ -9054,13 +9649,22 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(poisoned.get::<_, String>("status"), "failed");
-            assert!(poisoned
-                .get::<_, Option<String>>("failure_message")
-                .unwrap_or_default()
-                .contains("retired"));
+            assert!(
+                poisoned
+                    .get::<_, Option<String>>("failure_message")
+                    .unwrap_or_default()
+                    .contains("retired")
+            );
             raw.execute(
                 "UPDATE runtime_artifacts SET retired_at = NULL WHERE id = 'artifact-rc-v2'",
                 &[],
+            )
+            .await
+            .unwrap();
+            raw.execute(
+                "UPDATE agent_creation_requests SET runtime_spec = NULL
+                 WHERE agent_runtime_id = $1",
+                &[&runtime_id],
             )
             .await
             .unwrap();
@@ -9082,6 +9686,7 @@ mod tests {
                     source_host_id: Some(host.to_string()),
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
                         runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
@@ -9098,7 +9703,9 @@ mod tests {
                 Some("artifact-rc-v2")
             );
             raw.execute(
-                "UPDATE runtime_artifacts SET retired_at = CURRENT_TIMESTAMP WHERE id = 'artifact-rc-v2'",
+                "UPDATE runtime_artifacts
+                 SET retired_at = GREATEST(clock_timestamp(), promoted_at)
+                 WHERE id = 'artifact-rc-v2'",
                 &[],
             )
             .await
@@ -9110,14 +9717,41 @@ mod tests {
                     lease_token: format!("ctl-upgrade-{run}"),
                     runtime_artifact_id: Some("artifact-rc-v2".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
                     runtime_host: Some("http://127.0.0.1:41002".to_string()),
-                    published_app_urls: Some(vec![
-                        "http://127.0.0.1:41002/contact".to_string(),
-                    ]),
+                    published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
                     now: None,
                 })
                 .await
                 .unwrap();
+            let refreshed_capabilities: Value = raw
+                .query_one(
+                    "SELECT runtime_capabilities FROM agent_runtimes WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(
+                refreshed_capabilities["capabilities"]["recover_known_good_chat"],
+                true
+            );
+            let upgraded_spec: Value = raw
+                .query_one(
+                    "SELECT runtime_spec FROM agent_creation_requests
+                     WHERE agent_runtime_id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(upgraded_spec["spec"]["runtimeArtifactId"], "artifact-rc-v2");
+            assert_eq!(upgraded_spec["spec"]["durableStateId"], runtime_id);
             drop(raw);
             raw_connection.abort();
             let upgraded = store
@@ -9142,8 +9776,9 @@ mod tests {
                 .unwrap();
             assert_eq!(key_before_destroy.status, FinitePrivateApiKeyStatus::Active);
 
-            // Destroy: complete offboards the runtime and revokes its keys.
-            let destroy = store
+            // Retirement remains outside the authorized product surface even
+            // after a capability-refreshing Upgrade.
+            let destroy_error = store
                 .request_runtime_destroy(RequestRuntimeDestroyInput {
                     verified_email: email.clone(),
                     workos_user_id: workos.clone(),
@@ -9151,96 +9786,11 @@ mod tests {
                     now: Some("2026-07-10T12:04:00Z".to_string()),
                 })
                 .await
-                .unwrap();
-            store
-                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                    runner_id: format!("runner-{run}"),
-                    lease_token: format!("ctl-destroy-{run}"),
-                    lease_seconds: Some(60),
-                    source_host_id: Some(host.to_string()),
-                    runner_capacity: None,
-                    now: Some("2026-07-10T12:04:30Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .expect("destroy should lease");
-            store
-                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                    request_id: destroy.id.clone(),
-                    runner_id: format!("runner-{run}"),
-                    lease_token: format!("ctl-destroy-{run}"),
-                    runtime_artifact_id: None,
-                    state_schema_version: None,
-                    runtime_host: None,
-                    published_app_urls: None,
-                    now: Some("2026-07-10T12:05:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-
-            let admin_state = store.finite_private_admin_state().await.unwrap();
-            let key = admin_state
-                .api_keys
-                .iter()
-                .find(|k| k.id == provisioned.api_key.id)
-                .unwrap();
-            assert_eq!(
-                key.status,
-                FinitePrivateApiKeyStatus::Revoked,
-                "destroy must revoke the runtime's Finite Private keys"
-            );
-            let overview_offboarded = store
-                .admin_runtime_overviews()
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|o| o.agent_runtime_id == runtime_id)
-                .unwrap();
-            assert!(!overview_offboarded.runtime_link_active, "link deactivated");
-            let visible = store
-                .visible_projects_for_workos_user(&workos)
-                .await
-                .unwrap();
-            assert_eq!(visible.len(), 1);
-            assert_eq!(visible[0].project.id, unrelated_project_id);
-            assert!(visible[0].runtime.is_none());
-
-            let (raw, raw_connection) =
-                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
-            let raw_connection = tokio::spawn(async move {
-                let _ = raw_connection.await;
-            });
-            let retained = raw
-                .query_one(
-                    "SELECT
-                       EXISTS (SELECT 1 FROM projects WHERE id = $1) AS project_saved,
-                       EXISTS (SELECT 1 FROM agent_runtimes WHERE id = $2) AS runtime_saved,
-                       EXISTS (
-                         SELECT 1 FROM project_room_memberships
-                         WHERE project_id = $1
-                           AND archived_at = $3::text::timestamptz
-                       ) AS removed_membership_archived_at_completion,
-                       EXISTS (
-                         SELECT 1 FROM project_room_memberships
-                         WHERE project_id = $4 AND archived_at IS NULL
-                       ) AS unrelated_membership_active",
-                    &[
-                        &project_id,
-                        &runtime_id,
-                        &"2026-07-10T12:05:00Z",
-                        &unrelated_project_id,
-                    ],
-                )
-                .await
-                .unwrap();
-            assert!(retained.get::<_, bool>("project_saved"));
-            assert!(retained.get::<_, bool>("runtime_saved"));
-            assert!(retained.get::<_, bool>(
-                "removed_membership_archived_at_completion"
+                .unwrap_err();
+            assert!(matches!(
+                destroy_error,
+                CoreError::RuntimeControlUnsupported
             ));
-            assert!(retained.get::<_, bool>("unrelated_membership_active"));
-            drop(raw);
-            raw_connection.abort();
         })
         .await;
     }
@@ -9872,7 +10422,10 @@ mod tests {
                 .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
                     id: "artifact-golden-v1".to_string(),
                     kind: RuntimeArtifactKind::OciImage,
-                    reference: "ghcr.io/finitecomputer/finite-agent-runtime:golden-v1".to_string(),
+                    reference: format!(
+                        "ghcr.io/finitecomputer/finite-agent-runtime:golden-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
                     version_label: "golden-v1".to_string(),
                     source_git_sha: None,
                     finitec_version: None,
@@ -9880,6 +10433,7 @@ mod tests {
                     finite_platform_plugin_ref: None,
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
+                    recover_known_good_chat: false,
                     promoted: true,
                     now: None,
                 })
