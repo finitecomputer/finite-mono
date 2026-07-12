@@ -2272,9 +2272,6 @@ impl AppRuntimeState {
         &mut self,
         event: SyncHintEvent,
     ) -> Result<AppBridgeSync, FiniteChatCoreError> {
-        if matches!(event, SyncHintEvent::Heartbeat) {
-            return Ok(AppBridgeSync::default());
-        }
         let bridge = self.agent_bridge_sync_after_change()?;
         self.apply_sync_hint(&event);
         Ok(bridge)
@@ -12643,6 +12640,193 @@ mod tests {
                 .expect("inbox watch remains active after Welcome activation")
                 .after_seq,
             1
+        );
+    }
+
+    #[test]
+    fn app_runtime_agent_bridge_startup_poll_and_heartbeat_reconcile_typed_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let agent_core = CoreState::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let mut agent = AppRuntimeState::new(agent_core).unwrap();
+        agent
+            .start_runtime()
+            .expect("agent publishes KeyPackages before the resident wait loop");
+        let agent_account_id = agent.app.identity.account_id.clone();
+
+        let hosted = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("hosted-web").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let hosted_state = hosted
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: test_profile(&agent_account_id, "Agent"),
+                display_name: "Chat with Agent".to_owned(),
+            })
+            .expect("hosted Device creates the agent room");
+        let room_id = hosted_state
+            .selected_room_id
+            .expect("agent room is selected");
+
+        agent
+            .agent_bridge_apply_sync_hint(SyncHintEvent::InboxAdvanced { seq: 1 })
+            .expect("agent activates its Welcome before command delivery");
+
+        let hosted_identity = hosted.state().unwrap().identity;
+        let electron = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("electron").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "electron-heartbeat".to_owned(),
+            account_secret_hex: Some(hosted_identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        electron
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("linked Device publishes a KeyPackage");
+        let fanout = hosted
+            .link_device_and_wait(
+                "link-heartbeat-reconciliation".to_owned(),
+                "electron-heartbeat".to_owned(),
+            )
+            .expect("hosted Device adds its linked Device to the room");
+        assert!(fanout.fanout_complete);
+
+        let before_seq = agent
+            .wait_plan(5_000)
+            .request
+            .rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .expect("joined room has a durable cursor")
+            .after_seq;
+
+        let runtime_request = |request_id: &str| RuntimeCommandRequestV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Request,
+            request_id: request_id.to_owned(),
+            command: "agent.connections.status".to_owned(),
+            target: finitechat_proto::RuntimeCommandTargetV1 {
+                account_id: agent_account_id.clone(),
+                device_id: None,
+            },
+            resource_key: Some("agent.connections".to_owned()),
+            body: finitechat_proto::RuntimeCommandJsonPayloadV1 {
+                schema: "finite.agent.empty.request.v1".to_owned(),
+                json_payload: serde_json::to_vec(&serde_json::json!({})).unwrap(),
+            },
+        };
+        let delivered_request_ids = |sync: &AppBridgeSync| {
+            sync.events
+                .iter()
+                .filter_map(|stored| {
+                    let event =
+                        serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+                            .ok()?;
+                    if event.kind != DurableAppEventKind::RuntimeCommandRequest {
+                        return None;
+                    }
+                    serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload)
+                        .ok()
+                        .map(|request| request.request_id)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let startup_request_id = "request-before-startup-reconciliation";
+        hosted
+            .send_runtime_command_request_and_wait(
+                room_id.clone(),
+                None,
+                serde_json::to_vec(&runtime_request(startup_request_id)).unwrap(),
+            )
+            .expect("hosted Device durably queues a typed command");
+        assert_eq!(
+            agent
+                .wait_plan(5_000)
+                .request
+                .rooms
+                .iter()
+                .find(|room| room.room_id == room_id)
+                .unwrap()
+                .after_seq,
+            before_seq,
+            "the local Device remains behind until its resident sync reconciles"
+        );
+
+        let startup_recovered = agent
+            .agent_bridge_poll_once()
+            .expect("resident startup performs an immediate bounded reconciliation");
+        assert!(
+            delivered_request_ids(&startup_recovered)
+                .iter()
+                .any(|request_id| request_id == startup_request_id),
+            "the startup reconciliation makes the queued typed command deliverable"
+        );
+        let heartbeat_before_seq = agent
+            .wait_plan(5_000)
+            .request
+            .rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .unwrap()
+            .after_seq;
+        assert!(
+            heartbeat_before_seq > before_seq,
+            "startup reconciliation advances through the membership commit"
+        );
+
+        let heartbeat_request_id = "request-before-heartbeat-reconciliation";
+        hosted
+            .send_runtime_command_request_and_wait(
+                room_id.clone(),
+                None,
+                serde_json::to_vec(&runtime_request(heartbeat_request_id)).unwrap(),
+            )
+            .expect("hosted Device durably queues a second typed command");
+        assert_eq!(
+            agent
+                .wait_plan(5_000)
+                .request
+                .rooms
+                .iter()
+                .find(|room| room.room_id == room_id)
+                .unwrap()
+                .after_seq,
+            heartbeat_before_seq,
+            "the second command remains queued until the next resident reconciliation"
+        );
+
+        let heartbeat_recovered = agent
+            .agent_bridge_apply_sync_hint(SyncHintEvent::Heartbeat)
+            .expect("a heartbeat performs the bounded durable reconciliation");
+        assert!(
+            delivered_request_ids(&heartbeat_recovered)
+                .iter()
+                .any(|request_id| request_id == heartbeat_request_id),
+            "the heartbeat reconciliation makes the second typed command deliverable"
+        );
+        assert!(
+            agent
+                .wait_plan(5_000)
+                .request
+                .rooms
+                .iter()
+                .find(|room| room.room_id == room_id)
+                .unwrap()
+                .after_seq
+                > heartbeat_before_seq,
+            "heartbeat reconciliation advances the durable room cursor"
         );
     }
 

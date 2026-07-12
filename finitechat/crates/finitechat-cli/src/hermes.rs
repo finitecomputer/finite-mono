@@ -85,6 +85,7 @@ const DEFAULT_DEVICE_ID: &str = "agent";
 const DEFAULT_AGENT_PROFILE_NAME: &str = "Finite Agent";
 const DEFAULT_AGENT_PROFILE_ABOUT: &str = "A Finite Computer agent you can chat with.";
 const DEFAULT_AGENT_PROFILE_PICTURE: &str = "https://avatars.githubusercontent.com/u/274919006?v=4";
+const RESIDENT_BRIDGE_RECONCILE_MILLIS: u64 = 10_000;
 const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
 const POLL_SLEEP_MS: u64 = 300;
 const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
@@ -490,10 +491,19 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
         .name("finitechat-resident-sync".to_owned())
         .spawn(move || {
             let mut retry_millis = 250u64;
+            let mut reconcile_immediately = true;
             loop {
-                match state.runtime.agent_bridge_wait_for_update(30_000) {
+                let result = if reconcile_immediately {
+                    state.runtime.agent_bridge_poll_once()
+                } else {
+                    state
+                        .runtime
+                        .agent_bridge_wait_for_update(RESIDENT_BRIDGE_RECONCILE_MILLIS)
+                };
+                match result {
                     Ok(bridge) => {
                         retry_millis = 250;
+                        reconcile_immediately = false;
                         if !bridge.joined_account_ids.is_empty()
                             && let Ok(mut joined) = state.joined_account_ids.lock()
                         {
@@ -506,6 +516,7 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                     Err(_) => {
                         std::thread::sleep(Duration::from_millis(retry_millis));
                         retry_millis = (retry_millis.saturating_mul(2)).min(5_000);
+                        reconcile_immediately = true;
                     }
                 }
             }
