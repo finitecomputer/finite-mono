@@ -58,9 +58,17 @@ code and one key per Finite Home—not a secret shared between a human and agent
   operator-organization members.
 - Runner and other services use separate, route-scoped service credentials.
   A Runner credential cannot call user or administrator routes, assert a
-  WorkOS subject, or elevate a user. Core reads the Runner capability from
-  `FC_CORE_RUNNER_API_TOKEN`; the non-Runner service and Finite Private usage
-  capabilities remain separate and all three configured values must differ.
+  WorkOS subject, or elevate a user. Core reads rotatable Runner credential
+  metadata from `FC_CORE_RUNNER_CREDENTIALS_JSON`; each entry names a separate
+  `FC_CORE_RUNNER_CREDENTIAL_TOKEN_*` secret environment variable and binds it
+  to exactly one Runner id, one source-host id, and a non-empty exact
+  `RunnerClass` set. Multiple active entries may carry the same binding during
+  overlap rotation, and one entry can be revoked without invalidating the
+  others. The legacy Core-side `FC_CORE_RUNNER_API_TOKEN` input is accepted
+  only as a temporary binding for `finite-kata-runner-1`, class `kata`, on
+  `finite-lat-1`; it is not an unrestricted fallback. The non-Runner service
+  and Finite Private usage capabilities remain separate, and no bearer value
+  may be reused across route capabilities.
 - The Hosted Web Device is authorized by Account Auth but participates as a
   Finite Chat Device; it is not the agent and not room authority.
 - Agent operations are attributable to the agent npub by default. Acting as the

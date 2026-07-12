@@ -1,17 +1,75 @@
+use crate::{RunnerClass, normalize_source_host_id};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
 const DEFAULT_WORKOS_API_BASE_URL: &str = "https://api.workos.com";
 const DEFAULT_WORKOS_ISSUER: &str = "https://api.workos.com";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNNER_CREDENTIALS_ENV: &str = "FC_CORE_RUNNER_CREDENTIALS_JSON";
+const RUNNER_TOKEN_ENV_PREFIX: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_";
+const LEGACY_KATA_CREDENTIAL_ID: &str = "legacy-finite-kata-runner-1";
+const LEGACY_KATA_RUNNER_ID: &str = "finite-kata-runner-1";
+const LEGACY_KATA_SOURCE_HOST_ID: &str = "finite-lat-1";
+
+/// One rotatable Runner credential definition. This deliberately does not
+/// implement `Debug`: callers must never make bearer material printable.
+#[derive(Clone)]
+pub struct RunnerCredentialConfig {
+    pub credential_id: String,
+    pub token: String,
+    pub runner_id: String,
+    pub runner_classes: Vec<RunnerClass>,
+    pub source_host_id: String,
+    pub revoked: bool,
+}
+
+#[derive(Clone)]
+struct RunnerCredentialCandidate {
+    config: RunnerCredentialConfig,
+    legacy_kata_compatibility: bool,
+}
+
+#[derive(Clone)]
+struct RunnerCredential {
+    credential_id: Arc<str>,
+    token_digest: [u8; 32],
+    runner_id: Arc<str>,
+    runner_classes: Arc<[RunnerClass]>,
+    source_host_id: Arc<str>,
+    revoked: bool,
+    legacy_kata_compatibility: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedRunnerCredential {
+    pub credential_id: String,
+    pub runner_id: String,
+    pub runner_classes: Vec<RunnerClass>,
+    pub source_host_id: String,
+    pub legacy_kata_compatibility: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunnerCredentialEnvRecord {
+    credential_id: String,
+    token_env: String,
+    runner_id: String,
+    runner_classes: Vec<RunnerClass>,
+    source_host_id: String,
+    #[serde(default)]
+    revoked: bool,
+}
 
 /// Authentication configuration for the Core HTTP boundary.
 ///
@@ -21,17 +79,32 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct CoreAuth {
     workos: WorkosAuthenticator,
     service_api_token: Arc<str>,
-    runner_api_token: Arc<str>,
+    runner_credentials: Arc<[RunnerCredential]>,
     finite_private_usage_api_token: Arc<str>,
 }
 
 impl CoreAuth {
     pub fn from_env() -> Result<Self, AuthConfigError> {
         let workos = WorkosAuthenticator::from_env()?;
-        Self::new(
+        let mut runner_credentials = optional_env(RUNNER_CREDENTIALS_ENV)
+            .map(|metadata| {
+                runner_credential_configs_from_metadata(&metadata, |name| env::var(name).ok())
+            })
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|config| RunnerCredentialCandidate {
+                config,
+                legacy_kata_compatibility: false,
+            })
+            .collect::<Vec<_>>();
+        if let Some(token) = optional_env("FC_CORE_RUNNER_API_TOKEN") {
+            runner_credentials.push(legacy_kata_runner_credential(token));
+        }
+        Self::new_internal(
             workos,
             required_env("FC_CORE_API_TOKEN")?,
-            required_env("FC_CORE_RUNNER_API_TOKEN")?,
+            runner_credentials,
             required_env("FC_FINITE_PRIVATE_USAGE_API_TOKEN")?,
         )
     }
@@ -42,28 +115,92 @@ impl CoreAuth {
         runner_api_token: impl Into<String>,
         finite_private_usage_api_token: impl Into<String>,
     ) -> Result<Self, AuthConfigError> {
+        Self::new_internal(
+            workos,
+            service_api_token,
+            vec![legacy_kata_runner_credential(runner_api_token.into())],
+            finite_private_usage_api_token,
+        )
+    }
+
+    pub fn new_with_runner_credentials(
+        workos: WorkosAuthenticator,
+        service_api_token: impl Into<String>,
+        runner_credentials: Vec<RunnerCredentialConfig>,
+        finite_private_usage_api_token: impl Into<String>,
+    ) -> Result<Self, AuthConfigError> {
+        Self::new_internal(
+            workos,
+            service_api_token,
+            runner_credentials
+                .into_iter()
+                .map(|config| RunnerCredentialCandidate {
+                    config,
+                    legacy_kata_compatibility: false,
+                })
+                .collect(),
+            finite_private_usage_api_token,
+        )
+    }
+
+    fn new_internal(
+        workos: WorkosAuthenticator,
+        service_api_token: impl Into<String>,
+        runner_credentials: Vec<RunnerCredentialCandidate>,
+        finite_private_usage_api_token: impl Into<String>,
+    ) -> Result<Self, AuthConfigError> {
         let service_api_token = required_value("FC_CORE_API_TOKEN", service_api_token.into())?;
-        let runner_api_token = required_value("FC_CORE_RUNNER_API_TOKEN", runner_api_token.into())?;
         let finite_private_usage_api_token = required_value(
             "FC_FINITE_PRIVATE_USAGE_API_TOKEN",
             finite_private_usage_api_token.into(),
         )?;
+        if runner_credentials.is_empty() {
+            return Err(AuthConfigError::MissingRunnerCredentials);
+        }
 
-        let distinct = [
-            service_api_token.as_str(),
-            runner_api_token.as_str(),
-            finite_private_usage_api_token.as_str(),
-        ]
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-        if distinct.len() != 3 {
+        let mut credential_ids = BTreeSet::new();
+        if service_api_token == finite_private_usage_api_token {
             return Err(AuthConfigError::ServiceCredentialsMustBeDistinct);
+        }
+        let mut runner_tokens = BTreeSet::new();
+
+        let mut validated = Vec::with_capacity(runner_credentials.len());
+        for candidate in runner_credentials {
+            let credential_id = candidate.config.credential_id.trim().to_string();
+            let token = candidate.config.token.trim().to_string();
+            let runner_id = candidate.config.runner_id.trim().to_string();
+            let source_host_id = normalize_source_host_id(&candidate.config.source_host_id)
+                .map_err(|_| AuthConfigError::InvalidRunnerCredentialKeyring)?;
+            if credential_id.is_empty()
+                || token.is_empty()
+                || runner_id.is_empty()
+                || candidate.config.runner_classes.is_empty()
+                || !credential_ids.insert(credential_id.clone())
+                || runner_classes_have_duplicates(&candidate.config.runner_classes)
+            {
+                return Err(AuthConfigError::InvalidRunnerCredentialKeyring);
+            }
+            if token == service_api_token || token == finite_private_usage_api_token {
+                return Err(AuthConfigError::ServiceCredentialsMustBeDistinct);
+            }
+            if !runner_tokens.insert(token.clone()) {
+                return Err(AuthConfigError::InvalidRunnerCredentialKeyring);
+            }
+            validated.push(RunnerCredential {
+                credential_id: credential_id.into(),
+                token_digest: Sha256::digest(token.as_bytes()).into(),
+                runner_id: runner_id.into(),
+                runner_classes: candidate.config.runner_classes.into(),
+                source_host_id: source_host_id.into(),
+                revoked: candidate.config.revoked,
+                legacy_kata_compatibility: candidate.legacy_kata_compatibility,
+            });
         }
 
         Ok(Self {
             workos,
             service_api_token: service_api_token.into(),
-            runner_api_token: runner_api_token.into(),
+            runner_credentials: validated.into(),
             finite_private_usage_api_token: finite_private_usage_api_token.into(),
         })
     }
@@ -76,8 +213,25 @@ impl CoreAuth {
         &self.service_api_token
     }
 
-    pub(crate) fn runner_api_token(&self) -> &str {
-        &self.runner_api_token
+    pub(crate) fn verify_runner_credential(
+        &self,
+        presented_token: &str,
+    ) -> Option<VerifiedRunnerCredential> {
+        let presented_digest: [u8; 32] = Sha256::digest(presented_token.as_bytes()).into();
+        let mut matched = None;
+        for credential in self.runner_credentials.iter() {
+            if bool::from(presented_digest.ct_eq(&credential.token_digest)) {
+                matched = Some(credential);
+            }
+        }
+        let credential = matched.filter(|credential| !credential.revoked)?;
+        Some(VerifiedRunnerCredential {
+            credential_id: credential.credential_id.to_string(),
+            runner_id: credential.runner_id.to_string(),
+            runner_classes: credential.runner_classes.to_vec(),
+            source_host_id: credential.source_host_id.to_string(),
+            legacy_kata_compatibility: credential.legacy_kata_compatibility,
+        })
     }
 
     pub(crate) fn finite_private_usage_api_token(&self) -> &str {
@@ -469,6 +623,72 @@ pub enum AuthConfigError {
     InvalidHttpClient,
     #[error("Core service credentials must be non-empty and distinct")]
     ServiceCredentialsMustBeDistinct,
+    #[error("at least one bound Runner credential is required")]
+    MissingRunnerCredentials,
+    #[error("Runner credential keyring is invalid")]
+    InvalidRunnerCredentialKeyring,
+}
+
+fn legacy_kata_runner_credential(token: String) -> RunnerCredentialCandidate {
+    RunnerCredentialCandidate {
+        config: RunnerCredentialConfig {
+            credential_id: LEGACY_KATA_CREDENTIAL_ID.to_string(),
+            token,
+            runner_id: LEGACY_KATA_RUNNER_ID.to_string(),
+            runner_classes: vec![RunnerClass::Kata],
+            source_host_id: LEGACY_KATA_SOURCE_HOST_ID.to_string(),
+            revoked: false,
+        },
+        legacy_kata_compatibility: true,
+    }
+}
+
+fn runner_credential_configs_from_metadata(
+    metadata: &str,
+    token_lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<RunnerCredentialConfig>, AuthConfigError> {
+    let records = serde_json::from_str::<Vec<RunnerCredentialEnvRecord>>(metadata)
+        .map_err(|_| AuthConfigError::InvalidRunnerCredentialKeyring)?;
+    records
+        .into_iter()
+        .map(|record| {
+            let token_env = record.token_env.trim();
+            if !token_env.starts_with(RUNNER_TOKEN_ENV_PREFIX)
+                || !token_env.chars().all(|character| {
+                    character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+                })
+            {
+                return Err(AuthConfigError::InvalidRunnerCredentialKeyring);
+            }
+            let token = token_lookup(token_env)
+                .and_then(|token| required_runner_token(token).ok())
+                .ok_or(AuthConfigError::InvalidRunnerCredentialKeyring)?;
+            Ok(RunnerCredentialConfig {
+                credential_id: record.credential_id,
+                token,
+                runner_id: record.runner_id,
+                runner_classes: record.runner_classes,
+                source_host_id: record.source_host_id,
+                revoked: record.revoked,
+            })
+        })
+        .collect()
+}
+
+fn required_runner_token(value: String) -> Result<String, AuthConfigError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(AuthConfigError::InvalidRunnerCredentialKeyring)
+    } else {
+        Ok(value)
+    }
+}
+
+fn runner_classes_have_duplicates(classes: &[RunnerClass]) -> bool {
+    classes
+        .iter()
+        .enumerate()
+        .any(|(index, class)| classes[index + 1..].contains(class))
 }
 
 fn required_env(name: &'static str) -> Result<String, AuthConfigError> {
@@ -519,6 +739,9 @@ pub(crate) mod test_support {
     pub(crate) const CLIENT_ID: &str = "client_test";
     pub(crate) const ISSUER: &str = "https://identity.test.invalid";
     pub(crate) const OPERATOR_ORG_ID: &str = "workos_org_internal_operator";
+    pub(crate) const BOUNDARY_RUNNER_TOKEN: &str = "runner-auth-boundary-token";
+    pub(crate) const FULL_RUNNER_TOKEN: &str = "runner-oslo-full-token";
+    pub(crate) const SECOND_RUNNER_TOKEN: &str = "runner-oslo-2-token";
 
     struct TestKey {
         kid: String,
@@ -565,20 +788,120 @@ pub(crate) mod test_support {
         runner_token: impl Into<String>,
         usage_token: impl Into<String>,
     ) -> CoreAuth {
-        CoreAuth::new(authenticator(), service_token, runner_token, usage_token)
-            .expect("test Core auth should be valid")
+        CoreAuth::new_with_runner_credentials(
+            authenticator(),
+            service_token,
+            vec![
+                runner_credential_config(
+                    "runner-oslo-1-current",
+                    runner_token,
+                    "runner-oslo-1",
+                    &[RunnerClass::Kata],
+                    "oslo-host-1",
+                    false,
+                ),
+                runner_credential_config(
+                    "runner-auth-boundary-current",
+                    BOUNDARY_RUNNER_TOKEN,
+                    "runner-auth-boundary",
+                    &[RunnerClass::Kata],
+                    "source-auth-boundary",
+                    false,
+                ),
+            ],
+            usage_token,
+        )
+        .expect("test Core auth should be valid")
+    }
+
+    pub(crate) fn core_auth_with_runner_credentials(
+        service_token: impl Into<String>,
+        runner_credentials: Vec<RunnerCredentialConfig>,
+        usage_token: impl Into<String>,
+    ) -> CoreAuth {
+        CoreAuth::new_with_runner_credentials(
+            authenticator(),
+            service_token,
+            runner_credentials,
+            usage_token,
+        )
+        .expect("test Core auth should be valid")
+    }
+
+    pub(crate) fn runner_credential_config(
+        credential_id: impl Into<String>,
+        token: impl Into<String>,
+        runner_id: impl Into<String>,
+        runner_classes: &[RunnerClass],
+        source_host_id: impl Into<String>,
+        revoked: bool,
+    ) -> RunnerCredentialConfig {
+        RunnerCredentialConfig {
+            credential_id: credential_id.into(),
+            token: token.into(),
+            runner_id: runner_id.into(),
+            runner_classes: runner_classes.to_vec(),
+            source_host_id: source_host_id.into(),
+            revoked,
+        }
     }
 
     /// Compatibility setup for pre-boundary API behavior tests whose concern
     /// is store/route behavior rather than credential separation. Boundary
     /// tests use `core_auth` above with three distinct credentials.
     pub(crate) fn shared_route_core_auth(route_token: impl Into<String>) -> CoreAuth {
-        let route_token: Arc<str> = route_token.into().into();
+        let route_token = route_token.into();
+        let route_token_arc: Arc<str> = route_token.clone().into();
         CoreAuth {
             workos: authenticator(),
-            service_api_token: route_token.clone(),
-            runner_api_token: route_token.clone(),
-            finite_private_usage_api_token: route_token,
+            service_api_token: route_token_arc.clone(),
+            runner_credentials: vec![
+                runner_credential_for_tests(
+                    "runner-oslo-1-compatibility",
+                    &route_token,
+                    "runner-oslo-1",
+                    &[RunnerClass::Kata],
+                    "oslo-host-1",
+                    true,
+                ),
+                runner_credential_for_tests(
+                    "runner-oslo-full-current",
+                    FULL_RUNNER_TOKEN,
+                    "runner-oslo-full",
+                    &[RunnerClass::Kata],
+                    "oslo-host-1",
+                    false,
+                ),
+                runner_credential_for_tests(
+                    "runner-oslo-2-current",
+                    SECOND_RUNNER_TOKEN,
+                    "runner-oslo-2",
+                    &[RunnerClass::Kata],
+                    "oslo-host-1",
+                    false,
+                ),
+            ]
+            .into(),
+            finite_private_usage_api_token: route_token_arc,
+        }
+    }
+
+    fn runner_credential_for_tests(
+        credential_id: &str,
+        token: &str,
+        runner_id: &str,
+        runner_classes: &[RunnerClass],
+        source_host_id: &str,
+        legacy_kata_compatibility: bool,
+    ) -> RunnerCredential {
+        RunnerCredential {
+            credential_id: credential_id.into(),
+            token_digest: Sha256::digest(token.as_bytes()).into(),
+            runner_id: runner_id.into(),
+            runner_classes: runner_classes.into(),
+            source_host_id: source_host_id.into(),
+            revoked: false,
+            legacy_kata_compatibility,
         }
     }
 
@@ -842,5 +1165,138 @@ mod tests {
             result.err(),
             Some(AuthConfigError::ServiceCredentialsMustBeDistinct)
         );
+    }
+
+    fn runner_credential(
+        credential_id: &str,
+        token: &str,
+        runner_id: &str,
+        runner_classes: Vec<RunnerClass>,
+        source_host_id: &str,
+        revoked: bool,
+    ) -> RunnerCredentialConfig {
+        RunnerCredentialConfig {
+            credential_id: credential_id.to_string(),
+            token: token.to_string(),
+            runner_id: runner_id.to_string(),
+            runner_classes,
+            source_host_id: source_host_id.to_string(),
+            revoked,
+        }
+    }
+
+    #[test]
+    fn runner_keyring_accepts_overlap_and_rejects_only_revoked_credentials() {
+        let auth = CoreAuth::new_with_runner_credentials(
+            authenticator(),
+            "service-token",
+            vec![
+                runner_credential(
+                    "phala-current",
+                    "phala-current-token",
+                    "phala-worker-1",
+                    vec![RunnerClass::Phala],
+                    "phala-host-1",
+                    false,
+                ),
+                runner_credential(
+                    "phala-next",
+                    "phala-next-token",
+                    "phala-worker-1",
+                    vec![RunnerClass::Phala],
+                    "phala-host-1",
+                    false,
+                ),
+                runner_credential(
+                    "phala-revoked",
+                    "phala-revoked-token",
+                    "phala-worker-1",
+                    vec![RunnerClass::Phala],
+                    "phala-host-1",
+                    true,
+                ),
+            ],
+            "usage-token",
+        )
+        .unwrap();
+
+        for (token, credential_id) in [
+            ("phala-current-token", "phala-current"),
+            ("phala-next-token", "phala-next"),
+        ] {
+            let verified = auth.verify_runner_credential(token).unwrap();
+            assert_eq!(verified.credential_id, credential_id);
+            assert_eq!(verified.runner_id, "phala-worker-1");
+            assert_eq!(verified.runner_classes, vec![RunnerClass::Phala]);
+            assert_eq!(verified.source_host_id, "phala-host-1");
+            assert!(!verified.legacy_kata_compatibility);
+        }
+        assert!(
+            auth.verify_runner_credential("phala-revoked-token")
+                .is_none()
+        );
+        assert!(auth.verify_runner_credential("unknown-token").is_none());
+    }
+
+    #[test]
+    fn runner_keyring_rejects_empty_or_duplicate_class_sets() {
+        for classes in [Vec::new(), vec![RunnerClass::Phala, RunnerClass::Phala]] {
+            let result = CoreAuth::new_with_runner_credentials(
+                authenticator(),
+                "service-token",
+                vec![runner_credential(
+                    "phala-current",
+                    "phala-current-token",
+                    "phala-worker-1",
+                    classes,
+                    "phala-host-1",
+                    false,
+                )],
+                "usage-token",
+            );
+            assert_eq!(
+                result.err(),
+                Some(AuthConfigError::InvalidRunnerCredentialKeyring)
+            );
+        }
+    }
+
+    #[test]
+    fn runner_keyring_metadata_resolves_only_named_secret_environment_variables() {
+        let metadata = r#"[{"credentialId":"phala-current","tokenEnv":"FC_CORE_RUNNER_CREDENTIAL_TOKEN_PHALA_CURRENT","runnerId":"phala-worker-1","runnerClasses":["phala"],"sourceHostId":"phala-host-1"}]"#;
+        let credentials = runner_credential_configs_from_metadata(metadata, |name| {
+            (name == "FC_CORE_RUNNER_CREDENTIAL_TOKEN_PHALA_CURRENT")
+                .then(|| "resolved-secret-material".to_string())
+        })
+        .unwrap();
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].credential_id, "phala-current");
+        assert_eq!(credentials[0].token, "resolved-secret-material");
+        assert_eq!(credentials[0].runner_classes, vec![RunnerClass::Phala]);
+
+        let invalid_metadata = r#"[{"credentialId":"phala-current","tokenEnv":"UNSCOPED_TOKEN","runnerId":"phala-worker-1","runnerClasses":["phala"],"sourceHostId":"phala-host-1"}]"#;
+        assert_eq!(
+            runner_credential_configs_from_metadata(invalid_metadata, |_| Some("secret".into()))
+                .err(),
+            Some(AuthConfigError::InvalidRunnerCredentialKeyring)
+        );
+    }
+
+    #[test]
+    fn legacy_runner_token_is_narrowly_bound_to_deployed_kata_worker() {
+        let auth = CoreAuth::new(
+            authenticator(),
+            "service-token",
+            "legacy-runner-token",
+            "usage-token",
+        )
+        .unwrap();
+        let verified = auth
+            .verify_runner_credential("legacy-runner-token")
+            .unwrap();
+        assert_eq!(verified.runner_id, LEGACY_KATA_RUNNER_ID);
+        assert_eq!(verified.runner_classes, vec![RunnerClass::Kata]);
+        assert_eq!(verified.source_host_id, LEGACY_KATA_SOURCE_HOST_ID);
+        assert!(verified.legacy_kata_compatibility);
     }
 }

@@ -119,14 +119,36 @@ Use
 `../infra/hosts/lat1/systemd/runner.env.example` as the template. The
 production shape is:
 
-- `FC_CORE_RUNNER_API_TOKEN=<route-scoped Runner credential>` (never reuse the
-  shared `FC_CORE_API_TOKEN`)
+- `FC_CORE_RUNNER_API_TOKEN` (the bearer assigned to this exact Runner; never
+  reuse the shared `FC_CORE_API_TOKEN`)
 - `FC_RUNNER_CLASS=kata`
 - `FC_RUNNER_RUNTIME_ARTIFACT_ID=<promoted OCI runtime artifact in Core>`
 - `FC_RUNNER_KATA_NAMESPACE=finite`
 - `FC_RUNNER_KATA_OCI_RUNTIME=io.containerd.kata.v2`
 - `FC_RUNNER_KATA_CPUS=4`
 - `FC_RUNNER_KATA_MEMORY=8G`
+
+Core holds the corresponding rotatable keyring. Its non-secret metadata shape
+is an array in `FC_CORE_RUNNER_CREDENTIALS_JSON`:
+
+```json
+[
+  {
+    "credentialId": "kata-current",
+    "tokenEnv": "FC_CORE_RUNNER_CREDENTIAL_TOKEN_KATA_CURRENT",
+    "runnerId": "finite-kata-runner-1",
+    "runnerClasses": ["kata"],
+    "sourceHostId": "finite-lat-1",
+    "revoked": false
+  }
+]
+```
+
+The environment variable named by `tokenEnv` contains the secret outside the
+repository. Rotation adds a second entry and secret name with the same exact
+binding, moves the Runner to that bearer, then marks or removes the old entry.
+Setting `revoked` rejects only that credential. Empty class sets, duplicate
+bearers, and bearer reuse across Core route capabilities fail Core startup.
 
 For each leased Project, the runner writes a provider work directory under:
 

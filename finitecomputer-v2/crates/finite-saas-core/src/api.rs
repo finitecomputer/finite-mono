@@ -1,4 +1,4 @@
-use crate::auth::{CoreAuth, WorkosAuthError};
+use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, LaunchCodeBatchDetails, RevokeLaunchCodeBatchInput,
 };
@@ -25,7 +25,7 @@ use crate::{
     RunnerClass, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, normalize_owner_email,
+    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_source_host_id,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -856,7 +856,7 @@ async fn runtime_artifact(
     headers: HeaderMap,
     Path(artifact_id): Path<String>,
 ) -> Result<Json<RuntimeArtifact>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let _credential = require_runner_auth(&state, &headers)?;
     let Some(artifact) = state.store.runtime_artifact(&artifact_id).await? else {
         return Err(ApiError::not_found("runtime artifact is not configured"));
     };
@@ -1546,16 +1546,18 @@ async fn lease_agent_creation_request(
     headers: HeaderMap,
     Json(input): Json<LeaseAgentCreationRequest>,
 ) -> Result<Json<Option<AgentCreationLease>>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let runner_capacity = authorize_runner_capacity(&credential, input.runner_capacity)?;
     Ok(Json(
         state
             .store
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: input.runner_id,
-                source_host_id: None,
+                source_host_id: Some(credential.source_host_id),
                 lease_token: input.lease_token,
                 lease_seconds: input.lease_seconds,
-                runner_capacity: input.runner_capacity,
+                runner_capacity: Some(runner_capacity),
                 now: input.now,
             })
             .await?,
@@ -1567,7 +1569,11 @@ async fn lease_runtime_control_request(
     headers: HeaderMap,
     Json(input): Json<LeaseRuntimeControlRequest>,
 ) -> Result<Json<Option<crate::RuntimeControlLease>>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let runner_capacity = authorize_runner_capacity(&credential, input.runner_capacity)?;
+    let source_host_id =
+        authorize_runner_source_host(&credential, input.source_host_id.as_deref())?;
     Ok(Json(
         state
             .store
@@ -1575,8 +1581,8 @@ async fn lease_runtime_control_request(
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 lease_seconds: input.lease_seconds,
-                source_host_id: input.source_host_id,
-                runner_capacity: input.runner_capacity,
+                source_host_id: Some(source_host_id),
+                runner_capacity: Some(runner_capacity),
                 now: input.now,
             })
             .await?,
@@ -1589,7 +1595,8 @@ async fn complete_runtime_control_request(
     Path(request_id): Path<String>,
     Json(input): Json<CompleteRuntimeControlRequest>,
 ) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
     Ok(Json(
         state
             .store
@@ -1613,7 +1620,8 @@ async fn fail_runtime_control_request(
     Path(request_id): Path<String>,
     Json(input): Json<FailRuntimeControlRequest>,
 ) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
     Ok(Json(
         state
             .store
@@ -1634,7 +1642,10 @@ async fn complete_agent_creation_request(
     Path(request_id): Path<String>,
     Json(input): Json<CompleteAgentCreationRequest>,
 ) -> Result<Json<AgentCreationLease>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let source_host_id = authorize_runner_source_host(&credential, Some(&input.source_host_id))?;
+    authorize_provider_runtime_handle(&credential, input.provider_runtime_handle.as_ref())?;
     Ok(Json(
         state
             .store
@@ -1642,7 +1653,7 @@ async fn complete_agent_creation_request(
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
-                source_host_id: input.source_host_id,
+                source_host_id,
                 source_machine_id: input.source_machine_id,
                 runtime_artifact_id: input.runtime_artifact_id,
                 state_schema_version: input.state_schema_version,
@@ -1667,7 +1678,10 @@ async fn register_agent_creation_runtime(
     Path(request_id): Path<String>,
     Json(input): Json<RegisterAgentCreationRuntimeRequest>,
 ) -> Result<Json<AgentCreationLease>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let source_host_id = authorize_runner_source_host(&credential, Some(&input.source_host_id))?;
+    authorize_provider_runtime_handle(&credential, input.provider_runtime_handle.as_ref())?;
     Ok(Json(
         state
             .store
@@ -1675,7 +1689,7 @@ async fn register_agent_creation_runtime(
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
-                source_host_id: input.source_host_id,
+                source_host_id,
                 source_machine_id: input.source_machine_id,
                 runtime_artifact_id: input.runtime_artifact_id,
                 state_schema_version: input.state_schema_version,
@@ -1701,7 +1715,10 @@ async fn provision_finite_private_runtime_key(
     Path(request_id): Path<String>,
     Json(input): Json<ProvisionFinitePrivateRuntimeKeyRequest>,
 ) -> Result<Json<ProvisionFinitePrivateRuntimeKeyResult>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let source_host_id =
+        authorize_runner_source_host(&credential, input.source_host_id.as_deref())?;
     Ok(Json(
         state
             .store
@@ -1709,7 +1726,7 @@ async fn provision_finite_private_runtime_key(
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
-                source_host_id: input.source_host_id,
+                source_host_id: Some(source_host_id),
                 source_machine_id: input.source_machine_id,
                 now: input.now,
             })
@@ -1723,7 +1740,8 @@ async fn fail_agent_creation_request(
     Path(request_id): Path<String>,
     Json(input): Json<FailAgentCreationRequest>,
 ) -> Result<Json<AgentCreationRequest>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
     Ok(Json(
         state
             .store
@@ -1889,7 +1907,7 @@ async fn runtime_heartbeat_for_machine(
     headers: HeaderMap,
     Path(machine_id): Path<String>,
 ) -> Result<Json<crate::RelayHeartbeat>, ApiError> {
-    require_runner_auth(&state, &headers)?;
+    let _credential = require_runner_auth(&state, &headers)?;
     Ok(Json(
         state
             .store
@@ -2439,12 +2457,85 @@ fn require_service_auth(state: &CoreApiState, headers: &HeaderMap) -> Result<(),
     )
 }
 
-fn require_runner_auth(state: &CoreApiState, headers: &HeaderMap) -> Result<(), ApiError> {
-    require_route_credential(
-        headers,
-        state.auth.runner_api_token(),
-        "invalid Runner credential",
-    )
+fn require_runner_auth(
+    state: &CoreApiState,
+    headers: &HeaderMap,
+) -> Result<VerifiedRunnerCredential, ApiError> {
+    let presented =
+        bearer_token(headers).ok_or_else(|| ApiError::unauthorized("invalid Runner credential"))?;
+    state
+        .auth
+        .verify_runner_credential(&presented)
+        .ok_or_else(|| ApiError::unauthorized("invalid Runner credential"))
+}
+
+fn authorize_runner_id(
+    credential: &VerifiedRunnerCredential,
+    runner_id: &str,
+) -> Result<(), ApiError> {
+    if constant_time_token_eq(runner_id.trim(), &credential.runner_id) {
+        Ok(())
+    } else {
+        Err(runner_binding_error())
+    }
+}
+
+fn authorize_runner_capacity(
+    credential: &VerifiedRunnerCredential,
+    capacity: Option<RunnerLeaseCapacity>,
+) -> Result<RunnerLeaseCapacity, ApiError> {
+    let Some(capacity) = capacity else {
+        if credential.legacy_kata_compatibility {
+            return Ok(RunnerLeaseCapacity {
+                runner_classes: credential.runner_classes.clone(),
+                ..RunnerLeaseCapacity::default()
+            });
+        }
+        return Err(runner_binding_error());
+    };
+    if capacity.runner_classes.is_empty()
+        || capacity.runner_classes.len() != credential.runner_classes.len()
+        || !capacity
+            .runner_classes
+            .iter()
+            .all(|class| credential.runner_classes.contains(class))
+    {
+        return Err(runner_binding_error());
+    }
+    Ok(capacity)
+}
+
+fn authorize_runner_source_host(
+    credential: &VerifiedRunnerCredential,
+    source_host_id: Option<&str>,
+) -> Result<String, ApiError> {
+    let source_host_id = match source_host_id {
+        Some(source_host_id) => {
+            normalize_source_host_id(source_host_id).map_err(|_| runner_binding_error())?
+        }
+        None if credential.legacy_kata_compatibility => credential.source_host_id.clone(),
+        None => return Err(runner_binding_error()),
+    };
+    if constant_time_token_eq(&source_host_id, &credential.source_host_id) {
+        Ok(source_host_id)
+    } else {
+        Err(runner_binding_error())
+    }
+}
+
+fn authorize_provider_runtime_handle(
+    credential: &VerifiedRunnerCredential,
+    handle: Option<&ProviderRuntimeHandleEnvelope>,
+) -> Result<(), ApiError> {
+    if handle.is_none_or(|handle| credential.runner_classes.contains(&handle.runner_class())) {
+        Ok(())
+    } else {
+        Err(runner_binding_error())
+    }
+}
+
+fn runner_binding_error() -> ApiError {
+    ApiError::forbidden("Runner credential is not authorized for this worker request")
 }
 
 fn require_route_credential(
@@ -2743,7 +2834,9 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use crate::auth::test_support::{
-        OPERATOR_ORG_ID, access_token, access_token_with_subject, core_auth, shared_route_core_auth,
+        BOUNDARY_RUNNER_TOKEN, FULL_RUNNER_TOKEN, OPERATOR_ORG_ID, SECOND_RUNNER_TOKEN,
+        access_token, access_token_with_subject, core_auth, core_auth_with_runner_credentials,
+        runner_credential_config, shared_route_core_auth,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -2770,6 +2863,10 @@ mod tests {
 
     fn runner_authorization() -> String {
         format!("Bearer {}", scoped_token("runner"))
+    }
+
+    fn boundary_runner_authorization() -> String {
+        format!("Bearer {BOUNDARY_RUNNER_TOKEN}")
     }
 
     fn usage_authorization() -> String {
@@ -3846,6 +3943,7 @@ mod tests {
                             "runnerId": "runner-oslo-1",
                             "leaseToken": "lease-token-1",
                             "leaseSeconds": 300,
+                            "runnerCapacity": { "runnerClasses": ["kata"] },
                             "now": "2026-05-25T13:00:00Z"
                         })
                         .to_string(),
@@ -4044,13 +4142,15 @@ mod tests {
                 "draining": true,
                 "maxSandboxCount": 4,
                 "activeSandboxCount": 1,
-                "availableMemoryBytes": 8589934592_u64
+                "availableMemoryBytes": 8589934592_u64,
+                "runnerClasses": ["kata"]
             }),
             serde_json::json!({
                 "draining": false,
                 "maxSandboxCount": 1,
                 "activeSandboxCount": 1,
-                "availableMemoryBytes": 1073741824_u64
+                "availableMemoryBytes": 1073741824_u64,
+                "runnerClasses": ["kata"]
             }),
         ] {
             let response = app
@@ -4059,7 +4159,7 @@ mod tests {
                     Request::builder()
                         .method("POST")
                         .uri("/api/core/v1/agent-creation-requests/lease")
-                        .header("authorization", "Bearer core-token")
+                        .header("authorization", format!("Bearer {FULL_RUNNER_TOKEN}"))
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::json!({
@@ -4088,7 +4188,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", "Bearer core-token")
+                    .header("authorization", format!("Bearer {SECOND_RUNNER_TOKEN}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -4535,9 +4635,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runner_keyring_enforces_worker_class_source_and_revocation_bindings() {
+        let auth = core_auth_with_runner_credentials(
+            "service-token",
+            vec![
+                runner_credential_config(
+                    "kata-current",
+                    "kata-current-token",
+                    "kata-worker-1",
+                    &[RunnerClass::Kata],
+                    "kata-host-1",
+                    false,
+                ),
+                runner_credential_config(
+                    "kata-next",
+                    "kata-next-token",
+                    "kata-worker-1",
+                    &[RunnerClass::Kata],
+                    "kata-host-1",
+                    false,
+                ),
+                runner_credential_config(
+                    "kata-revoked",
+                    "kata-revoked-token",
+                    "kata-worker-1",
+                    &[RunnerClass::Kata],
+                    "kata-host-1",
+                    true,
+                ),
+                runner_credential_config(
+                    "phala-current",
+                    "phala-current-token",
+                    "phala-worker-1",
+                    &[RunnerClass::Phala],
+                    "phala-host-1",
+                    false,
+                ),
+            ],
+            "usage-token",
+        );
+        let app = router(CoreStore::memory(), auth);
+
+        for token in ["kata-current-token", "kata-next-token"] {
+            let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/agent-creation-requests/lease",
+                &headers,
+                Some(serde_json::json!({
+                    "runnerId": "kata-worker-1",
+                    "leaseToken": "lease-token",
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.is_null(), "empty queue must return no lease");
+        }
+
+        let kata = vec![(
+            "authorization".to_string(),
+            "Bearer kata-current-token".to_string(),
+        )];
+        for body in [
+            serde_json::json!({
+                "runnerId": "phala-worker-1",
+                "leaseToken": "lease-token",
+                "runnerCapacity": { "runnerClasses": ["kata"] }
+            }),
+            serde_json::json!({
+                "runnerId": "kata-worker-1",
+                "leaseToken": "lease-token",
+                "runnerCapacity": { "runnerClasses": [] }
+            }),
+            serde_json::json!({
+                "runnerId": "kata-worker-1",
+                "leaseToken": "lease-token",
+                "runnerCapacity": { "runnerClasses": ["phala"] }
+            }),
+        ] {
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/agent-creation-requests/lease",
+                &kata,
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        let phala = vec![(
+            "authorization".to_string(),
+            "Bearer phala-current-token".to_string(),
+        )];
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/agent-creation-requests/lease",
+            &phala,
+            Some(serde_json::json!({
+                "runnerId": "phala-worker-1",
+                "leaseToken": "lease-token",
+                "runnerCapacity": { "runnerClasses": ["kata"] }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, body) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/runtime-control-requests/lease",
+            &phala,
+            Some(serde_json::json!({
+                "runnerId": "phala-worker-1",
+                "leaseToken": "lease-token",
+                "sourceHostId": "phala-host-1",
+                "runnerCapacity": { "runnerClasses": ["phala"] }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_null());
+
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/runtime-control-requests/lease",
+            &phala,
+            Some(serde_json::json!({
+                "runnerId": "phala-worker-1",
+                "leaseToken": "lease-token",
+                "sourceHostId": "kata-host-1",
+                "runnerCapacity": { "runnerClasses": ["phala"] }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let revoked = vec![(
+            "authorization".to_string(),
+            "Bearer kata-revoked-token".to_string(),
+        )];
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/agent-creation-requests/lease",
+            &revoked,
+            Some(serde_json::json!({
+                "runnerId": "kata-worker-1",
+                "leaseToken": "lease-token",
+                "runnerCapacity": { "runnerClasses": ["kata"] }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn route_scoped_credentials_cannot_cross_user_admin_or_runner_boundaries() {
         let app = router(CoreStore::memory(), scoped_test_auth());
-        let runner = vec![("authorization".to_string(), runner_authorization())];
+        let runner = vec![("authorization".to_string(), boundary_runner_authorization())];
         let service = vec![("authorization".to_string(), "Bearer core-token".to_string())];
         let usage = vec![("authorization".to_string(), usage_authorization())];
 
@@ -4562,7 +4822,8 @@ mod tests {
                 serde_json::json!({
                     "runnerId": "runner-auth-boundary",
                     "leaseToken": "lease-auth-boundary",
-                    "leaseSeconds": 60
+                    "leaseSeconds": 60,
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
                 }),
             ),
             (
@@ -4570,7 +4831,9 @@ mod tests {
                 serde_json::json!({
                     "runnerId": "runner-auth-boundary",
                     "leaseToken": "lease-auth-boundary",
-                    "leaseSeconds": 60
+                    "leaseSeconds": 60,
+                    "sourceHostId": "source-auth-boundary",
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
                 }),
             ),
             (
