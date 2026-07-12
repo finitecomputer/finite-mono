@@ -51,3 +51,12 @@
 - Isolated browser proof was intentionally deferred to the coordinating
   session after the static-smoke prerequisite was found missing. No copied
   values, invite material, or user data were recorded during this work.
+
+## Post-commit follow-up
+
+- A review found that a prior copy result could otherwise continue to mask a
+  later generic client failure. Assigning a nonempty client error now clears
+  stale action feedback before rendering the generic failure.
+- The deterministic clipboard seam proves both precedence directions: a later
+  failure replaces copy feedback, and a later successful copy replaces the
+  generic failure without exposing copied material.

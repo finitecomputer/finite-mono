@@ -788,6 +788,16 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /page-id-fixture-sentinel/);
 
+  clipboardFeedbackState.lastError = "later-action-failure-detail-sentinel";
+  assert.equal(clipboardFeedbackState.clientActionFeedback, null);
+  assert.equal(
+    clipboardFeedbackElement.textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /later-action-failure-detail-sentinel/);
+  assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
+  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+
   clipboardFeedback.seams.handleContextMenuAction(
     { action: "copy-page-id" },
     { objectId: "context-page-id-sentinel" }
@@ -798,6 +808,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   );
   await Promise.resolve();
   assert.deepEqual(copiedValues, [
+    copiedPageId,
     copiedPageId,
     "context-page-id-sentinel",
     "context-folder-id-sentinel",

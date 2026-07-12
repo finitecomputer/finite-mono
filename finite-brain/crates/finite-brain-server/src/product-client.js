@@ -75,7 +75,9 @@ const FiniteBrainProductClient = (() => {
       return lastErrorValue;
     },
     set(value) {
-      lastErrorValue = value || null;
+      const nextError = value || null;
+      if (nextError) state.clientActionFeedback = null;
+      lastErrorValue = nextError;
       renderClientActionFeedback();
     },
   });
