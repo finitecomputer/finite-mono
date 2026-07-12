@@ -124,6 +124,8 @@ test("runtime upgrade control stays admin-only and requires an exact artifact id
   );
   assert.match(upgradePageSource, /name="targetRuntimeArtifactId"/u);
   assert.match(upgradePageSource, /required/u);
+  assert.match(upgradePageSource, /<FormActionButton/u);
+  assert.doesNotMatch(upgradePageSource, /ConfirmSubmitButton/u);
   assert.match(
     upgradePageSource,
     /No\s+candidate is selected automatically\./u

@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { ActivityIcon, ArrowLeftIcon } from "lucide-react";
 
 import { adminOpsUpgradeRuntimeAction } from "@/app/actions";
-import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
+import { FormActionButton } from "@/components/form-action-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { canAccessAdminOps } from "@/lib/admin-ops";
@@ -88,14 +88,10 @@ export default async function RuntimeUpgradePage({
               No candidate is selected automatically. Verify the complete ID
               before continuing.
             </p>
-            <ConfirmSubmitButton
-              className="w-fit"
-              pendingLabel="Upgrading..."
-              confirmMessage={`Upgrade ${runtime.project_display_name} to the exact runtime artifact ID entered? The hosted runtime will restart on its existing volume.`}
-            >
+            <FormActionButton className="w-fit" pendingLabel="Upgrading...">
               <ActivityIcon />
               Upgrade runtime
-            </ConfirmSubmitButton>
+            </FormActionButton>
           </form>
         )}
       </section>
