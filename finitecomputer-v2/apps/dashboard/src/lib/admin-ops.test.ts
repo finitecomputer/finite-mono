@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 import {
   ONE_TIME_KEY_WARNING,
@@ -87,4 +89,26 @@ test("oneTimeKeyError surfaces only error states", () => {
     oneTimeKeyError({ status: "error", error: "  " }),
     "The admin action failed.",
   );
+});
+
+test("runtime upgrade control stays admin-only and requires an exact artifact id", async () => {
+  const [actionsSource, pageSource] = await Promise.all([
+    readFile(path.resolve(process.cwd(), "src/app/actions.ts"), "utf8"),
+    readFile(
+      path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
+      "utf8"
+    ),
+  ]);
+
+  assert.match(
+    actionsSource,
+    /adminOpsUpgradeRuntimeAction[\s\S]*requireAdminViewer\("upgrade hosted runtimes"\)[\s\S]*adminUpgradeCoreRuntime\([\s\S]*targetRuntimeArtifactId/u
+  );
+  assert.match(pageSource, /name="targetRuntimeArtifactId"/u);
+  assert.match(pageSource, /required/u);
+  assert.match(
+    pageSource,
+    /disabled=\{!runtime\.supports_runtime_control\}/u
+  );
+  assert.match(pageSource, /No\s+candidate is selected automatically\./u);
 });

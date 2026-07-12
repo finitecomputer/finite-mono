@@ -19,6 +19,7 @@ import {
   adminRestartCoreRuntime,
   adminRevokeCoreFinitePrivateApiKey,
   adminRotateCoreFinitePrivateApiKey,
+  adminUpgradeCoreRuntime,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
   coreProjectSupportsHostedRestart,
@@ -320,6 +321,17 @@ export async function adminOpsRestartRuntimeAction(formData: FormData) {
 export async function adminOpsRecoverRuntimeAction(formData: FormData) {
   await requireAdminViewer("recover hosted runtimes");
   await adminRecoverCoreRuntime(String(formData.get("projectId") ?? ""));
+  revalidatePath("/dashboard/admin");
+}
+
+export async function adminOpsUpgradeRuntimeAction(formData: FormData) {
+  await requireAdminViewer("upgrade hosted runtimes");
+  await adminUpgradeCoreRuntime({
+    projectId: String(formData.get("projectId") ?? ""),
+    targetRuntimeArtifactId: String(
+      formData.get("targetRuntimeArtifactId") ?? ""
+    ),
+  });
   revalidatePath("/dashboard/admin");
 }
 

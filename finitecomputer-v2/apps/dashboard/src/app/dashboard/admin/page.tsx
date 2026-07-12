@@ -13,9 +13,10 @@ import {
 import {
   adminOpsRecoverRuntimeAction,
   adminOpsRevokeLaunchCodeBatchAction,
+  adminOpsRevokeFinitePrivateKeyAction,
   adminOpsResetFinitePrivateWindowAction,
   adminOpsRestartRuntimeAction,
-  adminOpsRevokeFinitePrivateKeyAction,
+  adminOpsUpgradeRuntimeAction,
 } from "@/app/actions";
 import {
   AdminFriendKeyIssueForm,
@@ -23,6 +24,7 @@ import {
   AdminRotateKeyForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
+import { Input } from "@/components/ui/input";
 import { canAccessAdminOps, heartbeatAgeLabel } from "@/lib/admin-ops";
 import {
   loadCoreAdminRuntimes,
@@ -274,32 +276,70 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
           ) : null}
         </div>
       </div>
-      <div className="flex flex-wrap items-start gap-2">
-        <form action={adminOpsRestartRuntimeAction}>
+      <div className="grid items-start gap-2">
+        <div className="flex flex-wrap items-start gap-2">
+          <form action={adminOpsRestartRuntimeAction}>
+            <input type="hidden" name="projectId" value={runtime.project_id} />
+            <ConfirmSubmitButton
+              variant="outline"
+              size="sm"
+              pendingLabel="Restarting..."
+              disabled={!runtime.supports_runtime_control}
+              confirmMessage={`Restart ${runtime.project_display_name} (${runtime.source_machine_id})?`}
+            >
+              <RotateCcwIcon />
+              Restart
+            </ConfirmSubmitButton>
+          </form>
+          <form action={adminOpsRecoverRuntimeAction}>
+            <input type="hidden" name="projectId" value={runtime.project_id} />
+            <ConfirmSubmitButton
+              variant="outline"
+              size="sm"
+              pendingLabel="Recovering..."
+              disabled={!runtime.supports_runtime_control}
+              confirmMessage={`Recover known-good chat runtime for ${runtime.project_display_name}?`}
+            >
+              <ActivityIcon />
+              Recover
+            </ConfirmSubmitButton>
+          </form>
+        </div>
+        <form
+          action={adminOpsUpgradeRuntimeAction}
+          className="grid gap-1.5 sm:grid-cols-[minmax(12rem,18rem)_auto]"
+        >
           <input type="hidden" name="projectId" value={runtime.project_id} />
-          <ConfirmSubmitButton
-            variant="outline"
-            size="sm"
-            pendingLabel="Restarting..."
-            disabled={!runtime.supports_runtime_control}
-            confirmMessage={`Restart ${runtime.project_display_name} (${runtime.source_machine_id})?`}
+          <label
+            className="grid gap-1 text-xs font-medium text-muted-foreground sm:col-span-2"
+            htmlFor={`runtime-artifact-${runtime.agent_runtime_id}`}
           >
-            <RotateCcwIcon />
-            Restart
-          </ConfirmSubmitButton>
-        </form>
-        <form action={adminOpsRecoverRuntimeAction}>
-          <input type="hidden" name="projectId" value={runtime.project_id} />
+            Exact target runtime artifact ID
+          </label>
+          <Input
+            id={`runtime-artifact-${runtime.agent_runtime_id}`}
+            name="targetRuntimeArtifactId"
+            className="font-mono text-xs"
+            placeholder="Paste an approved artifact ID"
+            required
+            autoComplete="off"
+            spellCheck={false}
+            disabled={!runtime.supports_runtime_control}
+          />
           <ConfirmSubmitButton
             variant="outline"
             size="sm"
-            pendingLabel="Recovering..."
+            pendingLabel="Upgrading..."
             disabled={!runtime.supports_runtime_control}
-            confirmMessage={`Recover known-good chat runtime for ${runtime.project_display_name}?`}
+            confirmMessage={`Upgrade ${runtime.project_display_name} to the exact runtime artifact ID entered? The hosted runtime will restart on its existing volume.`}
           >
             <ActivityIcon />
-            Recover
+            Upgrade
           </ConfirmSubmitButton>
+          <p className="text-xs text-muted-foreground sm:col-span-2">
+            Operator control: enter the full Core runtime artifact ID. No
+            candidate is selected automatically.
+          </p>
         </form>
       </div>
     </div>
