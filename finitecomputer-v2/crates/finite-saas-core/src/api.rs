@@ -8,24 +8,25 @@ use crate::{
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
     AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest,
-    BillingOverview, BillingSubscriptionStatus, CancelAgentCreationRequestInput,
+    AgentRuntime, BillingOverview, BillingSubscriptionStatus, CancelAgentCreationRequestInput,
     ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
     ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
     FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateGrant,
-    FinitePrivateSettlementKind, FinitePrivateUsageDecision, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, ProjectImportCandidate, ProviderRuntimeHandleEnvelope,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RegisterAgentCreationRuntimeInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    FinitePrivateSettlementKind, FinitePrivateUsageDecision, HostingTier, ImportCandidateStatus,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput,
+    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RunnerClass, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
+    RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_source_host_id,
+    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
+    normalize_source_host_id,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -467,9 +468,138 @@ struct ChatStreamQuery {
 pub struct MeResponse {
     pub email: String,
     pub workos_user_id: String,
-    pub claimable_candidates: Vec<ProjectImportCandidate>,
-    pub projects: Vec<VisibleProject>,
+    pub claimable_candidates: Vec<ClaimableProjectSummary>,
+    pub projects: Vec<PublicVisibleProject>,
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
+}
+
+/// A user-facing import choice. Source-host and machine identifiers stay on
+/// the internal compatibility path and never become browser authorization or
+/// navigation keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimableProjectSummary {
+    pub id: String,
+    pub display_name: String,
+    pub status: ImportCandidateStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<ProjectImportCandidate> for ClaimableProjectSummary {
+    fn from(candidate: ProjectImportCandidate) -> Self {
+        Self {
+            id: candidate.id,
+            display_name: candidate.host_facts.display_name,
+            status: candidate.status,
+            created_at: candidate.created_at,
+            updated_at: candidate.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicProject {
+    pub id: String,
+    pub display_name: String,
+    pub hosting_tier: Option<HostingTier>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<Project> for PublicProject {
+    fn from(project: Project) -> Self {
+        Self {
+            id: project.id,
+            display_name: project.display_name,
+            hosting_tier: project.hosting_tier,
+            created_at: project.created_at,
+            updated_at: project.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicRuntimeCapabilities {
+    pub restart: bool,
+    pub recover_known_good_chat: bool,
+    pub stop: bool,
+    pub runtime_retirement: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicAgentRuntime {
+    pub id: String,
+    pub project_id: String,
+    pub contact_endpoint: Option<String>,
+    pub runtime_status: RuntimeSummaryStatus,
+    pub hermes_available: Option<bool>,
+    /// Populated only from Core's persisted, versioned Runtime capability
+    /// record. N-1 rows remain absent and Dashboard fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_capabilities: Option<PublicRuntimeCapabilities>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<AgentRuntime> for PublicAgentRuntime {
+    fn from(runtime: AgentRuntime) -> Self {
+        let contact_endpoint = public_runtime_contact_endpoint(&runtime);
+        Self {
+            id: runtime.id,
+            project_id: runtime.project_id,
+            contact_endpoint,
+            runtime_status: runtime.host_facts.runtime_status,
+            hermes_available: runtime.host_facts.hermes_available,
+            runtime_capabilities: None,
+            created_at: runtime.created_at,
+            updated_at: runtime.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicVisibleProject {
+    pub project: PublicProject,
+    pub runtime: Option<PublicAgentRuntime>,
+}
+
+impl From<VisibleProject> for PublicVisibleProject {
+    fn from(project: VisibleProject) -> Self {
+        Self {
+            project: project.project.into(),
+            runtime: project.runtime.map(PublicAgentRuntime::from),
+        }
+    }
+}
+
+fn public_runtime_contact_endpoint(runtime: &AgentRuntime) -> Option<String> {
+    // `contact_endpoint` is the public contract. Reading the first valid old
+    // published URL is an N-1 compatibility bridge for rows created before
+    // that field existed; new Runner generations write the explicit fact.
+    normalize_runtime_contact_endpoint(runtime.contact_endpoint.as_deref())
+        .ok()
+        .flatten()
+        .or_else(|| {
+            runtime
+                .host_facts
+                .published_app_urls
+                .iter()
+                .find_map(|url| normalize_runtime_contact_endpoint(Some(url)).ok().flatten())
+        })
+}
+
+fn public_visible_projects(projects: Vec<VisibleProject>) -> Vec<PublicVisibleProject> {
+    projects
+        .into_iter()
+        .filter(|project| project.project.import_candidate_id.is_none())
+        .map(PublicVisibleProject::from)
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRouteResolution {
+    pub project_id: String,
+    pub runtime_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -477,7 +607,6 @@ pub struct AgentCreationRequestSummary {
     pub id: String,
     pub project_id: String,
     pub display_name: String,
-    pub runner_class: RunnerClass,
     pub profile_picture_url: Option<String>,
     pub status: crate::AgentCreationRequestStatus,
     pub agent_runtime_id: Option<String>,
@@ -492,7 +621,6 @@ impl From<AgentCreationRequest> for AgentCreationRequestSummary {
             id: request.id,
             project_id: request.project_id,
             display_name: request.display_name,
-            runner_class: request.runner_class,
             profile_picture_url: request.profile_picture_url,
             status: request.status,
             agent_runtime_id: request.agent_runtime_id,
@@ -632,6 +760,10 @@ pub fn router_with_runtime_upgrades(
             post(admin_reset_finite_private_usage_window),
         )
         .route("/api/core/v1/me", get(me))
+        .route(
+            "/api/core/v1/me/runtime-routes/{identifier}",
+            get(resolve_runtime_route),
+        )
         .route("/api/core/v1/me/billing", get(billing_overview))
         .route(
             "/api/core/v1/me/billing/stripe-customer",
@@ -1317,13 +1449,53 @@ async fn me(
     Ok(Json(MeResponse {
         email: identity.email,
         workos_user_id: identity.workos_user_id,
-        claimable_candidates,
-        projects,
+        claimable_candidates: claimable_candidates
+            .into_iter()
+            .map(ClaimableProjectSummary::from)
+            .collect(),
+        projects: public_visible_projects(projects),
         agent_creation_requests: agent_creation_requests
             .into_iter()
             .map(AgentCreationRequestSummary::from)
             .collect(),
     }))
+}
+
+async fn resolve_runtime_route(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(identifier): Path<String>,
+) -> Result<Json<RuntimeRouteResolution>, ApiError> {
+    let identity = require_verified_identity(&state, &headers).await?;
+    state
+        .store
+        .link_verified_user(LinkVerifiedUserInput {
+            verified_email: identity.email,
+            workos_user_id: identity.workos_user_id.clone(),
+            now: None,
+        })
+        .await?;
+    let identifier = identifier.trim();
+    let resolution = state
+        .store
+        .visible_projects_for_workos_user(&identity.workos_user_id)
+        .await?
+        .into_iter()
+        .find_map(|project| {
+            if project.project.import_candidate_id.is_some() {
+                return None;
+            }
+            let runtime = project.runtime?;
+            (project.project.id == identifier
+                || runtime.id == identifier
+                || runtime.source_machine_id == identifier)
+                .then(|| RuntimeRouteResolution {
+                    project_id: project.project.id,
+                    runtime_id: runtime.id,
+                })
+        })
+        .ok_or_else(|| ApiError::not_found("agent runtime was not found"))?;
+    Ok(Json(resolution))
 }
 
 async fn billing_overview(
@@ -2115,14 +2287,14 @@ async fn admin_chat_stream(
 async fn projects(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<VisibleProject>>, ApiError> {
+) -> Result<Json<Vec<PublicVisibleProject>>, ApiError> {
     let identity = require_verified_identity(&state, &headers).await?;
-    Ok(Json(
+    Ok(Json(public_visible_projects(
         state
             .store
             .visible_projects_for_workos_user(&identity.workos_user_id)
             .await?,
-    ))
+    )))
 }
 
 async fn authenticate_runtime_machine(
@@ -2833,6 +3005,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunnerClass;
     use crate::auth::test_support::{
         BOUNDARY_RUNNER_TOKEN, FULL_RUNNER_TOKEN, OPERATOR_ORG_ID, SECOND_RUNNER_TOKEN,
         access_token, access_token_with_subject, core_auth, core_auth_with_runner_credentials,
@@ -2873,6 +3046,28 @@ mod tests {
         format!("Bearer {}", scoped_token("finite-private-usage"))
     }
 
+    fn assert_json_omits_keys(value: &serde_json::Value, forbidden: &[&str]) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for key in forbidden {
+                    assert!(
+                        !object.contains_key(*key),
+                        "public JSON unexpectedly contained `{key}`: {value}"
+                    );
+                }
+                for child in object.values() {
+                    assert_json_omits_keys(child, forbidden);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    assert_json_omits_keys(child, forbidden);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn user_agent_creation_json_cannot_select_provider_placement() {
         let error = serde_json::from_value::<CreateAgentRequest>(serde_json::json!({
@@ -2883,6 +3078,54 @@ mod tests {
         }))
         .expect_err("runnerClass must remain outside the user boundary");
         assert!(error.to_string().contains("unknown field `runnerClass`"));
+    }
+
+    #[test]
+    fn public_runtime_contact_prefers_explicit_normalized_endpoint_over_n_minus_one_urls() {
+        let runtime = AgentRuntime {
+            id: "runtime-public-contact".to_string(),
+            project_id: "project-public-contact".to_string(),
+            source_host_id: "internal-host".to_string(),
+            source_machine_id: "internal-machine".to_string(),
+            source_import_key: "internal-host:internal-machine".to_string(),
+            runtime_artifact_id: None,
+            state_schema_version: None,
+            placement: None,
+            provider_runtime_handle: None,
+            provider_runtime_handle_history: Vec::new(),
+            contact_endpoint: Some("https://contact.example.test/".to_string()),
+            host_facts: crate::HostOwnedRuntimeFacts {
+                display_name: "Contact test".to_string(),
+                hostname: None,
+                runtime_host: "internal-host".to_string(),
+                runtime_status: RuntimeSummaryStatus::Online,
+                active_inference_profile: None,
+                hermes_available: Some(true),
+                published_app_urls: vec!["https://legacy.example.test/wrong".to_string()],
+            },
+            created_at: "2026-07-11T12:00:00Z".to_string(),
+            updated_at: "2026-07-11T12:00:00Z".to_string(),
+        };
+
+        assert_eq!(
+            public_runtime_contact_endpoint(&runtime).as_deref(),
+            Some("https://contact.example.test")
+        );
+        let legacy_runtime = AgentRuntime {
+            contact_endpoint: None,
+            host_facts: crate::HostOwnedRuntimeFacts {
+                published_app_urls: vec![
+                    "not-a-contact".to_string(),
+                    "https://legacy.example.test/contact/".to_string(),
+                ],
+                ..runtime.host_facts.clone()
+            },
+            ..runtime
+        };
+        assert_eq!(
+            public_runtime_contact_endpoint(&legacy_runtime).as_deref(),
+            Some("https://legacy.example.test/contact")
+        );
     }
 
     async fn issue_test_launch_code(store: &CoreStore) -> String {
@@ -2946,7 +3189,10 @@ mod tests {
                 runtime_status: crate::RuntimeSummaryStatus::Online,
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
-                published_app_urls: vec!["https://smoke.example.com".to_string()],
+                published_app_urls: vec![
+                    "not-a-contact-url".to_string(),
+                    "https://smoke.example.com/contact/".to_string(),
+                ],
                 known_external_channel_participants: Vec::new(),
                 admin_visible_to_emails: Vec::new(),
             }],
@@ -3003,8 +3249,23 @@ mod tests {
         assert!(me_json.get("workosUserId").is_none());
         assert!(me_json.get("claimableCandidates").is_none());
         assert!(me_json.get("agentCreationRequests").is_none());
+        assert_json_omits_keys(
+            &me_json,
+            &[
+                "runner_class",
+                "placement",
+                "source_host_id",
+                "source_machine_id",
+                "source_import_key",
+                "provider_runtime_handle",
+                "provider_runtime_handle_history",
+                "published_app_urls",
+                "host_facts",
+            ],
+        );
         let me: MeResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(me.claimable_candidates.len(), 1);
+        assert_eq!(me.claimable_candidates[0].display_name, "Smoke");
         assert!(me.projects.is_empty());
         assert!(me.agent_creation_requests.is_empty());
 
@@ -3071,12 +3332,35 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let projects: Vec<VisibleProject> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(projects.len(), 1);
-        assert_eq!(
-            projects[0].runtime.as_ref().unwrap().source_host_id,
-            "smoke"
+        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
+        assert!(
+            projects.is_empty(),
+            "legacy imports stay out of the product DTO"
         );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/me/runtime-routes/test-smoke")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let response = app
             .oneshot(
@@ -3104,15 +3388,7 @@ mod tests {
             .await
             .unwrap();
         let relinked_me: MeResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(relinked_me.projects.len(), 1);
-        assert_eq!(
-            relinked_me.projects[0]
-                .runtime
-                .as_ref()
-                .unwrap()
-                .source_host_id,
-            "smoke"
-        );
+        assert!(relinked_me.projects.is_empty());
         assert_eq!(relinked_me.workos_user_id, "user_workos_prod_google");
     }
 
@@ -3742,10 +4018,6 @@ mod tests {
         assert_eq!(me.agent_creation_requests.len(), 1);
         assert_eq!(me.agent_creation_requests[0].project_id, result.project.id);
         assert_eq!(
-            me.agent_creation_requests[0].runner_class,
-            RunnerClass::Kata
-        );
-        assert_eq!(
             me.agent_creation_requests[0].status,
             crate::AgentCreationRequestStatus::Requested
         );
@@ -3882,7 +4154,10 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "kind": "oci_image",
-                            "reference": "finite-runtime-v1",
+                            "reference": format!(
+                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                "a".repeat(64)
+                            ),
                             "versionLabel": "v1",
                             "stateSchemaVersion": "state-v1",
                             "baseImage": "python:3.11-trixie",
@@ -4015,6 +4290,7 @@ mod tests {
                             "sourceHostId": "oslo-host-1",
                             "sourceMachineId": "oslo-agent-001",
                             "runtimeArtifactId": "artifact-v1",
+                            "contactEndpoint": "https://oslo-agent.example.test/contact/",
                             "hostname": "oslo-agent-001.finite.computer",
                             "runtimeHost": "oslo-host-1",
                             "runtimeStatus": "online",
@@ -4041,6 +4317,7 @@ mod tests {
         assert!(completed.request.agent_runtime_id.is_some());
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/core/v1/me/projects")
@@ -4065,11 +4342,67 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let projects: Vec<VisibleProject> = serde_json::from_slice(&body).unwrap();
+        let projects_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_json_omits_keys(
+            &projects_json,
+            &[
+                "runner_class",
+                "placement",
+                "source_host_id",
+                "source_machine_id",
+                "source_import_key",
+                "provider_runtime_handle",
+                "provider_runtime_handle_history",
+                "published_app_urls",
+                "host_facts",
+            ],
+        );
+        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(
-            projects[0].runtime.as_ref().unwrap().source_machine_id,
-            "oslo-agent-001"
+            projects[0].runtime.as_ref().unwrap().runtime_status,
+            RuntimeSummaryStatus::Online
+        );
+        assert_eq!(
+            projects[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .contact_endpoint
+                .as_deref(),
+            Some("https://oslo-agent.example.test/contact")
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/me/runtime-routes/oslo-agent-001")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_new",
+                                "new@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resolution: RuntimeRouteResolution = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resolution.project_id, projects[0].project.id);
+        assert_eq!(
+            resolution.runtime_id,
+            projects[0].runtime.as_ref().unwrap().id
         );
     }
 
@@ -4089,7 +4422,10 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "kind": "oci_image",
-                            "reference": "finite-runtime-v1",
+                            "reference": format!(
+                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                "a".repeat(64)
+                            ),
                             "versionLabel": "v1",
                             "stateSchemaVersion": "state-v1",
                             "baseImage": "python:3.11-trixie",
@@ -4361,7 +4697,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let projects: Vec<VisibleProject> = serde_json::from_slice(&body).unwrap();
+        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
         assert!(projects.is_empty());
     }
 
@@ -4383,7 +4719,10 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "kind": "oci_image",
-                            "reference": "finite-runtime-v1",
+                            "reference": format!(
+                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                "a".repeat(64)
+                            ),
                             "versionLabel": "v1",
                             "stateSchemaVersion": "state-v1",
                             "baseImage": "python:3.11-trixie",
@@ -5134,7 +5473,10 @@ mod tests {
             &service,
             Some(serde_json::json!({
                 "kind": "oci_image",
-                "reference": "finite-runtime-v1",
+                "reference": format!(
+                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                    "a".repeat(64)
+                ),
                 "versionLabel": "v1",
                 "stateSchemaVersion": "state-v1",
                 "baseImage": "python:3.11-trixie",

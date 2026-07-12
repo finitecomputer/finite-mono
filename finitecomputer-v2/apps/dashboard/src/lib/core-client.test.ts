@@ -10,9 +10,11 @@ import {
   coreProjectLabel,
   coreProjectLaunchStatusLabel,
   coreProjectLocationLabel,
-  coreProjectMachineId,
   coreProjectPrimaryUrl,
-  coreProductProjectForMachineId,
+  coreProjectRuntimeId,
+  coreProjectSupportsRetirement,
+  coreProductProjectForLegacyMachineId,
+  coreProductProjectForRouteId,
   coreProductProjects,
   type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
@@ -126,82 +128,99 @@ test("coreIdentityHeaders forwards the AuthKit bearer and no caller-supplied ide
   );
 });
 
-test("core project helpers map imported runtimes to dashboard overview state", () => {
+test("core project helpers use stable runtime identity and normalized contact", () => {
   const project: CoreVisibleProject = {
     project: {
       id: "project_1",
-      customer_org_id: "org_1",
-      owner_user_id: "user_1",
       display_name: "Smoke",
-      import_candidate_id: "import_1",
       created_at: "2026-05-25T12:00:00Z",
       updated_at: "2026-05-25T12:00:00Z",
     },
     runtime: {
       id: "runtime_1",
       project_id: "project_1",
-      source_host_id: "smoke",
-      source_machine_id: "test-smoke",
-      source_import_key: "smoke:test-smoke",
+      contact_endpoint: "https://smoke.example.com/contact",
+      runtime_status: "online",
+      hermes_available: true,
       created_at: "2026-05-25T12:00:00Z",
       updated_at: "2026-05-25T12:00:00Z",
-      host_facts: {
-        display_name: "Smoke VPS",
-        hostname: "smoke.example.com",
-        runtime_host: "smoke",
-        runtime_status: "online",
-        active_inference_profile: "finite-private",
-        hermes_available: true,
-        published_app_urls: ["notaurl", "https://smoke.example.com/app"],
-      },
     },
   };
 
-  assert.equal(coreProjectMachineId(project), "test-smoke");
+  assert.equal(coreProjectRuntimeId(project), "runtime_1");
   assert.equal(coreProjectLabel(project), "Smoke");
-  assert.equal(coreProjectPrimaryUrl(project), "https://smoke.example.com/app");
+  assert.equal(coreProjectPrimaryUrl(project), "https://smoke.example.com/contact");
   assert.equal(coreProjectLocationLabel(project, null), "Ready to use");
 });
 
-test("normal product project helpers exclude imported rollout history", () => {
-  const imported = {
+test("route helpers prefer stable ids and isolate N-1 legacy alias reads", () => {
+  const first = {
     project: {
-      id: "project_imported",
-      import_candidate_id: "import_1",
-    },
-    runtime: {
-      source_machine_id: "smoke-agent",
-    },
-  } as CoreVisibleProject;
-  const current = {
-    project: {
-      id: "project_current",
+      id: "project_first",
       import_candidate_id: null,
     },
     runtime: {
-      source_machine_id: "kata-agent",
+      id: "runtime_first",
+      source_machine_id: "legacy-first",
+    },
+  } as CoreVisibleProject;
+  const second = {
+    project: {
+      id: "project_second",
+      import_candidate_id: null,
+    },
+    runtime: {
+      id: "runtime_second",
     },
   } as CoreVisibleProject;
 
-  assert.deepEqual(coreProductProjects([imported, current]), [current]);
+  assert.deepEqual(coreProductProjects([first, second]), [first, second]);
   assert.equal(
-    coreProductProjectForMachineId([imported, current], "smoke-agent"),
+    coreProductProjectForRouteId([first, second], "runtime_second"),
+    second
+  );
+  assert.equal(
+    coreProductProjectForRouteId([first, second], "project_first"),
+    first
+  );
+  assert.equal(
+    coreProductProjectForLegacyMachineId([first, second], "legacy-first"),
+    first
+  );
+
+  const imported = {
+    project: { id: "project_imported", import_candidate_id: "import_1" },
+    runtime: { id: "runtime_imported", source_machine_id: "legacy-import" },
+  } as CoreVisibleProject;
+  assert.deepEqual(coreProductProjects([imported, first]), [first]);
+  assert.equal(
+    coreProductProjectForLegacyMachineId([imported, first], "legacy-import"),
     null
   );
-  assert.equal(
-    coreProductProjectForMachineId([imported, current], "kata-agent"),
-    current
-  );
+});
+
+test("runtime retirement requires an explicit provider-neutral capability", () => {
+  const project = {
+    project: { id: "project_1" },
+    runtime: { id: "runtime_1" },
+  } as CoreVisibleProject;
+  assert.equal(coreProjectSupportsRetirement(project), false);
+
+  const advertised = {
+    ...project,
+    runtime: {
+      ...project.runtime,
+      runtime_capabilities: { runtime_retirement: true },
+    },
+  } as CoreVisibleProject;
+  assert.equal(coreProjectSupportsRetirement(advertised), true);
 });
 
 test("core project helpers expose self-serve launch status without fake runtime links", () => {
   const project: CoreVisibleProject = {
     project: {
       id: "project_1",
-      customer_org_id: "org_1",
-      owner_user_id: "user_1",
       display_name: "Oslo Agent",
-      import_candidate_id: null,
       created_at: "2026-05-25T12:00:00Z",
       updated_at: "2026-05-25T12:00:00Z",
     },
@@ -219,7 +238,7 @@ test("core project helpers expose self-serve launch status without fake runtime 
   };
 
   assert.equal(coreAgentCreationRequestForProject(project, [request]), request);
-  assert.equal(coreProjectMachineId(project), null);
+  assert.equal(coreProjectRuntimeId(project), null);
   assert.equal(coreProjectLaunchStatusLabel(project, request), "Starting");
   assert.equal(coreProjectLocationLabel(project, request), "Starting your agent");
 });

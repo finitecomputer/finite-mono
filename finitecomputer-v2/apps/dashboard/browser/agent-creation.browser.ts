@@ -21,7 +21,6 @@ type AgentCreationRequest = {
   id: string;
   project_id: string;
   display_name: string;
-  runner_class: "apple_container" | "kata";
   profile_picture_url: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id: string | null;
@@ -33,29 +32,22 @@ type AgentCreationRequest = {
 type VisibleProject = {
   project: {
     id: string;
-    customer_org_id: string;
-    owner_user_id: string;
     display_name: string;
-    import_candidate_id: string | null;
     created_at: string;
     updated_at: string;
   };
   runtime: null | {
     id: string;
     project_id: string;
-    source_host_id: string;
-    source_machine_id: string;
-    source_import_key: string;
-    runtime_artifact_id: string | null;
-    state_schema_version: string | null;
-    host_facts: {
-      display_name: string;
-      hostname: string;
-      runtime_host: string;
-      runtime_status: "online" | "offline" | "stale" | "unknown";
-      hermes_available: boolean;
-      published_app_urls: string[];
-    };
+    contact_endpoint: string;
+    runtime_status: "online" | "offline" | "stale" | "unknown";
+    hermes_available: boolean;
+    runtime_capabilities?: {
+      restart?: boolean;
+      recover_known_good_chat?: boolean;
+      stop?: boolean;
+      runtime_retirement?: boolean;
+    } | null;
     created_at: string;
     updated_at: string;
   };
@@ -411,7 +403,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot$/u);
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
       await page
         .getByRole("heading", { name: "Completed Oslo Bot", exact: true })
         .waitFor({ state: "visible" });
@@ -460,11 +452,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
       );
-      await page.waitForURL(/\/dashboard\/machines\/second-oslo-bot$/u);
+      await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
       await main.getByRole("button", { name: "Restart agent" }).waitFor({ state: "visible" });
       await main.getByRole("button", { name: "Recover chat" }).waitFor({ state: "visible" });
       await expectVisibleText(
@@ -478,7 +471,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       hostedDevice.holdOwnerClaim();
       await openWebChat.click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/chat$/u);
       await expectVisibleText(page, "Hello from Completed Oslo Bot.");
       await expectVisibleText(page, "Topics");
       await page
@@ -519,7 +512,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
       await page.getByRole("link", { name: "Connections" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/connections$/u);
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/connections$/u);
       await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
       await expectVisibleText(page, "Google Workspace");
       const ownerClaimIndex = hostedDevice.state.runtimeCommands.findIndex(
@@ -782,7 +775,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
       await page.getByRole("main").getByRole("link", { name: "Open chat" }).click();
-      await page.waitForURL(/\/dashboard\/machines\/completed-oslo-bot\/chat$/u);
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/chat$/u);
       await waitFor(
         () =>
           hostedDevice.state.actions.filter(
@@ -835,7 +828,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           projectId: "project_removable",
           displayName: "Removable Kata Bot",
           status: "running",
-          runnerClass: "kata",
           agentRuntimeId: "runtime_removable-kata-bot",
         }),
       ],
@@ -844,27 +836,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/removable-kata-bot`
       );
-      const removeButton = page.getByRole("button", { name: "Remove agent" });
-      await removeButton.waitFor({ state: "visible" });
-      const removeForm = removeButton.locator("xpath=ancestor::form");
+      await page.waitForURL(/\/dashboard\/machines\/runtime_removable-kata-bot$/u);
       assert.equal(
-        new URL((await removeForm.getAttribute("action")) ?? "", page.url()).pathname,
-        "/dashboard/machines/removable-kata-bot/remove",
-        "removal must use a stable POST URL instead of a build-specific Server Action id"
+        await page.getByRole("button", { name: "Remove agent" }).count(),
+        0,
+        "ordinary destroy must stay hidden without an explicit Runtime Retirement capability"
       );
-      assert.equal((await removeForm.getAttribute("method"))?.toLowerCase(), "post");
-
-      page.once("dialog", (dialog) => dialog.accept());
-      await removeButton.click();
-      await page.waitForURL(
-        /\/dashboard\?new=1&agentRemoval=requested$/u
-      );
-      await expectVisibleText(page, "Agent removal started");
-      await expectVisibleText(
-        page,
-        "Its compute is being removed. Saved agent data is retained. It will disappear from your dashboard when removal finishes."
-      );
-      assert.deepEqual(core.state.destroyPosts, ["project_removable"]);
+      assert.deepEqual(core.state.destroyPosts, []);
     });
   } finally {
     await browser?.close().catch(() => {});
@@ -1553,6 +1531,28 @@ async function handleCoreRequest(
     return;
   }
 
+  const runtimeRouteMatch = request.url?.match(
+    /^\/api\/core\/v1\/me\/runtime-routes\/([^/]+)$/u
+  );
+  if (request.method === "GET" && runtimeRouteMatch?.[1]) {
+    const identifier = decodeURIComponent(runtimeRouteMatch[1]);
+    const project = state.projects.find(
+      (candidate) =>
+        candidate.project.id === identifier ||
+        candidate.runtime?.id === identifier ||
+        candidate.runtime?.id === `runtime_${identifier}`
+    );
+    if (!project?.runtime) {
+      writeJson(response, 404, { error: "agent runtime was not found" });
+      return;
+    }
+    writeJson(response, 200, {
+      project_id: project.project.id,
+      runtime_id: project.runtime.id,
+    });
+    return;
+  }
+
   if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
     writeJson(response, 200, {
       customer_org: {
@@ -1595,8 +1595,8 @@ async function handleCoreRequest(
       id: `runtime_control_${kind}_${state.restartPosts.length + state.recoverPosts.length}`,
       project_id: projectId,
       agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
-      source_host_id: project?.runtime?.source_host_id ?? "oslo",
-      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      source_host_id: "browser-fixture",
+      source_machine_id: "internal-browser-runtime",
       requested_by_user_id: "user_browser",
       kind: kind === "restart" ? "restart" : "recover_known_good_chat_runtime",
       status: "requested",
@@ -1622,7 +1622,6 @@ async function handleCoreRequest(
       projectId,
       displayName: String(body.displayName ?? "Oslo Bot"),
       status: "requested",
-      runnerClass: "kata",
       createdAt: new Date().toISOString(),
     });
     state.requests = [requestRecord];
@@ -1644,7 +1643,6 @@ async function handleCoreRequest(
         project_id: requestRecord.project_id,
         idempotency_key: String(body.idempotencyKey ?? ""),
         display_name: requestRecord.display_name,
-        runner_class: requestRecord.runner_class,
         profile_picture_url: body.profilePictureUrl ?? null,
         status: requestRecord.status,
         requested_launch_code: String(body.launchCode ?? ""),
@@ -1669,8 +1667,8 @@ async function handleCoreRequest(
       id: `runtime_control_destroy_${state.destroyPosts.length}`,
       project_id: projectId,
       agent_runtime_id: project?.runtime?.id ?? "runtime_missing",
-      source_host_id: project?.runtime?.source_host_id ?? "oslo",
-      source_machine_id: project?.runtime?.source_machine_id ?? "missing",
+      source_host_id: "browser-fixture",
+      source_machine_id: "internal-browser-runtime",
       requested_by_user_id: "user_browser",
       kind: "destroy",
       status: "requested",
@@ -1728,7 +1726,6 @@ function agentCreationRequest({
   status,
   failureMessage = null,
   createdAt = new Date().toISOString(),
-  runnerClass = "apple_container",
   agentRuntimeId = null,
 }: {
   id: string;
@@ -1737,14 +1734,12 @@ function agentCreationRequest({
   status: AgentCreationRequest["status"];
   failureMessage?: string | null;
   createdAt?: string;
-  runnerClass?: AgentCreationRequest["runner_class"];
   agentRuntimeId?: string | null;
 }): AgentCreationRequest {
   return {
     id,
     project_id: projectId,
     display_name: displayName,
-    runner_class: runnerClass,
     profile_picture_url: null,
     status,
     agent_runtime_id: agentRuntimeId,
@@ -1758,33 +1753,27 @@ function visibleProject(
   projectId: string,
   displayName: string,
   runtimeStatusUrl: string,
-  machineId = "completed-oslo-bot"
+  legacyMachineId = "completed-oslo-bot",
+  runtimeRetirement = false
 ): VisibleProject {
   return {
     project: {
       id: projectId,
-      customer_org_id: "org_browser",
-      owner_user_id: "user_browser",
       display_name: displayName,
-      import_candidate_id: null,
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
     },
     runtime: {
-      id: `runtime_${machineId}`,
+      id: `runtime_${legacyMachineId}`,
       project_id: projectId,
-      source_host_id: "oslo",
-      source_machine_id: machineId,
-      source_import_key: `oslo:${machineId}`,
-      runtime_artifact_id: "runtime_artifact_1",
-      state_schema_version: "runtime-state-v1",
-      host_facts: {
-        display_name: "Completed Oslo Bot",
-        hostname: `${machineId}.finite.computer`,
-        runtime_host: "oslo",
-        runtime_status: "online",
-        hermes_available: true,
-        published_app_urls: [runtimeStatusUrl],
+      contact_endpoint: runtimeStatusUrl,
+      runtime_status: "online",
+      hermes_available: true,
+      runtime_capabilities: {
+        restart: true,
+        recover_known_good_chat: true,
+        stop: true,
+        runtime_retirement: runtimeRetirement,
       },
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",

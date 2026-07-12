@@ -20,6 +20,15 @@ export default async function HostedWebChatPage({
   if (!access) {
     redirect("/dashboard");
   }
+  if (access.machineId !== machineId) {
+    const destination = new URL(
+      `/dashboard/machines/${encodeURIComponent(access.machineId)}/chat`,
+      "https://finite.invalid"
+    );
+    const prompt = Array.isArray(query.prompt) ? query.prompt[0] : query.prompt;
+    if (prompt) destination.searchParams.set("prompt", prompt);
+    redirect(`${destination.pathname}${destination.search}`);
+  }
   return (
     <HostedWebChat
       connectionsHref={productHref(

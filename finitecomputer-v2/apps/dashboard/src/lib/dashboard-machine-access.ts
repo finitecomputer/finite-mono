@@ -1,31 +1,28 @@
 import {
+  coreProductProjectForLegacyMachineId,
+  coreProductProjectForRouteId,
+  coreProjectLabel,
+  coreProjectPrimaryUrl,
+  coreProjectSupportsRetirement,
   loadCoreMe,
-  loadCoreSourceHostRelayEndpoint,
-  coreProductProjectForMachineId,
-  type CoreAgentCreationRequestSummary,
+  resolveCoreRuntimeRoute,
   type CoreReadCacheMode,
-  type CoreReadOptions,
   type CoreVisibleProject,
+  type CoreMe,
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
-import {
-  relayEndpointForSourceHost,
-  type RelayEndpointConfig,
-} from "@/lib/finite-relay-client";
 
 type ViewerContext = Awaited<ReturnType<typeof import("@/lib/dashboard-auth").loadOptionalViewerContext>>;
 
 export type DashboardMachineAccess = {
   viewer: ViewerContext;
-  coreProject: CoreVisibleProject | null;
+  coreProject: CoreVisibleProject;
   mode: "core";
+  /** Stable Agent Runtime id used by every browser route and navigation link. */
   machineId: string;
   displayName: string;
-  ownerLabel: string | null;
   primaryUrl: string | null;
-  publishedAppUrls: string[];
-  relayEndpoint: RelayEndpointConfig | null;
-  canRemoveKataRuntime: boolean;
+  canRetireRuntime: boolean;
 };
 
 type DashboardMachineAccessOptions = {
@@ -33,92 +30,52 @@ type DashboardMachineAccessOptions = {
 };
 
 export async function loadDashboardMachineAccess(
-  machineId: string,
+  routeIdentifier: string,
   options: DashboardMachineAccessOptions = {}
 ): Promise<DashboardMachineAccess | null> {
   const viewer = await loadOptionalViewerContext();
-  let core = await loadCoreMe({
-    cacheMode: options.coreCacheMode,
-  });
-  let coreProject = coreProductProjectForMachineId(core.me?.projects ?? [], machineId);
+  let core = await loadCoreMe({ cacheMode: options.coreCacheMode });
+  let coreProject = await projectForRouteIdentifier(core.me, routeIdentifier);
   if (!coreProject && options.coreCacheMode === "swr") {
     core = await loadCoreMe();
-    coreProject = coreProductProjectForMachineId(core.me?.projects ?? [], machineId);
+    coreProject = await projectForRouteIdentifier(core.me, routeIdentifier);
   }
   const runtime = coreProject?.runtime;
-  if (!coreProject || !runtime) {
-    return null;
-  }
+  if (!coreProject || !runtime) return null;
 
   return {
     viewer,
     coreProject,
     mode: "core",
-    machineId: runtime.source_machine_id,
-    displayName:
-      coreProject.project.display_name.trim() ||
-      runtime.host_facts.display_name.trim() ||
-      runtime.source_machine_id,
-    ownerLabel: runtime.source_host_id,
-    primaryUrl: firstSafeHttpUrl(runtime.host_facts.published_app_urls),
-    publishedAppUrls: runtime.host_facts.published_app_urls.filter(safeHttpUrl),
-    relayEndpoint: await relayEndpointForCoreProject(coreProject, {
-      cacheMode: options.coreCacheMode,
-    }),
-    canRemoveKataRuntime: coreProjectHasRunningKataCreationRequest(
-      coreProject,
-      core.me?.agent_creation_requests ?? []
-    ),
+    machineId: runtime.id,
+    displayName: coreProjectLabel(coreProject),
+    primaryUrl: coreProjectPrimaryUrl(coreProject),
+    canRetireRuntime: coreProjectSupportsRetirement(coreProject),
   };
 }
 
-export function coreProjectHasRunningKataCreationRequest(
-  project: CoreVisibleProject,
-  requests: CoreAgentCreationRequestSummary[]
+async function projectForRouteIdentifier(
+  me: CoreMe | null,
+  routeIdentifier: string
 ) {
-  return requests.some(
-    (request) =>
-      request.project_id === project.project.id &&
-      request.agent_runtime_id === project.runtime?.id &&
-      request.status === "running" &&
-      request.runner_class === "kata"
+  const projects = me?.projects ?? [];
+  const stableProject = coreProductProjectForRouteId(projects, routeIdentifier);
+  if (stableProject) return stableProject;
+
+  // During an N-1 rollout, an older Core response can still carry the former
+  // source-machine field. Use it only on this server-side compatibility path.
+  const legacyProject = coreProductProjectForLegacyMachineId(projects, routeIdentifier);
+  if (legacyProject) return legacyProject;
+
+  const resolution = await resolveCoreRuntimeRoute(routeIdentifier);
+  if (!resolution) return null;
+  return (
+    coreProductProjectForRouteId(projects, resolution.runtime_id) ??
+    coreProductProjectForRouteId(projects, resolution.project_id)
   );
 }
 
-export async function relayEndpointForCoreProject(
-  project: CoreVisibleProject | null | undefined,
-  options: CoreReadOptions = {}
-): Promise<RelayEndpointConfig | null> {
-  const sourceHostId = project?.runtime?.source_host_id;
-  if (!sourceHostId) {
-    return null;
-  }
-  const coreEndpoint = await loadCoreSourceHostRelayEndpoint(sourceHostId, {
-    cacheMode: options.cacheMode,
-  });
-  if (coreEndpoint) {
-    return {
-      baseUrl: coreEndpoint.url,
-      adminToken: coreEndpoint.admin_token,
-    };
-  }
-  return relayEndpointForSourceHost(sourceHostId);
-}
-
 export function coreProjectOverviewHref(project: CoreVisibleProject) {
-  const machineId = project.runtime?.source_machine_id?.trim();
-  return machineId ? `/dashboard/machines/${encodeURIComponent(machineId)}` : null;
-}
-
-function firstSafeHttpUrl(values: string[]) {
-  return values.find(safeHttpUrl) ?? null;
-}
-
-function safeHttpUrl(value: string) {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
+  const runtimeId = project.runtime?.id.trim();
+  return runtimeId ? `/dashboard/machines/${encodeURIComponent(runtimeId)}` : null;
 }

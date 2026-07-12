@@ -5,6 +5,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 
 const MACHINE_ID = "skyler-fixture";
+const RUNTIME_ID = "runtime_web_design";
 const CORE_TOKEN = "web-design-core-token";
 const DEVICE_TOKEN = "web-design-hosted-device-token";
 const WORKOS_USER_ID = "user_web_design";
@@ -134,6 +135,16 @@ async function serve() {
       writeJson(response, 200, coreMe());
       return;
     }
+    if (
+      request.method === "GET" &&
+      request.url === `/api/core/v1/me/runtime-routes/${MACHINE_ID}`
+    ) {
+      writeJson(response, 200, {
+        project_id: "project_web_design",
+        runtime_id: RUNTIME_ID,
+      });
+      return;
+    }
     if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
       writeJson(response, 200, {
         customer_org: {
@@ -170,7 +181,7 @@ async function serve() {
       writeJson(response, 200, {
         id: `runtime_control_${kind}`,
         project_id: projectId,
-        agent_runtime_id: "runtime_web_design",
+        agent_runtime_id: RUNTIME_ID,
         source_host_id: "design-fixture",
         source_machine_id: MACHINE_ID,
         requested_by_user_id: WORKOS_USER_ID,
@@ -228,7 +239,7 @@ async function serve() {
   );
 
   console.log(
-    `\nReal dashboard UI: http://127.0.0.1:${dashboardPort}/dashboard/machines/${MACHINE_ID}/chat`
+    `\nReal dashboard UI: http://127.0.0.1:${dashboardPort}/dashboard/machines/${RUNTIME_ID}/chat`
   );
   console.log("State survives stopping and restarting this command.");
   console.log(
@@ -361,8 +372,8 @@ function coreMe() {
     claimable_candidates: [],
     agent_creation_requests: [],
     projects: [{
-      project: { id: "project_web_design", customer_org_id: "org_web_design", owner_user_id: WORKOS_USER_ID, display_name: "Moss", import_candidate_id: null, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
-      runtime: { id: "runtime_web_design", project_id: "project_web_design", source_host_id: "design-fixture", source_machine_id: MACHINE_ID, source_import_key: `design-fixture:${MACHINE_ID}`, runtime_artifact_id: "artifact_web_design", state_schema_version: "runtime-state-v1", host_facts: { display_name: "Moss", hostname: "moss.local", runtime_host: "design-fixture", runtime_status: "online", hermes_available: true, published_app_urls: [`http://127.0.0.1:${hostedPort}/runtime-status`] }, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      project: { id: "project_web_design", display_name: "Moss", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      runtime: { id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
     }],
   };
 }

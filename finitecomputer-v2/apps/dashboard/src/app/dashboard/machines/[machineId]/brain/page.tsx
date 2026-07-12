@@ -12,6 +12,9 @@ export default async function MachineBrainPage({
   const { machineId } = await params;
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");
+  if (access.machineId !== machineId) {
+    redirect(`/dashboard/machines/${encodeURIComponent(access.machineId)}/brain`);
+  }
 
   const enabled = Boolean(process.env.FC_BRAIN_UPSTREAM_URL?.trim());
   return (

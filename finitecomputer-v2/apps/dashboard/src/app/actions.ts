@@ -22,7 +22,10 @@ import {
   adminUpgradeCoreRuntime,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
+  coreProjectSupportsHostedRecovery,
   coreProjectSupportsHostedRestart,
+  coreProjectSupportsHostedStop,
+  coreProjectSupportsRetirement,
   issueCoreFinitePrivateApiKey,
   linkCoreStripeCustomer,
   loadCoreBillingOverview,
@@ -72,7 +75,7 @@ export async function recoverCoreRuntimeAction(formData: FormData) {
   if (!access || access.mode !== "core" || !access.coreProject) {
     throw new Error("Chat recovery is not available for this agent.");
   }
-  if (!coreProjectSupportsHostedRestart(access.coreProject)) {
+  if (!coreProjectSupportsHostedRecovery(access.coreProject)) {
     throw new Error("Chat recovery is not available for this agent.");
   }
 
@@ -91,7 +94,7 @@ export async function stopCoreRuntimeAction(formData: FormData) {
   if (!access || access.mode !== "core" || !access.coreProject) {
     throw new Error("This agent cannot be stopped from the dashboard.");
   }
-  if (!coreProjectSupportsHostedRestart(access.coreProject)) {
+  if (!coreProjectSupportsHostedStop(access.coreProject)) {
     throw new Error("This agent cannot be stopped from the dashboard.");
   }
 
@@ -110,11 +113,8 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   if (!access || access.mode !== "core" || !access.coreProject) {
     throw new Error("This agent cannot be removed from the dashboard.");
   }
-  if (!coreProjectSupportsHostedRestart(access.coreProject)) {
+  if (!coreProjectSupportsRetirement(access.coreProject) || !access.canRetireRuntime) {
     throw new Error("This agent cannot be removed from the dashboard.");
-  }
-  if (!access.canRemoveKataRuntime) {
-    throw new Error("Only self-service Kata agents can be removed from the dashboard.");
   }
 
   await requestCoreRuntimeDestroy(access.coreProject.project.id);

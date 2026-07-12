@@ -2,7 +2,8 @@ import { DashboardShell } from "@/components/dashboard-shell";
 import {
   coreProductProjects,
   coreProjectLabel,
-  coreProjectMachineId,
+  coreProjectPrimaryUrl,
+  coreProjectRuntimeId,
   loadCoreMe,
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
@@ -19,16 +20,16 @@ export default async function DashboardLayout({
   const machineIds = new Set<string>();
   const machines = [
     ...coreProductProjects(core.me?.projects ?? []).flatMap((project) => {
-      const machineId = coreProjectMachineId(project);
-      if (!machineId || machineIds.has(machineId)) {
+      const runtimeId = coreProjectRuntimeId(project);
+      if (!runtimeId || machineIds.has(runtimeId)) {
         return [];
       }
-      machineIds.add(machineId);
+      machineIds.add(runtimeId);
       return [
         {
-          id: machineId,
+          id: runtimeId,
           ownerLabel: coreProjectLabel(project),
-          siteUrl: project.runtime?.host_facts.published_app_urls[0],
+          siteUrl: coreProjectPrimaryUrl(project) ?? undefined,
         },
       ];
     }),

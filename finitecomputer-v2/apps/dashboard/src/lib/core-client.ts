@@ -15,54 +15,39 @@ export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
 
 export type CoreProjectImportCandidate = {
   id: string;
-  source_host_id: string;
-  source_machine_id: string;
-  source_import_key: string;
-  owner_email: string;
-  latest_host_owner_email?: string | null;
+  display_name: string;
   status: "pending" | "claimed" | "admin_review";
-  host_facts: CoreHostOwnedRuntimeFacts;
-  known_external_channel_participants: CoreKnownExternalChannelParticipant[];
   created_at: string;
   updated_at: string;
-};
-
-export type CoreKnownExternalChannelParticipant = {
-  channel: string;
-  external_user_id?: string | null;
-  username?: string | null;
-  display_name?: string | null;
-};
-
-export type CoreHostOwnedRuntimeFacts = {
-  display_name: string;
-  hostname?: string | null;
-  runtime_host: string;
-  runtime_status: CoreRuntimeStatus;
-  active_inference_profile?: string | null;
-  hermes_available?: boolean | null;
-  published_app_urls: string[];
 };
 
 export type CoreProject = {
   id: string;
-  customer_org_id: string;
-  owner_user_id: string;
   display_name: string;
-  import_candidate_id?: string | null;
+  hosting_tier?: CoreHostingTier | null;
   created_at: string;
   updated_at: string;
+};
+
+export type CoreRuntimeCapabilities = {
+  restart?: boolean;
+  recover_known_good_chat?: boolean;
+  stop?: boolean;
+  runtime_retirement?: boolean;
 };
 
 export type CoreAgentRuntime = {
   id: string;
   project_id: string;
-  source_host_id: string;
-  source_machine_id: string;
-  source_import_key: string;
-  runtime_artifact_id?: string | null;
-  state_schema_version?: string | null;
-  host_facts: CoreHostOwnedRuntimeFacts;
+  contact_endpoint?: string | null;
+  runtime_status: CoreRuntimeStatus;
+  hermes_available?: boolean | null;
+  /**
+   * Populated only from Core's persisted, versioned runtime capability
+   * advertisement. N-1 rows omit it; browser code must not infer capabilities
+   * from provider or artifact identity.
+   */
+  runtime_capabilities?: CoreRuntimeCapabilities | null;
   created_at: string;
   updated_at: string;
 };
@@ -92,7 +77,6 @@ export type CoreAgentCreationRequestSummary = {
   id: string;
   project_id: string;
   display_name: string;
-  runner_class: CoreRunnerClass;
   profile_picture_url?: string | null;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id?: string | null;
@@ -322,6 +306,11 @@ export type CoreMeResult = {
   account: AccountAuthContext;
   me: CoreMe | null;
   error: string | null;
+};
+
+export type CoreRuntimeRouteResolution = {
+  project_id: string;
+  runtime_id: string;
 };
 
 const REQUIRED_CORE_ENV = ["FC_CORE_BASE_URL"] as const;
@@ -650,15 +639,25 @@ export async function cancelFailedCoreAgentCreationRequest(requestId: string) {
   return result;
 }
 
-export async function findCoreProjectByMachineId(
-  machineId: string,
-  options: CoreReadOptions = {}
-) {
-  const result = await loadCoreMe(options);
-  if (!result.me) {
-    return null;
+export async function resolveCoreRuntimeRoute(identifier: string) {
+  const routeIdentifier = identifier.trim();
+  if (!routeIdentifier) return null;
+  const status = coreBridgeStatus();
+  if (!status.configured) return null;
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) return null;
+
+  try {
+    return await coreFetch<CoreRuntimeRouteResolution>(
+      `/api/core/v1/me/runtime-routes/${encodeURIComponent(routeIdentifier)}`,
+      account
+    );
+  } catch (error) {
+    if (error instanceof CoreFetchError && error.status === 404) {
+      return null;
+    }
+    throw error;
   }
-  return coreProductProjectForMachineId(result.me.projects, machineId);
 }
 
 export async function loadCoreSourceHostRelayEndpoint(
@@ -1021,44 +1020,82 @@ export async function adminResetCoreFinitePrivateWindow(grantId: string) {
   return result;
 }
 
-export function coreProjectMachineId(project: CoreVisibleProject) {
-  return project.runtime?.source_machine_id?.trim() || null;
+export function coreProjectRuntimeId(project: CoreVisibleProject) {
+  return project.runtime?.id.trim() || null;
 }
 
-/** Projects created by this product; imported whiteglove history is not user-facing. */
 export function coreProductProjects(projects: CoreVisibleProject[]) {
-  return projects.filter((project) => project.project.import_candidate_id == null);
+  return projects.filter((project) => {
+    const legacyProject = project.project as CoreProject & {
+      import_candidate_id?: unknown;
+    };
+    return legacyProject.import_candidate_id == null;
+  });
 }
 
-export function coreProductProjectForMachineId(
+export function coreProductProjectForRouteId(
   projects: CoreVisibleProject[],
-  machineId: string
+  identifier: string
 ) {
   return (
     coreProductProjects(projects).find(
-      (project) => project.runtime?.source_machine_id === machineId
+      (project) =>
+        project.runtime?.id === identifier || project.project.id === identifier
     ) ?? null
   );
 }
 
-export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {
-  return Boolean(project.runtime?.runtime_artifact_id?.trim());
-}
-
-export const coreProjectSupportsHostedRestart = coreProjectSupportsHostedRuntimeControl;
-
-export function coreProjectLabel(project: CoreVisibleProject) {
+/**
+ * N-1 Dashboard compatibility only: an older Core may still return the former
+ * source-machine field. It is read on the server solely to recover an old
+ * bookmark and is never copied into public Dashboard props or navigation.
+ */
+export function coreProductProjectForLegacyMachineId(
+  projects: CoreVisibleProject[],
+  legacyMachineId: string
+) {
   return (
-    project.project.display_name.trim() ||
-    project.runtime?.host_facts.display_name.trim() ||
-    project.runtime?.source_machine_id ||
-    "Imported agent"
+    coreProductProjects(projects).find((project) => {
+      const legacyRuntime = project.runtime as (CoreAgentRuntime & {
+        source_machine_id?: unknown;
+      }) | null | undefined;
+      return legacyRuntime?.source_machine_id === legacyMachineId;
+    }) ?? null
   );
 }
 
+export function coreProjectSupportsHostedRuntimeControl(project: CoreVisibleProject) {
+  const capabilities = project.runtime?.runtime_capabilities;
+  return Boolean(
+    capabilities?.restart === true ||
+    capabilities?.recover_known_good_chat === true ||
+    capabilities?.stop === true
+  );
+}
+
+export function coreProjectSupportsHostedRestart(project: CoreVisibleProject) {
+  return project.runtime?.runtime_capabilities?.restart === true;
+}
+
+export function coreProjectSupportsHostedRecovery(project: CoreVisibleProject) {
+  return project.runtime?.runtime_capabilities?.recover_known_good_chat === true;
+}
+
+export function coreProjectSupportsHostedStop(project: CoreVisibleProject) {
+  return project.runtime?.runtime_capabilities?.stop === true;
+}
+
+export function coreProjectSupportsRetirement(project: CoreVisibleProject) {
+  return project.runtime?.runtime_capabilities?.runtime_retirement === true;
+}
+
+export function coreProjectLabel(project: CoreVisibleProject) {
+  return project.project.display_name.trim() || "Agent";
+}
+
 export function coreProjectPrimaryUrl(project: CoreVisibleProject) {
-  const urls = project.runtime?.host_facts.published_app_urls ?? [];
-  return urls.find((url) => safeHttpUrl(url)) ?? null;
+  const endpoint = project.runtime?.contact_endpoint?.trim();
+  return endpoint && safeHttpUrl(endpoint) ? endpoint : null;
 }
 
 export function coreAgentCreationRequestForProject(
@@ -1074,7 +1111,7 @@ export function coreProjectLaunchStatusLabel(
   project: CoreVisibleProject,
   request: CoreAgentCreationRequestSummary | null
 ) {
-  const runtimeStatus = project.runtime?.host_facts.runtime_status;
+  const runtimeStatus = project.runtime?.runtime_status;
   if (runtimeStatus === "online") {
     return "Online";
   }

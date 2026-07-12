@@ -13,6 +13,11 @@ export default async function MachineConnectionsPage({
   const { machineId } = await params;
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");
+  if (access.machineId !== machineId) {
+    redirect(
+      `/dashboard/machines/${encodeURIComponent(access.machineId)}/connections`
+    );
+  }
 
   return (
     <div className="space-y-6">

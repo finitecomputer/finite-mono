@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 import {
-  coreProjectSupportsHostedRestart,
+  coreProjectSupportsRetirement,
   requestCoreRuntimeDestroy,
 } from "@/lib/core-client";
 import {
@@ -29,16 +29,16 @@ export async function POST(request: Request, context: RouteContext) {
 
   if (
     !access?.coreProject ||
-    !coreProjectSupportsHostedRestart(access.coreProject) ||
-    !access.canRemoveKataRuntime
+    !coreProjectSupportsRetirement(access.coreProject) ||
+    !access.canRetireRuntime
   ) {
-    return machineRedirect(request, machineId, "unavailable");
+    return machineRedirect(request, access?.machineId ?? machineId, "unavailable");
   }
 
   try {
     await requestCoreRuntimeDestroy(access.coreProject.project.id);
   } catch {
-    return machineRedirect(request, machineId, "failed");
+    return machineRedirect(request, access.machineId, "failed");
   }
 
   const destination = new URL("/dashboard", request.url);
