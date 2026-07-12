@@ -1,0 +1,17 @@
+{
+  "team_slug": "finite-fixture",
+  "tier": "pro",
+  "quotas": {
+    "vm_slots": { "limit": 10, "remaining": 2 },
+    "vcpu": { "limit": 32, "remaining": 8 },
+    "memory_mb": { "limit": 65536, "remaining": 16384 },
+    "disk_gb": { "limit": 1000, "remaining": 200 }
+  },
+  "reserved_nodes": { "limit": 1, "remaining": 1 },
+  "reserved_gpu": {
+    "gpus": { "limit": 0, "remaining": 0 },
+    "in_use": 0,
+    "misconfigured": 0
+  },
+  "as_of": "2026-07-11T00:00:00Z"
+}

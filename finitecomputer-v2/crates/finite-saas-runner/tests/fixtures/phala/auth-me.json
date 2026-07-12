@@ -1,0 +1,26 @@
+{
+  "user": {
+    "username": "fixture-user",
+    "email": "fixture@example.invalid",
+    "role": "admin",
+    "avatar": "https://fixture.example.invalid/avatar.png",
+    "email_verified": true,
+    "totp_enabled": false,
+    "has_backup_codes": false,
+    "flag_has_password": true
+  },
+  "workspace": {
+    "id": "workspace_fixture_01",
+    "name": "Finite Fixture",
+    "slug": "finite-fixture",
+    "tier": "pro",
+    "role": "owner",
+    "avatar": null
+  },
+  "credits": {
+    "balance": "100.00",
+    "granted_balance": "0.00",
+    "is_post_paid": false,
+    "outstanding_amount": "0.00"
+  }
+}

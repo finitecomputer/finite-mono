@@ -23,15 +23,23 @@ jobs:
     environment: phala-staging
     env:
       FC_RUNNER_PHALA_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+      FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID: ${{ vars.PHALA_EXPECTED_WORKSPACE_ID }}
+      FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG: ${{ vars.PHALA_EXPECTED_WORKSPACE_SLUG }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: "1.93"
 
-      - name: Require the environment-scoped API key
-        run: test -n "$FC_RUNNER_PHALA_API_KEY"
+      - name: Require the environment-scoped key and identity fence
+        run: |
+          test -n "$FC_RUNNER_PHALA_API_KEY"
+          test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID"
+          test -n "$FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG"
+
+      - name: Run fake-server and fixture contract tests
+        run: cargo test --locked --package finite-saas-runner phala
 
       - name: Run typed GET-only preflight
         run: |
@@ -48,6 +56,8 @@ jobs:
           report = json.loads(path.read_text(encoding="utf-8"))
           expected = {
               "apiVersion",
+              "workspaceIdentityVerified",
+              "workspaceQuotaSufficient",
               "instanceType",
               "vcpu",
               "memoryMb",
@@ -55,15 +65,25 @@ jobs:
               "hourlyPriceUsdMicros",
               "providerReportedMaxInstances",
               "availableNodeCount",
-              "activeFiniteCvmCount",
+              "finiteAppCount",
+              "nonDeletedFiniteCvmCount",
+              "finiteRevisionCount",
+              "billableFiniteResourceCount",
           }
           if set(report) != expected:
               raise SystemExit("unexpected Phala preflight summary fields")
           if report["instanceType"] != "tdx.medium":
               raise SystemExit("unexpected Phala instance type")
+          if not report["workspaceIdentityVerified"] or not report["workspaceQuotaSufficient"]:
+              raise SystemExit("Phala workspace identity or quota was not verified")
           if (report["vcpu"], report["memoryMb"], report["diskSizeGb"]) != (2, 4096, 40):
               raise SystemExit("unexpected Phala resource shape")
-          if report["activeFiniteCvmCount"] > 1:
+          if report["hourlyPriceUsdMicros"] != 116000:
+              raise SystemExit("unexpected Phala hourly rate")
+          expected_billable = max(report["finiteAppCount"], report["nonDeletedFiniteCvmCount"])
+          if report["billableFiniteResourceCount"] != expected_billable:
+              raise SystemExit("inconsistent Phala billable-resource aggregate")
+          if report["billableFiniteResourceCount"] > 1:
               raise SystemExit("Phala billable-resource cap is exceeded")
           PY
 
@@ -87,7 +107,10 @@ jobs:
           print(f"- Shape: `{report['instanceType']}` / {report['vcpu']} vCPU / {report['memoryMb']} MB / {report['diskSizeGb']} GB")
           print(f"- Hourly price (USD micros): `{report['hourlyPriceUsdMicros']}`")
           print(f"- Available matching nodes: `{report['availableNodeCount']}`")
-          print(f"- Active Finite CVMs: `{report['activeFiniteCvmCount']}`")
+          print(f"- Finite apps: `{report['finiteAppCount']}`")
+          print(f"- Non-deleted Finite CVMs: `{report['nonDeletedFiniteCvmCount']}`")
+          print(f"- Finite revisions: `{report['finiteRevisionCount']}`")
+          print(f"- Conservative billable resources: `{report['billableFiniteResourceCount']}`")
           print()
           print("This workflow performs authenticated reads only. It does not provision, update, stop, restart, or delete a CVM.")
           PY

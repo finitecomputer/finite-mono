@@ -19,7 +19,7 @@
       "memory_mb": 4096,
       "hourly_rate": "0.116",
       "requires_gpu": false,
-      "default_disk_size_gb": 40,
+      "default_disk_size_gb": 20,
       "family": "cpu"
     }
   ],

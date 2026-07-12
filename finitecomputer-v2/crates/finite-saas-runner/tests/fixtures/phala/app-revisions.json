@@ -1,0 +1,16 @@
+{
+  "revisions": [
+    {
+      "revision_id": "revision_fixture_01",
+      "app_id": "app_fixture_01",
+      "vm_uuid": "vm_fixture_01",
+      "compose_hash": "compose_fixture_01",
+      "created_at": "2026-07-11T00:00:00Z",
+      "operation_type": "create"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 100,
+  "total_pages": 1
+}

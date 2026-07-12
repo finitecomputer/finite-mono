@@ -6,6 +6,7 @@
       "app_id": "app_fixture_01",
       "vm_uuid": "vm_fixture_01",
       "status": "running",
+      "kms_type": "phala",
       "resource": {
         "instance_type": "tdx.medium",
         "vcpu": 2,
@@ -21,6 +22,8 @@
         }
       ],
       "public_logs": false,
+      "public_sysinfo": false,
+      "listed": false,
       "deleted_at": null,
       "compose_hash": "compose_fixture_01"
     },
@@ -28,18 +31,24 @@
       "id": "cvm_fixture_deleted",
       "name": "finite-agent-fixture-deleted",
       "status": "deleted",
+      "kms_type": "phala",
       "resource": {},
       "endpoints": [],
       "public_logs": false,
+      "public_sysinfo": false,
+      "listed": false,
       "deleted_at": "2026-07-01T00:00:00Z"
     },
     {
       "id": "cvm_fixture_unrelated",
       "name": "unrelated-fixture",
       "status": "running",
+      "kms_type": "phala",
       "resource": {},
       "endpoints": [],
       "public_logs": false,
+      "public_sysinfo": false,
+      "listed": false,
       "deleted_at": null
     }
   ],

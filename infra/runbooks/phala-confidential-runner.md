@@ -29,6 +29,7 @@ transition exist.
 | Secret file | `/etc/finite/phala-runner.env`, `root:root`, mode `0600` |
 | Core credential process variable | `FC_CORE_RUNNER_API_TOKEN` |
 | Phala key variable | `FC_RUNNER_PHALA_API_KEY` |
+| Workspace identity fences | `FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID`, `FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG` |
 | Core endpoint | `http://127.0.0.1:4200` |
 | Phala API origin | `https://cloud-api.phala.com/api/v1` |
 | Required headers | `X-API-Key` from the host-only file; `X-Phala-Version: 2026-06-23` |
@@ -83,6 +84,13 @@ replace the pinned origin with a general outbound proxy or configurable URL.
 
 If any precondition is false, leave the unit dark and stop.
 
+The current adapter deliberately cannot satisfy precondition 5: the official
+SDKs do not provide a reviewed Rust environment-encryption helper, and the
+required cross-language encryption/signature vectors are not pinned here.
+Creation and update therefore remain disabled even when read-only preflight is
+green. Do not port the cryptography or construct
+`VerifiedEncryptedEnvironment` as part of an operations workaround.
+
 ## Dark deployment verification
 
 A separately authorized Nix deployment may install the definition while it
@@ -125,23 +133,44 @@ The dispatch-only `Phala read-only preflight` workflow runs the typed
 GitHub Environment. It performs authenticated reads only and retains a
 redacted shape/price/capacity/count summary. Configure the environment-scoped
 secret named `PHALA_CLOUD_API_KEY`; never put its value in a workflow input or
-repository variable. A green read-only preflight is not the live Phala rung
-and does not authorize a provision.
+repository variable. Configure the non-secret environment variables
+`PHALA_EXPECTED_WORKSPACE_ID` and `PHALA_EXPECTED_WORKSPACE_SLUG` as the exact
+identity fence. A green read-only preflight is not the live Phala rung and
+does not authorize a provision.
 
 Before the worker may advertise a new lease, its startup preflight performs:
 
 | Check | HTTPS operation | Pass condition |
 |---|---|---|
-| Version/auth/account access | authenticated read using pinned headers | accepted API version and expected Finite workspace identity |
+| Version/auth/account access | `GET /auth/me` using pinned headers | accepted API version and exact configured workspace id plus slug; no user PII enters the report |
+| Workspace quota | `GET /workspaces/{slug}/quotas` | response belongs to the expected slug and has one VM slot, 2 vCPU, 4096 MB memory, and 40 GB disk remaining (`-1` means provider-reported unlimited) |
 | Instance catalog | `GET /instance-types/cpu` | `tdx.medium` is exactly 2 vCPU, 4096 MB, and the reviewed live price |
-| Provider capacity | `GET /teepods/available` | response schema is recognized; region/quota are still provision-time gates |
-| Inventory | every page of `GET /cvms/paginated` | bounded complete read; every Finite resource reconciles |
+| Provider capacity | `GET /teepods/available` | response schema is recognized; region scheduling remains a provision-time gate and workspace quota is rechecked then |
+| Inventory | every page of `GET /apps` and `GET /cvms/paginated`, then every page of `GET /apps/{app_id}/revisions` for each retained Finite app | bounded complete reads; retain all rows until provider apps, non-deleted CVMs, and revisions reconcile locally; Core-ledger reconciliation remains a separate admission input |
+| Privacy and allocation | returned CVM records | every non-deleted Finite CVM has `public_logs=false`, `public_sysinfo=false`, exact Medium/40 GB allocation, and the reviewed billing period/rate; a missing field is unproved |
+| Metered cost | not called by startup preflight | the official SDK surface does not currently pin a bounded usage query; do not add an unbounded read or treat metered usage as a settled invoice |
 | Private operation | provision/update request contract | `public_logs=false`, expected Cloud KMS, exact 40 GB; no mutation during preflight |
 
 A preflight failure blocks new creation leases. It must not erase handles or
-disable lifecycle controls for already known CVMs. Stop and escalate on API
-version/schema drift, changed Medium shape/price, incomplete inventory, an
-unknown resource, or inability to keep logs private.
+disable lifecycle controls for already known CVMs. Count every non-deleted
+Finite CVM even when its state is stopped, failed, or otherwise unusual; its
+storage can still be billable. Stop and escalate on API version/schema drift,
+workspace mismatch, insufficient provider quota, changed Medium shape/price,
+incomplete inventory, an unknown resource, or inability to keep logs and
+sysinfo private.
+
+Missing or malformed API-key/workspace-fence environment is static worker
+misconfiguration and fails startup; restore the required configuration before
+the worker can service any operation. Once static configuration is valid, an
+authenticated provider preflight failure changes only creation admission to
+draining. Handle-based inspect/start/stop/restart remains available.
+
+Phala currently publishes no stable API that inventories named volumes or
+proves their attachment. The CVM `disk_in_gb` and `storage_fs` fields prove
+only the CVM allocation. Volume attachment therefore remains explicit staging
+evidence and must not be reported as API-proven. If a future pinned, bounded
+app-usage query is adopted, its output is metered-cost evidence, not a
+workspace invoice or settlement record.
 
 ## Provision and adopt
 
@@ -270,11 +299,24 @@ provider deletion step.
 
 ## Inventory and cost
 
-Read every bounded page of `GET /cvms/paginated` and join API-visible Finite
-apps/CVMs/revisions against Core provision/reservation operations, current and
-historical handles, and CVM-attached volume facts. Record safe counts for
+Read every bounded page of `GET /apps` and `GET /cvms/paginated`, then each
+retained app's bounded `GET /apps/{app_id}/revisions`. Join API-visible Finite
+apps/CVMs/revisions against Core provision/reservation operations plus current
+and historical handles.
+Record safe counts for
 creating, running, stopped, retained and unknown resources. Expected unknown
 count is zero. Never automatically mutate an unknown resource.
+
+The provider API does not currently expose a volume inventory/attachment
+contract. Do not fabricate that join from a Compose declaration or CVM disk
+size; retain named-volume attachment as a separate live-staging handoff until
+a documented provider read surface exists.
+
+The current typed preflight does not call `/apps/{app_id}/usage`: the official
+SDK surface does not pin bounded query parameters for that route. Record cost
+as unavailable rather than issuing an unbounded request. If a later official
+version adds an exact bounded contract, deduplicate by billing key and label
+the aggregate as metered usage, never as invoice or settlement proof.
 
 Ordinary capacity is consumed by any current billable/non-deleted Finite
 resource or in-flight reservation, regardless of running state. The one

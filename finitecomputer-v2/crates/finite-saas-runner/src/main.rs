@@ -45,7 +45,10 @@ fn main() -> Result<()> {
 
 fn phala_preflight() -> Result<()> {
     let api_key = required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?;
-    let summary = PhalaApiClient::new(api_key)?.preflight_summary()?;
+    let expected_workspace_id = required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID")?;
+    let expected_workspace_slug = required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG")?;
+    let summary = PhalaApiClient::new(api_key)?
+        .preflight_summary(&expected_workspace_id, &expected_workspace_slug)?;
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
@@ -258,6 +261,8 @@ fn run_cycle() -> Result<RunOnceOutcome> {
         }
         "phala" => {
             let launcher = PhalaLauncher::new(PhalaConfig {
+                expected_workspace_id: required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID")?,
+                expected_workspace_slug: required_env("FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG")?,
                 api_key: required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?,
                 source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
                 image: runtime_artifact.reference,

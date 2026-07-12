@@ -13,12 +13,17 @@ use super::{
     RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
     docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
+use crate::phala_inventory::{
+    AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
+    PhalaApp, RevisionsPage, WorkspaceQuotas,
+};
 use finite_saas_core::{
     AgentCreationLease, ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass,
     RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Read;
 use std::sync::Mutex;
@@ -35,7 +40,7 @@ pub const FINITE_DISK_SIZE_GB: u32 = 40;
 pub const FINITE_HOURLY_PRICE_USD_MICROS: u64 = 116_000;
 
 const CLOUD_KMS: &str = "PHALA";
-const FINITE_CVM_NAME_PREFIX: &str = "finite-agent-";
+pub(crate) const FINITE_CVM_NAME_PREFIX: &str = "finite-agent-";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_COMPOSE_BYTES: usize = 200 * 1024;
 const MAX_PROVIDER_ID_BYTES: usize = 256;
@@ -46,6 +51,8 @@ const USER_AGENT: &str = concat!("finite-saas-runner/", env!("CARGO_PKG_VERSION"
 #[derive(Clone)]
 pub struct PhalaConfig {
     pub api_key: String,
+    pub expected_workspace_id: String,
+    pub expected_workspace_slug: String,
     pub source_host_id: String,
     pub image: String,
     pub runtime_artifact_id: Option<String>,
@@ -65,6 +72,8 @@ impl fmt::Debug for PhalaConfig {
         formatter
             .debug_struct("PhalaConfig")
             .field("api_key", &"<redacted>")
+            .field("expected_workspace_id", &"<configured>")
+            .field("expected_workspace_slug", &"<configured>")
             .field("source_host_id", &self.source_host_id)
             .field("image", &self.image)
             .field("runtime_artifact_id", &self.runtime_artifact_id)
@@ -89,6 +98,15 @@ impl PhalaConfig {
         if self.api_key.trim().is_empty() {
             return Err(RunnerError::MissingPhalaApiKey);
         }
+        if self.expected_workspace_id.trim().is_empty()
+            || self.expected_workspace_slug.trim().is_empty()
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala expected workspace id and slug are required".to_string(),
+            ));
+        }
+        validate_provider_id(&self.expected_workspace_id).map_err(runner_api_error)?;
+        validate_provider_id(&self.expected_workspace_slug).map_err(runner_api_error)?;
         if self.source_host_id.trim().is_empty() {
             return Err(RunnerError::MissingSourceHostId);
         }
@@ -122,6 +140,8 @@ impl Default for PhalaConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            expected_workspace_id: String::new(),
+            expected_workspace_slug: String::new(),
             source_host_id: String::new(),
             image: String::new(),
             runtime_artifact_id: None,
@@ -195,7 +215,7 @@ impl PhalaRuntimeHandleV1 {
 #[derive(Debug, Clone, Copy, Default)]
 struct PreflightSnapshot {
     provider_healthy: bool,
-    active_cvm_count: u32,
+    billable_resource_count: u32,
 }
 
 type HealthCheck = fn(&str, &str, Duration, Duration) -> Result<(), RunnerError>;
@@ -248,7 +268,12 @@ impl PhalaLauncher {
     fn refresh_preflight(&self) -> Result<(), RunnerError> {
         let result = (|| {
             let client = self.client()?;
-            client.preflight_summary().map_err(runner_api_error)
+            client
+                .preflight_summary(
+                    &self.config.expected_workspace_id,
+                    &self.config.expected_workspace_slug,
+                )
+                .map_err(runner_api_error)
         })();
         let mut snapshot = self.preflight.lock().map_err(|_| {
             RunnerError::RuntimeLaunch("Phala preflight state lock was poisoned".to_string())
@@ -257,11 +282,14 @@ impl PhalaLauncher {
             Ok(summary) => {
                 *snapshot = PreflightSnapshot {
                     provider_healthy: true,
-                    active_cvm_count: summary.active_finite_cvm_count,
+                    billable_resource_count: summary.billable_finite_resource_count,
                 };
             }
             Err(error) => {
-                *snapshot = PreflightSnapshot::default();
+                // Preserve the last known conservative count while draining.
+                // A transient read failure must not make existing resources
+                // disappear from capacity accounting.
+                snapshot.provider_healthy = false;
                 eprintln!("Phala preflight blocked new creation: {error}");
             }
         }
@@ -310,7 +338,7 @@ impl PhalaLauncher {
             .inspect_cvm(&handle.cvm_id)
             .map_err(runner_api_error)?;
         cvm.verify_finite_runtime().map_err(runner_api_error)?;
-        if !cvm.is_finite_active() || cvm.app_id.as_deref() != Some(handle.app_id.as_str()) {
+        if !cvm.is_finite_non_deleted() || cvm.app_id.as_deref() != Some(handle.app_id.as_str()) {
             return Err(RunnerError::RuntimeLaunch(
                 "Phala CVM did not match its persisted provider handle".to_string(),
             ));
@@ -395,7 +423,7 @@ impl RuntimeLauncher for PhalaLauncher {
             runner_classes: vec![RunnerClass::Phala],
             draining: self.config.drain_new_leases || !snapshot.provider_healthy,
             max_sandbox_count: self.config.max_cvm_count,
-            active_sandbox_count: Some(snapshot.active_cvm_count),
+            active_sandbox_count: Some(snapshot.billable_resource_count),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
         }
@@ -780,14 +808,54 @@ impl PhalaApiClient {
         self.get_json("capacity", "/teepods/available")
     }
 
+    pub fn current_user(&self) -> Result<CurrentUserResponse, PhalaApiError> {
+        self.get_json("current_user", "/auth/me")
+    }
+
+    pub fn workspace_quotas(&self, workspace_slug: &str) -> Result<WorkspaceQuotas, PhalaApiError> {
+        validate_provider_id(workspace_slug)?;
+        self.get_json(
+            "workspace_quotas",
+            &format!("/workspaces/{workspace_slug}/quotas"),
+        )
+    }
+
     /// Authenticated read-only compatibility check used by both worker
     /// startup and the opt-in CI preflight command. The returned projection
     /// deliberately contains no provider identifiers, endpoint URLs, or
     /// credential material.
-    pub fn preflight_summary(&self) -> Result<PhalaPreflightSummary, PhalaApiError> {
+    pub fn preflight_summary(
+        &self,
+        expected_workspace_id: &str,
+        expected_workspace_slug: &str,
+    ) -> Result<PhalaPreflightSummary, PhalaApiError> {
+        self.current_user()?
+            .verify_workspace(expected_workspace_id, expected_workspace_slug)
+            .map_err(inventory_contract_error)?;
+        self.workspace_quotas(expected_workspace_slug)?
+            .verify_capacity(
+                expected_workspace_slug,
+                FINITE_INSTANCE_VCPU,
+                FINITE_INSTANCE_MEMORY_MB,
+                FINITE_DISK_SIZE_GB,
+            )
+            .map_err(inventory_contract_error)?;
         let verified = self.verify_finite_instance_type()?;
         let capacity = self.capacity()?;
-        let inventory = self.inventory()?;
+        let apps = self.apps_inventory()?;
+        let cvms = self.cvm_inventory()?;
+        let inventory =
+            FiniteProviderInventory::reconcile(&apps, &cvms).map_err(inventory_contract_error)?;
+        for cvm in cvms.iter().filter(|cvm| cvm.is_finite_non_deleted()) {
+            cvm.verify_finite_runtime()?;
+        }
+        let mut revisions = Vec::new();
+        for app_id in &inventory.app_ids {
+            revisions.extend(self.app_revisions(app_id)?);
+        }
+        inventory
+            .reconcile_revisions(&cvms, &revisions)
+            .map_err(inventory_contract_error)?;
         let available_node_count = capacity
             .nodes
             .iter()
@@ -802,6 +870,8 @@ impl PhalaApiClient {
             .unwrap_or(u32::MAX);
         Ok(PhalaPreflightSummary {
             api_version: API_VERSION,
+            workspace_identity_verified: true,
+            workspace_quota_sufficient: true,
             instance_type: FINITE_INSTANCE_TYPE,
             vcpu: FINITE_INSTANCE_VCPU,
             memory_mb: FINITE_INSTANCE_MEMORY_MB,
@@ -809,7 +879,10 @@ impl PhalaApiClient {
             hourly_price_usd_micros: verified.hourly_rate.usd_micros(),
             provider_reported_max_instances: capacity.capacity.max_instances,
             available_node_count,
-            active_finite_cvm_count: inventory.active_cvm_count(),
+            finite_app_count: inventory.app_ids.len().try_into().unwrap_or(u32::MAX),
+            non_deleted_finite_cvm_count: inventory.cvm_count,
+            finite_revision_count: revisions.len().try_into().unwrap_or(u32::MAX),
+            billable_finite_resource_count: inventory.billable_resource_count(),
         })
     }
 
@@ -818,24 +891,107 @@ impl PhalaApiClient {
         self.get_json("inspect_cvm", &path)
     }
 
-    pub fn inventory(&self) -> Result<FiniteInventory, PhalaApiError> {
+    pub fn apps_inventory(&self) -> Result<Vec<PhalaApp>, PhalaApiError> {
         let mut page = 1;
-        let mut cvms = Vec::new();
+        let mut apps = Vec::new();
+        let mut expected_totals = None;
         loop {
             if page > MAX_INVENTORY_PAGES {
                 return Err(PhalaApiError::Contract(
-                    "Phala inventory exceeded the bounded page limit",
+                    "Phala app inventory exceeded the bounded page limit",
                 ));
             }
-            let path = format!("/cvms/paginated?page={page}&page_size={INVENTORY_PAGE_SIZE}");
-            let response: Paginated<CvmInfo> = self.get_json("inventory", &path)?;
-            cvms.extend(response.items.into_iter().filter(CvmInfo::is_finite_active));
-            if response.pages == 0 || page >= response.pages {
+            let path = format!("/apps?page={page}&page_size={INVENTORY_PAGE_SIZE}");
+            let response: AppsPage = self.get_json("apps_inventory", &path)?;
+            validate_inventory_page(
+                page,
+                response.page,
+                response.page_size,
+                response.total,
+                response.total_pages,
+                response.dstack_apps.len(),
+            )?;
+            verify_pagination_totals(&mut expected_totals, response.total, response.total_pages)?;
+            let total_pages = response.total_pages;
+            apps.extend(response.dstack_apps);
+            if total_pages == 0 || page >= total_pages {
                 break;
             }
             page += 1;
         }
-        Ok(FiniteInventory { cvms })
+        verify_complete_inventory(&apps, expected_totals, |app| app.app_id.as_str())?;
+        Ok(apps)
+    }
+
+    pub fn cvm_inventory(&self) -> Result<Vec<CvmInfo>, PhalaApiError> {
+        let mut page = 1;
+        let mut cvms = Vec::new();
+        let mut expected_totals = None;
+        loop {
+            if page > MAX_INVENTORY_PAGES {
+                return Err(PhalaApiError::Contract(
+                    "Phala CVM inventory exceeded the bounded page limit",
+                ));
+            }
+            let path = format!("/cvms/paginated?page={page}&page_size={INVENTORY_PAGE_SIZE}");
+            let response: Paginated<CvmInfo> = self.get_json("cvm_inventory", &path)?;
+            validate_inventory_page(
+                page,
+                response.page,
+                response.page_size,
+                response.total,
+                response.pages,
+                response.items.len(),
+            )?;
+            verify_pagination_totals(&mut expected_totals, response.total, response.pages)?;
+            let pages = response.pages;
+            cvms.extend(response.items);
+            if pages == 0 || page >= pages {
+                break;
+            }
+            page += 1;
+        }
+        verify_complete_inventory(&cvms, expected_totals, |cvm| cvm.id.as_str())?;
+        Ok(cvms)
+    }
+
+    pub fn app_revisions(&self, app_id: &str) -> Result<Vec<AppRevision>, PhalaApiError> {
+        validate_provider_id(app_id)?;
+        let mut page = 1;
+        let mut revisions = Vec::new();
+        let mut expected_totals = None;
+        loop {
+            if page > MAX_INVENTORY_PAGES {
+                return Err(PhalaApiError::Contract(
+                    "Phala revision inventory exceeded the bounded page limit",
+                ));
+            }
+            let path =
+                format!("/apps/{app_id}/revisions?page={page}&page_size={INVENTORY_PAGE_SIZE}");
+            let response: RevisionsPage = self.get_json("app_revisions", &path)?;
+            response
+                .verify_app(app_id)
+                .map_err(inventory_contract_error)?;
+            validate_inventory_page(
+                page,
+                response.page,
+                response.page_size,
+                response.total,
+                response.total_pages,
+                response.revisions.len(),
+            )?;
+            verify_pagination_totals(&mut expected_totals, response.total, response.total_pages)?;
+            let total_pages = response.total_pages;
+            revisions.extend(response.revisions);
+            if total_pages == 0 || page >= total_pages {
+                break;
+            }
+            page += 1;
+        }
+        verify_complete_inventory(&revisions, expected_totals, |revision| {
+            revision.revision_id.as_str()
+        })?;
+        Ok(revisions)
     }
 
     pub fn start_cvm(&self, cvm_id: &str) -> Result<CvmAction, PhalaApiError> {
@@ -1005,10 +1161,113 @@ impl PhalaApiClient {
     }
 }
 
+fn validate_inventory_page(
+    expected_page: u32,
+    actual_page: u32,
+    actual_page_size: u32,
+    total: u32,
+    total_pages: u32,
+    item_count: usize,
+) -> Result<(), PhalaApiError> {
+    let page_is_valid = actual_page == expected_page
+        && actual_page_size == INVENTORY_PAGE_SIZE
+        && total_pages <= MAX_INVENTORY_PAGES
+        && item_count <= INVENTORY_PAGE_SIZE as usize
+        && if total_pages == 0 {
+            expected_page == 1 && total == 0 && item_count == 0
+        } else {
+            expected_page <= total_pages
+        };
+    if !page_is_valid {
+        return Err(PhalaApiError::Contract(
+            "Phala inventory pagination was incomplete or inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_pagination_totals(
+    expected: &mut Option<(u32, u32)>,
+    total: u32,
+    total_pages: u32,
+) -> Result<(), PhalaApiError> {
+    let calculated_pages = if total == 0 {
+        0
+    } else {
+        u32::try_from(u64::from(total).div_ceil(u64::from(INVENTORY_PAGE_SIZE))).unwrap_or(u32::MAX)
+    };
+    let pages_are_valid = if total == 0 {
+        matches!(total_pages, 0 | 1)
+    } else {
+        total_pages == calculated_pages
+    };
+    if !pages_are_valid || expected.is_some_and(|value| value != (total, total_pages)) {
+        return Err(PhalaApiError::Contract(
+            "Phala inventory pagination was incomplete or inconsistent",
+        ));
+    }
+    *expected = Some((total, total_pages));
+    Ok(())
+}
+
+fn verify_complete_inventory<T>(
+    items: &[T],
+    expected: Option<(u32, u32)>,
+    key: impl Fn(&T) -> &str,
+) -> Result<(), PhalaApiError> {
+    let Some((total, _)) = expected else {
+        return Err(PhalaApiError::Contract(
+            "Phala inventory pagination was incomplete or inconsistent",
+        ));
+    };
+    if usize::try_from(total).ok() != Some(items.len()) {
+        return Err(PhalaApiError::Contract(
+            "Phala inventory pagination was incomplete or inconsistent",
+        ));
+    }
+    let mut keys = BTreeSet::new();
+    for item in items {
+        let key = key(item);
+        if key.is_empty() || key.len() > MAX_PROVIDER_ID_BYTES || !keys.insert(key) {
+            return Err(PhalaApiError::Contract(
+                "Phala inventory contained a missing or duplicate provider id",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn inventory_contract_error(error: InventoryContractError) -> PhalaApiError {
+    let message = match error {
+        InventoryContractError::WorkspaceMismatch => {
+            "Phala workspace identity did not match the configured fence"
+        }
+        InventoryContractError::InsufficientQuota => {
+            "Phala workspace quota was incomplete or insufficient"
+        }
+        InventoryContractError::IncompleteApp => {
+            "Phala app inventory contained an incomplete record"
+        }
+        InventoryContractError::AppCvmMismatch => "Phala app and CVM inventory did not reconcile",
+        InventoryContractError::AppPolicyMismatch => {
+            "Phala app inventory did not match the Cloud KMS policy"
+        }
+        InventoryContractError::RevisionMismatch => {
+            "Phala revision inventory did not match its requested app"
+        }
+        InventoryContractError::RevisionCvmMismatch => {
+            "Phala revisions did not reconcile with the current Finite CVMs"
+        }
+    };
+    PhalaApiError::Contract(message)
+}
+
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PhalaPreflightSummary {
     pub api_version: &'static str,
+    pub workspace_identity_verified: bool,
+    pub workspace_quota_sufficient: bool,
     pub instance_type: &'static str,
     pub vcpu: u32,
     pub memory_mb: u64,
@@ -1016,7 +1275,10 @@ pub struct PhalaPreflightSummary {
     pub hourly_price_usd_micros: u64,
     pub provider_reported_max_instances: Option<u32>,
     pub available_node_count: u32,
-    pub active_finite_cvm_count: u32,
+    pub finite_app_count: u32,
+    pub non_deleted_finite_cvm_count: u32,
+    pub finite_revision_count: u32,
+    pub billable_finite_resource_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1202,10 +1464,11 @@ fn cvm_path(cvm_id: &str, suffix: Option<&str>) -> Result<String, PhalaApiError>
 }
 
 fn validate_provider_id(value: &str) -> Result<(), PhalaApiError> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_PROVIDER_ID_BYTES
-        || !value
+    let trimmed = value.trim();
+    if value != trimmed
+        || trimmed.is_empty()
+        || trimmed.len() > MAX_PROVIDER_ID_BYTES
+        || !trimmed
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
@@ -1386,22 +1649,21 @@ pub struct CvmInfo {
     pub app_id: Option<String>,
     pub vm_uuid: Option<String>,
     pub status: String,
+    pub kms_type: Option<String>,
     pub resource: CvmResource,
     #[serde(default)]
     pub endpoints: Vec<CvmEndpoint>,
     pub public_logs: Option<bool>,
+    pub public_sysinfo: Option<bool>,
+    pub listed: Option<bool>,
+    pub storage_fs: Option<String>,
     pub deleted_at: Option<String>,
     pub compose_hash: Option<String>,
 }
 
 impl CvmInfo {
-    pub fn is_finite_active(&self) -> bool {
-        self.name.starts_with(FINITE_CVM_NAME_PREFIX)
-            && self.deleted_at.is_none()
-            && !matches!(
-                self.status.trim().to_ascii_lowercase().as_str(),
-                "deleted" | "terminated"
-            )
+    pub fn is_finite_non_deleted(&self) -> bool {
+        self.name.starts_with(FINITE_CVM_NAME_PREFIX) && self.deleted_at.is_none()
     }
 
     pub fn verify_finite_runtime(&self) -> Result<(), PhalaApiError> {
@@ -1409,10 +1671,20 @@ impl CvmInfo {
             || self.resource.vcpu != Some(FINITE_INSTANCE_VCPU)
             || self.resource.memory_in_gb != Some(4.0)
             || self.resource.disk_in_gb != Some(FINITE_DISK_SIZE_GB)
+            || self
+                .resource
+                .compute_billing_price
+                .as_deref()
+                .and_then(parse_usd_micros)
+                != Some(FINITE_HOURLY_PRICE_USD_MICROS)
+            || self.resource.billing_period.as_deref() != Some("hourly")
+            || self.kms_type.as_deref() != Some("phala")
             || self.public_logs != Some(false)
+            || self.public_sysinfo != Some(false)
+            || self.listed != Some(false)
         {
             return Err(PhalaApiError::Contract(
-                "Phala CVM shape, disk, or private-log policy did not match",
+                "Phala CVM allocation, hourly rate, Cloud KMS, or private visibility policy did not match",
             ));
         }
         Ok(())
@@ -1451,17 +1723,6 @@ pub struct CvmEndpoint {
     pub app: String,
     #[serde(default)]
     pub instance: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FiniteInventory {
-    pub cvms: Vec<CvmInfo>,
-}
-
-impl FiniteInventory {
-    pub fn active_cvm_count(&self) -> u32 {
-        self.cvms.len().try_into().unwrap_or(u32::MAX)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
@@ -1907,9 +2168,27 @@ mod tests {
         }
     }
 
+    fn preflight_responses() -> Vec<FixtureResponse> {
+        vec![
+            json_response(include_str!("../tests/fixtures/phala/auth-me.json")),
+            json_response(include_str!(
+                "../tests/fixtures/phala/workspace-quotas.json"
+            )),
+            json_response(include_str!(
+                "../tests/fixtures/phala/instance-types-cpu.json"
+            )),
+            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
+            json_response(include_str!("../tests/fixtures/phala/apps-list.json")),
+            json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
+            json_response(include_str!("../tests/fixtures/phala/app-revisions.json")),
+        ]
+    }
+
     fn launcher_config() -> PhalaConfig {
         PhalaConfig {
             api_key: FIXTURE_API_KEY.to_string(),
+            expected_workspace_id: "workspace_fixture_01".to_string(),
+            expected_workspace_slug: "finite-fixture".to_string(),
             source_host_id: "phala-worker-1".to_string(),
             image: format!(
                 "ghcr.io/finitecomputer/finite-agent-runtime@sha256:{}",
@@ -1959,6 +2238,7 @@ mod tests {
                 created_at: "2026-07-01T00:00:00Z".to_string(),
                 updated_at: "2026-07-01T00:00:00Z".to_string(),
             },
+            provider_operation: None,
         }
     }
 
@@ -2059,13 +2339,7 @@ mod tests {
 
     #[test]
     fn launcher_preflight_pins_shape_price_capacity_and_inventory_count() {
-        let server = FakePhalaServer::start(vec![
-            json_response(include_str!(
-                "../tests/fixtures/phala/instance-types-cpu.json"
-            )),
-            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
-            json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
-        ]);
+        let server = FakePhalaServer::start(preflight_responses());
         let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
         launcher.validate_ready().unwrap();
         let capacity = launcher.runner_capacity();
@@ -2080,9 +2354,13 @@ mod tests {
                 .map(|request| request.path.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "/api/v1/auth/me",
+                "/api/v1/workspaces/finite-fixture/quotas",
                 "/api/v1/instance-types/cpu",
                 "/api/v1/teepods/available",
+                "/api/v1/apps?page=1&page_size=100",
                 "/api/v1/cvms/paginated?page=1&page_size=100",
+                "/api/v1/apps/app_fixture_01/revisions?page=1&page_size=100",
             ]
         );
     }
@@ -2120,7 +2398,7 @@ mod tests {
                 .map(|request| (request.method.as_str(), request.path.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("GET", "/api/v1/instance-types/cpu"),
+                ("GET", "/api/v1/auth/me"),
                 ("GET", "/api/v1/cvms/cvm_fixture_01"),
                 ("POST", "/api/v1/cvms/cvm_fixture_01/restart"),
                 ("GET", "/api/v1/cvms/cvm_fixture_01"),
@@ -2130,6 +2408,25 @@ mod tests {
             !request.path.contains("legacy-runtime-machine-id")
                 && !request.path.contains("legacy-request-machine-id")
         }));
+    }
+
+    #[test]
+    fn later_preflight_failure_drains_without_erasing_last_known_count() {
+        let mut responses = preflight_responses();
+        responses.push(FixtureResponse::Http {
+            status: 500,
+            headers: vec![],
+            body: r#"{"error_code":"FIXTURE_UNAVAILABLE"}"#,
+        });
+        let server = FakePhalaServer::start(responses);
+        let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+
+        launcher.validate_ready().unwrap();
+        assert_eq!(launcher.runner_capacity().active_sandbox_count, Some(1));
+        launcher.validate_ready().unwrap();
+        let capacity = launcher.runner_capacity();
+        assert!(capacity.draining);
+        assert_eq!(capacity.active_sandbox_count, Some(1));
     }
 
     #[test]
@@ -2249,6 +2546,9 @@ mod tests {
         let debug = format!("{:?}", server.client());
         assert!(!debug.contains(FIXTURE_API_KEY));
         assert!(debug.contains("<redacted>"));
+        let config_debug = format!("{:?}", launcher_config());
+        assert!(!config_debug.contains("workspace_fixture_01"));
+        assert!(!config_debug.contains("finite-fixture"));
     }
 
     #[test]
@@ -2259,7 +2559,7 @@ mod tests {
         .unwrap();
         let verified = catalog.verify_finite_instance_type().unwrap();
         assert_eq!(verified.hourly_rate.usd_micros(), 116_000);
-        assert_eq!(verified.default_disk_size_gb, 40);
+        assert_eq!(verified.default_disk_size_gb, 20);
 
         let changed = include_str!("../tests/fixtures/phala/instance-types-cpu.json")
             .replace("0.116", "0.117");
@@ -2271,35 +2571,92 @@ mod tests {
     }
 
     #[test]
-    fn inventory_counts_only_active_finite_cvms_and_checks_capacity() {
+    fn workspace_mismatch_stops_before_other_inventory_reads() {
+        let server = FakePhalaServer::start(vec![json_response(include_str!(
+            "../tests/fixtures/phala/auth-me.json"
+        ))]);
+        let error = server
+            .client()
+            .preflight_summary("workspace_wrong", "finite-fixture")
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PhalaApiError::Contract("Phala workspace identity did not match the configured fence")
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/api/v1/auth/me");
+    }
+
+    #[test]
+    fn inventory_rejects_unbounded_or_inconsistent_page_metadata() {
+        let server = FakePhalaServer::start(vec![json_response(
+            r#"{
+              "dstack_apps": [],
+              "page": 1,
+              "page_size": 100,
+              "total": 0,
+              "total_pages": 1001
+            }"#,
+        )]);
+        assert_eq!(
+            server.client().apps_inventory().unwrap_err(),
+            PhalaApiError::Contract("Phala inventory pagination was incomplete or inconsistent")
+        );
+    }
+
+    #[test]
+    fn inventory_reads_apps_and_all_cvm_rows_without_server_filters() {
         let server = FakePhalaServer::start(vec![
+            json_response(include_str!("../tests/fixtures/phala/apps-list.json")),
             json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
             json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
         ]);
         let client = server.client();
-        let inventory = client.inventory().unwrap();
-        assert_eq!(inventory.active_cvm_count(), 1);
-        assert_eq!(inventory.cvms[0].id, FIXTURE_CVM_ID);
+        let apps = client.apps_inventory().unwrap();
+        let cvms = client.cvm_inventory().unwrap();
+        assert_eq!(apps.len(), 2);
+        assert_eq!(cvms.len(), 3);
+        assert_eq!(
+            cvms.iter()
+                .filter(|cvm| cvm.is_finite_non_deleted())
+                .count(),
+            1
+        );
         let capacity = client.capacity().unwrap();
         assert_eq!(capacity.capacity.max_instances, Some(1));
         assert_eq!(capacity.nodes[0].remaining_cvm_slots, 1.0);
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/api/v1/apps?page=1&page_size=100",
+                "/api/v1/cvms/paginated?page=1&page_size=100",
+                "/api/v1/teepods/available",
+            ]
+        );
     }
 
     #[test]
     fn read_only_preflight_summary_contains_counts_but_no_provider_identity() {
-        let server = FakePhalaServer::start(vec![
-            json_response(include_str!(
-                "../tests/fixtures/phala/instance-types-cpu.json"
-            )),
-            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
-            json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
-        ]);
-        let summary = server.client().preflight_summary().unwrap();
+        let server = FakePhalaServer::start(preflight_responses());
+        let summary = server
+            .client()
+            .preflight_summary("workspace_fixture_01", "finite-fixture")
+            .unwrap();
         assert_eq!(summary.api_version, API_VERSION);
         assert_eq!(summary.instance_type, FINITE_INSTANCE_TYPE);
         assert_eq!(summary.hourly_price_usd_micros, 116_000);
         assert_eq!(summary.available_node_count, 1);
-        assert_eq!(summary.active_finite_cvm_count, 1);
+        assert!(summary.workspace_identity_verified);
+        assert!(summary.workspace_quota_sufficient);
+        assert_eq!(summary.finite_app_count, 1);
+        assert_eq!(summary.non_deleted_finite_cvm_count, 1);
+        assert_eq!(summary.finite_revision_count, 1);
+        assert_eq!(summary.billable_finite_resource_count, 1);
         let output = serde_json::to_string(&summary).unwrap();
         for sensitive_or_identifying in [
             FIXTURE_API_KEY,
@@ -2307,16 +2664,52 @@ mod tests {
             "fixture-region",
             "cvm_fixture_01",
             "app_fixture_01",
+            "workspace_fixture_01",
+            "finite-fixture",
+            "fixture-user",
+            "fixture@example.invalid",
+            "fixture.example.invalid/avatar",
+            "Finite Fixture",
             "fixture-app.example.invalid",
         ] {
             assert!(!output.contains(sensitive_or_identifying));
         }
-        assert!(
-            server
-                .requests()
-                .iter()
-                .all(|request| request.method == "GET")
-        );
+        let requests = server.requests();
+        assert!(requests.iter().all(|request| {
+            request.method == "GET"
+                && request.headers.get("x-api-key").map(String::as_str) == Some(FIXTURE_API_KEY)
+                && request.headers.get("x-phala-version").map(String::as_str) == Some(API_VERSION)
+        }));
+    }
+
+    #[test]
+    fn readonly_workflow_pins_identity_fences_and_the_typed_command() {
+        let workflow = include_str!("../../../../.github/workflows/phala-readonly-preflight.yml");
+        for required in [
+            "FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID",
+            "FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG",
+            "cargo run --locked --quiet --package finite-saas-runner -- phala-preflight",
+            "billableFiniteResourceCount",
+            "nonDeletedFiniteCvmCount",
+        ] {
+            assert!(
+                workflow.contains(required),
+                "missing workflow guard {required}"
+            );
+        }
+        for forbidden in [
+            "npx phala",
+            "curl ",
+            "-X POST",
+            "-X PATCH",
+            "-X PUT",
+            "-X DELETE",
+        ] {
+            assert!(
+                !workflow.contains(forbidden),
+                "read-only workflow contains forbidden command {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -2330,6 +2723,18 @@ mod tests {
             cvm.public_application_endpoint().unwrap(),
             "https://fixture-app.example.invalid"
         );
+
+        let mut public_sysinfo = cvm.clone();
+        public_sysinfo.public_sysinfo = Some(true);
+        assert!(public_sysinfo.verify_finite_runtime().is_err());
+
+        let mut changed_disk = cvm.clone();
+        changed_disk.resource.disk_in_gb = Some(20);
+        assert!(changed_disk.verify_finite_runtime().is_err());
+
+        let mut changed_rate = cvm;
+        changed_rate.resource.compute_billing_price = Some("0.117".to_string());
+        assert!(changed_rate.verify_finite_runtime().is_err());
     }
 
     #[test]
