@@ -1830,9 +1830,9 @@ pre {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: color-mix(in srgb, var(--knowledge-overlay) 72%, transparent);
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
+  background: var(--knowledge-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .settings-modal-panel {
@@ -1842,10 +1842,10 @@ pre {
   max-height: min(720px, calc(100vh - 48px));
   min-height: min(480px, calc(100vh - 48px));
   overflow: hidden;
-  border: 0;
-  border-radius: var(--radius-panel);
-  background: var(--surface);
-  box-shadow: var(--shadow-popover);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-popover);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-obsi-popover);
 }
 
 @keyframes settings-overlay-enter {
@@ -3680,12 +3680,12 @@ pre {
   position: fixed;
   z-index: 42;
   inset: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  display: grid;
+  align-items: start;
+  justify-items: center;
   background: var(--knowledge-overlay);
   backdrop-filter: blur(4px);
-  padding: 11vh 16px 16px;
+  padding: max(24px, calc((100vh - 480px) / 2)) 24px 24px;
 }
 
 .command-palette-backdrop[hidden] {
@@ -5172,6 +5172,11 @@ pre {
 
 @media (max-width: 640px) {
   .settings-modal-backdrop {
+    align-items: end;
+    padding: 10px;
+  }
+
+  .command-palette-backdrop {
     align-items: end;
     padding: 10px;
   }

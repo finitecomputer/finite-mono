@@ -567,6 +567,14 @@ assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "acce
 assert.match(source, /state\.settingsModalOpen && state\.settingsSection === "access"[\s\S]{0,100}refreshAccessManagementListsInBackground\(\)/);
 assert.match(source, /closeSettingsModal\(\)/);
 assert.match(cssSource, /\.settings-modal-backdrop\s*\{/);
+assert.match(
+  cssSource,
+  /\.settings-modal-panel\s*\{[^}]*border:\s*1px solid var\(--line-strong\);[^}]*border-radius:\s*var\(--radius-popover\);[^}]*background:\s*var\(--surface-raised\);[^}]*box-shadow:\s*var\(--shadow-obsi-popover\);/s,
+);
+assert.match(
+  cssSource,
+  /\.command-palette-backdrop\s*\{[^}]*display:\s*grid;[^}]*align-items:\s*start;[^}]*justify-items:\s*center;[^}]*padding:\s*max\(24px, calc\(\(100vh - 480px\) \/ 2\)\) 24px 24px;/s,
+);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
