@@ -44,6 +44,16 @@ A Runner that provides stronger operator-privacy guarantees through
 confidential-computing infrastructure.
 _Avoid_: TEE product, Phala-only project type
 
+**Hosting Tier**:
+The customer-facing price and operating promise that Core resolves at Agent
+Runtime creation into an internal Runner class and Runtime Resource Class.
+_Avoid_: Provider selector, Phala plan, Stripe Price
+
+**Runtime Resource Class**:
+The provider-neutral minimum compute shape Core assigns to an Agent Runtime;
+each Runner adapter translates it to one verified provider-specific size.
+_Avoid_: Phala instance type, provider SKU, dashboard machine size
+
 **Core**:
 The v2 service that owns account-linked Project state, runtime launch state,
 entitlements, and Finite Private grants.
@@ -218,6 +228,15 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - A **Launch Code** grants a Core-owned entitlement to exactly one Account Auth organization without creating or proving a paid Stripe subscription.
 - A **Runner** reattaches to an **Agent Runtime** by its **Provider Runtime Handle**.
 - **Phala** is a **Confidential Runner** implementation, not the product model.
+- A **Hosting Tier** maps to one internal Runner class and **Runtime Resource
+  Class** when Core creates an **Agent Runtime**. Core persists that placement
+  with the **Project**; its Agent Runtimes and Runtime Operations reference the
+  same placement so replacement and recovery do not rerun current product
+  policy. The dashboard never submits a provider, provider SKU, or Provider
+  Runtime Handle.
+- Changing billing state or a **Hosting Tier** offer never moves, stops,
+  retires, or purges an existing **Agent Runtime**. Placement migration is a
+  separate, explicit Runtime Operation only after that operation is designed.
 - **Account Auth** owns dashboard access and billing; **User Nostr Identity**
   owns the human's cryptographic chat identity.
 - **Core** verifies the standard Account Auth credential on every user-scoped
@@ -295,6 +314,9 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 
 > **Dev:** "Can `finite-agentd` restart the user's Kata or Phala runtime?"
 > **Domain expert:** "No. It can restart Hermes inside the runtime. Compute lifecycle always goes from Core through the provider-neutral Runner contract."
+
+> **Dev:** "Should onboarding send `phala` when the user buys confidential hosting?"
+> **Domain expert:** "No. The user selects a Hosting Tier. Core resolves that product promise to a Runner and Runtime Resource Class without exposing provider placement to the dashboard."
 
 > **Dev:** "Does opening Electron replace the Hosted Web Device?"
 > **Domain expert:** "No. Account Auth enrolls another Finite Chat Device, and each Device heals independently from the canonical Room log."
