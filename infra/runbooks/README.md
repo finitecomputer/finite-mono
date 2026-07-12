@@ -31,6 +31,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 behind the dashboard's WorkOS session; SQLite migration and rollback |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
+| [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
 | [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke rollback source, clawland legacy) |
 
 ## Release checklist discipline
