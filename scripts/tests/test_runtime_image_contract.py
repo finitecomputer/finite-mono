@@ -60,6 +60,7 @@ class RuntimeImageContractTests(unittest.TestCase):
             workflow,
             "name: Phala read-only preflight\n"
             "description: 'Prose example only: docker build must stay forbidden'\n"
+            "container:\n  image: ubuntu:24.04\n"
             "run: runner preflight --read-only",
         )
         self.assertEqual(self.violations(), [])

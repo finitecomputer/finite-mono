@@ -44,7 +44,7 @@ PHALA_ENV_OVERRIDE = re.compile(
     re.IGNORECASE,
 )
 IMAGE_ASSIGNMENT = re.compile(
-    r"(?:^|\s)(?:image|runtime_image|phala_image)\s*[:=]\s*['\"]?([^\s'\"#,}]+)",
+    r"(?:^|\s)(image|runtime_image|phala_image)\s*[:=]\s*['\"]?([^\s'\"#,}]+)",
     re.IGNORECASE | re.MULTILINE,
 )
 DIGEST_REFERENCE = re.compile(r"^[^\s@]+@sha256:[0-9a-fA-F]{64}$")
@@ -234,7 +234,16 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
             and not path.as_posix().startswith("finitecomputer-v2/crates/")
         ):
             for match in IMAGE_ASSIGNMENT.finditer(text):
-                reference = match.group(1)
+                key, reference = match.groups()
+                if (
+                    path.parts[:2] == (".github", "workflows")
+                    and key.lower() == "image"
+                    and "agent-runtime" not in reference.lower()
+                ):
+                    # A workflow's job/action container is not a production
+                    # Runtime reference. Explicit runtime_image/phala_image
+                    # keys and known Agent Runtime repositories remain gated.
+                    continue
                 if not DIGEST_REFERENCE.fullmatch(reference):
                     violations.append(
                         f"{path}: mutable Phala Runtime image reference {reference!r}"
