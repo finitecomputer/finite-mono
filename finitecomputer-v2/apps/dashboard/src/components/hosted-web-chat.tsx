@@ -144,6 +144,7 @@ export function HostedWebChat({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
+  const [ownerClaimEpoch, setOwnerClaimEpoch] = useState(0);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -226,6 +227,19 @@ export function HostedWebChat({
     return pending;
   }, [apiBase]);
 
+  const startFreshChat = useCallback(async () => {
+    const requestGeneration = snapshotSourceRef.current.generation;
+    try {
+      const next = await chatRequest<HostedChatState>(`${apiBase}/fresh`, { method: "POST" });
+      applyHttpSnapshot(next, requestGeneration);
+      setOwnerClaimed(false);
+      setError(null);
+      setOwnerClaimEpoch((current) => current + 1);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }, [apiBase, applyHttpSnapshot]);
+
   const dispatch = useCallback(
     async (action: HostedChatAction) => {
       const requestGeneration = snapshotSourceRef.current.generation;
@@ -262,7 +276,7 @@ export function HostedWebChat({
     const controller = new AbortController();
     void runInitialHostedChatRetries(claimOwner, controller.signal);
     return () => controller.abort();
-  }, [claimOwner, hasState, ownerClaimed]);
+  }, [claimOwner, hasState, ownerClaimed, ownerClaimEpoch]);
 
   useEffect(() => {
     if (!hasState) {
@@ -889,6 +903,16 @@ export function HostedWebChat({
                     <RotateCcwIcon />
                     Retry
                   </Button>
+                  {hasState && !ownerClaimed ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void startFreshChat()}
+                    >
+                      Start a fresh chat
+                    </Button>
+                  ) : null}
                 </div>
               ) : null}
 

@@ -60,6 +60,45 @@ export async function claimHostedWebChatOwner(machineId: string) {
   return { claimed: true as const };
 }
 
+export async function startFreshHostedWebChat(machineId: string) {
+  const context = await hostedWebChatContext(machineId);
+  let state = await hostedDeviceState(context.config, context.account);
+  state = await ensureRuntimeStarted(context, state);
+
+  const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
+  if (!agentNpub) {
+    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
+  }
+  state = await hostedDeviceAction(context.config, context.account, {
+    ScanTarget: { value: agentNpub },
+  });
+  const profile = profileForNpub(state, agentNpub);
+  if (!profile) {
+    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
+  }
+  return hostedDeviceAction(
+    context.config,
+    context.account,
+    freshAgentChatAction(profile, context.agentName)
+  );
+}
+
+export function freshAgentChatAction(
+  profile: HostedChatProfile,
+  agentName: string
+): HostedChatAction {
+  return {
+    StartGroupChat: {
+      profiles: [profile],
+      display_name: freshAgentChatLabel(agentName),
+    },
+  };
+}
+
+export function freshAgentChatLabel(agentName: string) {
+  return `A · ${agentName.trim() || "Agent"}`;
+}
+
 export async function dispatchHostedWebChatAction(machineId: string, payload: unknown) {
   const context = await hostedWebChatContext(machineId);
   const action = parseHostedChatAction(payload);

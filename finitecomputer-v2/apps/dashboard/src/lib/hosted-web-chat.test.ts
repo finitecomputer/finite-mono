@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  freshAgentChatAction,
+  freshAgentChatLabel,
   HostedWebChatError,
   hostedWebChatErrorMessage,
   parseHostedChatAction,
@@ -17,6 +19,21 @@ test("unexpected chat infrastructure errors are replaced with plain product copy
     hostedWebChatErrorMessage(new HostedWebChatError("Sign in again to use chat.", 401)),
     "Sign in again to use chat."
   );
+});
+
+test("fresh chat recovery uses a stable label without exposing transport details", () => {
+  assert.equal(freshAgentChatLabel(" Sol 2 "), "A · Sol 2");
+  assert.equal(freshAgentChatLabel("  "), "A · Agent");
+  const profile = {
+    account_id: "agent-account",
+    npub: "npub1agent",
+    display_name: "Sol 2",
+    stale: false,
+    is_agent: true,
+  };
+  assert.deepEqual(freshAgentChatAction(profile, "Sol 2"), {
+    StartGroupChat: { profiles: [profile], display_name: "A · Sol 2" },
+  });
 });
 
 test("parseHostedChatAction accepts the bounded message operations used by web chat", () => {
@@ -105,6 +122,13 @@ test("parseHostedChatAction keeps pairing and unsupported operations off the bro
     () =>
       parseHostedChatAction({
         StartProfileChat: { profile: {}, display_name: "Injected room" },
+      }),
+    /Unsupported chat action/
+  );
+  assert.throws(
+    () =>
+      parseHostedChatAction({
+        StartGroupChat: { profiles: [], display_name: "Injected recovery room" },
       }),
     /Unsupported chat action/
   );

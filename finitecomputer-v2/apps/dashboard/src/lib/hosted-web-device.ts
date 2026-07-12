@@ -180,6 +180,12 @@ export type HostedChatAction =
         display_name: string;
       };
     }
+  | {
+      StartGroupChat: {
+        profiles: HostedChatProfile[];
+        display_name: string;
+      };
+    }
   | { SendMessage: { room_id: string; text: string } }
   | { SendTopicMessage: { room_id: string; topic_id: string; text: string } }
   | {
