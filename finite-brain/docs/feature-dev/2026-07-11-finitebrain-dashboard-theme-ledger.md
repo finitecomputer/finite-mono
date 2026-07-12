@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-dashboard-theme`
 - Human owner: plebdev
 - Started: 2026-07-11
-- Current status: complete; non-draft PR #9 is open, fallback review is clean, and all PR CI checks pass
+- Current status: complete; non-draft PR #9 is open, the human-requested control-consistency follow-up is committed, and local review is clean
 - Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
 
 ## Goal
@@ -76,6 +76,17 @@ overall visual character in a high-quality, elegant, surgical way.
 | #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | `8ee9129` plus review-fix follow-up | standards pass; two spec findings fixed; spec re-review pass | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
 | #7 | `ac6564a` | `/root/ticket_7_access_workflows` | `2960af7` plus review-fix follow-up | standards/spec pass after two low-severity standards fixes | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
 | #8 | `8e36d7a` | `/root/ticket_8_responsive_verification` | `296a30d` plus review-evidence follow-up | standards/spec pass after durable screenshot follow-up | Product Client tests, seeded verifier, asset/font routes, full locked workspace test/Clippy/build, Rustfmt, diff, and committed desktop/tablet/mobile light/dark browser matrix |
+
+## Human Visual Consistency Follow-up
+
+- Fixed point: `45b811f`
+- Commit: `eb67b6f` (`fix(fbrain): normalize product client controls`)
+- Scope: normalized visible dashboard chrome around one 32px control token; aligned Vault select/Load/Connect signer controls; reduced Resume/Lock CTA geometry; aligned ribbon, toolbar, search, command-palette, and Access action controls; repaired the file-sidebar grid row that vertically centered its toolbar inside the empty explorer area; retained intentional 40px structural rows, the 52px two-line Folder selector, and existing responsive workspace columns.
+- Sidecar evidence: two bounded read-only `grok-4.5-xhigh` passes found the competing control-size system and then the residual file-sidebar grid-row defect; Codex applied and verified the accepted recommendations.
+- Browser evidence: 12 local screenshots cover locked, stable resumed, and visible Access create-form states across desktop/mobile and light/dark. All four browser scenarios reported meaningful content, zero page/console errors, zero framework overlays, and 32px rendered geometry for the changed visible controls.
+- Review: two-axis `code-review` passed after removing redundant control-height tokens, preserving the existing 1180px workspace breakpoint, and expanding the browser matrix. Local CodeRabbit uncommitted review completed with zero findings.
+- Checks: Product Client syntax and deterministic seams, 40 `finite-brain-server` tests, `finite-brain-app` build, Rustfmt, and `git diff --check` passed.
+- Preserved user work: the pre-existing untracked `finite-brain/docs/research/` directory was not edited or staged.
 
 ## Open Questions
 
