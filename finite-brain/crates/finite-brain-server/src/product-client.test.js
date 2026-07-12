@@ -96,6 +96,26 @@ vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
 
+const prepareDraftWriteSource = source.slice(
+  source.indexOf("async function prepareDraftWrite(options = {})"),
+  source.indexOf("async function savePreparedPage()")
+);
+assert.match(
+  prepareDraftWriteSource,
+  /signEvent:\s*requireNip07SignEvent\(\),/,
+  "Save must sign its Page revision through the session-aware NIP-07 adapter"
+);
+
+const deletePageFromContextTargetSource = source.slice(
+  source.indexOf("async function deletePageFromContextTarget(target)"),
+  source.indexOf("function selectReaderFolder(folderId, options = {})")
+);
+assert.match(
+  deletePageFromContextTargetSource,
+  /signEvent:\s*requireNip07SignEvent\(\),/,
+  "Delete Page must sign its tombstone through the session-aware NIP-07 adapter"
+);
+
 function objectIdCandidateBaseForTest(value) {
   return `obj_${String(value || "page")
     .trim()

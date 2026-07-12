@@ -4461,6 +4461,7 @@ const FiniteBrainProductClient = (() => {
       baseRevision: page.revision,
       folderId: page.folderId,
       objectId: page.objectId,
+      signEvent: requireNip07SignEvent(),
       vaultId,
     });
     requireCurrentSessionEpoch(sessionEpoch);
@@ -9516,6 +9517,7 @@ const FiniteBrainProductClient = (() => {
       keyVersion,
       objectId: input.objectId,
       plaintext: encodeFolderObjectPagePlaintext(input.path, input.text),
+      signEvent: requireNip07SignEvent(),
       vaultId,
     });
     requireCurrentSessionEpoch(sessionEpoch);
