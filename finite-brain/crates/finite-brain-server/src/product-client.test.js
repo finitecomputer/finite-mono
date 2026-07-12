@@ -536,10 +536,17 @@ assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/
 assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavVault"[^>]*role="tab"/);
+assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
 assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsVaultPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsAccessPanelMount"/);
 assert.match(htmlSource, /id="settingsConnectSignerButton"/);
 assert.match(source, /openSettingsModal\("session"\)/);
+assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
+assert.match(source, /mountAccessPanelInSettings\(\)/);
+assert.match(source, /nextMode === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
+assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "access"/);
 assert.match(source, /closeSettingsModal\(\)/);
 assert.match(cssSource, /\.settings-modal-backdrop\s*\{/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
@@ -2041,7 +2048,7 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(client.sidebarModeLabel("bogus"), "Files");
   assert.equal(client.globalVaultControlState("files").hidden, false);
   assert.equal(client.globalVaultControlState("search").hidden, false);
-  assert.equal(client.globalVaultControlState("access").hidden, true);
+  assert.equal(client.globalVaultControlState("access").hidden, false);
   assert.equal(client.globalVaultControlState("bogus").hidden, false);
   assert.equal(
     JSON.stringify(client.commandPaletteCommands().map((row) => row.id)),

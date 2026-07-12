@@ -1960,7 +1960,7 @@ const FiniteBrainProductClient = (() => {
     return "Signer unavailable";
   }
 
-  const SETTINGS_SECTIONS = Object.freeze(["session", "vault"]);
+  const SETTINGS_SECTIONS = Object.freeze(["session", "vault", "access"]);
 
   function normalizeSettingsSection(section) {
     return SETTINGS_SECTIONS.includes(section) ? section : "session";
@@ -1976,9 +1976,23 @@ const FiniteBrainProductClient = (() => {
     ).filter((element) => !element.hidden && !element.closest?.("[hidden]"));
   }
 
+  function mountAccessPanelInSettings() {
+    const panel = $("accessSidebarPanel");
+    const mount = $("settingsAccessPanelMount");
+    if (!panel || !mount || panel.parentElement === mount) return;
+    mount.appendChild(panel);
+    panel.classList.remove("sidebar-mode-panel", "sidebar-tool-panel");
+    panel.hidden = false;
+    panel.removeAttribute("aria-hidden");
+  }
+
   function focusSettingsSection(section = state.settingsSection) {
     const navButton = $(
-      section === "vault" ? "settingsNavVault" : "settingsNavSession"
+      section === "vault"
+        ? "settingsNavVault"
+        : section === "access"
+          ? "settingsNavAccess"
+          : "settingsNavSession"
     );
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(() => navButton?.focus?.());
@@ -2122,10 +2136,13 @@ const FiniteBrainProductClient = (() => {
     if (shell) shell.dataset.settingsOpen = state.settingsModalOpen ? "true" : "false";
     const sessionNav = $("settingsNavSession");
     const vaultNav = $("settingsNavVault");
+    const accessNav = $("settingsNavAccess");
     const sessionPanel = $("settingsSessionPanel");
     const vaultPanel = $("settingsVaultPanel");
+    const accessPanel = $("settingsAccessPanel");
     const sessionActive = state.settingsSection === "session";
     const vaultActive = state.settingsSection === "vault";
+    const accessActive = state.settingsSection === "access";
     if (sessionNav) {
       sessionNav.className = `settings-nav-item${sessionActive ? " active" : ""}`;
       sessionNav.setAttribute("aria-selected", String(sessionActive));
@@ -2136,6 +2153,11 @@ const FiniteBrainProductClient = (() => {
       vaultNav.setAttribute("aria-selected", String(vaultActive));
       vaultNav.tabIndex = vaultActive ? 0 : -1;
     }
+    if (accessNav) {
+      accessNav.className = `settings-nav-item${accessActive ? " active" : ""}`;
+      accessNav.setAttribute("aria-selected", String(accessActive));
+      accessNav.tabIndex = accessActive ? 0 : -1;
+    }
     if (sessionPanel) {
       sessionPanel.hidden = !sessionActive;
       sessionPanel.setAttribute("aria-hidden", String(!sessionActive));
@@ -2143,6 +2165,10 @@ const FiniteBrainProductClient = (() => {
     if (vaultPanel) {
       vaultPanel.hidden = !vaultActive;
       vaultPanel.setAttribute("aria-hidden", String(!vaultActive));
+    }
+    if (accessPanel) {
+      accessPanel.hidden = !accessActive;
+      accessPanel.setAttribute("aria-hidden", String(!accessActive));
     }
     setText("settingsVaultName", activeVaultLabel());
     setText("settingsVaultIdentity", sessionIdentityLabel());
@@ -4152,7 +4178,7 @@ const FiniteBrainProductClient = (() => {
 
   function globalVaultControlState(sidebarMode) {
     return {
-      hidden: normalizeSidebarMode(sidebarMode) === "access",
+      hidden: false,
     };
   }
 
@@ -4232,7 +4258,12 @@ const FiniteBrainProductClient = (() => {
   }
 
   function setSidebarMode(mode) {
-    state.activeSidebarMode = normalizeSidebarMode(mode);
+    const nextMode = normalizeSidebarMode(mode);
+    if (nextMode === "access") {
+      openSettingsModal("access");
+      return;
+    }
+    state.activeSidebarMode = nextMode;
     closeContextMenu();
     render();
   }
@@ -5620,14 +5651,14 @@ const FiniteBrainProductClient = (() => {
     state.activeSidebarMode = mode;
     $("filesSidebarPanel").hidden = mode !== "files";
     $("searchSidebarPanel").hidden = mode !== "search";
-    $("accessSidebarPanel").hidden = mode !== "access";
     $("ribbonFilesButton").className = `ribbon-button${mode === "files" ? " active" : ""}`;
     $("ribbonSearchButton").className = `ribbon-button${mode === "search" ? " active" : ""}`;
-    $("ribbonAccessButton").className = `ribbon-button${mode === "access" ? " active" : ""}`;
+    const accessActive = state.settingsModalOpen && state.settingsSection === "access";
+    $("ribbonAccessButton").className = `ribbon-button${accessActive ? " active" : ""}`;
     setText("sidebarModeTitle", sidebarModeLabel(mode));
     setPressed("ribbonFilesButton", mode === "files");
     setPressed("ribbonSearchButton", mode === "search");
-    setPressed("ribbonAccessButton", mode === "access");
+    setPressed("ribbonAccessButton", accessActive);
   }
 
   function renderSearchPanel() {
@@ -9544,12 +9575,15 @@ const FiniteBrainProductClient = (() => {
     $("settingsNavVault")?.addEventListener("click", () => {
       setSettingsSection("vault");
     });
+    $("settingsNavAccess")?.addEventListener("click", () => {
+      setSettingsSection("access");
+    });
     $("settingsModal")?.addEventListener("click", (event) => {
       if (event.target === $("settingsModal")) closeSettingsModal();
     });
     $("settingsNav")?.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
-      const buttons = [$("settingsNavSession"), $("settingsNavVault")].filter(Boolean);
+      const buttons = [$("settingsNavSession"), $("settingsNavVault"), $("settingsNavAccess")].filter(Boolean);
       const activeIndex = buttons.findIndex((button) => button.getAttribute("aria-selected") === "true");
       if (activeIndex < 0) return;
       event.preventDefault();
@@ -9558,12 +9592,12 @@ const FiniteBrainProductClient = (() => {
         return;
       }
       if (event.key === "End") {
-        setSettingsSection("vault");
+        setSettingsSection("access");
         return;
       }
       const direction = event.key === "ArrowDown" ? 1 : -1;
       const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
-      setSettingsSection(nextIndex === 0 ? "session" : "vault");
+      setSettingsSection(["session", "vault", "access"][nextIndex] || "session");
     });
     $("loadVaultButton").addEventListener("click", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
@@ -10113,12 +10147,14 @@ const FiniteBrainProductClient = (() => {
       populated = true;
     }
     if (!populated) return false;
-    state.activeSidebarMode = "access";
     state.activeAccessView = "folder";
+    state.settingsSection = "access";
+    state.settingsModalOpen = true;
     return true;
   }
 
   async function start() {
+    mountAccessPanelInSettings();
     bind();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();

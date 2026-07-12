@@ -824,6 +824,15 @@ Start writing here.</textarea>
                   <small>Current context</small>
                 </span>
               </button>
+              <button id="settingsNavAccess" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsAccessPanel" tabindex="-1">
+                <span class="settings-nav-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M7 11V8a5 5 0 0 1 10 0v3" /><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M12 15v3" /></svg>
+                </span>
+                <span>
+                  <strong>Access &amp; sharing</strong>
+                  <small>People and links</small>
+                </span>
+              </button>
             </nav>
             <div class="settings-modal-content">
               <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavSession">
@@ -878,6 +887,15 @@ Start writing here.</textarea>
                   <span>Connect signer</span>
                 </button>
                 <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
+              </section>
+
+              <section id="settingsAccessPanel" class="settings-section settings-access-section" role="tabpanel" aria-labelledby="settingsNavAccess" hidden>
+                <header class="settings-section-header">
+                  <p class="eyebrow">Access &amp; sharing</p>
+                  <h3>Vault access</h3>
+                  <p>Manage folder access, Vault members, invitations, and single-use sharing links.</p>
+                </header>
+                <div id="settingsAccessPanelMount"></div>
               </section>
             </div>
           </div>

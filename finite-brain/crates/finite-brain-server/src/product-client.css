@@ -1941,6 +1941,28 @@ pre {
   min-width: 0;
 }
 
+.settings-access-section {
+  gap: 12px;
+}
+
+.settings-access-section > #settingsAccessPanelMount {
+  min-width: 0;
+}
+
+.settings-access-section #accessSidebarPanel {
+  overflow: visible;
+}
+
+.settings-access-section #accessSidebarPanel > .sidebar-section-title,
+.settings-access-section #accessSidebarPanel > .access-view-switch {
+  position: static;
+}
+
+.settings-access-section #accessSidebarPanel > .sidebar-section-title::before,
+.settings-access-section #accessSidebarPanel > .sidebar-section-title::after {
+  display: none;
+}
+
 .settings-section-header {
   display: grid;
   gap: 5px;
@@ -5011,7 +5033,7 @@ pre {
 
   .settings-nav {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     flex: 0 0 auto;
     overflow-x: hidden;
     overflow-y: visible;
