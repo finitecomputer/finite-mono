@@ -146,6 +146,8 @@ jobs:
         run: nix develop --command just skills check
       - name: Search check
         run: nix develop --command just search check
+      - name: Canonical Runtime image contract
+        run: nix develop --command just runtime-image-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
