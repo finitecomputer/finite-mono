@@ -96,6 +96,37 @@ vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
 
+function accessFailureTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element());
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(seamSource, source, "The access-failure test must capture the Product Client's real closure seams");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-access-failure.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured access-failure seams to this deterministic test");
+  return { elements: testElements, seams };
+}
+
 const prepareDraftWriteSource = source.slice(
   source.indexOf("async function prepareDraftWrite(options = {})"),
   source.indexOf("async function savePreparedPage()")
@@ -114,6 +145,34 @@ assert.match(
   deletePageFromContextTargetSource,
   /signEvent:\s*requireNip07SignEvent\(\),/,
   "Delete Page must sign its tombstone through the session-aware NIP-07 adapter"
+);
+
+const reportClientActionFailureSource = source.slice(
+  source.indexOf("function reportClientActionFailure(error)"),
+  source.indexOf("function markAccessFailureHandled(error)")
+);
+const failAccessOperationSource = source.slice(
+  source.indexOf("function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message)"),
+  source.indexOf("function finishAccessOperation(sessionEpoch)")
+);
+const createVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function createVaultInvitationFromPanel()"),
+  source.indexOf("async function inspectVaultInvitationFromPanel()")
+);
+assert.match(
+  reportClientActionFailureSource,
+  /handledAccessFailures\.has\(error\)\) return;/,
+  "A failure already shown by the access panel must not also show global feedback"
+);
+assert.match(
+  failAccessOperationSource,
+  /markAccessFailureHandled\(error\);\s*if \(!sessionOperationIsCurrent\(state\.sessionEpoch, sessionEpoch, state\.sessionStatus\)\) return;\s*setAccessResult\("error", title, detail\(error\)\);/s,
+  "Access failures must stay in the existing access result and be suppressed before stale requests return"
+);
+assert.match(
+  createVaultInvitationFromPanelSource,
+  /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
+  "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
 );
 
 function objectIdCandidateBaseForTest(value) {
@@ -540,6 +599,17 @@ assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
 assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
 assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(
+  htmlSource,
+  /id="clientActionFeedback"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/
+);
+assert.match(cssSource, /\.client-action-feedback\[hidden\]\s*\{\s*display:\s*none;/);
+assert.match(
+  cssSource,
+  /@media \(max-width: 1180px\) \{[\s\S]*?\.obsidian-shell\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto;/,
+  "The compact shell must retain the status-feedback row"
+);
+assert.doesNotMatch(source, /window\.alert/);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-haspopup="menu"/);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-controls="vaultSwitcherMenu"/);
 assert.match(htmlSource, /id="vaultSwitcherMenu"[^>]*role="menu"/);
@@ -3050,6 +3120,29 @@ assert.match(source, /"vaultInviteSecretInput"/);
     [true, false, false]
   );
 
+  const accessFailure = accessFailureTestSeams();
+  const handledAccessError = new Error("handled-access-error-sentinel");
+  accessFailure.seams.state.sessionEpoch = 41;
+  accessFailure.seams.state.sessionStatus = "unlocked";
+  accessFailure.seams.state.lastError = null;
+  const accessFeedback = accessFailure.elements.get("clientActionFeedback");
+  accessFailure.seams.failAccessOperation(41, "Add member failed", handledAccessError);
+  assert.equal(accessFailure.seams.state.accessResult?.tone, "error");
+  assert.equal(accessFailure.seams.state.accessResult?.title, "Add member failed");
+  assert.equal(accessFailure.seams.state.accessResult?.detail, "handled-access-error-sentinel");
+  accessFailure.seams.reportClientActionFailure(handledAccessError);
+  assert.equal(accessFeedback.hidden, true);
+  assert.equal(accessFeedback.textContent, "");
+
+  const inFlightSessionEpoch = accessFailure.seams.state.sessionEpoch;
+  const staleAccessError = new Error("stale-access-error-sentinel");
+  accessFailure.seams.lockSession();
+  assert.equal(accessFeedback.hidden, true);
+  accessFailure.seams.failAccessOperation(inFlightSessionEpoch, "Add member failed", staleAccessError);
+  accessFailure.seams.reportClientActionFailure(staleAccessError);
+  assert.equal(accessFeedback.hidden, true);
+  assert.equal(accessFeedback.textContent, "");
+
   context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
   context.document.getElementById("folderKeyInput").value = "runtime-folder-key-sentinel";
   context.document.getElementById("okfBundleInput").value = "runtime-okf-sentinel";
@@ -3057,6 +3150,20 @@ assert.match(source, /"vaultInviteSecretInput"/);
   context.document.getElementById("graphStats").textContent = "12 nodes / 18 links";
   context.document.getElementById("obsidianNewPageButton");
   context.document.getElementById("obsidianNewFolderButton");
+  context.window.location = {
+    hash: "#inviteSecret=invite-secret-sentinel&inviteEmail=not-an-email",
+    href: "http://localhost/client#inviteSecret=invite-secret-sentinel&inviteEmail=not-an-email",
+    pathname: "/client",
+    search: "",
+  };
+  context.window.history = { replaceState() {} };
+  assert.equal(client.populateInviteFromHash(), false);
+  assert.equal(elements.get("clientActionFeedback").hidden, false);
+  assert.equal(
+    elements.get("clientActionFeedback").textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
   assert.equal(elements.get("folderKeyInput").value, "");
@@ -3071,6 +3178,8 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");
   assert.equal(elements.get("obsidianNewPageButton").disabled, true);
   assert.equal(elements.get("obsidianNewFolderButton").disabled, true);
+  assert.equal(elements.get("clientActionFeedback").hidden, true);
+  assert.equal(elements.get("clientActionFeedback").textContent, "");
 
   console.log("product-client deterministic seams ok");
 })().catch((error) => {

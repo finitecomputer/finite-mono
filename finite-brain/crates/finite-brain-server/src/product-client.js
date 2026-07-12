@@ -64,9 +64,22 @@ const FiniteBrainProductClient = (() => {
     editorSlashSelectedIndex: 0,
     accessFolderDropdownListenerBound: false,
   };
+  const handledAccessFailures = new WeakSet();
   let pendingInviteNavigation = null;
 
   const $ = (id) => document.getElementById(id);
+  let lastErrorValue = state.lastError;
+  Object.defineProperty(state, "lastError", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return lastErrorValue;
+    },
+    set(value) {
+      lastErrorValue = value || null;
+      renderClientActionFeedback();
+    },
+  });
   const setOptionalDisabled = (id, disabled) => {
     const element = $(id);
     if (element) element.disabled = disabled;
@@ -544,6 +557,25 @@ const FiniteBrainProductClient = (() => {
     if (!value) return "-";
     if (value.length <= 18) return value;
     return `${value.slice(0, 10)}...${value.slice(-8)}`;
+  }
+
+  function renderClientActionFeedback() {
+    const feedback = $("clientActionFeedback");
+    if (!feedback) return;
+    const visible = Boolean(lastErrorValue);
+    feedback.hidden = !visible;
+    feedback.textContent = visible
+      ? "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+      : "";
+  }
+
+  function reportClientActionFailure(error) {
+    if (error && typeof error === "object" && handledAccessFailures.has(error)) return;
+    state.lastError = error instanceof Error ? error.message : String(error || "Action failed");
+  }
+
+  function markAccessFailureHandled(error) {
+    if (error && typeof error === "object") handledAccessFailures.add(error);
   }
 
   function publicKeyIdentityFromInput(input) {
@@ -5726,7 +5758,6 @@ const FiniteBrainProductClient = (() => {
     if (item.action === "new-folder") {
       createFolderFromToolbar().catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to create Folder from context menu.", { error: error.message });
         render();
       });
@@ -5750,7 +5781,6 @@ const FiniteBrainProductClient = (() => {
     if (item.action === "delete-page") {
       deletePageFromContextTarget(target).catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to delete Page.", { error: error.message });
         render();
       });
@@ -6459,7 +6489,7 @@ const FiniteBrainProductClient = (() => {
         removeButton.addEventListener("click", () => {
           const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
           action(person.id).catch((error) => {
-            state.lastError = error.message;
+            reportClientActionFailure(error);
             log("Failed to update Vault Member Identities.", { error: error.message });
           });
         });
@@ -6492,7 +6522,7 @@ const FiniteBrainProductClient = (() => {
     button.disabled = state.accessBusy;
     button.addEventListener("click", () => {
       onClick().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Access list action failed.", { error: error.message });
       });
     });
@@ -7149,6 +7179,7 @@ const FiniteBrainProductClient = (() => {
       clearSessionSecretsAndPlaintext(state);
       clearSessionOwnedDom();
     }
+    renderClientActionFeedback();
     safeSetHidden("connectSignerButton", state.signerStatus === "connected");
     setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
     setOptionalDisabled(
@@ -8707,6 +8738,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message) {
+    markAccessFailureHandled(error);
     if (!sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) return;
     setAccessResult("error", title, detail(error));
   }
@@ -9264,6 +9296,7 @@ const FiniteBrainProductClient = (() => {
       });
       await refreshVaultAdminLists();
     } catch (error) {
+      markAccessFailureHandled(error);
       if (state.sessionEpoch === sessionEpoch) {
         setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
       }
@@ -9960,13 +9993,13 @@ const FiniteBrainProductClient = (() => {
     }
     onOptionalClick("addVaultMemberButton", () => {
       addVaultMemberFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to add Vault member.", { error: error.message });
       });
     });
     onOptionalClick("addVaultAdminButton", () => {
       addVaultAdminFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to add Vault admin.", { error: error.message });
       });
     });
@@ -9985,55 +10018,55 @@ const FiniteBrainProductClient = (() => {
     }
     onOptionalClick("grantFolderAccessButton", () => {
       grantFolderAccessFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to grant Folder access.", { error: error.message });
       });
     });
     onOptionalClick("removeFolderAccessButton", () => {
       removeFolderAccessFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to remove Folder access.", { error: error.message });
       });
     });
     onOptionalClick("createShareLinkButton", () => {
       createShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to create Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("acceptShareLinkButton", () => {
       acceptShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to accept Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("revokeShareLinkButton", () => {
       revokeShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to revoke Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("createVaultInvitationButton", () => {
       createVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to create Vault invitation.", { error: error.message });
       });
     });
     onOptionalClick("getVaultInvitationButton", () => {
       inspectVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to inspect Vault invitation.", { error: error.message });
       });
     });
     onOptionalClick("getEmailInviteInstructionsButton", () => {
       loadEmailInviteInstructionsFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to load email Vault invitation scope.", { error: error.message });
       });
     });
     onOptionalClick("acceptVaultInvitationButton", () => {
       acceptVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to accept Vault invitation.", { error: error.message });
       });
     });
@@ -10046,7 +10079,7 @@ const FiniteBrainProductClient = (() => {
     });
     onOptionalClick("revokeVaultInvitationButton", () => {
       revokeVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to revoke Vault invitation.", { error: error.message });
       });
     });
@@ -10080,7 +10113,6 @@ const FiniteBrainProductClient = (() => {
     $("obsidianNewFolderButton").addEventListener("click", () => {
       createFolderFromToolbar().catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to create Folder from toolbar.", { error: error.message });
         render();
       });
