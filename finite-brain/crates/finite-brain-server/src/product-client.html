@@ -553,8 +553,15 @@
         </section>
 
         <footer class="sidebar-account-footer">
-          <details id="sessionAccountDetails" class="session-account-details">
-            <summary>
+          <div class="session-account-row">
+            <button
+              id="sessionAccountVaultButton"
+              class="session-account-vault-button"
+              type="button"
+              title="Open Vault switcher"
+              aria-label="Open Vault switcher"
+              aria-haspopup="menu"
+            >
               <span class="session-account-avatar" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24">
                   <circle cx="12" cy="8" r="3.5" />
@@ -572,25 +579,22 @@
               <svg class="session-account-chevron icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m8 10 4 4 4-4" />
               </svg>
-            </summary>
-            <div class="session-account-panel">
-              <section id="sessionSecurityStatus" class="session-security-status" aria-live="polite">
-                <div class="session-security-copy">
-                  <strong id="sessionSecurityTitle">Session locked</strong>
-                  <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
-                </div>
-                <button id="resumeSessionButton" type="button">Resume session</button>
-                <button id="lockSessionButton" type="button" hidden>Lock session</button>
-              </section>
-              <button id="sessionSettingsButton" class="session-settings-button" type="button">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M5.9 5.9l1.4 1.4M16.7 16.7l1.4 1.4M18.1 5.9l-1.4 1.4M7.3 16.7l-1.4 1.4" />
-                  <circle cx="12" cy="12" r="3.5" />
-                </svg>
-                <span>Vault settings</span>
-              </button>
-            </div>
-          </details>
+            </button>
+            <button
+              id="sessionSettingsButton"
+              class="session-settings-button"
+              type="button"
+              title="Settings"
+              aria-label="Settings"
+              aria-haspopup="dialog"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M5.9 5.9l1.4 1.4M16.7 16.7l1.4 1.4M18.1 5.9l-1.4 1.4M7.3 16.7l-1.4 1.4" />
+                <circle cx="12" cy="12" r="3.5" />
+              </svg>
+              <span class="sr-only">Settings</span>
+            </button>
+          </div>
         </footer>
 
       </aside>
@@ -746,6 +750,107 @@ Start writing here.</textarea>
             spellcheck="false"
           />
           <ol id="commandPaletteList" class="command-palette-list"></ol>
+        </section>
+      </div>
+
+      <div
+        id="settingsModal"
+        class="settings-modal-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settingsModalTitle"
+        aria-hidden="true"
+        hidden
+      >
+        <section class="settings-modal-panel">
+          <header class="settings-modal-header">
+            <div>
+              <p class="eyebrow">Workspace</p>
+              <h2 id="settingsModalTitle">Settings</h2>
+            </div>
+            <button id="closeSettingsButton" class="sidebar-icon-button" type="button" title="Close settings" aria-label="Close settings">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m7 7 10 10M17 7 7 17" />
+              </svg>
+            </button>
+          </header>
+          <div class="settings-modal-layout">
+            <nav id="settingsNav" class="settings-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
+              <button id="settingsNavSession" class="settings-nav-item active" type="button" role="tab" aria-selected="true" aria-controls="settingsSessionPanel" tabindex="0">
+                <span class="settings-nav-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M5.9 5.9l1.4 1.4M16.7 16.7l1.4 1.4M18.1 5.9l-1.4 1.4M7.3 16.7l-1.4 1.4" /><circle cx="12" cy="12" r="3.5" /></svg>
+                </span>
+                <span>
+                  <strong>Session</strong>
+                  <small>Signer and lock</small>
+                </span>
+              </button>
+              <button id="settingsNavVault" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsVaultPanel" tabindex="-1">
+                <span class="settings-nav-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z" /><path d="M3 10h18" /></svg>
+                </span>
+                <span>
+                  <strong>Vault</strong>
+                  <small>Current context</small>
+                </span>
+              </button>
+            </nav>
+            <div class="settings-modal-content">
+              <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavSession">
+                <header class="settings-section-header">
+                  <p class="eyebrow">Session</p>
+                  <h3>Session security</h3>
+                  <p>Session Folder Keys and readable content stay in memory only while this session is unlocked.</p>
+                </header>
+                <section id="sessionSecurityStatus" class="session-security-status settings-card" aria-live="polite">
+                  <div class="session-security-copy">
+                    <strong id="sessionSecurityTitle">Session locked</strong>
+                    <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
+                  </div>
+                  <button id="resumeSessionButton" type="button">Resume session</button>
+                  <button id="lockSessionButton" type="button" hidden>Lock session</button>
+                </section>
+                <div class="settings-info-card">
+                  <span class="settings-info-icon" aria-hidden="true">
+                    <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 10v6M12 7h.01" /></svg>
+                  </span>
+                  <p>Locking clears Session Folder Keys, decrypted pages, drafts, and other temporary plaintext from this client.</p>
+                </div>
+              </section>
+
+              <section id="settingsVaultPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavVault" hidden>
+                <header class="settings-section-header">
+                  <p class="eyebrow">Vault</p>
+                  <h3>Current Vault</h3>
+                  <p>Review the Vault context and signer used for this Product Client session.</p>
+                </header>
+                <div class="settings-card settings-vault-summary">
+                  <div>
+                    <span class="settings-card-label">Selected Vault</span>
+                    <strong id="settingsVaultName">Personal vault</strong>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Member Identity</dt>
+                      <dd id="settingsVaultIdentity">Signer unavailable</dd>
+                    </div>
+                    <div>
+                      <dt>Session</dt>
+                      <dd id="settingsVaultStatus">Session locked</dd>
+                    </div>
+                  </dl>
+                </div>
+                <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="7.5" cy="12.5" r="3.5" />
+                    <path d="M11 12.5h9M16 12.5v3M19 12.5v2" />
+                  </svg>
+                  <span>Connect signer</span>
+                </button>
+                <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
+              </section>
+            </div>
+          </div>
         </section>
       </div>
     </div>

@@ -25,6 +25,9 @@ const FiniteBrainProductClient = (() => {
     selectedPageKey: null,
     activeWorkspaceView: "page",
     activeSidebarMode: "files",
+    settingsModalOpen: false,
+    settingsSection: "session",
+    settingsModalPreviousFocus: null,
     activeAccessFolderId: null,
     activeAccessView: "vault",
     activeAccessIntent: "overview",
@@ -1949,6 +1952,103 @@ const FiniteBrainProductClient = (() => {
     if (state.signerStatus === "ready") return "Signer ready";
     if (state.signerStatus === "checking") return "Checking signer";
     return "Signer unavailable";
+  }
+
+  const SETTINGS_SECTIONS = Object.freeze(["session", "vault"]);
+
+  function normalizeSettingsSection(section) {
+    return SETTINGS_SECTIONS.includes(section) ? section : "session";
+  }
+
+  function settingsModalFocusableElements() {
+    const modal = $("settingsModal");
+    if (!modal) return [];
+    return Array.from(
+      modal.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((element) => !element.hidden && !element.closest?.("[hidden]"));
+  }
+
+  function focusSettingsSection(section = state.settingsSection) {
+    const navButton = $(
+      section === "vault" ? "settingsNavVault" : "settingsNavSession"
+    );
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => navButton?.focus?.());
+    } else {
+      navButton?.focus?.();
+    }
+  }
+
+  function openSettingsModal(section = state.settingsSection) {
+    const modal = $("settingsModal");
+    if (!modal) return;
+    if (!state.settingsModalOpen) {
+      state.settingsModalPreviousFocus = document.activeElement || null;
+    }
+    state.settingsSection = normalizeSettingsSection(section);
+    state.settingsModalOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    focusSettingsSection(state.settingsSection);
+  }
+
+  function closeSettingsModal() {
+    if (!state.settingsModalOpen) return;
+    state.settingsModalOpen = false;
+    const previousFocus = state.settingsModalPreviousFocus;
+    state.settingsModalPreviousFocus = null;
+    render();
+    previousFocus?.focus?.();
+  }
+
+  function setSettingsSection(section) {
+    state.settingsSection = normalizeSettingsSection(section);
+    render();
+    focusSettingsSection(state.settingsSection);
+  }
+
+  function renderSettingsModal() {
+    const modal = $("settingsModal");
+    if (!modal) return;
+    modal.hidden = !state.settingsModalOpen;
+    modal.setAttribute("aria-hidden", String(!state.settingsModalOpen));
+    const shell = document.querySelector?.(".obsidian-shell");
+    if (shell) shell.dataset.settingsOpen = state.settingsModalOpen ? "true" : "false";
+    const sessionNav = $("settingsNavSession");
+    const vaultNav = $("settingsNavVault");
+    const sessionPanel = $("settingsSessionPanel");
+    const vaultPanel = $("settingsVaultPanel");
+    const sessionActive = state.settingsSection === "session";
+    const vaultActive = state.settingsSection === "vault";
+    if (sessionNav) {
+      sessionNav.className = `settings-nav-item${sessionActive ? " active" : ""}`;
+      sessionNav.setAttribute("aria-selected", String(sessionActive));
+      sessionNav.tabIndex = sessionActive ? 0 : -1;
+    }
+    if (vaultNav) {
+      vaultNav.className = `settings-nav-item${vaultActive ? " active" : ""}`;
+      vaultNav.setAttribute("aria-selected", String(vaultActive));
+      vaultNav.tabIndex = vaultActive ? 0 : -1;
+    }
+    if (sessionPanel) {
+      sessionPanel.hidden = !sessionActive;
+      sessionPanel.setAttribute("aria-hidden", String(!sessionActive));
+    }
+    if (vaultPanel) {
+      vaultPanel.hidden = !vaultActive;
+      vaultPanel.setAttribute("aria-hidden", String(!vaultActive));
+    }
+    setText("settingsVaultName", activeVaultLabel());
+    setText("settingsVaultIdentity", sessionIdentityLabel());
+    setText("settingsVaultStatus", sessionStatusView(state.sessionStatus).title);
+    setOptionalDisabled(
+      "settingsConnectSignerButton",
+      !deriveSignerState(window.nostr).canConnect
+    );
   }
 
   function sessionGrantOpeningAllowed(status) {
@@ -6615,6 +6715,7 @@ const FiniteBrainProductClient = (() => {
     renderVaultSelect();
 
     renderSessionSecurity();
+    renderSettingsModal();
     renderVaultControlChrome();
     renderSidebarMode();
     renderReader();
@@ -9210,14 +9311,44 @@ const FiniteBrainProductClient = (() => {
       render();
     });
     $("sessionSettingsButton")?.addEventListener("click", () => {
-      state.vaultControlsCollapsedAfterLoad = true;
-      setSidebarMode("files");
-      const details = $("vaultControlDetails");
-      if (details) {
-        details.hidden = false;
-        details.open = true;
-        details.querySelector("summary")?.focus?.();
+      openSettingsModal("session");
+    });
+    $("settingsConnectSignerButton")?.addEventListener("click", () => {
+      connectSigner().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to connect signer from Settings.", { error: error.message });
+        render();
+      });
+    });
+    $("closeSettingsButton")?.addEventListener("click", () => {
+      closeSettingsModal();
+    });
+    $("settingsNavSession")?.addEventListener("click", () => {
+      setSettingsSection("session");
+    });
+    $("settingsNavVault")?.addEventListener("click", () => {
+      setSettingsSection("vault");
+    });
+    $("settingsModal")?.addEventListener("click", (event) => {
+      if (event.target === $("settingsModal")) closeSettingsModal();
+    });
+    $("settingsNav")?.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+      const buttons = [$("settingsNavSession"), $("settingsNavVault")].filter(Boolean);
+      const activeIndex = buttons.findIndex((button) => button.getAttribute("aria-selected") === "true");
+      if (activeIndex < 0) return;
+      event.preventDefault();
+      if (event.key === "Home") {
+        setSettingsSection("session");
+        return;
       }
+      if (event.key === "End") {
+        setSettingsSection("vault");
+        return;
+      }
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
+      setSettingsSection(nextIndex === 0 ? "session" : "vault");
     });
     $("loadVaultButton").addEventListener("click", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
@@ -9575,6 +9706,31 @@ const FiniteBrainProductClient = (() => {
       if (state.editorSlashOpen) refreshEditorSlashMenu();
     });
     document.addEventListener("keydown", (event) => {
+      if (state.settingsModalOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeSettingsModal();
+          return;
+        }
+        if (event.key === "Tab") {
+          const focusable = settingsModalFocusableElements();
+          if (!focusable.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+          return;
+        }
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
         event.preventDefault();
         openCommandPalette();

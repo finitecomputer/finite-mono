@@ -1526,6 +1526,362 @@ pre {
   color: var(--icon);
 }
 
+.session-account-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-account-vault-button {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: transparent;
+  padding: 4px 7px;
+  text-align: left;
+}
+
+.session-account-vault-button:hover {
+  border-color: transparent;
+  background: var(--surface-active);
+  color: var(--text);
+}
+
+.session-account-vault-button:focus-visible {
+  border-color: transparent;
+}
+
+.session-account-row > .session-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  align-self: center;
+  border-color: transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--icon);
+  padding: 0;
+}
+
+.session-account-row > .session-settings-button:hover {
+  border-color: transparent;
+  background: var(--surface-active);
+  color: var(--text);
+}
+
+.session-account-row > .session-settings-button .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.settings-modal-backdrop {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--knowledge-overlay) 72%, transparent);
+  backdrop-filter: blur(5px);
+}
+
+.settings-modal-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(780px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  min-height: min(480px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+}
+
+.settings-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+  padding: 18px 20px 16px;
+}
+
+.settings-modal-header h2 {
+  margin-top: 2px;
+  font-size: 20px;
+}
+
+.settings-modal-layout {
+  display: grid;
+  grid-template-columns: 188px minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface-soft);
+  padding: 12px 10px;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 0;
+  min-height: 48px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.settings-nav-item:hover,
+.settings-nav-item.active {
+  border-color: transparent;
+  background: var(--surface-active);
+  color: var(--text);
+}
+
+.settings-nav-item.active {
+  border-left-color: var(--blue);
+}
+
+.settings-nav-item > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.settings-nav-item strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-nav-item small {
+  overflow: hidden;
+  color: var(--soft);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  color: var(--icon);
+}
+
+.settings-nav-icon .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-nav-item.active .settings-nav-icon {
+  color: var(--blue);
+}
+
+.settings-modal-content {
+  min-width: 0;
+  overflow: auto;
+  padding: 24px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.settings-section-header {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-section-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-section-header p:last-child {
+  max-width: 56ch;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  padding: 16px;
+}
+
+.settings-section .session-security-status {
+  display: grid;
+  gap: 14px;
+  border-bottom: 0;
+  padding: 16px;
+}
+
+.settings-section .session-security-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.settings-section .session-security-copy strong {
+  font-size: 14px;
+}
+
+.settings-section .session-security-copy span {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  color: var(--muted);
+  font-size: 12px;
+  clip: auto;
+  white-space: normal;
+}
+
+.settings-section .session-security-copy strong::before {
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+}
+
+.settings-section .session-security-status button {
+  justify-self: start;
+  min-width: 142px;
+}
+
+.settings-info-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--status-warning-border);
+  border-radius: 10px;
+  background: var(--status-warning-bg);
+  color: var(--muted);
+  padding: 12px;
+}
+
+.settings-info-card p {
+  font-size: 12px;
+}
+
+.settings-info-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--status-warning);
+}
+
+.settings-info-icon .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-vault-summary {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-vault-summary > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-card-label,
+.settings-vault-summary dt {
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-vault-summary > div:first-child strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-vault-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.settings-vault-summary dl > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-vault-summary dd {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-primary-action {
+  display: inline-flex;
+  justify-content: flex-start;
+  gap: 8px;
+  width: max-content;
+  min-width: 148px;
+  border-color: transparent;
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
+.settings-primary-action:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--blue-soft) 72%, var(--blue));
+  color: var(--blue-strong);
+}
+
+.settings-primary-action .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-field-hint {
+  color: var(--soft);
+  font-size: 11px;
+}
+
 .session-security-status button:not(:disabled):hover {
   border-color: transparent;
   background: color-mix(in srgb, var(--blue-soft) 70%, var(--blue));
@@ -4407,6 +4763,51 @@ pre {
 }
 
 @media (max-width: 640px) {
+  .settings-modal-backdrop {
+    align-items: end;
+    padding: 10px;
+  }
+
+  .settings-modal-panel {
+    width: 100%;
+    max-height: calc(100vh - 20px);
+    min-height: min(520px, calc(100vh - 20px));
+    border-radius: 12px;
+  }
+
+  .settings-modal-header {
+    padding: 14px 16px 12px;
+  }
+
+  .settings-modal-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex: 0 0 auto;
+    overflow-x: hidden;
+    overflow-y: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 8px;
+  }
+
+  .settings-nav-item {
+    min-height: 42px;
+    padding: 6px 8px;
+  }
+
+  .settings-modal-content {
+    padding: 18px 16px 20px;
+  }
+
+  .settings-vault-summary dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   #accessSidebarPanel {
     --access-panel-inset: 8px;
   }
