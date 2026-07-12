@@ -16,8 +16,8 @@ run-name: Hermes runtime smoke (${{ github.ref_name }})
 on:
   workflow_dispatch:
     inputs:
-      phala_durable_smoke:
-        description: "Run canonical Add/Welcome chat plus durable /home/node restart smoke"
+      durable_home_docker_smoke:
+        description: "Run canonical Docker Add/Welcome chat plus durable /data restart smoke"
         required: false
         type: boolean
         default: true
@@ -64,7 +64,7 @@ jobs:
             --report target/hermes-docker-smoke/image-build.json
 
       - name: Durable home Docker smoke
-        if: ${{ inputs.phala_durable_smoke }}
+        if: ${{ inputs.durable_home_docker_smoke }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}

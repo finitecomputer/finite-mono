@@ -78,7 +78,7 @@ Use the Phala durable-home gate when proving the current hosted-agent runtime:
 gh workflow run ci.yml \
   -R finitecomputer/finitechat \
   --ref <branch> \
-  -f phala_durable_smoke=true \
+  -f durable_home_docker_smoke=true \
   -f publish_phala_runtime_image=true
 ```
 
