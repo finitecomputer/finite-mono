@@ -1051,7 +1051,7 @@ pre {
   grid-column: 2;
   grid-row: 1;
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
 }
 
 .vault-header,
@@ -1306,15 +1306,122 @@ pre {
   grid-row: 2;
 }
 
-.session-security-status {
+.sidebar-account-footer {
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  background: var(--obsi-panel);
+  padding: 6px 8px 8px;
+}
+
+.session-account-details {
+  min-width: 0;
+}
+
+.session-account-details > summary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  min-height: 36px;
+  min-height: 42px;
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 7px;
+  transition-duration: 140ms;
+  transition-property: background-color, box-shadow, color;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.session-account-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-account-details > summary:hover,
+.session-account-details[open] > summary {
+  background: var(--surface-active);
+  box-shadow: var(--shadow-control);
+}
+
+.session-account-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.session-account-avatar .icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.7;
+}
+
+.session-account-summary {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 1px;
+}
+
+.session-account-summary strong,
+.session-account-summary > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-account-summary strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.session-account-summary > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.session-account-summary > span > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-account-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition-duration: 140ms;
+  transition-property: transform, color;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.session-account-details[open] .session-account-chevron {
+  transform: rotate(180deg);
+  color: var(--text);
+}
+
+.session-account-panel {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 8px 7px 2px;
+}
+
+.session-security-status {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
   border-bottom: 1px solid var(--line);
-  background: var(--sidebar);
-  padding: 4px 10px;
+  background: transparent;
+  padding: 2px 0 10px;
 }
 
 .session-security-copy {
@@ -1374,6 +1481,31 @@ pre {
   transition-duration: 140ms;
   transition-property: background-color, box-shadow, color, transform;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.session-settings-button {
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.session-settings-button:hover {
+  border-color: transparent;
+  background: var(--surface-active);
+  color: var(--text);
+}
+
+.session-settings-button .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--icon);
 }
 
 .session-security-status button:not(:disabled):hover {

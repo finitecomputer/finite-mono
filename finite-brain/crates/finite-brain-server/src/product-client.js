@@ -1942,6 +1942,15 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function sessionIdentityLabel() {
+    if (state.signerStatus === "connected" && state.pubkeyHex) {
+      return shortKey(npubFromHex(state.pubkeyHex));
+    }
+    if (state.signerStatus === "ready") return "Signer ready";
+    if (state.signerStatus === "checking") return "Checking signer";
+    return "Signer unavailable";
+  }
+
   function sessionGrantOpeningAllowed(status) {
     return status === SESSION_STATUS.RESUMING || status === SESSION_STATUS.UNLOCKED;
   }
@@ -6544,6 +6553,9 @@ const FiniteBrainProductClient = (() => {
 
   function renderSessionSecurity() {
     const view = sessionStatusView(state.sessionStatus);
+    setText("sessionAccountVault", activeVaultLabel());
+    setText("sessionAccountIdentity", sessionIdentityLabel());
+    setText("sessionAccountStatus", view.title);
     setText("sessionSecurityTitle", view.title);
     setText("sessionSecurityDetail", state.sessionNotice || view.detail);
     safeSetHidden("resumeSessionButton", !view.locked);
@@ -9177,6 +9189,16 @@ const FiniteBrainProductClient = (() => {
     $("vaultSelect").addEventListener("change", () => {
       setActiveVaultId($("vaultSelect").value);
       render();
+    });
+    $("sessionSettingsButton")?.addEventListener("click", () => {
+      state.vaultControlsCollapsedAfterLoad = true;
+      setSidebarMode("files");
+      const details = $("vaultControlDetails");
+      if (details) {
+        details.hidden = false;
+        details.open = true;
+        details.querySelector("summary")?.focus?.();
+      }
     });
     $("loadVaultButton").addEventListener("click", () => {
       loadVaultReader().catch((error) => {
