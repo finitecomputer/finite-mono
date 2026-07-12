@@ -18,6 +18,14 @@ The `/data` mount contains:
 - runtime logs, memories, credentials, and generated config under
   those state roots.
 
+The opt-in Restic mechanism snapshots the complete `FINITE_AGENT_STATE_ROOT`
+(default `/data`), not only `/data/agent`. It refuses to run when the Agent
+Home or workspace resolves outside that root, so a successful snapshot cannot
+silently omit `/data/workspace`. This closes the old path-selection gap only;
+application-consistent quiescing, independent Recovery Authority envelopes,
+off-provider storage, and an empty-target restore drill remain required before
+the mechanism is a product Recovery Snapshot.
+
 The `/runtime` tree is immutable image state. It must not contain provider keys
 or user data. Runner-supplied values arrive through container environment
 variables or provider-native sealed env files. Generated Hermes config

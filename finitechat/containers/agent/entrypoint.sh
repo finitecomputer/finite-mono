@@ -9,6 +9,8 @@ truthy() {
 }
 
 agent_home="${FINITECHAT_HOME:-/data/agent}"
+state_root="${FINITE_AGENT_STATE_ROOT:-/data}"
+workspace="${FINITECHAT_WORKSPACE:-/data/workspace}"
 # The shared Finite identity (identity/identity.json) must live on the same
 # durable mount as the rest of the agent state so restore/backup and
 # restarts keep the account key.
@@ -115,30 +117,51 @@ backup_agent_state() {
         echo "FINITE_AGENT_BACKUP_ERROR missing FINITE_AGENT_RESTIC_PASSWORD" >&2
         return 64
     fi
-    if [[ ! -d "$agent_home" ]]; then
-        echo "FINITE_AGENT_BACKUP_SKIPPED missing_home=true home=$agent_home"
+    if [[ ! -d "$state_root" ]]; then
+        echo "FINITE_AGENT_BACKUP_SKIPPED missing_state_root=true state_root=$state_root"
         return 0
     fi
+
+    local canonical_state_root
+    canonical_state_root="$(realpath -m "$state_root")"
+    local canonical_agent_home
+    canonical_agent_home="$(realpath -m "$agent_home")"
+    local canonical_workspace
+    canonical_workspace="$(realpath -m "$workspace")"
+    case "$canonical_agent_home" in
+        "$canonical_state_root"/*) ;;
+        *)
+            echo "FINITE_AGENT_BACKUP_ERROR agent home is outside state root" >&2
+            return 64
+            ;;
+    esac
+    case "$canonical_workspace" in
+        "$canonical_state_root"/*) ;;
+        *)
+            echo "FINITE_AGENT_BACKUP_ERROR workspace is outside state root" >&2
+            return 64
+            ;;
+    esac
     if backup_activity_active; then
         return 0
     fi
 
     local lock_dir="${FINITE_AGENT_BACKUP_LOCK_DIR:-/tmp/finite-agent-backup.lock}"
     if ! mkdir "$lock_dir" 2>/dev/null; then
-        echo "FINITE_AGENT_BACKUP_SKIPPED backup_running=true home=$agent_home tag=$tag"
+        echo "FINITE_AGENT_BACKUP_SKIPPED backup_running=true state_root=$state_root tag=$tag"
         return 0
     fi
 
     export_restic_env "$password"
-    echo "FINITE_AGENT_BACKUP_START home=$agent_home tag=$tag"
+    echo "FINITE_AGENT_BACKUP_START state_root=$state_root tag=$tag"
     local status=0
-    restic -r "$repository" backup "$agent_home" --tag "$tag" --json || status="$?"
+    restic -r "$repository" backup "$state_root" --tag "$tag" --json || status="$?"
     rmdir "$lock_dir" 2>/dev/null || true
     if [[ "$status" -ne 0 ]]; then
-        echo "FINITE_AGENT_BACKUP_ERROR restic_status=$status home=$agent_home tag=$tag" >&2
+        echo "FINITE_AGENT_BACKUP_ERROR restic_status=$status state_root=$state_root tag=$tag" >&2
         return "$status"
     fi
-    echo "FINITE_AGENT_BACKUP_COMPLETE home=$agent_home tag=$tag"
+    echo "FINITE_AGENT_BACKUP_COMPLETE state_root=$state_root tag=$tag"
 }
 
 start_periodic_backup() {

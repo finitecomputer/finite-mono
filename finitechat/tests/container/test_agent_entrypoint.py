@@ -214,13 +214,18 @@ class AgentEntrypointTest(unittest.TestCase):
             fake_bin.mkdir()
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
-            home = tmp / "agent"
-            home.mkdir()
+            state_root = tmp / "data"
+            home = state_root / "agent"
+            workspace = state_root / "workspace"
+            home.mkdir(parents=True)
+            workspace.mkdir()
             (home / "config.json").write_text("{}", encoding="utf-8")
+            (workspace / "project.txt").write_text("workspace", encoding="utf-8")
             fake_restic.write_text(
                 "#!/usr/bin/env sh\n"
                 'echo "$@" > "$RESTIC_FAKE_LOG"\n'
                 'test "$RESTIC_PASSWORD" = secret\n'
+                'test -f "$FINITECHAT_WORKSPACE/project.txt"\n'
                 'printf \'{"message_type":"summary","snapshot_id":"snapshot-456"}\\n\'\n',
                 encoding="utf-8",
             )
@@ -231,6 +236,8 @@ class AgentEntrypointTest(unittest.TestCase):
                     "PATH": f"{fake_bin}:{env['PATH']}",
                     "RESTIC_FAKE_LOG": str(log_path),
                     "FINITECHAT_HOME": str(home),
+                    "FINITECHAT_WORKSPACE": str(workspace),
+                    "FINITE_AGENT_STATE_ROOT": str(state_root),
                     "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                     "FINITE_AGENT_RESTIC_REPOSITORY": "s3:https://example.invalid/bucket/prefix",
                     "FINITE_AGENT_RESTIC_PASSWORD": "secret",
@@ -249,7 +256,7 @@ class AgentEntrypointTest(unittest.TestCase):
             self.assertIn("FINITE_AGENT_BACKUP_COMPLETE", result.stdout)
             self.assertEqual(
                 log_text,
-                f"-r s3:https://example.invalid/bucket/prefix backup {home} --tag finite-agent-state --json",
+                f"-r s3:https://example.invalid/bucket/prefix backup {state_root} --tag finite-agent-state --json",
             )
 
     def test_periodic_backup_runs_while_command_is_alive(self) -> None:
@@ -259,8 +266,11 @@ class AgentEntrypointTest(unittest.TestCase):
             fake_bin.mkdir()
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
-            home = tmp / "agent"
-            home.mkdir()
+            state_root = tmp / "data"
+            home = state_root / "agent"
+            workspace = state_root / "workspace"
+            home.mkdir(parents=True)
+            workspace.mkdir()
             (home / "config.json").write_text("{}", encoding="utf-8")
             fake_restic.write_text(
                 "#!/usr/bin/env sh\n"
@@ -276,6 +286,8 @@ class AgentEntrypointTest(unittest.TestCase):
                     "PATH": f"{fake_bin}:{env['PATH']}",
                     "RESTIC_FAKE_LOG": str(log_path),
                     "FINITECHAT_HOME": str(home),
+                    "FINITECHAT_WORKSPACE": str(workspace),
+                    "FINITE_AGENT_STATE_ROOT": str(state_root),
                     "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                     "FINITE_AGENT_BACKUP_INTERVAL_SECS": "1",
                     "FINITE_AGENT_RESTIC_REPOSITORY": "s3:https://example.invalid/bucket/prefix",
@@ -298,7 +310,7 @@ class AgentEntrypointTest(unittest.TestCase):
             self.assertTrue(
                 all(
                     line
-                    == f"-r s3:https://example.invalid/bucket/prefix backup {home} --tag finite-agent-state --json"
+                    == f"-r s3:https://example.invalid/bucket/prefix backup {state_root} --tag finite-agent-state --json"
                     for line in log_lines
                 )
             )
@@ -333,8 +345,11 @@ class AgentEntrypointTest(unittest.TestCase):
             fake_bin.mkdir()
             fake_restic = fake_bin / "restic"
             log_path = tmp / "restic.log"
-            home = tmp / "agent"
-            home.mkdir()
+            state_root = tmp / "data"
+            home = state_root / "agent"
+            workspace = state_root / "workspace"
+            home.mkdir(parents=True)
+            workspace.mkdir()
             (home / "config.json").write_text("{}", encoding="utf-8")
             (home / ".finitechat-backup-active").write_text("active", encoding="utf-8")
             fake_restic.write_text(
@@ -348,6 +363,8 @@ class AgentEntrypointTest(unittest.TestCase):
                     "PATH": f"{fake_bin}:{env['PATH']}",
                     "RESTIC_FAKE_LOG": str(log_path),
                     "FINITECHAT_HOME": str(home),
+                    "FINITECHAT_WORKSPACE": str(workspace),
+                    "FINITE_AGENT_STATE_ROOT": str(state_root),
                     "FINITE_AGENT_BACKUP_ON_EXIT": "1",
                     "FINITE_AGENT_RESTIC_REPOSITORY": "s3:https://example.invalid/bucket/prefix",
                     "FINITE_AGENT_RESTIC_PASSWORD": "secret",
@@ -365,6 +382,36 @@ class AgentEntrypointTest(unittest.TestCase):
             self.assertFalse(log_path.exists())
             self.assertIn("child-done", result.stdout)
             self.assertIn("FINITE_AGENT_BACKUP_SKIPPED activity_active=true", result.stdout)
+
+    def test_backup_rejects_workspace_outside_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_value:
+            tmp = Path(tmp_value)
+            state_root = tmp / "data"
+            home = state_root / "agent"
+            home.mkdir(parents=True)
+            (home / "config.json").write_text("{}", encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "FINITECHAT_HOME": str(home),
+                    "FINITECHAT_WORKSPACE": str(tmp / "outside-workspace"),
+                    "FINITE_AGENT_STATE_ROOT": str(state_root),
+                    "FINITE_AGENT_BACKUP_ON_EXIT": "1",
+                    "FINITE_AGENT_RESTIC_REPOSITORY": "s3:https://example.invalid/bucket/prefix",
+                    "FINITE_AGENT_RESTIC_PASSWORD": "secret",
+                }
+            )
+            result = subprocess.run(
+                [str(ENTRYPOINT), "sh", "-c", "echo child-done"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("child-done", result.stdout)
+        self.assertIn("workspace is outside state root", result.stderr)
 
 
 if __name__ == "__main__":
