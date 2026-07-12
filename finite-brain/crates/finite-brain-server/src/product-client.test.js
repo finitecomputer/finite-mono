@@ -656,7 +656,7 @@ assert.match(source, /openFolderKeyGrants\(keyring, exported, expectedRecipient,
 assert.match(source, /state\.sessionStatus = SESSION_STATUS\.UNLOCKED;[\s\S]{0,160}applyPendingInviteNavigation\(\)/);
 assert.match(
   source,
-  /setOptionalDisabled\("loadVaultButton", state\.sessionStatus !== SESSION_STATUS\.UNLOCKED \|\| !canLoadVault\(\)\)/
+  /setOptionalDisabled\([\s\S]{0,120}loadVaultButton[\s\S]{0,180}state\.sessionStatus === SESSION_STATUS\.RESUMING/
 );
 for (const [surface, pattern] of [
   ["localStorage", /\blocalStorage\b/],

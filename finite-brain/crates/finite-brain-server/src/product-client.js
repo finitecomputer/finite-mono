@@ -6553,6 +6553,22 @@ const FiniteBrainProductClient = (() => {
 
   function renderSessionSecurity() {
     const view = sessionStatusView(state.sessionStatus);
+    const vaultAction =
+      state.sessionStatus === SESSION_STATUS.LOCKED
+        ? "Resume"
+        : state.sessionStatus === SESSION_STATUS.RESUMING
+          ? "Resuming…"
+          : "Load";
+    setText("loadVaultButton", vaultAction);
+    const loadVaultButton = $("loadVaultButton");
+    loadVaultButton?.setAttribute(
+      "aria-label",
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Resume session" : "Load and decrypt vault"
+    );
+    loadVaultButton?.setAttribute(
+      "title",
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Resume session" : "Load and decrypt vault"
+    );
     setText("sessionAccountVault", activeVaultLabel());
     setText("sessionAccountIdentity", sessionIdentityLabel());
     setText("sessionAccountStatus", view.title);
@@ -6575,7 +6591,10 @@ const FiniteBrainProductClient = (() => {
     }
     safeSetHidden("connectSignerButton", state.signerStatus === "connected");
     setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled("loadVaultButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault());
+    setOptionalDisabled(
+      "loadVaultButton",
+      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
+    );
     setOptionalDisabled(
       "createOrganizationVaultButton",
       state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
@@ -9201,7 +9220,8 @@ const FiniteBrainProductClient = (() => {
       }
     });
     $("loadVaultButton").addEventListener("click", () => {
-      loadVaultReader().catch((error) => {
+      const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
+      operation.catch((error) => {
         state.lastError = error.message;
         log("Failed to load Vault reader.", { error: error.message });
         state.readerBusy = false;

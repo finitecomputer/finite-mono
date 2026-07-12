@@ -1177,6 +1177,20 @@ pre {
   font-weight: 600;
 }
 
+.obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled) {
+  border-color: transparent;
+  background: var(--blue-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 28%, transparent);
+  color: var(--blue-strong);
+}
+
+.obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled):hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--blue-soft) 70%, var(--blue));
+  box-shadow: var(--shadow-control-hover);
+  color: var(--blue-strong);
+}
+
 .vault-create-row {
   width: 100%;
 }
