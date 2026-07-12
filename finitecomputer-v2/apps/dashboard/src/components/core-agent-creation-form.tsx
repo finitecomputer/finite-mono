@@ -15,14 +15,12 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { CoreRunnerClass } from "@/lib/core-client";
 
 export function CoreAgentCreationForm({
   error,
   idempotencyKey,
   initialName,
   initialPictureUrl,
-  runnerClass,
   requiresAccess,
   stripeConfigured,
 }: {
@@ -30,7 +28,6 @@ export function CoreAgentCreationForm({
   idempotencyKey: string;
   initialName?: string | null;
   initialPictureUrl?: string | null;
-  runnerClass: CoreRunnerClass;
   requiresAccess: boolean;
   stripeConfigured: boolean;
 }) {
@@ -79,7 +76,6 @@ export function CoreAgentCreationForm({
       }}
     >
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
-      <input type="hidden" name="runnerClass" value={runnerClass} />
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground" aria-label="Setup progress">
         <StepDot active={step === "profile"} complete={step === "access"}>1</StepDot>

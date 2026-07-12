@@ -294,7 +294,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Oslo Bot");
       assert.equal(post.launchCode, "fixture-launch-code");
-      assert.equal(post.runnerClass, "apple_container");
+      assert.equal("runnerClass" in post, false);
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
       await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
@@ -1622,6 +1622,7 @@ async function handleCoreRequest(
       projectId,
       displayName: String(body.displayName ?? "Oslo Bot"),
       status: "requested",
+      runnerClass: "kata",
       createdAt: new Date().toISOString(),
     });
     state.requests = [requestRecord];
@@ -1643,7 +1644,7 @@ async function handleCoreRequest(
         project_id: requestRecord.project_id,
         idempotency_key: String(body.idempotencyKey ?? ""),
         display_name: requestRecord.display_name,
-        runner_class: String(body.runnerClass ?? "apple_container"),
+        runner_class: requestRecord.runner_class,
         profile_picture_url: body.profilePictureUrl ?? null,
         status: requestRecord.status,
         requested_launch_code: String(body.launchCode ?? ""),

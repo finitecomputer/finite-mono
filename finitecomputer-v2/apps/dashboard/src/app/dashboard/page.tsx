@@ -61,7 +61,6 @@ import {
 import { stripeBillingStatus } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
-  defaultRunnerClass,
   draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
@@ -785,7 +784,6 @@ function CoreAgentCreationPanel({
         idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
         initialName={draft?.displayName}
         initialPictureUrl={draft?.profilePictureUrl}
-        runnerClass={draft?.runnerClass ?? defaultRunnerClass()}
         requiresAccess={requiresAccess}
         stripeConfigured={stripeBillingStatus().configured}
       />

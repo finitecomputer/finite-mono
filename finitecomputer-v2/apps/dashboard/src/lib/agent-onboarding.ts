@@ -1,27 +1,16 @@
 import { sealData, unsealData } from "iron-session";
 
-import type { CoreRunnerClass } from "@/lib/core-client";
-
 export const AGENT_DRAFT_COOKIE = "finite-agent-draft";
 export const AGENT_DRAFT_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_AGENT_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exhausted";
 
-const RUNNER_CLASSES = new Set<CoreRunnerClass>([
-  "local_docker",
-  "apple_container",
-  "kata",
-  "phala",
-  "enclavia",
-]);
-
 export type AgentOnboardingDraft = {
   version: 1;
   workosUserId: string;
   displayName: string;
   profilePictureUrl: string | null;
-  runnerClass: CoreRunnerClass;
   idempotencyKey: string;
   issuedAtMs: number;
   /** Present only after this signed draft actually initiated Stripe Checkout. */
@@ -62,40 +51,6 @@ export function agentCreationErrorMessage(error: unknown): string {
   return message;
 }
 
-export function configuredRunnerClasses(
-  env: Record<string, string | undefined> = process.env
-): CoreRunnerClass[] {
-  const fallback = defaultRunnerClass(env);
-  const configured = (env.FC_DASHBOARD_RUNNER_CLASSES ?? fallback)
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value): value is CoreRunnerClass => RUNNER_CLASSES.has(value as CoreRunnerClass));
-  return configured.length ? Array.from(new Set(configured)) : [fallback];
-}
-
-export function defaultRunnerClass(
-  env: Record<string, string | undefined> = process.env
-): CoreRunnerClass {
-  const configured = env.FC_DASHBOARD_DEFAULT_RUNNER_CLASS?.trim();
-  if (configured && RUNNER_CLASSES.has(configured as CoreRunnerClass)) {
-    return configured as CoreRunnerClass;
-  }
-  return env.NODE_ENV === "production" ? "kata" : "apple_container";
-}
-
-export function resolveRunnerClass(
-  requested: FormDataEntryValue | null,
-  env: Record<string, string | undefined> = process.env
-) {
-  const allowed = configuredRunnerClasses(env);
-  const candidate = typeof requested === "string" ? requested.trim() : "";
-  if (!candidate) return allowed[0];
-  if (!allowed.includes(candidate as CoreRunnerClass)) {
-    throw new Error("That hosting option is not available.");
-  }
-  return candidate as CoreRunnerClass;
-}
-
 export function normalizeAgentDisplayName(value: FormDataEntryValue | null) {
   const name = typeof value === "string" ? value.trim().replace(/\s+/gu, " ") : "";
   if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/u.test(name)) {
@@ -130,7 +85,6 @@ export async function unsealAgentOnboardingDraft(
       draft.workosUserId !== workosUserId ||
       !draft.displayName?.trim() ||
       !draft.idempotencyKey?.trim() ||
-      !RUNNER_CLASSES.has(draft.runnerClass) ||
       !Number.isFinite(draft.issuedAtMs) ||
       (draft.stripeCheckoutStartedAtMs != null &&
         (!Number.isFinite(draft.stripeCheckoutStartedAtMs) ||
@@ -141,7 +95,15 @@ export async function unsealAgentOnboardingDraft(
     ) {
       return null;
     }
-    return draft;
+    return {
+      version: 1,
+      workosUserId: draft.workosUserId,
+      displayName: draft.displayName,
+      profilePictureUrl: draft.profilePictureUrl ?? null,
+      idempotencyKey: draft.idempotencyKey,
+      issuedAtMs: draft.issuedAtMs,
+      stripeCheckoutStartedAtMs: draft.stripeCheckoutStartedAtMs,
+    };
   } catch {
     return null;
   }

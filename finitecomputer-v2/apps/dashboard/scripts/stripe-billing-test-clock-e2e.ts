@@ -398,7 +398,6 @@ async function assertAgentCreationBlocked(coreUrl: string) {
         displayName: "Blocked Billing E2E Agent",
         launchCode: "",
         idempotencyKey: `stripe-e2e-blocked-${runId}`,
-        runnerClass: "kata",
       }),
     }
   );

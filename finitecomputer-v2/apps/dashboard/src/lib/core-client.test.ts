@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   coreAgentCreationRequestForProject,
+  coreAgentCreationRequestBody,
   coreBridgeStatus,
   coreIdentityHeaders,
   coreProjectLabel,
@@ -16,6 +17,36 @@ import {
   type CoreVisibleProject,
   loadCoreSourceHostRelayEndpoint,
 } from "./core-client";
+
+test("agent creation payload cannot submit provider placement", () => {
+  const staleInput = {
+    displayName: "Moss",
+    launchCode: "launch-fixture",
+    idempotencyKey: "request-fixture",
+    profilePictureUrl: "https://chat.example/profile.png",
+    runnerClass: "phala",
+  };
+  const body = coreAgentCreationRequestBody(staleInput);
+  assert.deepEqual(body, {
+    displayName: "Moss",
+    launchCode: "launch-fixture",
+    idempotencyKey: "request-fixture",
+    profilePictureUrl: "https://chat.example/profile.png",
+  });
+  assert.equal("runnerClass" in body, false);
+  assert.deepEqual(
+    coreAgentCreationRequestBody({
+      displayName: "Moss",
+      launchCode: "",
+      idempotencyKey: "request-without-picture",
+    }),
+    {
+      displayName: "Moss",
+      launchCode: "",
+      idempotencyKey: "request-without-picture",
+    }
+  );
+});
 
 test("coreBridgeStatus requires the Core URL but not a service token for user routes", () => {
   assert.deepEqual(coreBridgeStatus({}), {

@@ -3,8 +3,6 @@ import test from "node:test";
 
 import {
   agentCreationErrorMessage,
-  configuredRunnerClasses,
-  defaultRunnerClass,
   draftStartedStripeCheckout,
   normalizeAgentDisplayName,
   resolveAgentCreationAccessPath,
@@ -27,7 +25,6 @@ test("only a signed draft that initiated Stripe is eligible for checkout complet
     workosUserId: "user-a",
     displayName: "Moss",
     profilePictureUrl: null,
-    runnerClass: "kata" as const,
     idempotencyKey: "idem-checkout",
     issuedAtMs: 1_000,
   };
@@ -62,23 +59,6 @@ const env = {
   NODE_ENV: "production",
 };
 
-test("production defaults to Kata while local development defaults to Apple Container", () => {
-  assert.equal(defaultRunnerClass(env), "kata");
-  assert.equal(defaultRunnerClass({ NODE_ENV: "development" }), "apple_container");
-  assert.deepEqual(configuredRunnerClasses(env), ["kata"]);
-});
-
-test("runner availability is explicit and bounded", () => {
-  assert.deepEqual(
-    configuredRunnerClasses({
-      NODE_ENV: "production",
-      FC_DASHBOARD_DEFAULT_RUNNER_CLASS: "kata",
-      FC_DASHBOARD_RUNNER_CLASSES: "kata, phala,unknown,kata",
-    }),
-    ["kata", "phala"]
-  );
-});
-
 test("agent names are compact user-facing values", () => {
   assert.equal(normalizeAgentDisplayName("  Moss   Agent  "), "Moss Agent");
   assert.throws(() => normalizeAgentDisplayName(""), /between 1 and 80/u);
@@ -92,7 +72,6 @@ test("onboarding draft is sealed, user-bound, and expiring", async () => {
       workosUserId: "user-a",
       displayName: "Moss",
       profilePictureUrl: "https://chat.example/profile.png",
-      runnerClass: "kata",
       idempotencyKey: "request-a",
       issuedAtMs,
     },
@@ -108,4 +87,21 @@ test("onboarding draft is sealed, user-bound, and expiring", async () => {
     await unsealAgentOnboardingDraft(sealed, "user-a", env, issuedAtMs + 25 * 60 * 60 * 1000),
     null
   );
+});
+
+test("onboarding draft strips stale provider placement state", async () => {
+  const issuedAtMs = Date.now();
+  const staleDraft = {
+    version: 1 as const,
+    workosUserId: "user-a",
+    displayName: "Moss",
+    profilePictureUrl: null,
+    idempotencyKey: "request-stale-provider",
+    issuedAtMs,
+    runnerClass: "phala",
+  };
+  const sealed = await sealAgentOnboardingDraft(staleDraft, env);
+  const draft = await unsealAgentOnboardingDraft(sealed, "user-a", env, issuedAtMs + 1000);
+  assert(draft);
+  assert.equal("runnerClass" in draft, false);
 });

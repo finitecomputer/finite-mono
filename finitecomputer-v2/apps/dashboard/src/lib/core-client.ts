@@ -445,13 +445,24 @@ export async function loadCoreBillingOverview(
   }
 }
 
-export async function requestCoreAgentCreation(input: {
+export type CoreAgentCreationInput = {
   displayName: string;
   launchCode: string;
   idempotencyKey: string;
-  runnerClass: CoreRunnerClass;
   profilePictureUrl?: string | null;
-}) {
+};
+
+export function coreAgentCreationRequestBody(input: CoreAgentCreationInput) {
+  const profilePictureUrl = optionalString(input.profilePictureUrl);
+  return {
+    displayName: input.displayName,
+    launchCode: input.launchCode,
+    idempotencyKey: input.idempotencyKey,
+    ...(profilePictureUrl ? { profilePictureUrl } : {}),
+  };
+}
+
+export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
   const status = coreBridgeStatus();
   if (!status.configured) {
     throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
@@ -466,10 +477,7 @@ export async function requestCoreAgentCreation(input: {
     account,
     {
       method: "POST",
-      body: JSON.stringify({
-        ...input,
-        profilePictureUrl: optionalString(input.profilePictureUrl),
-      }),
+      body: JSON.stringify(coreAgentCreationRequestBody(input)),
     }
   );
   invalidateCoreReadCache();

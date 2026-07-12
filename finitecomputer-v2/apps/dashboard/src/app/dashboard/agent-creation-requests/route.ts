@@ -9,7 +9,6 @@ import {
   agentCreationErrorMessage,
   normalizeAgentDisplayName,
   resolveAgentCreationAccessPath,
-  resolveRunnerClass,
   sealAgentOnboardingDraft,
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
@@ -56,7 +55,6 @@ export async function POST(request: Request) {
       throw new Error("Sign in again to create your agent.");
     }
     const displayName = normalizeAgentDisplayName(formData.get("displayName"));
-    const runnerClass = resolveRunnerClass(formData.get("runnerClass"));
     const idempotencyKey = validIdempotencyKey(formData.get("idempotencyKey"));
     const existingDraft = await currentDraft(request, account.workosUserId);
     const profilePictureUrl = await profilePicture(
@@ -69,7 +67,6 @@ export async function POST(request: Request) {
       workosUserId: account.workosUserId,
       displayName,
       profilePictureUrl,
-      runnerClass,
       idempotencyKey,
       issuedAtMs: Date.now(),
       stripeCheckoutStartedAtMs: null,
@@ -136,7 +133,6 @@ async function launchDraft(draft: AgentOnboardingDraft, launchCode = "") {
     displayName: draft.displayName,
     launchCode,
     idempotencyKey: draft.idempotencyKey,
-    runnerClass: draft.runnerClass,
     profilePictureUrl: draft.profilePictureUrl,
   });
 }

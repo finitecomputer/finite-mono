@@ -44,7 +44,6 @@ export async function GET(request: Request) {
       displayName: draft.displayName,
       launchCode: "",
       idempotencyKey: draft.idempotencyKey,
-      runnerClass: draft.runnerClass,
       profilePictureUrl: draft.profilePictureUrl,
     });
     dashboard.searchParams.set("new", "1");
