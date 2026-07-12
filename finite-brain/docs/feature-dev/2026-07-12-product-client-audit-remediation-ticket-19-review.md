@@ -36,5 +36,6 @@ SPEC_STATUS: pass after fixes
 SPEC_FINDINGS:
 - Stale access failures are marked before the Session epoch guard, so a late
   rethrow cannot recreate feedback after Session Lock.
-- Real browser proof is intentionally deferred to the final isolated-Vault pass.
+- The final isolated browser flow passed a generic visible failure followed by
+  Session Lock purge of that feedback and session-owned plaintext.
 ```

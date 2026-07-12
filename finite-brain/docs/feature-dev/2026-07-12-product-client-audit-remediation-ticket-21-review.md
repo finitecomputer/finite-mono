@@ -6,7 +6,7 @@
   input; direct list revoke is guarded; revocation does not inspect recipient
   links; client-only secret material stays ephemeral
 - Baseline: `fe577fc`
-- Current diff: `fe577fc...dfc8a0b`
+- Current diff: `fe577fc...4909693`
 
 ## Implementation Summary
 
@@ -35,4 +35,10 @@ FINDINGS:
   revoke, and direct pending-list revoke.
 - The revoke resolver uses explicit, remembered, or loaded administrator-side
   IDs and never calls the recipient-only link lookup.
+
+FINAL_INTEGRATION_CORRECTION:
+- A real recipient acceptance flow found that the state reset correctly locked
+  the Session but did not immediately re-render the new lock/notice. Normal
+  and email invitation acceptance now render after setting that notice; a
+  deterministic regression guard and the disposable browser flow pass.
 ```

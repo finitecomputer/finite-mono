@@ -273,6 +273,7 @@ function checkStaticShell() {
   );
   assertNotIncludes(html, "graphFilterInput", "Product Client HTML");
   assertNotIncludes(html, "aria-label=\"Filter graph\"", "Product Client HTML");
+  assertNotIncludes(html, "graph-icon-button", "Product Client HTML");
   assertNotIncludes(css, ".graph-controls", "Product Client CSS");
   assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");

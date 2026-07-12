@@ -30,5 +30,7 @@ SPEC_STATUS: pass
 FINDINGS:
 - None. The implementation preserves the independent Folder key/access boundary
   while transmitting only hierarchy metadata for the context parent.
-- Final browser POST proof remains in the isolated-Vault integration pass.
+- The final isolated browser flow passed the context-menu Child Folder POST and
+  confirmed parent metadata, nested path, independent grants, and default
+  `all_members` access.
 ```

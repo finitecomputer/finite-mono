@@ -3,8 +3,8 @@
 - Issue: #21 — make Vault invitation actions match Session Lock
 - Fixed point before session: `fe577fc`
 - Worker session: `/root/ticket_21_invitations`
-- Commit: `dfc8a0b`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Commit: `dfc8a0b` + final integration correction `4909693`
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -28,6 +28,9 @@
   pending admin-row ID
 - Boundary preserved: normal inspect/accept still call the recipient-bound
   route, but the admin revoke resolver never calls it
+- Final integration correction: accepting a normal or email Vault invitation
+  now renders the reset Session immediately, so stale unlocked chrome cannot
+  hide the required safe unlock notice after the active Vault changes
 - `tdd` used: yes; deterministic panel/seam tests cover controls, guards,
   input lifecycle, binding, resolver paths, and secret handling
 - Commands run during implementation:
@@ -44,7 +47,11 @@
 - Review specifically verified: every direct protected action guards before
   epoch capture; the revoke resolver does not inspect recipient links; manual
   Invite Secret input remains DOM/session-only
-- Final browser proof: deferred to the final isolated disposable-Vault pass
+- Final browser proof: locked controls stayed disabled; an admin created an
+  invite, a recipient accepted it through the visible panel and immediately
+  saw the locked Session/Unlock guidance, then unlocked the invited Vault.
+  The same disposable flow confirmed the admin-side revoke path remains
+  available without recipient-link inspection.
 
 ## Risks
 

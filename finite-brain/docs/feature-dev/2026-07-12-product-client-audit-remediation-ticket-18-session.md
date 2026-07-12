@@ -4,7 +4,7 @@
 - Fixed point before session: `3c828e0`
 - Worker session: `/root/ticket_18_page_persistence`
 - Commit: `7fc85c4`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -27,7 +27,7 @@
   - `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`
   - `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
   - `git diff --check`
-- Full suite command: deferred until all remediation tickets are integrated
+- Final shared suite: `scripts/with-dev-env cargo test -p finite-brain-server --locked` passed
 
 ## Review
 
@@ -36,12 +36,11 @@
 - Spec findings: the behavior matches the signing requirement. The deterministic
   guard is source-contract coverage rather than a full browser handler test.
 - Worthy fixes applied: none beyond the implemented signer wiring
-- Findings ignored with reasons: the live `/client` save/delete path is the
-  pre-agreed final integration seam and will be exercised against a disposable
-  Vault after all tickets land.
+- Final browser proof: the isolated Product Client submitted a signed Page
+  revision through the visible Save action and a signed tombstone through the
+  visible Delete Page action; both server requests succeeded.
 
 ## Risks
 
-- A focused Rust test currently expects a stale `graph-icon-button` HTML class
-  that was already absent at the ticket baseline. It is outside this ticket and
-  will be handled only if final verification proves it relevant.
+- The final static verifier now rejects the stale `graph-icon-button` HTML
+  marker alongside the existing CSS/JS absence checks.

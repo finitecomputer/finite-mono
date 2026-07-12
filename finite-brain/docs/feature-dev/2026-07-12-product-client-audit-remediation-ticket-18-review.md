@@ -26,7 +26,7 @@ signer to the unchanged encrypted revision and tombstone builders.
 ## Review Instructions
 
 Review only this issue's slice unless a severe cross-slice regression appears.
-The final browser pass supplies the public end-to-end Save/Delete proof.
+The final browser pass supplied the public end-to-end Save/Delete proof.
 
 ## Reviewer Output
 
@@ -37,6 +37,7 @@ STANDARDS_FINDINGS:
 
 SPEC_STATUS: pass
 SPEC_FINDINGS:
-- Production behavior matches the signing requirement. Browser handler proof is
-  intentionally deferred to the final disposable-vault integration pass.
+- Production behavior matches the signing requirement. The final disposable
+  browser flow passed signed Save and tombstone Delete requests through the
+  visible Product Client controls.
 ```

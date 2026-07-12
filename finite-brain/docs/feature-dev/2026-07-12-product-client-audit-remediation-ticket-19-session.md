@@ -4,7 +4,7 @@
 - Fixed point before session: `7fc85c4`
 - Worker session: `/root/ticket_19_client_feedback`
 - Commit: `cae93df`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -30,7 +30,7 @@
   - `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`
   - `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
   - `git diff --check`
-- Full suite command: deferred until all remediation tickets are integrated
+- Final shared suite: `scripts/with-dev-env cargo test -p finite-brain-server --locked` passed
 
 ## Review
 
@@ -42,11 +42,11 @@
     clear after a late rejection
 - Worthy fixes applied: all three findings
 - Final delta review: no remaining P0–P3 findings
-- Findings deferred with reasons: a real protected-action failure is covered by
-  the pre-agreed final disposable-Vault browser pass.
+- Final browser proof: an isolated client received a generic protected-action
+  failure in the visible safe feedback region; Session Lock then cleared that
+  feedback and the session-owned plaintext state.
 
 ## Risks
 
-- The focused Rust asset test currently expects a stale `graph-icon-button`
-  HTML class that was already absent at this ticket baseline. The Graph ticket
-  owns that assertion and final integration will rerun it.
+- The final static verifier now rejects the stale `graph-icon-button` HTML
+  marker alongside the existing CSS/JS absence checks.

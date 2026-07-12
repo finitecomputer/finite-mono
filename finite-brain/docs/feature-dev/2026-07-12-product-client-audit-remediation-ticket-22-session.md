@@ -4,7 +4,7 @@
 - Fixed point before session: `ca86dbe`
 - Worker session: `/root/ticket_22_child_folders`
 - Commit: `f4d66f8`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -41,7 +41,9 @@
 - Standards review: pass; no actionable findings
 - Spec review: pass; hierarchy and independent scope match the portability
   contract and the remediation spec
-- Final browser proof: deferred to the final isolated organization-Vault flow
+- Final browser proof: the isolated organization-Vault flow created a Child
+  Folder through the context menu and confirmed the parent id, nested path,
+  independent grants, and `all_members` default access in the real POST.
 
 ## Risks
 

@@ -4,7 +4,7 @@
 - Fixed point before session: `b946ed6`
 - Worker session: `/root/ticket_23_graph_filter`
 - Commit: `72b5d82`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -46,7 +46,11 @@
   rechecked clean
 - Spec review: pass; the graph continues to use decrypted accessible Pages only
   and the verifier cleanup removes only markers already absent at baseline
-- Final browser proof: deferred to the final isolated desktop/narrow-width pass
+- Final browser proof: isolated desktop and supported narrow (768×844) browser
+  checks confirmed no Graph header filter/action, fully fitted Graph stats and
+  title, and reachable Zoom, Reset, and Full screen controls. The narrow
+  screenshot artifact remains outside the repository because it contains only
+  disposable local test content.
 
 ## Risks
 

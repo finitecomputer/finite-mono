@@ -4,7 +4,7 @@
 - Fixed point before session: `65b98a7`
 - Worker session: `/root/ticket_20_access_loss`
 - Commit: `390c801`
-- Status: complete; integrated browser verification remains in the final shared pass
+- Status: complete; final shared browser verification passed
 
 ## Inputs
 
@@ -41,11 +41,15 @@
   concurrent read-only ticket analyses
 - Findings: none. The error predicate is exact and only invoked after the
   response has been authenticated and correlated with the active session epoch.
-- Final browser proof: an isolated local Product Client receives the exact
-  active-Vault metadata `403` reason `vault access required`; it purges the
-  session, locks, and retains the Vault-change notice. The same disposable
-  flow also proved immediate Lock → Unlock works after the client began adding
-  a fresh signed HTTP auth nonce per protected request.
+- Final browser proof: a disposable admin created an organization Vault and
+  invited a disposable Member Identity through the Product Client. The Member
+  accepted the invitation, saw the newly locked Session and safe unlock
+  notice, then unlocked the organization Vault. The admin removed that Member
+  through Vault People; the Member's real metadata refresh received the
+  server's exact `403` reason `vault access required`, purged the Session,
+  locked, and retained the Vault-change notice. The same isolated flow also
+  proved immediate Lock → Unlock works after the client began adding a fresh
+  signed HTTP auth nonce per protected request.
 
 ## Risks
 
