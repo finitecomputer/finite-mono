@@ -560,6 +560,16 @@ assert.equal(
   ),
   null
 );
+assert.equal(
+  client.missingVisibleVaultFallback(
+    "resuming",
+    "personal-aaaaaaaaaaaaaaaa",
+    [{ vaultId: "org-testr-mr9bmjs", kind: "organization" }],
+    "aa".repeat(32),
+    "personal"
+  ),
+  "org-testr-mr9bmjs"
+);
 assert.deepEqual(
   Array.from(
     client.withActiveVaultOption(
