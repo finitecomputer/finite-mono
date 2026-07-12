@@ -547,6 +547,7 @@ assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"
 assert.match(source, /mountAccessPanelInSettings\(\)/);
 assert.match(source, /nextMode === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
 assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "access"/);
+assert.match(source, /state\.settingsModalOpen && state\.settingsSection === "access"[\s\S]{0,100}refreshAccessManagementListsInBackground\(\)/);
 assert.match(source, /closeSettingsModal\(\)/);
 assert.match(cssSource, /\.settings-modal-backdrop\s*\{/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);

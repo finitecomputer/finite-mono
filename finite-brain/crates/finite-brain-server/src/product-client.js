@@ -7324,7 +7324,9 @@ const FiniteBrainProductClient = (() => {
     rememberVisibleVault(metadata);
     log("Loaded Vault metadata.", metadata);
     render();
-    if (state.activeSidebarMode === "access") refreshAccessManagementListsInBackground();
+    if (state.settingsModalOpen && state.settingsSection === "access") {
+      refreshAccessManagementListsInBackground();
+    }
   }
 
   function canLoadVaultAdminLists() {

@@ -2380,7 +2380,7 @@ mod tests {
             css_response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, max-age=0"
         );
-        let css_body = to_bytes(css_response.into_body(), 96 * 1024)
+        let css_body = to_bytes(css_response.into_body(), 128 * 1024)
             .await
             .expect("client css body");
         let css_body = std::str::from_utf8(&css_body).expect("client css utf8");
