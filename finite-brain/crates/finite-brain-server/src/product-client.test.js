@@ -2110,6 +2110,32 @@ assert.match(source, /"vaultInviteSecretInput"/);
   ]);
   assert.equal(searchRows.length, 1);
   assert.equal(searchRows[0].detail, "crypto/folder-keys.md");
+  assert.equal(searchRows[0].matchSnippet, "# Folder Keys Readable key material stays client-side.");
+  assert.equal(
+    JSON.stringify(client.searchHighlightSegments("Testing test TEST", "test")),
+    JSON.stringify([
+      { match: true, text: "Test" },
+      { match: false, text: "ing " },
+      { match: true, text: "test" },
+      { match: false, text: " " },
+      { match: true, text: "TEST" },
+    ])
+  );
+  assert.equal(
+    JSON.stringify(client.searchHighlightSegments("a+b and A+B", "a+b")),
+    JSON.stringify([
+      { match: true, text: "a+b" },
+      { match: false, text: " and " },
+      { match: true, text: "A+B" },
+    ])
+  );
+  assert.equal(
+    client.searchResultSnippet(
+      { path: "notes.md", text: "A focused keyword appears in this sentence.", title: "Notes" },
+      "keyword"
+    ),
+    "A focused keyword appears in this sentence."
+  );
   const paletteRows = client.commandPaletteRows("folder", [
     {
       folderId: "crypto",

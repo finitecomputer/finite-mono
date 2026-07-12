@@ -4243,6 +4243,58 @@ const FiniteBrainProductClient = (() => {
       .slice(0, 12);
   }
 
+  function searchHighlightSegments(text, query) {
+    const source = String(text || "");
+    const needle = String(query || "").trim();
+    if (!source) return [];
+    if (!needle) return [{ match: false, text: source }];
+
+    const haystack = source.toLowerCase();
+    const normalizedNeedle = needle.toLowerCase();
+    const segments = [];
+    let cursor = 0;
+    let matchIndex = haystack.indexOf(normalizedNeedle, cursor);
+
+    while (matchIndex >= 0) {
+      if (matchIndex > cursor) {
+        segments.push({ match: false, text: source.slice(cursor, matchIndex) });
+      }
+      segments.push({
+        match: true,
+        text: source.slice(matchIndex, matchIndex + needle.length),
+      });
+      cursor = matchIndex + needle.length;
+      matchIndex = haystack.indexOf(normalizedNeedle, cursor);
+    }
+
+    if (cursor < source.length) {
+      segments.push({ match: false, text: source.slice(cursor) });
+    }
+    return segments.length ? segments : [{ match: false, text: source }];
+  }
+
+  function searchTextSnippet(text, query, maxLength = 96) {
+    const source = String(text || "").replace(/\s+/g, " ").trim();
+    const needle = String(query || "").trim();
+    if (!source || !needle) return "";
+
+    const matchIndex = source.toLowerCase().indexOf(needle.toLowerCase());
+    if (matchIndex < 0) return "";
+
+    const snippetLength = Math.max(maxLength, needle.length);
+    const start = Math.max(0, matchIndex - Math.floor((snippetLength - needle.length) / 2));
+    const end = Math.min(source.length, start + snippetLength);
+    const prefix = start > 0 ? "…" : "";
+    const suffix = end < source.length ? "…" : "";
+    return `${prefix}${source.slice(start, end).trim()}${suffix}`;
+  }
+
+  function searchResultSnippet(page, query) {
+    return [page?.text, page?.path, page?.folderId, page?.title]
+      .map((text) => searchTextSnippet(text, query))
+      .find(Boolean) || "";
+  }
+
   function searchPageRows(query, pages = readablePages()) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return [];
@@ -4259,6 +4311,7 @@ const FiniteBrainProductClient = (() => {
         ...page,
         label: pageTitleForPage(page),
         detail: `${page.folderId}/${page.path || `${page.objectId}.md`}`,
+        matchSnippet: searchResultSnippet(page, needle),
       }));
   }
 
@@ -5638,15 +5691,41 @@ const FiniteBrainProductClient = (() => {
     button.appendChild(detailElement);
   }
 
+  function appendSearchHighlightedText(parent, text, query) {
+    for (const segment of searchHighlightSegments(text, query)) {
+      if (!segment.match) {
+        parent.appendChild(document.createTextNode(segment.text));
+        continue;
+      }
+      const match = document.createElement("mark");
+      match.className = "search-match";
+      match.textContent = segment.text;
+      parent.appendChild(match);
+    }
+  }
+
+  function appendSearchMatchSnippet(button, snippet, query) {
+    if (!snippet) return;
+    const snippetElement = document.createElement("span");
+    snippetElement.className = "search-match-snippet";
+    appendSearchHighlightedText(snippetElement, snippet, query);
+    button.appendChild(snippetElement);
+  }
+
   function obsidianTreeButton(label, detail, className, onClick, options = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = className;
     const title = document.createElement("span");
     title.className = "obsidian-file-title";
-    title.textContent = label;
+    if (options.highlightQuery) {
+      appendSearchHighlightedText(title, label, options.highlightQuery);
+    } else {
+      title.textContent = label;
+    }
     button.appendChild(title);
     appendObsidianDetail(button, detail);
+    appendSearchMatchSnippet(button, options.matchSnippet, options.highlightQuery);
     button.addEventListener("click", onClick);
     if (options.contextTarget) {
       button.addEventListener("contextmenu", (event) => {
@@ -5715,6 +5794,8 @@ const FiniteBrainProductClient = (() => {
               pageKey: row.key,
               title: row.title,
             },
+            highlightQuery: query,
+            matchSnippet: row.matchSnippet,
           }
         );
         item.appendChild(button);
@@ -10328,7 +10409,9 @@ const FiniteBrainProductClient = (() => {
     readerPageDetail,
     readerPageRows,
     resumeSession,
+    searchHighlightSegments,
     searchPageRows,
+    searchResultSnippet,
     sharedFolderRelationshipRows,
     sessionGrantOpeningAllowed,
     sessionOperationIsCurrent,

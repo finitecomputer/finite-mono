@@ -3541,6 +3541,16 @@ pre {
   padding-left: 20px;
 }
 
+.search-results .obsidian-page-button {
+  min-height: 44px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.search-results .obsidian-page-button::before {
+  top: 12px;
+}
+
 .obsidian-file-title {
   display: block;
   max-width: 100%;
@@ -3604,6 +3614,34 @@ pre {
   text-overflow: ellipsis;
   text-wrap: pretty;
   white-space: nowrap;
+}
+
+.search-match-snippet {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 560;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-match {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--blue) 32%, transparent);
+  box-decoration-break: clone;
+  color: var(--text);
+  padding: 0 1px;
+  -webkit-box-decoration-break: clone;
+}
+
+.search-results .obsidian-page-button.active .search-match {
+  background: color-mix(in srgb, var(--blue) 52%, var(--surface-raised));
+  color: var(--text);
 }
 
 .obsidian-folder-button.locked .obsidian-file-detail,
