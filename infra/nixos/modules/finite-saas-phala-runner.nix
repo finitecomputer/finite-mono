@@ -33,21 +33,16 @@ in
       FC_RUNNER_ID = "finite-phala-runner-1";
       FC_RUNNER_SOURCE_HOST_ID = "finite-lat-1-phala-control-1";
       FC_RUNNER_CLASS = "phala";
-      FC_RUNNER_WORK_ROOT = "/var/lib/finite-saas-runner-phala";
 
       # Dark means no new creation leases. Existing-runtime controls remain a
       # separate contract; changing this value requires a reviewed Nix deploy.
       FC_RUNNER_DRAIN = "true";
       FC_RUNNER_MAX_SANDBOXES = "1";
 
-      # The HTTPS adapter pins the API origin/version in code. Do not add a
-      # provider URL override or a CLI binary here. The only intended network
-      # destinations are loopback Core and cloud-api.phala.com:443.
-      FC_RUNNER_PHALA_INSTANCE_TYPE = "tdx.medium";
-      FC_RUNNER_PHALA_DISK_SIZE = "40G";
-      FC_RUNNER_PHALA_KMS = "PHALA";
-      FC_RUNNER_PHALA_PUBLIC_LOGS = "false";
-      FC_RUNNER_PHALA_PUBLIC_SYSINFO = "false";
+      # The HTTPS adapter pins the API origin/version, exact Medium/40 GB
+      # shape, Cloud KMS, and private-log policy in code. None is a deploy-time
+      # provider knob. The only intended network destinations are loopback
+      # Core and cloud-api.phala.com:443.
     };
 
     serviceConfig = {
