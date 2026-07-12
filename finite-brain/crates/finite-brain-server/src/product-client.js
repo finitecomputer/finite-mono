@@ -769,16 +769,16 @@ const FiniteBrainProductClient = (() => {
       $(id)?.replaceChildren?.();
     }
     setText("readerPageTitle", "Session locked");
-    setText("readerPagePath", "Resume the session to reopen encrypted Folder Key Grants");
+    setText("readerPagePath", "Unlock the session to reopen encrypted Folder Key Grants");
     const readerContent = $("readerPageContent");
     if (readerContent) {
       readerContent.replaceChildren?.();
-      readerContent.textContent = "Session locked. Resume to reopen encrypted Folder Key Grants.";
+      readerContent.textContent = "Session locked. Unlock to reopen encrypted Folder Key Grants.";
     }
     if (typeof document.title === "string") document.title = "FiniteBrain";
     setPill("graphStats", "0 nodes / 0 links", "muted");
     setText("graphEmptyTitle", "No graph yet");
-    setText("graphEmptyCopy", "Resume the session to rebuild the local graph.");
+    setText("graphEmptyCopy", "Unlock the session to rebuild the local graph.");
     const graphEmptyState = $("graphEmptyState");
     if (graphEmptyState) graphEmptyState.hidden = false;
     const editorDrawer = $("editorDrawer");
@@ -840,7 +840,7 @@ const FiniteBrainProductClient = (() => {
       clearSessionSecretsAndPlaintext(state);
       clearSessionOwnedDom();
     }
-    throw new Error("Session changed while protected client work was in progress; resume again");
+    throw new Error("Session changed while protected client work was in progress; unlock again");
   }
 
   function setActiveVaultId(vaultId, options = {}) {
@@ -1025,7 +1025,7 @@ const FiniteBrainProductClient = (() => {
       const sessionEpoch = state.sessionEpoch;
       const expectedPubkeyHex = state.pubkeyHex;
       requireCurrentSessionEpoch(sessionEpoch);
-      if (!expectedPubkeyHex) throw new Error("Connect and Resume the signer identity before signing");
+      if (!expectedPubkeyHex) throw new Error("Connect a signer, then unlock the session before signing");
       const signed = await provider.signEvent.call(provider, event);
       requireCurrentSessionEpoch(sessionEpoch);
       if (signedEventMatchesPinnedIdentity(expectedPubkeyHex, signed)) return signed;
@@ -1941,12 +1941,12 @@ const FiniteBrainProductClient = (() => {
         action: "Lock session",
         detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
         locked: false,
-        title: "Resuming session",
+        title: "Unlocking session",
       };
     }
     return {
-      action: "Resume session",
-      detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+      action: "Unlock session",
+      detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
       locked: true,
       title: "Session locked",
     };
@@ -2239,7 +2239,7 @@ const FiniteBrainProductClient = (() => {
       "manageVaultsCurrentDetail",
       state.metadata
         ? `${status.title}. ${vaultManagementSummary(state.metadata)}`
-        : `${status.title}. Select a Vault, then ${status.locked ? "Resume" : "Load"} to open encrypted content.`
+        : `${status.title}. Select a Vault, then ${status.locked ? "unlock it" : "load it"} to open encrypted content.`
     );
     const signerConnected = state.signerStatus === "connected";
     safeSetHidden("manageVaultsConnectSignerButton", signerConnected);
@@ -2248,9 +2248,9 @@ const FiniteBrainProductClient = (() => {
       !deriveSignerState(window.nostr).canConnect
     );
     const action = state.sessionStatus === SESSION_STATUS.LOCKED
-      ? "Resume"
+      ? "Unlock Vault"
       : state.sessionStatus === SESSION_STATUS.RESUMING
-        ? "Resuming…"
+        ? "Unlocking…"
         : "Load";
     setText("manageVaultsLoadButton", action);
     setOptionalDisabled(
@@ -5360,7 +5360,7 @@ const FiniteBrainProductClient = (() => {
       content.textContent =
         state.sessionStatus === SESSION_STATUS.UNLOCKED
           ? "Open a vault to read pages."
-          : "Session locked. Resume to reopen encrypted Folder Key Grants.";
+          : "Session locked. Unlock to reopen encrypted Folder Key Grants.";
       return;
     }
     if (!isReadablePage(page)) {
@@ -6054,7 +6054,11 @@ const FiniteBrainProductClient = (() => {
   }
 
   function vaultManagementSummary(metadata) {
-    if (!metadata) return "Choose a Vault, then Load to decrypt its readable Folders.";
+    if (!metadata) {
+      return state.sessionStatus === SESSION_STATUS.LOCKED
+        ? "Choose a Vault, then unlock it to open encrypted content."
+        : "Choose a Vault, then load it to decrypt its readable Folders.";
+    }
     if (metadata.kind === "personal") {
       return "Personal vault loaded. Use Access for Folder permissions and share links.";
     }
@@ -6161,9 +6165,24 @@ const FiniteBrainProductClient = (() => {
       }
     });
     setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
+    const vaultAction = state.sessionStatus === SESSION_STATUS.LOCKED
+      ? "Unlock Vault"
+      : state.sessionStatus === SESSION_STATUS.RESUMING
+        ? "Unlocking…"
+        : "Load";
+    setText("accessLoadVaultButton", vaultAction);
+    const accessLoadVaultButton = $("accessLoadVaultButton");
+    accessLoadVaultButton?.setAttribute(
+      "aria-label",
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock Vault" : "Load and decrypt Vault"
+    );
+    accessLoadVaultButton?.setAttribute(
+      "title",
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock Vault" : "Load and decrypt Vault"
+    );
     setOptionalDisabled(
       "accessLoadVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault()
+      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
     );
     setOptionalDisabled(
       "accessCreateOrganizationVaultButton",
@@ -6867,7 +6886,7 @@ const FiniteBrainProductClient = (() => {
       );
       setText(
         "readerPagePath",
-        sessionLocked ? "Resume the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
+        sessionLocked ? "Unlock the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
       );
       setPill("readerPageMeta", sessionLocked ? "locked" : "empty", sessionLocked ? "warn" : "muted");
       renderPageContent(null);
@@ -6894,19 +6913,19 @@ const FiniteBrainProductClient = (() => {
     const view = sessionStatusView(state.sessionStatus);
     const vaultAction =
       state.sessionStatus === SESSION_STATUS.LOCKED
-        ? "Resume"
+        ? "Unlock"
         : state.sessionStatus === SESSION_STATUS.RESUMING
-          ? "Resuming…"
+          ? "Unlocking…"
           : "Load";
     setText("loadVaultButton", vaultAction);
     const loadVaultButton = $("loadVaultButton");
     loadVaultButton?.setAttribute(
       "aria-label",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Resume session" : "Load and decrypt vault"
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock session" : "Load and decrypt vault"
     );
     loadVaultButton?.setAttribute(
       "title",
-      state.sessionStatus === SESSION_STATUS.LOCKED ? "Resume session" : "Load and decrypt vault"
+      state.sessionStatus === SESSION_STATUS.LOCKED ? "Unlock session" : "Load and decrypt vault"
     );
     setText("sessionAccountVault", activeVaultLabel());
     setText("sessionAccountIdentity", sessionIdentityLabel());
@@ -7060,7 +7079,7 @@ const FiniteBrainProductClient = (() => {
     );
     if (fallbackVaultId) {
       setActiveVaultId(fallbackVaultId);
-      state.sessionNotice = "The previously selected Vault is no longer visible. Resume session to open the fallback Vault.";
+      state.sessionNotice = "The previously selected Vault is no longer visible. Unlock the session to open the fallback Vault.";
       render();
       return state.visibleVaults;
     }
@@ -7260,7 +7279,7 @@ const FiniteBrainProductClient = (() => {
 
   async function createOrganizationVaultFromInput(inputId = "organizationVaultNameInput") {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating a Vault");
+      throw new Error("Session is locked. Unlock the session before creating a Vault");
     }
     const sessionEpoch = state.sessionEpoch;
     const input = $(inputId);
@@ -7314,7 +7333,7 @@ const FiniteBrainProductClient = (() => {
     }
     const pubkey = await window.nostr.getPublicKey();
     if (state.sessionEpoch !== operationEpoch) {
-      throw new Error("Session changed while signer connection was in progress; resume again");
+      throw new Error("Session changed while signer connection was in progress; unlock again");
     }
     const identityChanged = signerIdentityChanged(state.pubkeyHex, pubkey);
     if (identityChanged) {
@@ -7505,7 +7524,7 @@ const FiniteBrainProductClient = (() => {
 
   async function openAvailableFolderKeyGrants(options = {}) {
     if (!sessionGrantOpeningAllowed(state.sessionStatus)) {
-      throw new Error("Session is locked. Resume the session before opening encrypted Folder Key Grants");
+      throw new Error("Session is locked. Unlock the session before opening encrypted Folder Key Grants");
     }
     const sessionEpoch = state.sessionEpoch;
     const assertCurrent = () => requireCurrentSessionEpoch(sessionEpoch);
@@ -7531,7 +7550,7 @@ const FiniteBrainProductClient = (() => {
   async function loadVaultReader(options = {}) {
     const allowResume = options.allowResume === true;
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
-      throw new Error("Session is locked. Use Resume session before loading protected Vault state");
+      throw new Error("Session is locked. Use Unlock session before loading protected Vault state");
     }
     setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     let relockOnFailure = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
@@ -7542,7 +7561,7 @@ const FiniteBrainProductClient = (() => {
       await connectSigner({ loadVisibleVaults: false, sessionEpoch });
       if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
       if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
-        throw new Error("Signer identity changed. Use Resume session to open the new session");
+        throw new Error("Signer identity changed. Use Unlock session to open the new session");
       }
       relockOnFailure = relockOnFailure || state.sessionStatus !== SESSION_STATUS.UNLOCKED;
       if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) state.sessionStatus = SESSION_STATUS.RESUMING;
@@ -7562,7 +7581,7 @@ const FiniteBrainProductClient = (() => {
       renderGraphView();
       state.sessionStatus = SESSION_STATUS.UNLOCKED;
       if (applyPendingInviteNavigation()) {
-        state.sessionNotice = "Invitation details loaded into this resumed session.";
+        state.sessionNotice = "Invitation details loaded into this unlocked session.";
       }
       log("Loaded Vault reader.", {
         openedFolderKeys: grants.opened.length,
@@ -7580,7 +7599,7 @@ const FiniteBrainProductClient = (() => {
 
   async function refreshReader() {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before refreshing readable content");
+      throw new Error("Session is locked. Unlock the session before refreshing readable content");
     }
     const sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
@@ -7740,7 +7759,7 @@ const FiniteBrainProductClient = (() => {
   async function createFolderFromToolbar() {
     if (!state.metadata) throw new Error("Open a Vault before creating a Folder");
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating a Folder");
+      throw new Error("Session is locked. Unlock the session before creating a Folder");
     }
     const sessionEpoch = state.sessionEpoch;
     const vaultId = state.activeVaultId;
@@ -8940,7 +8959,7 @@ const FiniteBrainProductClient = (() => {
 
   async function createVaultInvitationFromPanel() {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating an invitation");
+      throw new Error("Session is locked. Unlock the session before creating an invitation");
     }
     const sessionEpoch = state.sessionEpoch;
     const vaultId = state.activeVaultId;
@@ -9147,8 +9166,8 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(invitation.vaultId);
       state.sessionNotice = invitation.duplicateAccept
-        ? "Invitation was already accepted. Resume session to open the selected Vault."
-        : "Invitation accepted. Resume session to open the selected Vault.";
+        ? "Invitation was already accepted. Unlock the session to open the selected Vault."
+        : "Invitation accepted. Unlock the session to open the selected Vault.";
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
       failAccessOperation(sessionEpoch, "Accept failed", error, vaultInvitationUnavailableDetail);
@@ -9160,7 +9179,7 @@ const FiniteBrainProductClient = (() => {
 
   async function claimEmailVaultInvitationFromPanel(code) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before claiming encrypted Folder Key Grants");
+      throw new Error("Session is locked. Unlock the session before claiming encrypted Folder Key Grants");
     }
     const sessionEpoch = captureSessionOperationEpoch();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
@@ -9200,8 +9219,8 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(claimed.vaultId);
       state.sessionNotice = claimed.duplicateAccept
-        ? "Email invitation was already claimed. Resume session to open the selected Vault."
-        : "Email invitation claimed. Resume session to open the selected Vault.";
+        ? "Email invitation was already claimed. Unlock the session to open the selected Vault."
+        : "Email invitation claimed. Unlock the session to open the selected Vault.";
       log("Claimed email Vault invitation.", {
         invitationId: claimed.id,
         vaultId: claimed.vaultId,
@@ -9549,7 +9568,7 @@ const FiniteBrainProductClient = (() => {
     onOptionalClick("resumeSessionButton", () => {
       resumeSession().catch((error) => {
         state.lastError = error.message;
-        log("Failed to resume Product Client session.", { error: error.message });
+        log("Failed to unlock Product Client session.", { error: error.message });
         render();
       });
     });
@@ -9764,9 +9783,10 @@ const FiniteBrainProductClient = (() => {
       });
     });
     onOptionalClick("accessLoadVaultButton", () => {
-      loadVaultReader().catch((error) => {
+      const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
+      operation.catch((error) => {
         state.lastError = error.message;
-        log("Failed to load Vault reader.", { error: error.message });
+        log("Failed to unlock or load Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
       });

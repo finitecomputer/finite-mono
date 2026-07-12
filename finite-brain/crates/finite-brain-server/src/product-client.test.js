@@ -492,8 +492,8 @@ assert.equal(sessionState.lastEmailInvitePostProof, null);
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
   JSON.stringify({
-    action: "Resume session",
-    detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+    action: "Unlock session",
+    detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
     locked: true,
     title: "Session locked",
   })
@@ -513,12 +513,12 @@ assert.equal(
     action: "Lock session",
     detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
     locked: false,
-    title: "Resuming session",
+    title: "Unlocking session",
   })
 );
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
-assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Resume session</);
+assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
 assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-haspopup="menu"/);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-controls="vaultSwitcherMenu"/);
@@ -530,10 +530,16 @@ assert.doesNotMatch(source, /sessionAccountVaultButton[\s\S]{0,180}openSettingsM
 assert.match(htmlSource, /id="manageVaultsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="manageVaultsList"/);
 assert.match(htmlSource, /id="manageVaultsLoadButton"/);
+assert.match(htmlSource, /id="manageVaultsLoadButton"[^>]*>Unlock Vault</);
+assert.match(htmlSource, /id="accessLoadVaultButton"[^>]*>Unlock Vault</);
 assert.match(htmlSource, /id="manageVaultsConnectSignerButton"/);
 assert.match(htmlSource, /id="manageCreateOrganizationVaultButton"/);
 assert.match(source, /manageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\)/);
 assert.match(source, /manageVaultsLoadButton[\s\S]{0,120}manageVaultsLoadAction\(\)/);
+assert.match(
+  source,
+  /onOptionalClick\("accessLoadVaultButton",[\s\S]{0,180}state\.sessionStatus === SESSION_STATUS\.LOCKED \? resumeSession\(\) : loadVaultReader\(\)/
+);
 assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
 assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
@@ -2995,7 +3001,7 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
   assert.equal(
     elements.get("readerPageContent").textContent,
-    "Session locked. Resume to reopen encrypted Folder Key Grants."
+    "Session locked. Unlock to reopen encrypted Folder Key Grants."
   );
   assert.equal(elements.get("graphCanvas").children.length, 0);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");

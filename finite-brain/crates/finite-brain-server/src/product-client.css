@@ -102,6 +102,9 @@
   --blue: #8ab4ff;
   --blue-strong: #a9c8ff;
   --blue-soft: rgba(138, 180, 255, 0.14);
+  --action-primary-bg: #3f67a7;
+  --action-primary-bg-hover: #426aa8;
+  --action-primary-text: #fff;
   --focus: rgba(138, 180, 255, 0.72);
   --green: #39d98a;
   --amber: #e6a23c;
@@ -206,6 +209,9 @@
     --blue: #315fbd;
     --blue-strong: #244b9c;
     --blue-soft: rgba(49, 95, 189, 0.1);
+    --action-primary-bg: #315fbd;
+    --action-primary-bg-hover: #244b9c;
+    --action-primary-text: #fff;
     --focus: rgba(49, 95, 189, 0.7);
     --green: #167a52;
     --amber: #d97706;
@@ -1757,6 +1763,13 @@ pre {
   min-height: 40px;
 }
 
+.manage-vault-actions .manage-vault-unlock-button {
+  min-height: 44px !important;
+  border-radius: var(--radius-control);
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
 .manage-vault-create {
   border-top: 1px solid var(--line);
   padding-top: 14px;
@@ -3055,10 +3068,11 @@ pre {
   flex-shrink: 0;
   min-height: var(--control-height);
   padding: 0 12px;
-  background: var(--access-accent);
+  background: var(--action-primary-bg);
   border: none;
   border-radius: var(--radius-pill);
-  color: #fff;
+  box-shadow: var(--shadow-control);
+  color: var(--action-primary-text);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -3076,8 +3090,8 @@ pre {
 }
 
 .access-add-button:hover {
-  background: var(--access-accent-strong);
-  box-shadow: 0 0 0 3px var(--access-accent-soft);
+  background: var(--action-primary-bg-hover);
+  box-shadow: var(--shadow-control-hover);
 }
 
 .access-add-button:disabled {

@@ -141,13 +141,13 @@
             <section class="vault-management-section vault-primary-section">
               <div class="access-header">
                 <h3 id="vaultManagementTitle">Vaults</h3>
-                <p id="vaultManagementSummary" class="access-summary">Choose a Vault, then Load to decrypt its readable Folders.</p>
+                <p id="vaultManagementSummary" class="access-summary">Choose a Vault, then unlock it to open encrypted content.</p>
               </div>
               <ol id="vaultGuideSteps" class="vault-guide-steps" hidden></ol>
               <ol id="vaultSwitchList" class="vault-switch-list" aria-label="Available Vaults"></ol>
               <div class="access-button-row vault-quick-actions">
                 <button id="accessConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
-                <button id="accessLoadVaultButton" type="button" class="access-add-button">Load</button>
+                <button id="accessLoadVaultButton" type="button" class="access-add-button">Unlock Vault</button>
               </div>
             </section>
 
@@ -812,9 +812,9 @@ Start writing here.</textarea>
                 <section id="sessionSecurityStatus" class="session-security-status settings-card" aria-live="polite">
                   <div class="session-security-copy">
                     <strong id="sessionSecurityTitle">Session locked</strong>
-                    <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
+                    <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.</span>
                   </div>
-                  <button id="resumeSessionButton" type="button">Resume session</button>
+                  <button id="resumeSessionButton" type="button">Unlock session</button>
                   <button id="lockSessionButton" type="button" hidden>Lock session</button>
                 </section>
                 <div class="settings-info-card">
@@ -906,7 +906,7 @@ Start writing here.</textarea>
                 <span class="settings-card-label">Selected Vault</span>
                 <strong id="manageVaultsCurrentName">Personal vault</strong>
               </div>
-              <p id="manageVaultsCurrentDetail">Session locked. Select a Vault, then Resume to open encrypted content.</p>
+              <p id="manageVaultsCurrentDetail">Session locked. Select a Vault, then unlock it to open encrypted content.</p>
             </section>
 
             <section class="manage-vaults-list-section">
@@ -919,7 +919,7 @@ Start writing here.</textarea>
 
             <div class="manage-vault-actions">
               <button id="manageVaultsConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
-              <button id="manageVaultsLoadButton" type="button" class="access-add-button">Resume</button>
+              <button id="manageVaultsLoadButton" type="button" class="access-add-button manage-vault-unlock-button">Unlock Vault</button>
             </div>
 
             <details id="manageVaultCreateDetails" class="manage-vault-create">
