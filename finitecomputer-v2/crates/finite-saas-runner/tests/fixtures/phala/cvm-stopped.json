@@ -1,0 +1,24 @@
+{
+  "id": "cvm_fixture_01",
+  "name": "finite-agent-fixture-01",
+  "app_id": "app_fixture_01",
+  "vm_uuid": "vm_fixture_01",
+  "status": "stopped",
+  "resource": {
+    "instance_type": "tdx.medium",
+    "vcpu": 2,
+    "memory_in_gb": 4.0,
+    "disk_in_gb": 40,
+    "compute_billing_price": "0.116",
+    "billing_period": "hourly"
+  },
+  "endpoints": [
+    {
+      "app": "https://fixture-app.example.invalid",
+      "instance": ""
+    }
+  ],
+  "public_logs": false,
+  "deleted_at": null,
+  "compose_hash": "compose_fixture_01"
+}

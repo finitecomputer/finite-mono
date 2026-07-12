@@ -3,7 +3,7 @@ use finite_saas_core::FinitePrivateApiKey;
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput,
+    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
     RuntimeArtifact, RuntimeArtifactKind, RuntimeControlKind, RuntimeControlLease,
@@ -29,6 +29,7 @@ pub mod phala;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use kata::{KataConfig, KataLaunchPlan, KataLauncher};
+pub use phala::{PhalaConfig, PhalaLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
@@ -158,8 +159,6 @@ pub enum RunnerError {
     MissingNerdctlBinary,
     #[error("Kata runtime binary is required")]
     MissingKataRuntimeBinary,
-    #[error("Phala CLI binary is required")]
-    MissingPhalaBinary,
     #[error("Phala API key is required")]
     MissingPhalaApiKey,
     #[error("Enclavia CLI binary is required")]
@@ -176,10 +175,6 @@ pub enum RunnerError {
     MissingRuntimeArtifactReference,
     #[error("invalid opaque runtime environment: {0}")]
     InvalidRuntimeEnvironment(String),
-    #[error("Phala instance type is required")]
-    MissingPhalaInstanceType,
-    #[error("Phala disk size is required")]
-    MissingPhalaDiskSize,
     #[error("Core request failed: {0}")]
     CoreRequest(String),
     #[error("Core returned HTTP {status}: {body}")]
@@ -406,7 +401,7 @@ where
                         source_machine_id: facts.source_machine_id.clone(),
                         runtime_artifact_id: facts.runtime_artifact_id.clone(),
                         state_schema_version: facts.state_schema_version.clone(),
-                        provider_runtime_handle: None,
+                        provider_runtime_handle: facts.provider_runtime_handle.clone(),
                         contact_endpoint: None,
                         runtime_relay_token_hash: facts.runtime_relay_token_hash.clone(),
                         display_name: facts.display_name.clone(),
@@ -431,7 +426,7 @@ where
                                 source_machine_id: facts.source_machine_id.clone(),
                                 runtime_artifact_id: facts.runtime_artifact_id.clone(),
                                 state_schema_version: facts.state_schema_version.clone(),
-                                provider_runtime_handle: None,
+                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
                                 contact_endpoint: None,
                                 display_name: facts.display_name.clone(),
                                 hostname: facts.hostname.clone(),
@@ -1038,6 +1033,8 @@ pub struct RuntimeLaunchFacts {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub state_schema_version: Option<String>,
+    #[serde(default)]
+    pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -1910,6 +1907,7 @@ impl RuntimeLauncher for DockerLauncher {
             source_machine_id: plan.container_name,
             runtime_artifact_id: self.config.runtime_artifact_id.clone(),
             state_schema_version: self.config.runtime_state_schema_version.clone(),
+            provider_runtime_handle: None,
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
@@ -2263,442 +2261,6 @@ fn active_docker_container_count(config: &DockerConfig) -> Option<u32> {
             .filter(|line| !line.trim().is_empty())
             .count() as u32,
     )
-}
-
-#[derive(Debug, Clone)]
-pub struct PhalaConfig {
-    pub phala_bin: PathBuf,
-    pub api_key: String,
-    pub source_host_id: String,
-    pub image: String,
-    pub runtime_artifact_id: Option<String>,
-    pub runtime_artifact_kind: Option<RuntimeArtifactKind>,
-    pub runtime_state_schema_version: Option<String>,
-    pub work_root: PathBuf,
-    pub finitechat_server_url: String,
-    pub agent_picture_url: String,
-    pub instance_type: String,
-    pub disk_size: String,
-    pub region: Option<String>,
-    pub kms: String,
-    pub public_logs: bool,
-    pub public_sysinfo: bool,
-    pub max_cvm_count: Option<u32>,
-    pub drain_new_leases: bool,
-    pub available_memory_bytes: Option<u64>,
-    pub command_timeout: Duration,
-    pub launch_timeout: Duration,
-    pub readiness_timeout: Duration,
-    pub readiness_interval: Duration,
-}
-
-impl PhalaConfig {
-    pub fn validate(&self) -> Result<(), RunnerError> {
-        if self.phala_bin.as_os_str().is_empty() {
-            return Err(RunnerError::MissingPhalaBinary);
-        }
-        if self.api_key.trim().is_empty() {
-            return Err(RunnerError::MissingPhalaApiKey);
-        }
-        if self.source_host_id.trim().is_empty() {
-            return Err(RunnerError::MissingSourceHostId);
-        }
-        if self.image.trim().is_empty() {
-            return Err(RunnerError::MissingRuntimeArtifactReference);
-        }
-        if self.work_root.as_os_str().is_empty() {
-            return Err(RunnerError::MissingWorkRoot);
-        }
-        if self.finitechat_server_url.trim().is_empty() {
-            return Err(RunnerError::MissingFinitechatServerUrl);
-        }
-        if self.instance_type.trim().is_empty() {
-            return Err(RunnerError::MissingPhalaInstanceType);
-        }
-        if self.disk_size.trim().is_empty() {
-            return Err(RunnerError::MissingPhalaDiskSize);
-        }
-        if let Some(kind) = self.runtime_artifact_kind
-            && kind != RuntimeArtifactKind::OciImage
-        {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "Phala launcher requires an OCI image artifact, got {}",
-                kind.as_str()
-            )));
-        }
-        Ok(())
-    }
-}
-
-impl Default for PhalaConfig {
-    fn default() -> Self {
-        Self {
-            phala_bin: PathBuf::from("phala"),
-            api_key: String::new(),
-            source_host_id: String::new(),
-            image: String::new(),
-            runtime_artifact_id: None,
-            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
-            runtime_state_schema_version: None,
-            work_root: PathBuf::new(),
-            finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
-            agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
-            instance_type: "tdx.small".to_string(),
-            disk_size: "40G".to_string(),
-            region: None,
-            kms: "phala".to_string(),
-            public_logs: false,
-            public_sysinfo: false,
-            max_cvm_count: None,
-            drain_new_leases: false,
-            available_memory_bytes: None,
-            command_timeout: DEFAULT_COMMAND_TIMEOUT,
-            launch_timeout: DEFAULT_LAUNCH_TIMEOUT,
-            readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
-            readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PhalaLauncher {
-    config: PhalaConfig,
-}
-
-impl PhalaLauncher {
-    pub fn new(config: PhalaConfig) -> Self {
-        Self { config }
-    }
-
-    pub fn plan_launch(&self, lease: &AgentCreationLease) -> PhalaLaunchPlan {
-        phala_launch_plan(&self.config, lease)
-    }
-
-    fn run_command_capture(
-        &self,
-        args: Vec<OsString>,
-        timeout: Duration,
-    ) -> Result<String, RunnerError> {
-        let child = Command::new(&self.config.phala_bin)
-            .args(&args)
-            .env("PHALA_CLOUD_API_KEY", self.config.api_key.trim())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| RunnerError::CommandExecution {
-                program: self.config.phala_bin.display().to_string(),
-                message: error.to_string(),
-            })?;
-        let output = wait_with_captured_output(child, &self.config.phala_bin, timeout)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if output.status.success() {
-            return Ok(stdout);
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(RunnerError::CommandExecution {
-            program: self.config.phala_bin.display().to_string(),
-            message: format!(
-                "exit status {} stdout={stdout} stderr={stderr}",
-                output.status
-            ),
-        })
-    }
-
-    fn run_command(&self, args: Vec<OsString>, timeout: Duration) -> Result<(), RunnerError> {
-        let _ = self.run_command_capture(args, timeout)?;
-        Ok(())
-    }
-
-    fn wait_for_runtime_http(&self, endpoint: &PhalaAppEndpoint) -> Result<(), RunnerError> {
-        wait_for_http_json_ready(
-            &endpoint.health_url,
-            "Phala runtime /healthz",
-            self.config.readiness_timeout,
-            self.config.readiness_interval,
-        )
-    }
-
-    fn wait_for_endpoint(&self, app_name: &str) -> Result<PhalaAppEndpoint, RunnerError> {
-        let started = Instant::now();
-        loop {
-            match self.lookup_endpoint(app_name) {
-                Ok(endpoint) => return Ok(endpoint),
-                Err(error) => {
-                    if started.elapsed() >= self.config.readiness_timeout {
-                        return Err(error);
-                    }
-                }
-            }
-            thread::sleep(self.config.readiness_interval);
-        }
-    }
-
-    fn lookup_endpoint(&self, app_name: &str) -> Result<PhalaAppEndpoint, RunnerError> {
-        let apps_output = self.run_command_capture(
-            vec![
-                OsString::from("apps"),
-                OsString::from("--search"),
-                OsString::from(app_name),
-                OsString::from("--json"),
-            ],
-            self.config.command_timeout,
-        )?;
-        match phala_app_from_apps_json(&apps_output, app_name, DEFAULT_DOCKER_CONTAINER_PORT)? {
-            // Older `phala` versions embedded the CVM node (teepod) inside the
-            // `apps` listing, so the endpoint is fully known after one call.
-            PhalaAppLookup::Endpoint(endpoint) => Ok(endpoint),
-            // The current `phala` CLI (>=1.1) only reports {appId, cvmName,
-            // status, uptime} per app, so the node needed to build the public
-            // hostname must be resolved with a follow-up `cvms get` call.
-            PhalaAppLookup::NeedsCvm(app_id) => {
-                let cvm_output = self.run_command_capture(
-                    vec![
-                        OsString::from("cvms"),
-                        OsString::from("get"),
-                        OsString::from(&app_id),
-                        OsString::from("--json"),
-                    ],
-                    self.config.command_timeout,
-                )?;
-                phala_endpoint_from_cvm_json(
-                    &cvm_output,
-                    &app_id,
-                    app_name,
-                    DEFAULT_DOCKER_CONTAINER_PORT,
-                )
-            }
-        }
-    }
-}
-
-impl RuntimeLauncher for PhalaLauncher {
-    fn runner_class(&self) -> RunnerClass {
-        RunnerClass::Phala
-    }
-
-    fn validate_ready(&self) -> Result<(), RunnerError> {
-        self.config.validate()
-    }
-
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
-    }
-
-    fn runner_capacity(&self) -> RunnerLeaseCapacity {
-        RunnerLeaseCapacity {
-            runner_classes: vec![self.runner_class()],
-            draining: self.config.drain_new_leases,
-            max_sandbox_count: self.config.max_cvm_count,
-            active_sandbox_count: None,
-            available_memory_bytes: self.config.available_memory_bytes,
-        }
-    }
-
-    fn source_host_id(&self) -> Option<&str> {
-        Some(&self.config.source_host_id)
-    }
-
-    fn planned_source(&self, lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
-        let plan = self.plan_launch(lease);
-        Some(RuntimeSourceIdentity {
-            source_host_id: self.config.source_host_id.clone(),
-            source_machine_id: plan.cvm_name,
-        })
-    }
-
-    fn restart_runtime(
-        &mut self,
-        lease: &RuntimeControlLease,
-        _options: &RuntimeRestartOptions,
-    ) -> Result<(), RunnerError> {
-        self.validate_ready()?;
-        if lease.runtime.source_host_id != self.config.source_host_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime belongs to source host {}, not {}",
-                lease.runtime.source_host_id, self.config.source_host_id
-            )));
-        }
-        if lease.runtime.source_machine_id != lease.request.source_machine_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime source machine {} did not match restart request {}",
-                lease.runtime.source_machine_id, lease.request.source_machine_id
-            )));
-        }
-        self.run_command(
-            vec![
-                OsString::from("cvms"),
-                OsString::from("restart"),
-                OsString::from(&lease.request.source_machine_id),
-                OsString::from("--json"),
-            ],
-            self.config.command_timeout,
-        )?;
-        let endpoint = self.wait_for_endpoint(&lease.request.source_machine_id)?;
-        self.wait_for_runtime_http(&endpoint)
-    }
-
-    fn recover_known_good_chat_runtime(
-        &mut self,
-        lease: &RuntimeControlLease,
-        options: &RuntimeRestartOptions,
-    ) -> Result<(), RunnerError> {
-        self.restart_runtime(lease, options)
-    }
-
-    fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
-        self.validate_ready()?;
-        if lease.runtime.source_host_id != self.config.source_host_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime belongs to source host {}, not {}",
-                lease.runtime.source_host_id, self.config.source_host_id
-            )));
-        }
-        if lease.runtime.source_machine_id != lease.request.source_machine_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime source machine {} did not match stop request {}",
-                lease.runtime.source_machine_id, lease.request.source_machine_id
-            )));
-        }
-        self.run_command(
-            vec![
-                OsString::from("cvms"),
-                OsString::from("stop"),
-                OsString::from(&lease.request.source_machine_id),
-                OsString::from("--json"),
-            ],
-            self.config.command_timeout,
-        )
-    }
-
-    fn destroy_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
-        self.validate_ready()?;
-        if lease.runtime.source_host_id != self.config.source_host_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime belongs to source host {}, not {}",
-                lease.runtime.source_host_id, self.config.source_host_id
-            )));
-        }
-        if lease.runtime.source_machine_id != lease.request.source_machine_id {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "runtime source machine {} did not match destroy request {}",
-                lease.runtime.source_machine_id, lease.request.source_machine_id
-            )));
-        }
-        self.run_command(
-            vec![
-                OsString::from("cvms"),
-                OsString::from("delete"),
-                OsString::from(&lease.request.source_machine_id),
-                OsString::from("--yes"),
-                OsString::from("--json"),
-            ],
-            self.config.command_timeout,
-        )
-    }
-
-    fn launch(
-        &mut self,
-        lease: &AgentCreationLease,
-        options: &RuntimeLaunchOptions,
-    ) -> Result<RuntimeLaunchFacts, RunnerError> {
-        self.validate_ready()?;
-        let plan = self.plan_launch(lease);
-        std::fs::create_dir_all(&plan.work_dir)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-        write_secret_file(
-            &plan.compose_path,
-            phala_compose(&self.config, &plan, lease, options).as_bytes(),
-        )
-        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-        write_secret_file(
-            &plan.env_path,
-            phala_env_file(options)
-                .ok_or_else(|| {
-                    RunnerError::RuntimeLaunch(
-                        "Phala runtime launch requires a Finite Private key".to_string(),
-                    )
-                })?
-                .as_bytes(),
-        )
-        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-
-        let mut args = vec![
-            OsString::from("deploy"),
-            OsString::from("--name"),
-            OsString::from(&plan.cvm_name),
-            OsString::from("--compose"),
-            OsString::from(&plan.compose_path),
-            OsString::from("--env"),
-            OsString::from(&plan.env_path),
-            OsString::from("--instance-type"),
-            OsString::from(self.config.instance_type.trim()),
-            OsString::from("--disk-size"),
-            OsString::from(self.config.disk_size.trim()),
-            OsString::from("--kms"),
-            OsString::from(self.config.kms.trim()),
-        ];
-        if let Some(region) = self
-            .config
-            .region
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            args.push(OsString::from("--region"));
-            args.push(OsString::from(region));
-        }
-        args.push(if self.config.public_logs {
-            OsString::from("--public-logs")
-        } else {
-            OsString::from("--no-public-logs")
-        });
-        args.push(if self.config.public_sysinfo {
-            OsString::from("--public-sysinfo")
-        } else {
-            OsString::from("--no-public-sysinfo")
-        });
-        args.push(OsString::from("--wait"));
-        args.push(OsString::from("--json"));
-
-        let _ = self.run_command_capture(args, self.config.launch_timeout)?;
-        let endpoint = self.wait_for_endpoint(&plan.cvm_name)?;
-        self.wait_for_runtime_http(&endpoint)?;
-
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-
-        Ok(RuntimeLaunchFacts {
-            source_host_id: self.config.source_host_id.clone(),
-            source_machine_id: plan.cvm_name,
-            runtime_artifact_id: self.config.runtime_artifact_id.clone(),
-            state_schema_version: self.config.runtime_state_schema_version.clone(),
-            runtime_relay_token_hash,
-            display_name: Some(lease.project.display_name.clone()),
-            hostname: Some(endpoint.hostname.clone()),
-            runtime_host: Some(endpoint.public_base_url.clone()),
-            runtime_status: RuntimeSummaryStatus::Online,
-            active_inference_profile: options
-                .finite_private
-                .as_ref()
-                .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
-            hermes_available: Some(true),
-            published_app_urls: vec![endpoint.contact_url],
-        })
-    }
-
-    fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
-        self.run_command(
-            vec![
-                OsString::from("cvms"),
-                OsString::from("delete"),
-                OsString::from(&facts.source_machine_id),
-                OsString::from("--yes"),
-                OsString::from("--json"),
-            ],
-            self.config.command_timeout,
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -3225,6 +2787,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
             source_machine_id: endpoint.enclave_id.clone(),
             runtime_artifact_id: self.config.runtime_artifact_id.clone(),
             state_schema_version: self.config.runtime_state_schema_version.clone(),
+            provider_runtime_handle: None,
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: Some(endpoint.hostname.clone()),
@@ -3367,355 +2930,6 @@ fn ensure_runtime_control_source_matches(
         )));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PhalaLaunchPlan {
-    pub cvm_name: String,
-    pub work_dir: PathBuf,
-    pub compose_path: PathBuf,
-    pub env_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PhalaAppEndpoint {
-    app_id: String,
-    teepod_name: String,
-    hostname: String,
-    public_base_url: String,
-    health_url: String,
-    contact_url: String,
-}
-
-fn phala_launch_plan(config: &PhalaConfig, lease: &AgentCreationLease) -> PhalaLaunchPlan {
-    let cvm_name = phala_cvm_name_for_request_id(&lease.request.id);
-    let work_dir = config.work_root.join("phala").join(&cvm_name);
-    PhalaLaunchPlan {
-        compose_path: work_dir.join("docker-compose.yml"),
-        env_path: work_dir.join("runtime.env"),
-        work_dir,
-        cvm_name,
-    }
-}
-
-fn phala_compose(
-    config: &PhalaConfig,
-    plan: &PhalaLaunchPlan,
-    lease: &AgentCreationLease,
-    options: &RuntimeLaunchOptions,
-) -> String {
-    let mut env = docker_equivalent_runtime_env(
-        DockerEquivalentRuntimeEnv {
-            finitechat_server_url: &config.finitechat_server_url,
-            agent_picture_url: &config.agent_picture_url,
-            agent_http_port: DEFAULT_DOCKER_CONTAINER_PORT,
-            agent_device_id: &plan.cvm_name,
-            agent_home: "/data/agent",
-            hermes_home: "/data/agent/hermes-home",
-            workspace: "/data/workspace",
-        },
-        lease,
-        options,
-    );
-    for (key, value) in &mut env {
-        if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
-            *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
-        } else if options.secret_environment.contains_key(key) {
-            *value = format!("${{{key}:?{key} is required}}");
-        }
-    }
-
-    let mut rendered = String::new();
-    rendered.push_str("services:\n");
-    rendered.push_str("  agent:\n");
-    rendered.push_str("    image: ");
-    rendered.push_str(&yaml_quote(config.image.trim()));
-    rendered.push('\n');
-    rendered.push_str("    container_name: ");
-    rendered.push_str(&yaml_quote(&plan.cvm_name));
-    rendered.push('\n');
-    rendered.push_str("    restart: unless-stopped\n");
-    rendered.push_str("    ports:\n");
-    rendered.push_str("      - \"8080:8080\"\n");
-    rendered.push_str("    volumes:\n");
-    rendered.push_str("      - agent_state:/data\n");
-    rendered.push_str("    environment:\n");
-    for (key, value) in env {
-        rendered.push_str("      ");
-        rendered.push_str(&key);
-        rendered.push_str(": ");
-        rendered.push_str(&yaml_quote(&value));
-        rendered.push('\n');
-    }
-    rendered.push_str("\nvolumes:\n");
-    rendered.push_str("  agent_state:\n");
-    rendered
-}
-
-fn phala_env_file(options: &RuntimeLaunchOptions) -> Option<String> {
-    let finite_private = options.finite_private.as_ref()?;
-    let mut rendered = String::new();
-    rendered.push_str("# Generated by finite-saas-runner. Do not commit.\n");
-    rendered.push_str("# Phala CLI seals these values before upload.\n");
-    rendered.push_str("FINITE_PRIVATE_API_KEY=");
-    rendered.push_str(&dotenv_quote(&finite_private.raw_api_key));
-    rendered.push('\n');
-    for (key, value) in &options.secret_environment {
-        rendered.push_str(key);
-        rendered.push('=');
-        rendered.push_str(&dotenv_quote(value));
-        rendered.push('\n');
-    }
-    Some(rendered)
-}
-
-/// Outcome of parsing a `phala apps --search <name> --json` response.
-///
-/// The Phala CLI's output schema changed across versions:
-///
-/// * Older builds returned a `dstack_apps` array whose entries embedded the
-///   running CVM (via `current_cvm`/`cvms`), including the node/`teepod_name`.
-///   For those we can build the full public endpoint from the single call.
-/// * The current CLI (verified against `phala` 1.1.x) returns
-///   `{"success":true,...,"items":[{"appId":..,"cvmName":..,"status":..,
-///   "uptime":..}]}`. Those entries carry no node information, so we can only
-///   learn the `appId` here and must resolve the node with a `cvms get` call.
-enum PhalaAppLookup {
-    Endpoint(PhalaAppEndpoint),
-    NeedsCvm(String),
-}
-
-fn phala_app_from_apps_json(
-    output: &str,
-    app_name: &str,
-    port: u16,
-) -> Result<PhalaAppLookup, RunnerError> {
-    let value: serde_json::Value = serde_json::from_str(output)
-        .map_err(|error| RunnerError::RuntimeLaunch(format!("invalid Phala apps JSON: {error}")))?;
-    // Accept every app-list container shape the CLI has used: `items` (>=1.1),
-    // `dstack_apps` (older), or a bare top-level array.
-    let apps = value
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| {
-            value
-                .get("dstack_apps")
-                .and_then(serde_json::Value::as_array)
-        })
-        .or_else(|| value.as_array())
-        .ok_or_else(|| {
-            RunnerError::RuntimeLaunch("Phala apps JSON did not contain an app list".to_string())
-        })?;
-    // The CLI already filters to the searched app, so match by name against
-    // both the new `cvmName` and the old `name`, falling back to the first row.
-    let app = apps
-        .iter()
-        .find(|app| {
-            let matches =
-                |key: &str| app.get(key).and_then(serde_json::Value::as_str) == Some(app_name);
-            matches("cvmName") || matches("name")
-        })
-        .or_else(|| apps.first())
-        .ok_or_else(|| RunnerError::RuntimeLaunch(format!("Phala app {app_name} was not found")))?;
-    // `appId` (>=1.1) or `app_id` (older).
-    let app_id = app
-        .get("appId")
-        .or_else(|| app.get("app_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            RunnerError::RuntimeLaunch(format!("Phala app {app_name} did not include app_id"))
-        })?;
-    // If the listing still embeds the CVM node, finish in one call. Otherwise
-    // defer to `cvms get <app_id>` to learn the node.
-    match phala_teepod_name_from_value(app) {
-        Some(teepod_name) => Ok(PhalaAppLookup::Endpoint(phala_app_endpoint(
-            app_id,
-            &teepod_name,
-            port,
-        ))),
-        None => Ok(PhalaAppLookup::NeedsCvm(app_id.to_string())),
-    }
-}
-
-/// Resolve the public endpoint from a `phala cvms get <app_id> --json` response.
-///
-/// The CLI wraps the CVM object as `{"success":true,"data":{..}}`; we also
-/// accept a bare CVM object. The node lives under `teepod.name` (verified
-/// against `phala` 1.1.x), with `current_cvm.teepod_name`/`teepod_name`
-/// accepted for compatibility. `app_id` from the earlier `apps` call is used as
-/// a fallback when the CVM payload omits it.
-fn phala_endpoint_from_cvm_json(
-    output: &str,
-    app_id: &str,
-    app_name: &str,
-    port: u16,
-) -> Result<PhalaAppEndpoint, RunnerError> {
-    let value: serde_json::Value = serde_json::from_str(output)
-        .map_err(|error| RunnerError::RuntimeLaunch(format!("invalid Phala cvm JSON: {error}")))?;
-    let cvm = value
-        .get("data")
-        .filter(|data| !data.is_null())
-        .unwrap_or(&value);
-    let resolved_app_id = cvm
-        .get("app_id")
-        .or_else(|| cvm.get("appId"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(app_id);
-    // Preferred: the CLI hands us the full public URL in `endpoints[].app`
-    // (verified against `phala` 1.1.x `cvms get`), so use it verbatim rather
-    // than reconstructing the hostname. Fall back to building it from the node
-    // name only when no endpoint URL is present.
-    if let Some(endpoint) = phala_endpoint_from_endpoints(cvm, resolved_app_id, port) {
-        return Ok(endpoint);
-    }
-    let teepod_name = phala_teepod_name_from_value(cvm).ok_or_else(|| {
-        RunnerError::RuntimeLaunch(format!(
-            "Phala cvm for {app_name} did not include an app endpoint or node name"
-        ))
-    })?;
-    Ok(phala_app_endpoint(resolved_app_id, &teepod_name, port))
-}
-
-/// Build the endpoint from the CLI-provided `endpoints[].app` URL. Picks the
-/// entry whose URL targets our port, else the first non-empty `app` URL.
-fn phala_endpoint_from_endpoints(
-    cvm: &serde_json::Value,
-    app_id: &str,
-    port: u16,
-) -> Option<PhalaAppEndpoint> {
-    let endpoints = cvm.get("endpoints")?.as_array()?;
-    let app_urls = || {
-        endpoints
-            .iter()
-            .filter_map(|entry| entry.get("app").and_then(serde_json::Value::as_str))
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-    };
-    let port_marker = format!("-{port}.");
-    let url = app_urls()
-        .find(|url| url.contains(&port_marker))
-        .or_else(|| app_urls().next())?;
-    let public_base_url = url.trim_end_matches('/').to_string();
-    let hostname = public_base_url
-        .strip_prefix("https://")
-        .or_else(|| public_base_url.strip_prefix("http://"))
-        .unwrap_or(&public_base_url)
-        .to_string();
-    let teepod_name = phala_teepod_name_from_value(cvm).unwrap_or_default();
-    Some(PhalaAppEndpoint {
-        app_id: app_id.to_string(),
-        teepod_name,
-        health_url: format!("{public_base_url}/healthz"),
-        contact_url: format!("{public_base_url}/contact"),
-        hostname,
-        public_base_url,
-    })
-}
-
-/// Extract the node/`teepod` name from a Phala app or CVM object across the
-/// several field layouts the CLI has emitted.
-fn phala_teepod_name_from_value(value: &serde_json::Value) -> Option<String> {
-    let clean = |candidate: Option<&serde_json::Value>| {
-        candidate
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    // Current CLI (`phala` 1.1.x `cvms get`): `node_info: { name }`.
-    if let Some(name) = clean(value.get("node_info").and_then(|node| node.get("name"))) {
-        return Some(name);
-    }
-    // Current CLI: `teepod: { name }`.
-    if let Some(name) = clean(value.get("teepod").and_then(|teepod| teepod.get("name"))) {
-        return Some(name);
-    }
-    // Older listings: `current_cvm.teepod_name` or `cvms[0].teepod_name`.
-    let current_cvm = value
-        .get("current_cvm")
-        .filter(|value| !value.is_null())
-        .or_else(|| {
-            value
-                .get("cvms")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|items| items.first())
-        });
-    if let Some(name) = clean(current_cvm.and_then(|cvm| cvm.get("teepod_name"))) {
-        return Some(name);
-    }
-    // Flat `teepod_name` fallback.
-    clean(value.get("teepod_name"))
-}
-
-fn phala_app_endpoint(app_id: &str, teepod_name: &str, port: u16) -> PhalaAppEndpoint {
-    let teepod_name = teepod_name.trim();
-    let hostname = format!("{app_id}-{port}.dstack-pha-{teepod_name}.phala.network");
-    let public_base_url = format!("https://{hostname}");
-    PhalaAppEndpoint {
-        app_id: app_id.to_string(),
-        teepod_name: teepod_name.to_string(),
-        hostname,
-        health_url: format!("{public_base_url}/healthz"),
-        contact_url: format!("{public_base_url}/contact"),
-        public_base_url,
-    }
-}
-
-fn phala_cvm_name_for_request_id(request_id: &str) -> String {
-    let suffix = request_id
-        .strip_prefix("agent_request_")
-        .unwrap_or(request_id);
-    sanitize_phala_name(&format!("finite-agent-{suffix}"))
-}
-
-fn sanitize_phala_name(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push('-');
-        }
-    }
-    while result.contains("--") {
-        result = result.replace("--", "-");
-    }
-    if result.len() > 63 {
-        result.truncate(63);
-    }
-    result.trim_matches('-').to_string()
-}
-
-fn yaml_quote(value: &str) -> String {
-    let mut quoted = String::from("'");
-    for ch in value.chars() {
-        if ch == '\'' {
-            quoted.push_str("''");
-        } else {
-            quoted.push(ch);
-        }
-    }
-    quoted.push('\'');
-    quoted
-}
-
-fn dotenv_quote(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            _ => quoted.push(ch),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -4181,9 +3395,26 @@ mod tests {
     #[test]
     fn run_once_completes_only_after_launcher_returns_runtime_facts() {
         let lease = sample_lease("agent_request_123");
+        let provider_runtime_handle: ProviderRuntimeHandleEnvelope =
+            serde_json::from_value(serde_json::json!({
+                "schema": "provider_runtime_handle.v1",
+                "handle": {
+                    "runnerClass": "phala",
+                    "opaque": {
+                        "schema": "phala_runtime_handle.v1",
+                        "handle": {
+                            "cvmId": "cvm_fixture_01",
+                            "appId": "app_fixture_01"
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.provider_runtime_handle = Some(provider_runtime_handle.clone());
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(lease.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FakeLauncher::ready(facts),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
             300,
@@ -4205,6 +3436,10 @@ mod tests {
             "hash-runtime-token"
         );
         assert_eq!(
+            runner.queue.registered[0].provider_runtime_handle,
+            Some(provider_runtime_handle.clone())
+        );
+        assert_eq!(
             runner.queue.heartbeat_checks,
             vec!["finite-agent_123".to_string()]
         );
@@ -4216,6 +3451,10 @@ mod tests {
         assert_eq!(
             runner.queue.completed[0].runtime_status,
             Some(RuntimeSummaryStatus::Online)
+        );
+        assert_eq!(
+            runner.queue.completed[0].provider_runtime_handle,
+            Some(provider_runtime_handle)
         );
         assert!(runner.queue.failed.is_empty());
     }
@@ -4989,74 +4228,6 @@ mod tests {
     }
 
     #[test]
-    fn phala_plan_renders_docker_equivalent_compose_without_raw_secrets() {
-        let config = PhalaConfig {
-            phala_bin: PathBuf::from("/usr/local/bin/phala"),
-            api_key: "phala_test_api_key".to_string(),
-            source_host_id: "phala-prod".to_string(),
-            image: "ghcr.io/finitecomputer/finite-agent-runtime:canary@sha256:abc123".to_string(),
-            runtime_artifact_id: Some("artifact-v1".to_string()),
-            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
-            runtime_state_schema_version: Some("state-v1".to_string()),
-            work_root: PathBuf::from("/var/lib/finite/runner"),
-            ..PhalaConfig::default()
-        };
-        config.validate().unwrap();
-        let lease = sample_lease("agent_request_ABC.123");
-        let plan = phala_launch_plan(&config, &lease);
-        let options = RuntimeLaunchOptions {
-            finite_private: Some(FinitePrivateLaunchKey {
-                api_key_id: "fp_key_123".to_string(),
-                raw_api_key: "fpk_live_test".to_string(),
-                base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
-                model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
-                revoke_on_launch_failure: true,
-            }),
-            profile_picture_url: None,
-            environment: BTreeMap::new(),
-            secret_environment: BTreeMap::from([(
-                "FAL_KEY".to_string(),
-                "fal_phala_secret".to_string(),
-            )]),
-        };
-
-        assert_eq!(plan.cvm_name, "finite-agent-abc-123");
-        assert_eq!(
-            plan.compose_path,
-            PathBuf::from("/var/lib/finite/runner/phala/finite-agent-abc-123/docker-compose.yml")
-        );
-
-        let compose = phala_compose(&config, &plan, &lease, &options);
-        assert!(
-            compose.contains(
-                "image: 'ghcr.io/finitecomputer/finite-agent-runtime:canary@sha256:abc123'"
-            )
-        );
-        assert!(compose.contains("container_name: 'finite-agent-abc-123'"));
-        assert!(compose.contains("- agent_state:/data"));
-        assert!(compose.contains("FINITECHAT_HOME: '/data/agent'"));
-        assert!(compose.contains("FINITE_HOME: '/data/agent'"));
-        assert!(compose.contains("HERMES_HOME: '/data/agent/hermes-home'"));
-        assert!(compose.contains("FINITECHAT_WORKSPACE: '/data/workspace'"));
-        assert!(compose.contains("FINITECHAT_SERVER_URL: 'https://chat.finite.computer'"));
-        assert!(compose.contains(
-            "FINITE_PRIVATE_API_KEY: '${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}'"
-        ));
-        assert!(compose.contains(
-            "OPENAI_API_KEY: '${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}'"
-        ));
-        assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
-        assert!(!compose.contains("fpk_live_test"));
-        assert!(!compose.contains("fal_phala_secret"));
-        assert!(!compose.contains("phala_test_api_key"));
-
-        let env_file = phala_env_file(&options).unwrap();
-        assert!(env_file.contains("FINITE_PRIVATE_API_KEY=\"fpk_live_test\""));
-        assert!(env_file.contains("FAL_KEY=\"fal_phala_secret\""));
-        assert!(!env_file.contains("phala_test_api_key"));
-    }
-
-    #[test]
     fn enclavia_plan_targets_precreated_enclave_and_proxy_urls() {
         let config = EnclaviaConfig {
             enclavia_bin: PathBuf::from("/usr/local/bin/enclavia"),
@@ -5121,154 +4292,6 @@ mod tests {
         assert!(enclavia_env_value_uses_stdin("XAI_API_KEY"));
         assert!(!enclavia_env_value_uses_stdin("FINITECHAT_SERVER_URL"));
         assert!(!enclavia_env_value_uses_stdin("FINITE_AGENT_NAME"));
-    }
-
-    #[test]
-    fn phala_apps_items_shape_resolves_app_id_for_cvm_lookup() {
-        // Exact shape emitted by the installed `phala` CLI (>=1.1) for
-        // `apps --search <name> --json`.
-        let payload = r#"{
-            "success": true,
-            "page": 1,
-            "pageSize": 50,
-            "total": 1,
-            "totalPages": 1,
-            "items": [
-                {
-                    "appId": "b86bdd97e9575f178ec5ccfe6fab6e138781ea1c",
-                    "cvmName": "finite-agent-abc-123",
-                    "status": "running",
-                    "uptime": "3m 17s"
-                }
-            ]
-        }"#;
-
-        match phala_app_from_apps_json(payload, "finite-agent-abc-123", 8080).unwrap() {
-            PhalaAppLookup::NeedsCvm(app_id) => {
-                assert_eq!(app_id, "b86bdd97e9575f178ec5ccfe6fab6e138781ea1c");
-            }
-            PhalaAppLookup::Endpoint(endpoint) => {
-                panic!("items shape has no node; expected NeedsCvm, got {endpoint:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn phala_cvm_json_builds_endpoint_from_teepod_name() {
-        // Exact shape emitted by `phala cvms get <app_id> --json` (>=1.1):
-        // `{success, data: { ..., teepod: { name }, app_id }}`.
-        let payload = r#"{
-            "success": true,
-            "data": {
-                "id": 42,
-                "name": "finite-agent-abc-123",
-                "status": "running",
-                "app_id": "b86bdd97e9575f178ec5ccfe6fab6e138781ea1c",
-                "teepod_id": 5,
-                "teepod": { "id": 5, "name": "prod5" },
-                "app_url": "https://something-else",
-                "instance_id": "i-1234"
-            }
-        }"#;
-
-        let endpoint = phala_endpoint_from_cvm_json(
-            payload,
-            "b86bdd97e9575f178ec5ccfe6fab6e138781ea1c",
-            "finite-agent-abc-123",
-            8080,
-        )
-        .unwrap();
-
-        assert_eq!(
-            endpoint.public_base_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network"
-        );
-        assert_eq!(
-            endpoint.contact_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/contact"
-        );
-        assert_eq!(endpoint.teepod_name, "prod5");
-    }
-
-    #[test]
-    fn phala_cvm_json_uses_provided_endpoint_url_and_node_info() {
-        // Real `phala cvms get <app_id> --json` (1.1.x): NO `data` wrapper,
-        // the node is under `node_info.name`, and the full public URL is handed
-        // to us in `endpoints[].app`. We must use that URL verbatim.
-        let payload = r#"{
-            "success": true,
-            "id": 99,
-            "name": "finite-agent-7cc86b88",
-            "app_id": "d6afaf5f4775f4774de28527d93fe9a06639cd3d",
-            "status": "running",
-            "node_info": { "object_type": "node", "id": 26, "name": "prod5", "status": "ONLINE" },
-            "gateway": { "base_domain": "dstack-pha-prod5.phala.network" },
-            "endpoints": [
-                { "app": "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network", "instance": "" }
-            ],
-            "app_url": null
-        }"#;
-
-        let endpoint = phala_endpoint_from_cvm_json(
-            payload,
-            "d6afaf5f4775f4774de28527d93fe9a06639cd3d",
-            "finite-agent-7cc86b88",
-            8080,
-        )
-        .unwrap();
-
-        assert_eq!(
-            endpoint.public_base_url,
-            "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network"
-        );
-        assert_eq!(
-            endpoint.contact_url,
-            "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network/contact"
-        );
-        assert_eq!(
-            endpoint.health_url,
-            "https://d6afaf5f4775f4774de28527d93fe9a06639cd3d-8080.dstack-pha-prod5.phala.network/healthz"
-        );
-        assert_eq!(endpoint.teepod_name, "prod5");
-    }
-
-    #[test]
-    fn phala_endpoint_uses_app_id_port_and_teepod_name() {
-        // Backward-compat: older CLI embedded the CVM node in the `dstack_apps`
-        // listing, so the endpoint resolves from a single `apps` call.
-        let payload = serde_json::json!({
-            "dstack_apps": [
-                {
-                    "name": "finite-agent-abc-123",
-                    "app_id": "b86bdd97e9575f178ec5ccfe6fab6e138781ea1c",
-                    "current_cvm": {
-                        "teepod_name": "prod5"
-                    }
-                }
-            ]
-        });
-
-        let endpoint = match phala_app_from_apps_json(
-            &serde_json::to_string(&payload).unwrap(),
-            "finite-agent-abc-123",
-            8080,
-        )
-        .unwrap()
-        {
-            PhalaAppLookup::Endpoint(endpoint) => endpoint,
-            PhalaAppLookup::NeedsCvm(app_id) => {
-                panic!("dstack_apps shape embeds the node; expected Endpoint, got {app_id}")
-            }
-        };
-
-        assert_eq!(
-            endpoint.public_base_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network"
-        );
-        assert_eq!(
-            endpoint.contact_url,
-            "https://b86bdd97e9575f178ec5ccfe6fab6e138781ea1c-8080.dstack-pha-prod5.phala.network/contact"
-        );
     }
 
     #[derive(Debug)]
@@ -5723,6 +4746,7 @@ mod tests {
                 source_machine_id: "finite-agent_123".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
+                provider_runtime_handle: None,
                 runtime_relay_token_hash: "hash-runtime-token".to_string(),
                 display_name: Some("Oslo Agent".to_string()),
                 hostname: None,

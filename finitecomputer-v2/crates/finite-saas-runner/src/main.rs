@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AppleContainerConfig, AppleContainerLauncher, CoreHttpAgentCreationQueue,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
@@ -28,6 +29,9 @@ enum Command {
     /// Continuously process generic runtime lifecycle work.
     #[command(name = "serve")]
     Serve,
+    /// Run authenticated, read-only Phala contract and inventory checks.
+    #[command(name = "phala-preflight")]
+    PhalaPreflight,
 }
 
 fn main() -> Result<()> {
@@ -35,7 +39,15 @@ fn main() -> Result<()> {
     match args.command.unwrap_or(Command::RunOnce) {
         Command::RunOnce => run_once(),
         Command::Serve => serve(),
+        Command::PhalaPreflight => phala_preflight(),
     }
+}
+
+fn phala_preflight() -> Result<()> {
+    let api_key = required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?;
+    let summary = PhalaApiClient::new(api_key)?.preflight_summary()?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
 }
 
 fn run_once() -> Result<()> {
@@ -246,14 +258,12 @@ fn run_cycle() -> Result<RunOnceOutcome> {
         }
         "phala" => {
             let launcher = PhalaLauncher::new(PhalaConfig {
-                phala_bin: optional_path("FC_RUNNER_PHALA_BIN", "phala"),
                 api_key: required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?,
                 source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
                 image: runtime_artifact.reference,
                 runtime_artifact_id: Some(runtime_artifact.id),
                 runtime_artifact_kind: Some(runtime_artifact.kind),
                 runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
-                work_root: required_path("FC_RUNNER_WORK_ROOT")?,
                 finitechat_server_url: optional_env(
                     "FC_RUNNER_FINITECHAT_SERVER_URL",
                     DEFAULT_FINITECHAT_SERVER_URL,
@@ -262,23 +272,9 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     "FC_RUNNER_AGENT_PICTURE_URL",
                     DEFAULT_FINITE_AGENT_PICTURE_URL,
                 ),
-                instance_type: optional_env("FC_RUNNER_PHALA_INSTANCE_TYPE", "tdx.small"),
-                disk_size: optional_env("FC_RUNNER_PHALA_DISK_SIZE", "40G"),
-                region: optional_env_value("FC_RUNNER_PHALA_REGION"),
-                kms: optional_env("FC_RUNNER_PHALA_KMS", "phala"),
-                public_logs: optional_bool("FC_RUNNER_PHALA_PUBLIC_LOGS", false)?,
-                public_sysinfo: optional_bool("FC_RUNNER_PHALA_PUBLIC_SYSINFO", false)?,
-                max_cvm_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?,
+                max_cvm_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?.or(Some(1)),
                 drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
                 available_memory_bytes: host_available_memory_bytes(),
-                command_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_COMMAND_TIMEOUT_SECS",
-                    15,
-                )?),
-                launch_timeout: Duration::from_secs(optional_u64(
-                    "FC_RUNNER_LAUNCH_TIMEOUT_SECS",
-                    900,
-                )?),
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
             });
@@ -363,9 +359,10 @@ fn serve() -> Result<()> {
     let mut error_backoff = idle_interval;
     let mut last_error: Option<String> = None;
 
-    // Fail the supervised process before advertising a worker when static
-    // configuration, Core artifact lookup, or provider preflight is broken.
-    // Later failures are retried because they may be transient outages.
+    // Fail the supervised process for static configuration or Core artifact
+    // lookup errors. Provider inventory/preflight failures are represented as
+    // unavailable creation capacity so persisted runtime controls remain
+    // serviceable; later cycle failures are retried as transient outages.
     match run_cycle()? {
         RunOnceOutcome::Idle | RunOnceOutcome::CapacityUnavailable { .. } => {}
         outcome => println!("{}", serde_json::to_string(&outcome)?),
@@ -589,5 +586,11 @@ mod tests {
         );
         assert!(parse_runtime_secret_environment("FAL_KEY=one\nFAL_KEY=two\n").is_err());
         assert!(parse_runtime_secret_environment("not-an-assignment\n").is_err());
+    }
+
+    #[test]
+    fn phala_preflight_is_an_explicit_subcommand() {
+        let args = Args::try_parse_from(["finite-saas-runner", "phala-preflight"]).unwrap();
+        assert!(matches!(args.command, Some(Command::PhalaPreflight)));
     }
 }

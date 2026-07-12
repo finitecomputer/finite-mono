@@ -6,10 +6,23 @@
 //! keeps this client usable for inventory and ordinary lifecycle work without
 //! inventing a cryptographic envelope or staging plaintext environment files.
 
+use super::{
+    DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
+    DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
+    RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
+    RuntimeUpgradeFacts, docker_equivalent_runtime_env, wait_for_http_json_ready,
+};
+use finite_saas_core::{
+    AgentCreationLease, ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass,
+    RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeControlLease,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::io::Read;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 pub const API_BASE_URL: &str = "https://cloud-api.phala.com/api/v1";
@@ -28,6 +41,540 @@ const MAX_PROVIDER_ID_BYTES: usize = 256;
 const MAX_INVENTORY_PAGES: u32 = 1000;
 const INVENTORY_PAGE_SIZE: u32 = 100;
 const USER_AGENT: &str = concat!("finite-saas-runner/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Clone)]
+pub struct PhalaConfig {
+    pub api_key: String,
+    pub source_host_id: String,
+    pub image: String,
+    pub runtime_artifact_id: Option<String>,
+    pub runtime_artifact_kind: Option<RuntimeArtifactKind>,
+    pub runtime_state_schema_version: Option<String>,
+    pub finitechat_server_url: String,
+    pub agent_picture_url: String,
+    pub max_cvm_count: Option<u32>,
+    pub drain_new_leases: bool,
+    pub available_memory_bytes: Option<u64>,
+    pub readiness_timeout: Duration,
+    pub readiness_interval: Duration,
+}
+
+impl fmt::Debug for PhalaConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PhalaConfig")
+            .field("api_key", &"<redacted>")
+            .field("source_host_id", &self.source_host_id)
+            .field("image", &self.image)
+            .field("runtime_artifact_id", &self.runtime_artifact_id)
+            .field("runtime_artifact_kind", &self.runtime_artifact_kind)
+            .field(
+                "runtime_state_schema_version",
+                &self.runtime_state_schema_version,
+            )
+            .field("finitechat_server_url", &self.finitechat_server_url)
+            .field("agent_picture_url", &self.agent_picture_url)
+            .field("max_cvm_count", &self.max_cvm_count)
+            .field("drain_new_leases", &self.drain_new_leases)
+            .field("available_memory_bytes", &self.available_memory_bytes)
+            .field("readiness_timeout", &self.readiness_timeout)
+            .field("readiness_interval", &self.readiness_interval)
+            .finish()
+    }
+}
+
+impl PhalaConfig {
+    pub fn validate(&self) -> Result<(), RunnerError> {
+        if self.api_key.trim().is_empty() {
+            return Err(RunnerError::MissingPhalaApiKey);
+        }
+        if self.source_host_id.trim().is_empty() {
+            return Err(RunnerError::MissingSourceHostId);
+        }
+        validate_digest_pinned_image(&self.image)?;
+        if self.finitechat_server_url.trim().is_empty() {
+            return Err(RunnerError::MissingFinitechatServerUrl);
+        }
+        if let Some(kind) = self.runtime_artifact_kind
+            && kind != RuntimeArtifactKind::OciImage
+        {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "Phala launcher requires an OCI image artifact, got {}",
+                kind.as_str()
+            )));
+        }
+        if self.max_cvm_count == Some(0) {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala maximum CVM count must be at least one".to_string(),
+            ));
+        }
+        if self.readiness_timeout.is_zero() || self.readiness_interval.is_zero() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala readiness timeouts must be positive".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for PhalaConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            source_host_id: String::new(),
+            image: String::new(),
+            runtime_artifact_id: None,
+            runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
+            runtime_state_schema_version: None,
+            finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
+            agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
+            max_cvm_count: Some(1),
+            drain_new_leases: false,
+            available_memory_bytes: None,
+            readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
+            readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
+        }
+    }
+}
+
+fn validate_digest_pinned_image(image: &str) -> Result<(), RunnerError> {
+    let Some((repository, digest)) = image.trim().rsplit_once("@sha256:") else {
+        return Err(RunnerError::RuntimeLaunch(
+            "Phala runtime image must be pinned by sha256 digest".to_string(),
+        ));
+    };
+    if repository.is_empty()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Phala runtime image must use an exact sha256 digest".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "schema", content = "handle")]
+enum PhalaRuntimeHandleEnvelope {
+    #[serde(rename = "phala_runtime_handle.v1")]
+    V1(PhalaRuntimeHandleV1),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhalaRuntimeHandleV1 {
+    cvm_id: String,
+    app_id: String,
+}
+
+impl PhalaRuntimeHandleV1 {
+    fn validate(&self) -> Result<(), RunnerError> {
+        validate_provider_id(&self.cvm_id).map_err(runner_api_error)?;
+        validate_provider_id(&self.app_id).map_err(runner_api_error)
+    }
+
+    #[cfg(test)]
+    fn fixture() -> Self {
+        Self {
+            cvm_id: "cvm_fixture_01".to_string(),
+            app_id: "app_fixture_01".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn core_envelope(&self) -> ProviderRuntimeHandleEnvelope {
+        ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
+            runner_class: RunnerClass::Phala,
+            opaque: serde_json::to_value(PhalaRuntimeHandleEnvelope::V1(self.clone())).unwrap(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PreflightSnapshot {
+    provider_healthy: bool,
+    active_cvm_count: u32,
+}
+
+type HealthCheck = fn(&str, &str, Duration, Duration) -> Result<(), RunnerError>;
+
+pub struct PhalaLauncher {
+    config: PhalaConfig,
+    client: Result<PhalaApiClient, String>,
+    preflight: Mutex<PreflightSnapshot>,
+    health_check: HealthCheck,
+}
+
+impl fmt::Debug for PhalaLauncher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PhalaLauncher")
+            .field("config", &self.config)
+            .field("client", &self.client)
+            .field("preflight", &self.preflight)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PhalaLauncher {
+    pub fn new(config: PhalaConfig) -> Self {
+        let client = PhalaApiClient::new(config.api_key.clone()).map_err(|error| error.to_string());
+        Self {
+            config,
+            client,
+            preflight: Mutex::new(PreflightSnapshot::default()),
+            health_check: wait_for_http_json_ready,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_client(config: PhalaConfig, client: PhalaApiClient) -> Self {
+        Self {
+            config,
+            client: Ok(client),
+            preflight: Mutex::new(PreflightSnapshot::default()),
+            health_check: no_op_health_check,
+        }
+    }
+
+    fn client(&self) -> Result<&PhalaApiClient, RunnerError> {
+        self.client
+            .as_ref()
+            .map_err(|error| RunnerError::RuntimeLaunch(error.clone()))
+    }
+
+    fn refresh_preflight(&self) -> Result<(), RunnerError> {
+        let result = (|| {
+            let client = self.client()?;
+            client.preflight_summary().map_err(runner_api_error)
+        })();
+        let mut snapshot = self.preflight.lock().map_err(|_| {
+            RunnerError::RuntimeLaunch("Phala preflight state lock was poisoned".to_string())
+        })?;
+        match result {
+            Ok(summary) => {
+                *snapshot = PreflightSnapshot {
+                    provider_healthy: true,
+                    active_cvm_count: summary.active_finite_cvm_count,
+                };
+            }
+            Err(error) => {
+                *snapshot = PreflightSnapshot::default();
+                eprintln!("Phala preflight blocked new creation: {error}");
+            }
+        }
+        Ok(())
+    }
+
+    fn runtime_handle(
+        &self,
+        lease: &RuntimeControlLease,
+    ) -> Result<PhalaRuntimeHandleV1, RunnerError> {
+        if lease.runtime.source_host_id != self.config.source_host_id {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "runtime belongs to source host {}, not {}",
+                lease.runtime.source_host_id, self.config.source_host_id
+            )));
+        }
+        let outer = lease
+            .runtime
+            .provider_runtime_handle
+            .as_ref()
+            .ok_or_else(|| {
+                RunnerError::RuntimeLaunch(
+                    "Phala runtime is missing its persisted provider handle".to_string(),
+                )
+            })?;
+        if outer.runner_class() != RunnerClass::Phala {
+            return Err(RunnerError::RuntimeLaunch(
+                "provider handle does not belong to the Phala runner".to_string(),
+            ));
+        }
+        let ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 { opaque, .. }) = outer;
+        let handle: PhalaRuntimeHandleEnvelope =
+            serde_json::from_value(opaque.clone()).map_err(|_| {
+                RunnerError::RuntimeLaunch(
+                    "Phala runtime provider handle was invalid or unsupported".to_string(),
+                )
+            })?;
+        let PhalaRuntimeHandleEnvelope::V1(handle) = handle;
+        handle.validate()?;
+        Ok(handle)
+    }
+
+    fn inspect_verified(&self, handle: &PhalaRuntimeHandleV1) -> Result<CvmInfo, RunnerError> {
+        let cvm = self
+            .client()?
+            .inspect_cvm(&handle.cvm_id)
+            .map_err(runner_api_error)?;
+        cvm.verify_finite_runtime().map_err(runner_api_error)?;
+        if !cvm.is_finite_active() || cvm.app_id.as_deref() != Some(handle.app_id.as_str()) {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala CVM did not match its persisted provider handle".to_string(),
+            ));
+        }
+        Ok(cvm)
+    }
+
+    fn wait_for_running(&self, handle: &PhalaRuntimeHandleV1) -> Result<CvmInfo, RunnerError> {
+        let started = Instant::now();
+        loop {
+            let cvm = self.inspect_verified(handle)?;
+            if status_is_running(&cvm.status) {
+                return Ok(cvm);
+            }
+            if started.elapsed() >= self.config.readiness_timeout {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Phala CVM did not become running before the readiness deadline".to_string(),
+                ));
+            }
+            thread::sleep(self.config.readiness_interval);
+        }
+    }
+
+    fn wait_for_stopped(&self, handle: &PhalaRuntimeHandleV1) -> Result<(), RunnerError> {
+        let started = Instant::now();
+        loop {
+            let cvm = self.inspect_verified(handle)?;
+            if status_is_stopped(&cvm.status) {
+                return Ok(());
+            }
+            if started.elapsed() >= self.config.readiness_timeout {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Phala CVM did not stop before the readiness deadline".to_string(),
+                ));
+            }
+            thread::sleep(self.config.readiness_interval);
+        }
+    }
+
+    fn check_runtime_health(&self, cvm: &CvmInfo) -> Result<(), RunnerError> {
+        let base_url = cvm
+            .public_application_endpoint()
+            .map_err(runner_api_error)?
+            .trim_end_matches('/');
+        (self.health_check)(
+            &format!("{base_url}/healthz"),
+            "Phala runtime /healthz",
+            self.config.readiness_timeout,
+            self.config.readiness_interval,
+        )
+    }
+}
+
+impl RuntimeLauncher for PhalaLauncher {
+    fn validate_ready(&self) -> Result<(), RunnerError> {
+        self.config.validate()?;
+        self.client()?;
+        self.refresh_preflight()
+    }
+
+    fn runner_class(&self) -> RunnerClass {
+        RunnerClass::Phala
+    }
+
+    fn uses_core_runtime_heartbeat(&self) -> bool {
+        false
+    }
+
+    fn runner_capacity(&self) -> RunnerLeaseCapacity {
+        let snapshot = self
+            .preflight
+            .lock()
+            .map(|snapshot| *snapshot)
+            .unwrap_or_default();
+        RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Phala],
+            draining: self.config.drain_new_leases || !snapshot.provider_healthy,
+            max_sandbox_count: self.config.max_cvm_count,
+            active_sandbox_count: Some(snapshot.active_cvm_count),
+            available_memory_bytes: self.config.available_memory_bytes,
+        }
+    }
+
+    fn source_host_id(&self) -> Option<&str> {
+        Some(&self.config.source_host_id)
+    }
+
+    fn restart_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        self.config.validate()?;
+        let handle = self.runtime_handle(lease)?;
+        let cvm = self.inspect_verified(&handle)?;
+        if status_is_stopped(&cvm.status) {
+            self.client()?
+                .start_cvm(&handle.cvm_id)
+                .map_err(runner_api_error)?;
+        } else {
+            self.client()?
+                .restart_cvm(&handle.cvm_id)
+                .map_err(runner_api_error)?;
+        }
+        let cvm = self.wait_for_running(&handle)?;
+        self.check_runtime_health(&cvm)
+    }
+
+    fn recover_known_good_chat_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        options: &RuntimeRestartOptions,
+    ) -> Result<(), RunnerError> {
+        self.restart_runtime(lease, options)
+    }
+
+    fn upgrade_runtime(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _options: &RuntimeRestartOptions,
+    ) -> Result<RuntimeUpgradeFacts, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "Phala upgrade is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
+                .to_string(),
+        ))
+    }
+
+    fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        self.config.validate()?;
+        let handle = self.runtime_handle(lease)?;
+        let cvm = self.inspect_verified(&handle)?;
+        if status_is_stopped(&cvm.status) {
+            return Ok(());
+        }
+        self.client()?
+            .shutdown_cvm(&handle.cvm_id)
+            .map_err(runner_api_error)?;
+        self.wait_for_stopped(&handle)
+    }
+
+    fn destroy_runtime(&mut self, _lease: &RuntimeControlLease) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "Phala destroy is intentionally unsupported by this runner".to_string(),
+        ))
+    }
+
+    fn launch(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        self.config.validate()?;
+        // Render and validate the reviewed compose contract in memory only.
+        // No provider provision call or plaintext environment staging is
+        // allowed on this side of the encryption-and-acknowledgment boundary.
+        let _compose = phala_compose(&self.config, lease, options)?;
+        Err(RunnerError::RuntimeLaunch(
+            "Phala creation is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
+                .to_string(),
+        ))
+    }
+}
+
+fn runner_api_error(error: PhalaApiError) -> RunnerError {
+    RunnerError::RuntimeLaunch(error.to_string())
+}
+
+fn status_is_running(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("running")
+}
+
+fn status_is_stopped(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "stopped" | "shutdown" | "exited" | "powered_off"
+    )
+}
+
+fn phala_cvm_name_for_request_id(request_id: &str) -> String {
+    let suffix = request_id
+        .strip_prefix("agent_request_")
+        .unwrap_or(request_id);
+    let mut result = String::from("finite-agent-");
+    for ch in suffix.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch.to_ascii_lowercase());
+        } else if !result.ends_with('-') {
+            result.push('-');
+        }
+    }
+    if result.len() > 63 {
+        result.truncate(63);
+    }
+    result.trim_end_matches('-').to_string()
+}
+
+fn phala_compose(
+    config: &PhalaConfig,
+    lease: &AgentCreationLease,
+    options: &RuntimeLaunchOptions,
+) -> Result<String, RunnerError> {
+    config.validate()?;
+    let cvm_name = phala_cvm_name_for_request_id(&lease.request.id);
+    let mut environment = docker_equivalent_runtime_env(
+        DockerEquivalentRuntimeEnv {
+            finitechat_server_url: &config.finitechat_server_url,
+            agent_picture_url: &config.agent_picture_url,
+            agent_http_port: DEFAULT_DOCKER_CONTAINER_PORT,
+            agent_device_id: &cvm_name,
+            agent_home: "/data/agent",
+            hermes_home: "/data/agent/hermes-home",
+            workspace: "/data/workspace",
+        },
+        lease,
+        options,
+    );
+    for (key, value) in &mut environment {
+        if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
+            *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
+        } else if options.secret_environment.contains_key(key) {
+            *value = format!("${{{key}:?{key} is required}}");
+        }
+    }
+
+    let mut rendered = String::new();
+    rendered.push_str("services:\n  agent:\n    image: ");
+    rendered.push_str(&yaml_quote(config.image.trim()));
+    rendered.push_str("\n    platform: linux/amd64\n    container_name: ");
+    rendered.push_str(&yaml_quote(&cvm_name));
+    rendered.push_str(
+        "\n    restart: unless-stopped\n    ports:\n      - \"8080:8080\"\n    volumes:\n      - agent_state:/data\n      - /var/run/dstack.sock:/var/run/dstack.sock\n    environment:\n",
+    );
+    for (key, value) in environment {
+        rendered.push_str("      ");
+        rendered.push_str(&key);
+        rendered.push_str(": ");
+        rendered.push_str(&yaml_quote(&value));
+        rendered.push('\n');
+    }
+    rendered.push_str("\nvolumes:\n  agent_state:\n");
+    Ok(rendered)
+}
+
+fn yaml_quote(value: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+#[cfg(test)]
+fn no_op_health_check(
+    _url: &str,
+    _name: &str,
+    _timeout: Duration,
+    _interval: Duration,
+) -> Result<(), RunnerError> {
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -213,6 +760,39 @@ impl PhalaApiClient {
 
     pub fn capacity(&self) -> Result<AvailableCapacity, PhalaApiError> {
         self.get_json("capacity", "/teepods/available")
+    }
+
+    /// Authenticated read-only compatibility check used by both worker
+    /// startup and the opt-in CI preflight command. The returned projection
+    /// deliberately contains no provider identifiers, endpoint URLs, or
+    /// credential material.
+    pub fn preflight_summary(&self) -> Result<PhalaPreflightSummary, PhalaApiError> {
+        let verified = self.verify_finite_instance_type()?;
+        let capacity = self.capacity()?;
+        let inventory = self.inventory()?;
+        let available_node_count = capacity
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.listed
+                    && node.remaining_vcpu >= f64::from(FINITE_INSTANCE_VCPU)
+                    && node.remaining_memory >= FINITE_INSTANCE_MEMORY_MB as f64
+                    && node.remaining_cvm_slots >= 1.0
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        Ok(PhalaPreflightSummary {
+            api_version: API_VERSION,
+            instance_type: FINITE_INSTANCE_TYPE,
+            vcpu: FINITE_INSTANCE_VCPU,
+            memory_mb: FINITE_INSTANCE_MEMORY_MB,
+            disk_size_gb: FINITE_DISK_SIZE_GB,
+            hourly_price_usd_micros: verified.hourly_rate.usd_micros(),
+            provider_reported_max_instances: capacity.capacity.max_instances,
+            available_node_count,
+            active_finite_cvm_count: inventory.active_cvm_count(),
+        })
     }
 
     pub fn inspect_cvm(&self, cvm_id: &str) -> Result<CvmInfo, PhalaApiError> {
@@ -405,6 +985,20 @@ impl PhalaApiClient {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PhalaPreflightSummary {
+    pub api_version: &'static str,
+    pub instance_type: &'static str,
+    pub vcpu: u32,
+    pub memory_mb: u64,
+    pub disk_size_gb: u32,
+    pub hourly_price_usd_micros: u64,
+    pub provider_reported_max_instances: Option<u32>,
+    pub available_node_count: u32,
+    pub active_finite_cvm_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -784,7 +1378,12 @@ pub struct CvmInfo {
 
 impl CvmInfo {
     pub fn is_finite_active(&self) -> bool {
-        self.name.starts_with(FINITE_CVM_NAME_PREFIX) && self.deleted_at.is_none()
+        self.name.starts_with(FINITE_CVM_NAME_PREFIX)
+            && self.deleted_at.is_none()
+            && !matches!(
+                self.status.trim().to_ascii_lowercase().as_str(),
+                "deleted" | "terminated"
+            )
     }
 
     pub fn verify_finite_runtime(&self) -> Result<(), PhalaApiError> {
@@ -1103,6 +1702,12 @@ struct CommitUpdateRequest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FinitePrivateLaunchKey;
+    use finite_saas_core::{
+        AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime, HostOwnedRuntimeFacts,
+        Project, RuntimeControlKind, RuntimeControlRequest, RuntimeControlRequestStatus,
+        RuntimeSummaryStatus,
+    };
     use std::collections::{BTreeMap, VecDeque};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1284,6 +1889,322 @@ mod tests {
         }
     }
 
+    fn launcher_config() -> PhalaConfig {
+        PhalaConfig {
+            api_key: FIXTURE_API_KEY.to_string(),
+            source_host_id: "phala-worker-1".to_string(),
+            image: format!(
+                "ghcr.io/finitecomputer/finite-agent-runtime@sha256:{}",
+                "a".repeat(64)
+            ),
+            runtime_artifact_id: Some("artifact-phala-1".to_string()),
+            runtime_state_schema_version: Some("runtime-state-v1".to_string()),
+            readiness_timeout: Duration::from_millis(100),
+            readiness_interval: Duration::from_millis(1),
+            ..PhalaConfig::default()
+        }
+    }
+
+    fn sample_creation_lease() -> AgentCreationLease {
+        AgentCreationLease {
+            project: Project {
+                id: "project_123".to_string(),
+                customer_org_id: "org_123".to_string(),
+                owner_user_id: "user_123".to_string(),
+                display_name: "Fixture Agent".to_string(),
+                import_candidate_id: None,
+                hosting_tier: None,
+                placement: None,
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                updated_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+            request: AgentCreationRequest {
+                id: "agent_request_Fixture.01".to_string(),
+                customer_org_id: "org_123".to_string(),
+                owner_user_id: "user_123".to_string(),
+                project_id: "project_123".to_string(),
+                idempotency_key: "fixture-idempotency".to_string(),
+                display_name: "Fixture Agent".to_string(),
+                runner_class: RunnerClass::Phala,
+                hosting_tier: None,
+                placement: None,
+                desired_runtime_artifact_id: None,
+                runtime_spec: None,
+                profile_picture_url: None,
+                status: AgentCreationRequestStatus::Launching,
+                requested_launch_code: None,
+                agent_runtime_id: None,
+                runner_id: Some("runner-phala".to_string()),
+                lease_token: Some("fixture-lease".to_string()),
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                updated_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+        }
+    }
+
+    fn sample_control_lease(
+        kind: RuntimeControlKind,
+        handle: Option<ProviderRuntimeHandleEnvelope>,
+    ) -> RuntimeControlLease {
+        RuntimeControlLease {
+            request: RuntimeControlRequest {
+                id: "runtime_control_fixture".to_string(),
+                project_id: "project_123".to_string(),
+                agent_runtime_id: "runtime_123".to_string(),
+                source_host_id: "phala-worker-1".to_string(),
+                source_machine_id: "legacy-request-machine-id".to_string(),
+                requested_by_user_id: "user_123".to_string(),
+                kind,
+                target_runtime_artifact_id: None,
+                status: RuntimeControlRequestStatus::Running,
+                runner_id: Some("runner-phala".to_string()),
+                lease_token: Some("fixture-lease".to_string()),
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                updated_at: "2026-07-01T00:00:00Z".to_string(),
+                completed_at: None,
+            },
+            runtime: AgentRuntime {
+                id: "runtime_123".to_string(),
+                project_id: "project_123".to_string(),
+                source_host_id: "phala-worker-1".to_string(),
+                source_machine_id: "legacy-runtime-machine-id".to_string(),
+                source_import_key: "fixture-import-key".to_string(),
+                runtime_artifact_id: Some("artifact-phala-1".to_string()),
+                state_schema_version: Some("runtime-state-v1".to_string()),
+                placement: None,
+                provider_runtime_handle: handle,
+                provider_runtime_handle_history: Vec::new(),
+                contact_endpoint: None,
+                host_facts: HostOwnedRuntimeFacts {
+                    display_name: "Fixture Agent".to_string(),
+                    hostname: None,
+                    runtime_host: "fixture-runtime".to_string(),
+                    runtime_status: RuntimeSummaryStatus::Online,
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                },
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                updated_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+            target_runtime_artifact: None,
+        }
+    }
+
+    #[test]
+    fn launcher_compose_is_digest_pinned_private_and_never_contains_plaintext_secrets() {
+        let config = launcher_config();
+        let lease = sample_creation_lease();
+        let options = RuntimeLaunchOptions {
+            finite_private: Some(FinitePrivateLaunchKey {
+                api_key_id: "fixture-key-id".to_string(),
+                raw_api_key: "fixture-plaintext-inference-key".to_string(),
+                base_url: "https://inference.example.invalid/v1".to_string(),
+                model: "fixture-model".to_string(),
+                revoke_on_launch_failure: true,
+            }),
+            profile_picture_url: None,
+            environment: BTreeMap::new(),
+            secret_environment: BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fixture-plaintext-provider-key".to_string(),
+            )]),
+        };
+        let compose = phala_compose(&config, &lease, &options).unwrap();
+
+        assert!(compose.contains("platform: linux/amd64"));
+        assert!(compose.contains("- agent_state:/data"));
+        assert!(compose.contains("- /var/run/dstack.sock:/var/run/dstack.sock"));
+        assert!(compose.contains("FINITECHAT_HOME: '/data/agent'"));
+        assert!(compose.contains(
+            "FINITE_PRIVATE_API_KEY: '${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}'"
+        ));
+        assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
+        assert!(!compose.contains("fixture-plaintext-inference-key"));
+        assert!(!compose.contains("fixture-plaintext-provider-key"));
+        assert!(!compose.contains(FIXTURE_API_KEY));
+        assert_eq!(
+            phala_cvm_name_for_request_id(&lease.request.id),
+            "finite-agent-fixture-01"
+        );
+
+        let mut unpinned = config;
+        unpinned.image = "ghcr.io/finitecomputer/runtime:latest".to_string();
+        assert!(unpinned.validate().is_err());
+    }
+
+    #[test]
+    fn launcher_preflight_pins_shape_price_capacity_and_inventory_count() {
+        let server = FakePhalaServer::start(vec![
+            json_response(include_str!(
+                "../tests/fixtures/phala/instance-types-cpu.json"
+            )),
+            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
+            json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
+        ]);
+        let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        launcher.validate_ready().unwrap();
+        let capacity = launcher.runner_capacity();
+        assert!(!capacity.draining);
+        assert_eq!(capacity.active_sandbox_count, Some(1));
+        assert_eq!(capacity.max_sandbox_count, Some(1));
+        assert!(!capacity.accepts_agent_creation());
+        assert_eq!(
+            server
+                .requests()
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/api/v1/instance-types/cpu",
+                "/api/v1/teepods/available",
+                "/api/v1/cvms/paginated?page=1&page_size=100",
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_preflight_failure_blocks_creation_but_not_handle_based_restart() {
+        let server = FakePhalaServer::start(vec![
+            FixtureResponse::Http {
+                status: 500,
+                headers: vec![],
+                body: r#"{"error_code":"FIXTURE_UNAVAILABLE"}"#,
+            },
+            json_response(include_str!("../tests/fixtures/phala/cvm-detail.json")),
+            json_response(include_str!("../tests/fixtures/phala/action.json")),
+            json_response(include_str!("../tests/fixtures/phala/cvm-detail.json")),
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+
+        launcher.validate_ready().unwrap();
+        let capacity = launcher.runner_capacity();
+        assert!(capacity.draining);
+        assert_eq!(capacity.active_sandbox_count, Some(0));
+
+        let lease = sample_control_lease(
+            RuntimeControlKind::Restart,
+            Some(PhalaRuntimeHandleV1::fixture().core_envelope()),
+        );
+        launcher
+            .restart_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap();
+        let requests = server.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GET", "/api/v1/instance-types/cpu"),
+                ("GET", "/api/v1/cvms/cvm_fixture_01"),
+                ("POST", "/api/v1/cvms/cvm_fixture_01/restart"),
+                ("GET", "/api/v1/cvms/cvm_fixture_01"),
+            ]
+        );
+        assert!(requests.iter().all(|request| {
+            !request.path.contains("legacy-runtime-machine-id")
+                && !request.path.contains("legacy-request-machine-id")
+        }));
+    }
+
+    #[test]
+    fn launcher_starts_stopped_cvm_and_shutdown_waits_for_stopped_state() {
+        let stopped = include_str!("../tests/fixtures/phala/cvm-stopped.json");
+        let running = include_str!("../tests/fixtures/phala/cvm-detail.json");
+        let action = include_str!("../tests/fixtures/phala/action.json");
+        let handle = Some(PhalaRuntimeHandleV1::fixture().core_envelope());
+
+        let start_server = FakePhalaServer::start(vec![
+            json_response(stopped),
+            json_response(action),
+            json_response(running),
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), start_server.client());
+        launcher
+            .restart_runtime(
+                &sample_control_lease(RuntimeControlKind::Restart, handle.clone()),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            start_server.requests()[1].path,
+            "/api/v1/cvms/cvm_fixture_01/start"
+        );
+
+        let stop_server = FakePhalaServer::start(vec![
+            json_response(running),
+            json_response(action),
+            json_response(stopped),
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), stop_server.client());
+        launcher
+            .stop_runtime(&sample_control_lease(RuntimeControlKind::Stop, handle))
+            .unwrap();
+        assert_eq!(
+            stop_server.requests()[1].path,
+            "/api/v1/cvms/cvm_fixture_01/shutdown"
+        );
+    }
+
+    #[test]
+    fn missing_or_wrong_provider_handle_fails_before_provider_request() {
+        let server = FakePhalaServer::start(Vec::new());
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        let missing = sample_control_lease(RuntimeControlKind::Restart, None);
+        assert!(
+            launcher
+                .restart_runtime(&missing, &RuntimeRestartOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("missing its persisted provider handle")
+        );
+
+        let wrong = ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
+            runner_class: RunnerClass::Kata,
+            opaque: serde_json::json!({
+                "schema": "phala_runtime_handle.v1",
+                "handle": {"cvmId": "cvm_fixture_01", "appId": "app_fixture_01"}
+            }),
+        });
+        assert!(
+            launcher
+                .stop_runtime(&sample_control_lease(RuntimeControlKind::Stop, Some(wrong)))
+                .unwrap_err()
+                .to_string()
+                .contains("does not belong to the Phala runner")
+        );
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn create_upgrade_and_destroy_are_fail_closed_without_provider_mutation() {
+        let server = FakePhalaServer::start(Vec::new());
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        let creation = launcher
+            .launch(&sample_creation_lease(), &RuntimeLaunchOptions::default())
+            .unwrap_err();
+        assert!(creation.to_string().contains("creation is disabled"));
+
+        let control = sample_control_lease(
+            RuntimeControlKind::Upgrade,
+            Some(PhalaRuntimeHandleV1::fixture().core_envelope()),
+        );
+        assert!(
+            launcher
+                .upgrade_runtime(&control, &RuntimeRestartOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("upgrade is disabled")
+        );
+        assert!(launcher.destroy_runtime(&control).is_err());
+        assert!(server.requests().is_empty());
+    }
+
     #[test]
     fn client_pins_official_headers_and_redacts_api_key() {
         let server = FakePhalaServer::start(vec![json_response(include_str!(
@@ -1342,6 +2263,40 @@ mod tests {
         let capacity = client.capacity().unwrap();
         assert_eq!(capacity.capacity.max_instances, Some(1));
         assert_eq!(capacity.nodes[0].remaining_cvm_slots, 1.0);
+    }
+
+    #[test]
+    fn read_only_preflight_summary_contains_counts_but_no_provider_identity() {
+        let server = FakePhalaServer::start(vec![
+            json_response(include_str!(
+                "../tests/fixtures/phala/instance-types-cpu.json"
+            )),
+            json_response(include_str!("../tests/fixtures/phala/available-nodes.json")),
+            json_response(include_str!("../tests/fixtures/phala/cvm-list.json")),
+        ]);
+        let summary = server.client().preflight_summary().unwrap();
+        assert_eq!(summary.api_version, API_VERSION);
+        assert_eq!(summary.instance_type, FINITE_INSTANCE_TYPE);
+        assert_eq!(summary.hourly_price_usd_micros, 116_000);
+        assert_eq!(summary.available_node_count, 1);
+        assert_eq!(summary.active_finite_cvm_count, 1);
+        let output = serde_json::to_string(&summary).unwrap();
+        for sensitive_or_identifying in [
+            FIXTURE_API_KEY,
+            "fixture-node",
+            "fixture-region",
+            "cvm_fixture_01",
+            "app_fixture_01",
+            "fixture-app.example.invalid",
+        ] {
+            assert!(!output.contains(sensitive_or_identifying));
+        }
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| request.method == "GET")
+        );
     }
 
     #[test]
