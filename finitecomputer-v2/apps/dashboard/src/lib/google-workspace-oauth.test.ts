@@ -40,6 +40,16 @@ test("Google Workspace OAuth uses the dashboard callback and sealed user-bound s
   );
 });
 
+test("Google Workspace OAuth derives the exact production callback from the configured public origin", () => {
+  assert.equal(
+    googleWorkspaceOAuthConfig("http://127.0.0.1:3000/internal", {
+      ...env,
+      NEXT_PUBLIC_WORKOS_REDIRECT_URI: "https://finite.computer/callback",
+    })?.redirectUri,
+    "https://finite.computer/google-workspace/callback"
+  );
+});
+
 test("dashboard and installed skill share one Google Workspace scope contract", async () => {
   const skillScopes = JSON.parse(
     await readFile(

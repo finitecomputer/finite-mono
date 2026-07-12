@@ -20,6 +20,11 @@ Latitude.sh. Everything here is traceable to the read-only capture of
 is public). **This describes the wiped k3s host, not the current NixOS box —
 see `infra/nixos/`.**
 
+Current Google Workspace OAuth setup and acceptance requirements are in
+`infra/nixos/README.md` under **Google Workspace OAuth production setup**.
+The credential-name inventory below is historical and is not a live setup
+runbook.
+
 ## Hardware / OS
 
 - Supermicro AS-3015MR-H10TNR bare metal, 188G RAM.

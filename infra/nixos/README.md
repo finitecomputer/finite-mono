@@ -67,6 +67,51 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 finite-brain has **no** secret env (plain-config `Environment=` lines only,
 per the smoke capture).
 
+## Google Workspace OAuth production setup
+
+The dashboard connection flow uses one operator-managed Google OAuth client;
+users connect it from their machine's **Connections** page. The live credential
+must be an OAuth 2.0 Client ID with application type **Web application**. In
+Google Cloud Console, its Authorized redirect URI must be exactly:
+
+```text
+https://finite.computer/google-workspace/callback
+```
+
+That is a separate callback from WorkOS' `/callback`; do not substitute one
+for the other or add a trailing slash. The server performs the code exchange,
+so this flow does not require a browser-side Google secret.
+
+Before enabling the connection:
+
+1. Configure the OAuth consent screen for the intended canary accounts. Use
+   **Internal** when the project and every user belong to the same Google
+   Workspace organization. Otherwise keep the app in **Testing** and add each
+   participating account as a test user until the app's publication and
+   verification work is deliberately taken on.
+2. Enable the Gmail, Google Calendar, Google Drive, Google Sheets, Google Docs,
+   People, and Google Apps Script APIs in that project.
+3. Configure the consent screen with the exact checked-in scope contract in
+   `finite-skills/skills/productivity/google-workspace-finite/references/google-workspace-scopes.json`.
+   This includes the OpenID identity scopes used to bind the connected email;
+   omitting an API or requested scope makes the dashboard reject the grant.
+4. Put only the corresponding values in `/etc/finite/dashboard.env`, under
+   the names `GOOGLE_WORKSPACE_CLIENT_ID` and
+   `GOOGLE_WORKSPACE_CLIENT_SECRET`. `WORKOS_COOKIE_PASSWORD` is also required
+   there to seal the short-lived, user-bound OAuth state. Never copy those
+   values into this repository, a command transcript, or logs.
+5. Keep the checked-in public-origin setting
+   `NEXT_PUBLIC_WORKOS_REDIRECT_URI` (or an explicit
+   `FC_DASHBOARD_PUBLIC_URL` override) pointed at the production dashboard
+   origin. The dashboard derives the Google callback path from that origin.
+
+Acceptance is not a configuration inspection or a callback-only probe. From
+one real, authorized production account, click **Connect**, complete Google's
+consent, return to Connections with the connected Google email visible, and
+then perform one real operation through the agent whose API and permission are
+inside the granted scope (for example, a Drive search or Calendar list). Keep
+that final operation read-only unless the tester explicitly intends a write.
+
 ## Port map (consolidated box)
 
 | Port | Bind | What | Was |
