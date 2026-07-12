@@ -30,4 +30,4 @@ CREATE TABLE IF NOT EXISTS agent_creation_provider_operation_transitions (
 COMMENT ON TABLE agent_creation_provider_operations IS
   'One immutable provider-operation identity per Core agent creation request.';
 COMMENT ON TABLE agent_creation_provider_operation_transitions IS
-  'Append-only, lease-fenced provider creation transition acknowledgments.';
+  'Append-only, lease-fenced provider creation acknowledgments; provision_started must be durable before the first provider mutation.';

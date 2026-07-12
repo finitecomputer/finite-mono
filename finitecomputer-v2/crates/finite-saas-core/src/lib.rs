@@ -275,6 +275,11 @@ pub struct ProviderOperationTransitionRecord {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderOperationTransition {
     CorrelationReserved,
+    /// Core acknowledged that the runner is about to perform the first
+    /// provider mutation. A crash after this boundary must reconcile the
+    /// reserved correlation; it may never be treated as a pre-provider
+    /// failure merely because no response facts were persisted yet.
+    ProvisionStarted,
     Provisioned {
         provider_facts: Value,
     },
@@ -2802,7 +2807,11 @@ impl BridgeCoreState {
                         placement,
                     },
                     current_artifact,
-                    &runtime.id,
+                    // Runtimes created before RuntimeSpec used the canonical
+                    // Kata source-machine name as the durable-state directory.
+                    // The Core Runtime id is a different random surrogate and
+                    // would point controls at an empty/mismatched /data bind.
+                    &runtime.source_machine_id,
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
@@ -3527,19 +3536,40 @@ impl BridgeCoreState {
         input: CancelAgentCreationRequestInput,
     ) -> CoreResult<AgentCreationRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
-        let provisional_runtime_id = self
+        let request = self
             .agent_creation_requests
             .get(&input.request_id)
-            .ok_or(CoreError::AgentCreationRequestNotFound)
-            .and_then(|request| match request.status {
-                AgentCreationRequestStatus::Running => {
-                    Err(CoreError::AgentCreationRequestNotCancellable)
-                }
-                AgentCreationRequestStatus::Requested
-                | AgentCreationRequestStatus::Launching
-                | AgentCreationRequestStatus::Failed
-                | AgentCreationRequestStatus::Cancelled => Ok(request.agent_runtime_id.clone()),
+            .cloned()
+            .ok_or(CoreError::AgentCreationRequestNotFound)?;
+        if request.status == AgentCreationRequestStatus::Running {
+            return Err(CoreError::AgentCreationRequestNotCancellable);
+        }
+        if self
+            .provider_operations
+            .get(&input.request_id)
+            .is_some_and(|operation| !provider_operation_allows_generic_failure(operation))
+        {
+            return Err(CoreError::ProviderOperationBoundaryNotReached);
+        }
+        let provisional_runtime_id = request.agent_runtime_id.clone();
+        // Cancellation is the final cleanup step for failed/pre-provider
+        // requests. Revoke every project-scoped launch key, including one a
+        // crashed runner failed to identify in its failure acknowledgment.
+        let key_ids = self
+            .finite_private_api_keys
+            .values()
+            .filter(|key| {
+                key.status == FinitePrivateApiKeyStatus::Active
+                    && key.project_id.as_deref() == Some(request.project_id.as_str())
+            })
+            .map(|key| key.id.clone())
+            .collect::<Vec<_>>();
+        for key_id in key_ids {
+            self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
+                key_id,
+                now: Some(now.clone()),
             })?;
+        }
 
         let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
             return Err(CoreError::AgentCreationRequestNotFound);
@@ -5969,6 +5999,7 @@ pub(crate) fn merge_provider_runtime_handle(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderOperationTransitionKind {
     CorrelationReserved,
+    ProvisionStarted,
     Provisioned,
     ProvisionUnknown,
     CommitStarted,
@@ -5980,6 +6011,7 @@ impl ProviderOperationTransition {
     fn kind(&self) -> ProviderOperationTransitionKind {
         match self {
             Self::CorrelationReserved => ProviderOperationTransitionKind::CorrelationReserved,
+            Self::ProvisionStarted => ProviderOperationTransitionKind::ProvisionStarted,
             Self::Provisioned { .. } => ProviderOperationTransitionKind::Provisioned,
             Self::ProvisionUnknown { .. } => ProviderOperationTransitionKind::ProvisionUnknown,
             Self::CommitStarted => ProviderOperationTransitionKind::CommitStarted,
@@ -6068,6 +6100,7 @@ fn validate_provider_operation_transition(
             validate_provider_operation_facts(provider_facts)
         }
         ProviderOperationTransition::CorrelationReserved
+        | ProviderOperationTransition::ProvisionStarted
         | ProviderOperationTransition::CommitStarted
         | ProviderOperationTransition::ProviderHandleRecorded { .. }
         | ProviderOperationTransition::Ready => Ok(()),
@@ -6123,6 +6156,10 @@ pub(crate) fn append_provider_operation_transition(
         (None, ProviderOperationTransitionKind::CorrelationReserved)
             | (
                 Some(ProviderOperationTransitionKind::CorrelationReserved),
+                ProviderOperationTransitionKind::ProvisionStarted
+            )
+            | (
+                Some(ProviderOperationTransitionKind::ProvisionStarted),
                 ProviderOperationTransitionKind::Provisioned
                     | ProviderOperationTransitionKind::ProvisionUnknown
             )
@@ -7280,14 +7317,41 @@ mod tests {
             .unwrap();
         assert_eq!(replay, reserved, "replay returns the exact persisted ack");
         let mut current_failure = state.clone();
+        let abandoned_key = current_failure
+            .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                request_id: request_id.clone(),
+                runner_id: "runner-a".to_string(),
+                lease_token: "token-a".to_string(),
+                source_host_id: None,
+                source_machine_id: None,
+                now: Some("2098-01-01T00:00:20Z".to_string()),
+            })
+            .unwrap();
         let failed = current_failure
             .fail_agent_creation_request(fail_input("runner-a", "token-a", None))
             .unwrap();
         assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
         assert_eq!(
+            current_failure.finite_private_api_keys[&abandoned_key.api_key.id].status,
+            FinitePrivateApiKeyStatus::Active,
+            "failure cannot revoke a launch key the runner failed to identify"
+        );
+        assert_eq!(
             current_failure.provider_operations.get(&request_id),
             Some(&reserved),
             "the accepted pre-provider failure keeps its audit journal"
+        );
+        let cancelled = current_failure
+            .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                now: Some("2098-01-01T00:00:31Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
+        assert_eq!(
+            current_failure.finite_private_api_keys[&abandoned_key.api_key.id].status,
+            FinitePrivateApiKeyStatus::Revoked,
+            "final cancellation revokes an otherwise abandoned project launch key"
         );
 
         state
@@ -7329,6 +7393,42 @@ mod tests {
             )),
             Err(CoreError::InvalidProviderOperationFacts)
         ));
+        assert!(matches!(
+            state.record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::Provisioned {
+                    provider_facts: json!({"provider_id": "must-not-skip-start"}),
+                },
+            )),
+            Err(CoreError::ProviderOperationTransitionConflict)
+        ));
+
+        let provision_started = state
+            .record_provider_operation_transition(input(
+                "runner-a",
+                "token-a",
+                "provider-correlation-1",
+                ProviderOperationTransition::ProvisionStarted,
+            ))
+            .unwrap();
+        assert!(matches!(
+            state.fail_agent_creation_request(fail_input("runner-a", "token-a", None)),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert!(matches!(
+            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                now: Some("2098-01-01T00:00:32Z".to_string()),
+            }),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert_eq!(
+            state.provider_operations.get(&request_id),
+            Some(&provision_started),
+            "a crash after the pre-mutation fence remains resumable"
+        );
 
         let provision_unknown = state
             .record_provider_operation_transition(input(
@@ -7393,6 +7493,13 @@ mod tests {
             state.finite_private_api_keys[&provisioned_key.api_key.id].status,
             FinitePrivateApiKeyStatus::Active
         );
+        assert!(matches!(
+            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                now: Some("2098-01-01T00:00:41Z".to_string()),
+            }),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
         let committed = state
             .record_provider_operation_transition(input(
                 "runner-a",
@@ -7531,6 +7638,14 @@ mod tests {
             state.finite_private_api_keys[&provisioned_key.api_key.id].status,
             FinitePrivateApiKeyStatus::Active
         );
+        assert!(matches!(
+            state.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                now: Some("2098-01-01T00:01:01Z".to_string()),
+            }),
+            Err(CoreError::ProviderOperationBoundaryNotReached)
+        ));
+        assert!(state.agent_runtimes.contains_key(&runtime_id));
         let completed = state
             .complete_agent_creation_request(CompleteAgentCreationRequestInput {
                 request_id,
@@ -10798,7 +10913,8 @@ mod tests {
         let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
-            runtime_id
+            "finite-kata-upgrade",
+            "legacy synthesis preserves the source-machine /data directory"
         );
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).operation_id,

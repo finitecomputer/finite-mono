@@ -4598,6 +4598,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         for provider_transition in [
+            serde_json::json!({"kind": "provision_started"}),
             serde_json::json!({
                 "kind": "provisioned",
                 "provider_facts": {"provider_id": "opaque-api-1"}

@@ -3306,6 +3306,35 @@ where
     if request.status == AgentCreationRequestStatus::Running {
         return Err(CoreError::AgentCreationRequestNotCancellable);
     }
+    if select_provider_operation(client, &input.request_id)
+        .await?
+        .is_some_and(|operation| !provider_operation_allows_generic_failure(&operation))
+    {
+        return Err(CoreError::ProviderOperationBoundaryNotReached);
+    }
+    // Cancellation is the final cleanup step for a failed or pre-provider
+    // request. Revoke a project-scoped launch key even when a crashed runner
+    // never named it in its failure acknowledgment. Ambiguous/post-mutation
+    // operations returned above without touching keys or Runtime facts.
+    let key_rows = client
+        .query(
+            "SELECT id FROM finite_private_api_keys
+             WHERE project_id = $1 AND status = 'active'
+             FOR UPDATE",
+            &[&request.project_id],
+        )
+        .await
+        .map_err(store_error)?;
+    for key_id in key_rows.into_iter().map(|row| row.get::<_, String>("id")) {
+        postgres_revoke_finite_private_api_key(
+            client,
+            RevokeFinitePrivateApiKeyInput {
+                key_id,
+                now: Some(now.clone()),
+            },
+        )
+        .await?;
+    }
     if let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
@@ -5830,7 +5859,11 @@ where
                         placement,
                     },
                     &current_artifact,
-                    &runtime.id,
+                    // Pre-RuntimeSpec Kata launches used source_machine_id as
+                    // their durable-state directory. Preserve that proven
+                    // mount identity instead of inventing the Core surrogate
+                    // Runtime id during expand-generation synthesis.
+                    &runtime.source_machine_id,
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
@@ -8819,6 +8852,50 @@ mod tests {
                     "ledger-runner-b",
                     "ledger-token-b",
                     "opaque-ledger-correlation",
+                    ProviderOperationTransition::ProvisionStarted,
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                store
+                    .fail_agent_creation_request(FailAgentCreationRequestInput {
+                        request_id: request_id.clone(),
+                        runner_id: "ledger-runner-b".to_string(),
+                        lease_token: "ledger-token-b".to_string(),
+                        failure_message: "crashed after provider mutation started".to_string(),
+                        provisioned_finite_private_api_key_id: None,
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert!(matches!(
+                store
+                    .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                        request_id: request_id.clone(),
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            let started = raw
+                .query_one(
+                    "SELECT status,
+                            (SELECT count(*)
+                             FROM agent_creation_provider_operation_transitions transition
+                             WHERE transition.agent_creation_request_id = request.id)
+                     FROM agent_creation_requests request WHERE request.id = $1",
+                    &[&request_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(started.get::<_, String>(0), "launching");
+            assert_eq!(started.get::<_, i64>(1), 2);
+            store
+                .record_provider_operation_transition(input(
+                    "ledger-runner-b",
+                    "ledger-token-b",
+                    "opaque-ledger-correlation",
                     ProviderOperationTransition::Provisioned {
                         provider_facts: json!({"provider_id": "opaque-ledger-runtime"}),
                     },
@@ -8846,6 +8923,27 @@ mod tests {
                         provisioned_finite_private_api_key_id: Some(
                             provisioned_key.api_key.id.clone(),
                         ),
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::ProviderOperationBoundaryNotReached)
+            ));
+            assert_eq!(
+                store
+                    .finite_private_admin_state()
+                    .await
+                    .unwrap()
+                    .api_keys
+                    .into_iter()
+                    .find(|key| key.id == provisioned_key.api_key.id)
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Active
+            );
+            assert!(matches!(
+                store
+                    .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                        request_id: request_id.clone(),
                         now: None,
                     })
                     .await,
@@ -8902,7 +9000,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 completed.provider_operation.unwrap().v1().transitions.len(),
-                5
+                6
             );
             let sequences = raw
                 .query(
@@ -8915,7 +9013,7 @@ mod tests {
                 .into_iter()
                 .map(|row| row.get::<_, i32>(0))
                 .collect::<Vec<_>>();
-            assert_eq!(sequences, vec![0, 1, 2, 3, 4]);
+            assert_eq!(sequences, vec![0, 1, 2, 3, 4, 5]);
 
             let current_code = issue_test_launch_code(&store, "unused").await;
             let current = store
@@ -8952,9 +9050,20 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let abandoned_key = store
+                .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                    request_id: current.request.id.clone(),
+                    runner_id: "ledger-current".to_string(),
+                    lease_token: "ledger-current-token".to_string(),
+                    source_host_id: None,
+                    source_machine_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
             let failed = store
                 .fail_agent_creation_request(FailAgentCreationRequestInput {
-                    request_id: current.request.id,
+                    request_id: current.request.id.clone(),
                     runner_id: "ledger-current".to_string(),
                     lease_token: "ledger-current-token".to_string(),
                     failure_message: "failed before provider mutation".to_string(),
@@ -8964,6 +9073,26 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
+            let cancelled = store
+                .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: current.request.id,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status, AgentCreationRequestStatus::Cancelled);
+            assert_eq!(
+                store
+                    .finite_private_admin_state()
+                    .await
+                    .unwrap()
+                    .api_keys
+                    .into_iter()
+                    .find(|key| key.id == abandoned_key.api_key.id)
+                    .unwrap()
+                    .status,
+                FinitePrivateApiKeyStatus::Revoked
+            );
             drop(raw);
             connection.abort();
         })
@@ -9880,7 +10009,10 @@ mod tests {
                 .unwrap()
                 .get(0);
             assert_eq!(upgraded_spec["spec"]["runtimeArtifactId"], "artifact-rc-v2");
-            assert_eq!(upgraded_spec["spec"]["durableStateId"], runtime_id);
+            assert_eq!(
+                upgraded_spec["spec"]["durableStateId"], machine,
+                "legacy synthesis preserves the source-machine /data directory"
+            );
             drop(raw);
             raw_connection.abort();
             let upgraded = store
