@@ -693,10 +693,6 @@ label,
   stroke: var(--green);
 }
 
-.replay-list {
-  margin-top: 10px;
-}
-
 .primary-action {
   border-color: transparent;
   background: var(--blue);
@@ -4527,24 +4523,6 @@ pre {
   line-height: 1.2;
   text-align: center;
   backdrop-filter: blur(12px);
-}
-
-.graph-replay-overlay {
-  position: absolute;
-  left: 14px;
-  bottom: 14px;
-  width: min(340px, calc(100% - 116px));
-  max-height: min(180px, 36%);
-  margin: 0;
-  overflow: auto;
-}
-
-.graph-replay-overlay:empty {
-  display: none;
-}
-
-.graph-replay-overlay[hidden] {
-  display: none;
 }
 
 /* Advanced Options Section */

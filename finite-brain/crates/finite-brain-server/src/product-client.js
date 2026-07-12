@@ -24,7 +24,6 @@ const FiniteBrainProductClient = (() => {
     selectedFolderId: null,
     selectedPageKey: null,
     graphZoom: 1,
-    graphHistoryOpen: false,
     searchHighlight: null,
     searchHighlightShouldScroll: false,
     activeWorkspaceView: "page",
@@ -764,7 +763,6 @@ const FiniteBrainProductClient = (() => {
       "folderShareLinkList",
       "graphCanvas",
       "readerFolderList",
-      "replayList",
       "sharedFolderList",
       "sidebarSearchResults",
       "vaultInvitationList",
@@ -789,8 +787,6 @@ const FiniteBrainProductClient = (() => {
     setText("graphZoomValue", "100%");
     const graphEmptyState = $("graphEmptyState");
     if (graphEmptyState) graphEmptyState.hidden = false;
-    const replayList = $("replayList");
-    if (replayList) replayList.hidden = true;
     const editorDrawer = $("editorDrawer");
     if (editorDrawer) editorDrawer.open = false;
     for (const id of ["commandPalette", "contextMenu", "editorSlashMenu"]) {
@@ -1919,7 +1915,6 @@ const FiniteBrainProductClient = (() => {
     target.selectedFolderId = null;
     target.selectedPageKey = null;
     target.graphZoom = 1;
-    target.graphHistoryOpen = false;
     target.searchHighlight = null;
     target.searchHighlightShouldScroll = false;
     target.activeWorkspaceView = "page";
@@ -3972,32 +3967,6 @@ const FiniteBrainProductClient = (() => {
       });
     }
     return positions;
-  }
-
-  function buildReplayFrames(changes) {
-    const ordered = [...changes].sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
-    const seen = new Set();
-    const pages = new Map();
-    const frames = [];
-    for (const change of ordered) {
-      if (change.recordEventId && seen.has(change.recordEventId)) continue;
-      if (change.recordEventId) seen.add(change.recordEventId);
-      if (change.deleted) {
-        pages.delete(pageKey(change.folderId, change.objectId));
-      } else if (change.page?.status === "ready") {
-        pages.set(pageKey(change.page.folderId, change.page.objectId), change.page);
-      }
-      const graph = buildGraphProjection(pages.values());
-      frames.push({
-        sequence: change.sequence || frames.length + 1,
-        action: change.deleted ? "delete" : "upsert",
-        edgeCount: graph.edges.length,
-        graph,
-        nodeCount: graph.nodes.length,
-        recordEventId: change.recordEventId || null,
-      });
-    }
-    return frames;
   }
 
   function decryptedPagesForGraph() {
@@ -9638,7 +9607,6 @@ const FiniteBrainProductClient = (() => {
     drawGraph(graph, { filterText, readablePageCount: pages.length });
     setGraphStats(graph, pages.length);
     updateGraphFullscreenControl();
-    if (state.graphHistoryOpen) renderGraphHistory();
     log("Rendered graph from decrypted client index.", {
       edges: graph.edges.length,
       nodes: graph.nodes.length,
@@ -9648,76 +9616,6 @@ const FiniteBrainProductClient = (() => {
   function fitGraphView() {
     setGraphZoom(1);
     log("Reset graph zoom.");
-  }
-
-  function updateGraphHistoryControl() {
-    const button = $("toggleGraphHistoryButton");
-    if (!button) return;
-    const action = state.graphHistoryOpen ? "Hide" : "Show";
-    button.setAttribute("aria-pressed", String(state.graphHistoryOpen));
-    button.setAttribute("aria-label", `${action} local page sequence`);
-    button.setAttribute("title", `${action} local page sequence`);
-  }
-
-  function renderGraphHistory(options = {}) {
-    const changes = [];
-    let sequence = 1;
-    for (const [key, draft] of state.projection.localDrafts.entries()) {
-      const [folderId, objectId] = key.split("/");
-      changes.push({
-        sequence,
-        recordEventId: `local-draft-${sequence}`,
-        page: {
-          folderId,
-          objectId,
-          status: "ready",
-          text: draft.text,
-        },
-      });
-      sequence += 1;
-    }
-    for (const [key, page] of state.projection.pages.entries()) {
-      if (!isReadablePage(page)) continue;
-      const [folderId, objectId] = key.split("/");
-      changes.push({
-        sequence,
-        recordEventId: `page-${sequence}`,
-        page: {
-          folderId,
-          objectId,
-          status: "ready",
-          text: page.text,
-          title: page.title,
-        },
-      });
-      sequence += 1;
-    }
-    const frames = buildReplayFrames(changes);
-    const replayList = $("replayList");
-    if (replayList) replayList.hidden = false;
-    setList("replayList", frames, "No local page sequence", (item, frame) => {
-      item.textContent = `#${frame.sequence} ${frame.action}: ${frame.nodeCount} nodes, ${frame.edgeCount} edges`;
-    });
-    updateGraphHistoryControl();
-    if (options.log) {
-      log("Rendered local graph page sequence.", frames.map((frame) => ({
-        edgeCount: frame.edgeCount,
-        nodeCount: frame.nodeCount,
-        sequence: frame.sequence,
-      })));
-    }
-  }
-
-  function toggleGraphHistory() {
-    state.graphHistoryOpen = !state.graphHistoryOpen;
-    if (state.graphHistoryOpen) {
-      renderGraphHistory({ log: true });
-      return;
-    }
-    const replayList = $("replayList");
-    if (replayList) replayList.hidden = true;
-    updateGraphHistoryControl();
-    log("Hid local graph page sequence.");
   }
 
   function renderOkfPlan() {
@@ -10238,9 +10136,6 @@ const FiniteBrainProductClient = (() => {
     $("fullscreenGraphButton").addEventListener("click", () => {
       toggleGraphFullscreen();
     });
-    $("toggleGraphHistoryButton").addEventListener("click", () => {
-      toggleGraphHistory();
-    });
     document.addEventListener("fullscreenchange", updateGraphFullscreenControl);
     onOptionalClick("planOkfImportButton", () => {
       try {
@@ -10499,7 +10394,6 @@ const FiniteBrainProductClient = (() => {
     buildVaultInvitationRequest,
     buildVaultBootstrapPlan,
     buildGraphProjection,
-    buildReplayFrames,
     canonicalAdminAccessChangePayload,
     canonicalEmailInviteAuthorizationPayload,
     canonicalInviteEmail,

@@ -587,10 +587,11 @@ assert.match(htmlSource, /id="zoomInGraphButton"[^>]*title="Zoom in"/);
 assert.match(htmlSource, /id="zoomOutGraphButton"[^>]*title="Zoom out"/);
 assert.match(htmlSource, /id="fitGraphButton"[^>]*title="Reset zoom"/);
 assert.match(htmlSource, /id="fullscreenGraphButton"[^>]*title="Enter full screen"/);
-assert.match(htmlSource, /id="toggleGraphHistoryButton"[^>]*Show local page sequence/);
 assert.doesNotMatch(htmlSource, /id="resetGraphButton"/);
 assert.doesNotMatch(htmlSource, /id="renderGraphButton"/);
 assert.doesNotMatch(htmlSource, /id="replayGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="toggleGraphHistoryButton"/);
+assert.doesNotMatch(htmlSource, /id="replayList"/);
 assert.match(source, /requestFullscreen\(\)/);
 assert.match(source, /document\.addEventListener\("fullscreenchange", updateGraphFullscreenControl\)/);
 assert.match(source, /zoomGraphView\(1\)/);
@@ -1868,7 +1869,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(openedAsset.text, undefined);
   assert.equal(client.buildGraphProjection([openedAsset]).nodes.length, 0);
   assert.equal(client.searchPageRows("source", [openedAsset]).length, 0);
-  assert.equal(client.buildReplayFrames([{ sequence: 1, page: openedAsset }])[0].nodeCount, 0);
   assert.equal(client.readerPageRows("general", [openedAsset]).length, 0);
   await assert.rejects(
     () =>
@@ -2900,47 +2900,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   );
   assert.equal(client.graphViewBoxForZoom(0).zoom, 0.5);
 
-  const replay = client.buildReplayFrames([
-    {
-      sequence: 2,
-      recordEventId: "event-b",
-      page: {
-        folderId: "general",
-        objectId: "page-b",
-        status: "ready",
-        text: "# Beta",
-      },
-    },
-    {
-      sequence: 1,
-      recordEventId: "event-a",
-      page: {
-        folderId: "general",
-        objectId: "page-a",
-        status: "ready",
-        text: "# Alpha\n\n[[Beta]]",
-      },
-    },
-    {
-      sequence: 2,
-      recordEventId: "event-b",
-      page: {
-        folderId: "general",
-        objectId: "page-b",
-        status: "ready",
-        text: "# Duplicate",
-      },
-    },
-  ]);
-  assert.equal(replay.length, 2);
-  assert.deepEqual(
-    Array.from(replay.map((frame) => frame.sequence)),
-    [1, 2]
-  );
-  assert.equal(replay[0].nodeCount, 1);
-  assert.equal(replay[1].nodeCount, 2);
-  assert.equal(replay[1].edgeCount, 1);
-
   const invitationRows = client.vaultInvitationRows([
     {
       createdAt: "2026-07-01T00:00:00.000Z",
@@ -3088,7 +3047,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   );
   assert.equal(elements.get("graphCanvas").children.length, 0);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");
-  assert.equal(elements.get("replayList").children.length, 0);
   assert.equal(elements.get("obsidianNewPageButton").disabled, true);
   assert.equal(elements.get("obsidianNewFolderButton").disabled, true);
 
