@@ -803,6 +803,9 @@ assert.match(cssSource, /\.graph-floating-controls button:active:not\(:disabled\
 assert.doesNotMatch(cssSource, /\.graph-icon-button\b/);
 assert.doesNotMatch(cssSource, /\.graph-controls\b/);
 assert.doesNotMatch(source, /graphFilterInput/);
+for (const [, rule] of cssSource.matchAll(/\.graph-canvas \.node\s*\{([^}]*)\}/g)) {
+  assert.doesNotMatch(rule, /cursor:\s*pointer/);
+}
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
 assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
@@ -977,14 +980,22 @@ assert.match(source, /"vaultInviteSecretInput"/);
     "http://finite.test/_admin/vaults/smoke/metadata",
     "{\"name\":\"Smoke\"}"
   );
+  const repeatedEvent = await client.buildAuthEventTemplate(
+    "post",
+    "http://finite.test/_admin/vaults/smoke/metadata",
+    "{\"name\":\"Smoke\"}"
+  );
   assert.equal(event.kind, 27235);
   assert.deepEqual(Array.from(event.tags[0]), [
     "u",
     "http://finite.test/_admin/vaults/smoke/metadata",
   ]);
   assert.deepEqual(Array.from(event.tags[1]), ["method", "POST"]);
-  assert.equal(event.tags[2][0], "payload");
-  assert.equal(event.tags[2][1].length, 64);
+  assert.equal(event.tags[2][0], "nonce");
+  assert.match(event.tags[2][1], /^[0-9a-f]{32}$/);
+  assert.notEqual(event.tags[2][1], repeatedEvent.tags[2][1]);
+  assert.equal(event.tags[3][0], "payload");
+  assert.equal(event.tags[3][1].length, 64);
 
   const keyring = client.createSessionKeyring();
   const folderKey = Buffer.alloc(32, 7).toString("base64");

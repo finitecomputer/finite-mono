@@ -33,5 +33,8 @@ FINDINGS:
 - None. The membership-loss predicate is constrained to status 403, reason
   "vault access required", matching active Vault, and one of the three
   vault-wide state-read paths.
-- Browser member-removal proof remains in the final isolated-Vault pass.
+- Isolated browser proof passed: the exact active-Vault access-loss response
+  locks and clears the session while retaining the safe notice. Immediate
+  Lock → Unlock also passed after fresh signed auth nonces removed the
+  same-second NIP-98 replay collision.
 ```

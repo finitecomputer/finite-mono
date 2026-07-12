@@ -41,11 +41,17 @@
   concurrent read-only ticket analyses
 - Findings: none. The error predicate is exact and only invoked after the
   response has been authenticated and correlated with the active session epoch.
-- Final browser proof: deferred to the final isolated organization-Vault flow,
-  which removes a disposable member and triggers recipient refresh.
+- Final browser proof: an isolated local Product Client receives the exact
+  active-Vault metadata `403` reason `vault access required`; it purges the
+  session, locks, and retains the Vault-change notice. The same disposable
+  flow also proved immediate Lock → Unlock works after the client began adding
+  a fresh signed HTTP auth nonce per protected request.
 
 ## Risks
 
 - The client relies intentionally on the server's stable membership-loss
   reason. Widening that server contract in the future requires revisiting this
   predicate rather than treating every 403 as Vault revocation.
+- The server correctly rejects reused auth event ids. Product Clients must
+  mint a fresh signed auth nonce rather than weakening that replay boundary or
+  relying on second-resolution timestamps.

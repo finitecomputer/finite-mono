@@ -7230,10 +7230,15 @@ const FiniteBrainProductClient = (() => {
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  function authNonce() {
+    return bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  }
+
   async function buildAuthEventTemplate(method, url, bodyText) {
     const tags = [
       ["u", url],
       ["method", method.toUpperCase()],
+      ["nonce", authNonce()],
     ];
     if (bodyText) tags.push(["payload", await sha256Hex(bodyText)]);
     return {

@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: all remediation tickets implemented; integrated verification and final review in progress
+- Current status: all remediation tickets implemented; integrated browser verification passed; final review in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and `finite-brain/docs/agents/`)
 
 ## Goal
@@ -42,12 +42,12 @@ undefined or ambiguous.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| #18 | AFK | complete | standards pass; spec pass with integrated browser proof pending | signed Page save/delete | Node contract; syntax; diff |
-| #19 | AFK | complete | standards/spec pass after three P2 corrections; integrated browser proof pending | safe visible client feedback | Node contract; syntax; diff |
-| #20 | AFK | complete | focused self-review pass; integrated browser proof pending | authorization-loss Session Lock | Node contract; syntax; diff |
-| #21 | AFK | complete | independent focused review pass; integrated browser proof pending | invitation Session Lock/reactivity/revoke | Node contract; syntax; diff |
-| #22 | AFK | complete | standards/spec review pass; integrated browser proof pending | Child Folder hierarchy metadata | Node contract; syntax; diff |
-| #23 | AFK | complete | standards/spec review pass; integrated browser proof pending | hidden Graph filter removal | Node contract; fixture verifier; Rust tests; syntax; diff |
+| #18 | AFK | complete | standards pass; spec pass | signed Page save/delete | Node contract; browser signed PUT/tombstone DELETE; syntax; diff |
+| #19 | AFK | complete | standards/spec pass after three P2 corrections | safe visible client feedback | Node contract; browser generic failure then Session Lock purge; syntax; diff |
+| #20 | AFK | complete | focused self-review pass | authorization-loss Session Lock | Node contract; browser exact 403 lock + immediate re-unlock; syntax; diff |
+| #21 | AFK | complete | independent focused review pass | invitation Session Lock/reactivity/revoke | browser locked control state plus admin create/revoke; Node contract; syntax; diff |
+| #22 | AFK | complete | standards/spec review pass | Child Folder hierarchy metadata | browser parent-aware Folder POST/grants/default access; Node contract; syntax; diff |
+| #23 | AFK | complete | standards/spec review pass | hidden Graph filter removal | browser visual/DOM graph control proof; Node contract; fixture verifier; Rust tests; syntax; diff |
 
 ## Parked HITL Slices
 
@@ -74,5 +74,7 @@ undefined or ambiguous.
 
 ## Escalations
 
-- None. Existing Product Client, Session Lock, Folder, and invitation product
-  truths resolve the remediation behavior.
+- None. Existing Product Client, Session Lock, Folder, invitation, and NIP-98
+  replay product truths resolve the remediation behavior. Final browser
+  verification exposed a same-second replay collision in Product Client auth;
+  the existing CLI nonce precedent resolved it without a new product decision.
