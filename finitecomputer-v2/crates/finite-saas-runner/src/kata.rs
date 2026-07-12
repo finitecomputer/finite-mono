@@ -423,11 +423,19 @@ impl KataLauncher {
                 OsString::from(self.config.stop_timeout_secs.to_string()),
                 OsString::from(container_name),
             ]),
-            self.config
-                .command_timeout
-                .max(Duration::from_secs(self.config.stop_timeout_secs + 5)),
+            self.graceful_stop_command_timeout(),
         )?;
         Ok(())
+    }
+
+    fn graceful_stop_command_timeout(&self) -> Duration {
+        // `nerdctl --time` is the guest's graceful-stop allowance, not the
+        // complete CLI operation budget. Leave the full ordinary command
+        // allowance after that grace for containerd/Kata acknowledgement and
+        // process teardown; otherwise the outer watchdog can kill nerdctl
+        // while the canonical container has already exited.
+        Duration::from_secs(self.config.stop_timeout_secs)
+            .saturating_add(self.config.command_timeout)
     }
 
     fn rename_compute(&self, from: &str, to: &str) -> Result<(), RunnerError> {
@@ -487,6 +495,7 @@ impl KataLauncher {
             self.start_compute(&canonical_plan.container_name)?;
         }
         let host_port = self.host_port(canonical_plan)?;
+        self.wait_for_runtime_http(canonical_plan, host_port)?;
         let restored_npub = self.wait_for_agent_npub(canonical_plan, host_port)?;
         if restored_npub != old_npub {
             return Err(RunnerError::RuntimeLaunch(
@@ -780,9 +789,7 @@ impl RuntimeLauncher for KataLauncher {
                 OsString::from(self.config.stop_timeout_secs.to_string()),
                 OsString::from(&plan.container_name),
             ]),
-            self.config
-                .command_timeout
-                .max(Duration::from_secs(self.config.stop_timeout_secs + 5)),
+            self.graceful_stop_command_timeout(),
         )?;
         let host_port = self.host_port(&plan)?;
         self.wait_for_runtime_http(&plan, host_port)
@@ -956,7 +963,8 @@ impl RuntimeLauncher for KataLauncher {
         write_kata_env_file(&candidate_plan.env_file, &replacement_environment.entries)?;
         if let Err(error) = self.stop_compute(&canonical_name) {
             let _ = std::fs::remove_file(&candidate_plan.env_file);
-            return Err(error);
+            let restore = self.restore_previous_compute(&canonical_plan, &old_npub);
+            return Err(runtime_upgrade_failure(error, restore.err()));
         }
 
         let candidate_launch = self.run_checked(
@@ -1105,9 +1113,7 @@ impl RuntimeLauncher for KataLauncher {
                     OsString::from(self.config.stop_timeout_secs.to_string()),
                     OsString::from(&plan.container_name),
                 ]),
-                self.config
-                    .command_timeout
-                    .max(Duration::from_secs(self.config.stop_timeout_secs + 5)),
+                self.graceful_stop_command_timeout(),
             )?;
         }
         Ok(())
@@ -1697,11 +1703,13 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct TestHttpServer {
         port: u16,
         stop: Arc<AtomicBool>,
+        contact_requests: Arc<AtomicUsize>,
+        health_requests: Arc<AtomicUsize>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -1712,6 +1720,10 @@ mod tests {
             let port = listener.local_addr().unwrap().port();
             let stop = Arc::new(AtomicBool::new(false));
             let stop_thread = stop.clone();
+            let contact_requests = Arc::new(AtomicUsize::new(0));
+            let contact_requests_thread = contact_requests.clone();
+            let health_requests = Arc::new(AtomicUsize::new(0));
+            let health_requests_thread = health_requests.clone();
             let npub = npub.to_string();
             let thread = std::thread::spawn(move || {
                 while !stop_thread.load(Ordering::Relaxed) {
@@ -1721,8 +1733,10 @@ mod tests {
                             let count = stream.read(&mut request).unwrap_or_default();
                             let request = String::from_utf8_lossy(&request[..count]);
                             let body = if request.contains(" /contact ") {
+                                contact_requests_thread.fetch_add(1, Ordering::Relaxed);
                                 format!(r#"{{"agent_npub":"{npub}"}}"#)
                             } else {
+                                health_requests_thread.fetch_add(1, Ordering::Relaxed);
                                 r#"{"ready":true}"#.to_string()
                             };
                             let response = format!(
@@ -1742,6 +1756,8 @@ mod tests {
             Self {
                 port,
                 stop,
+                contact_requests,
+                health_requests,
                 thread: Some(thread),
             }
         }
@@ -1790,7 +1806,16 @@ case "$cmd" in
   start)
     name="$1"; write_field "$name" status running ;;
   stop)
-    for name in "$@"; do :; done; write_field "$name" status exited ;;
+    for name in "$@"; do :; done
+    write_field "$name" status exited
+    if [ -f "$root/fail-stop-after-exit" ]; then
+      echo "injected stop failure" >&2
+      exit 42
+    fi
+    if [ -f "$root/timeout-stop-after-exit" ]; then
+      exec sleep 10
+    fi
+    ;;
   rm)
     for name in "$@"; do :; done
     rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.port"
@@ -1883,6 +1908,10 @@ esac
                 source_import_key: "finite-lat-1/finite-kata-upgrade-agent".to_string(),
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
+                placement: None,
+                provider_runtime_handle: None,
+                provider_runtime_handle_history: Vec::new(),
+                contact_endpoint: None,
                 host_facts: HostOwnedRuntimeFacts {
                     display_name: "Upgrade Agent".to_string(),
                     hostname: None,
@@ -2018,6 +2047,139 @@ esac
             commands_after_retry.matches("run --detach").count(),
             commands_before_retry.matches("run --detach").count(),
             "exact Config.Image retry must not launch replacement compute again"
+        );
+    }
+
+    #[test]
+    fn kata_stop_outer_timeout_includes_grace_and_full_command_budget() {
+        let launcher = KataLauncher::new(KataConfig {
+            command_timeout: Duration::from_secs(35),
+            stop_timeout_secs: 30,
+            ..KataConfig::default()
+        });
+        assert_eq!(
+            launcher.graceful_stop_command_timeout(),
+            Duration::from_secs(65)
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_stop_failure_restarts_and_verifies_old_canonical() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join("fail-stop-after-exit"), "1").unwrap();
+
+        let error = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_stop_failure"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected stop failure"));
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                .unwrap(),
+            "running"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            old_image
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let stop = commands
+            .find(&format!("stop --time 30 {}", plan.container_name))
+            .unwrap();
+        let restart = commands
+            .find(&format!("start {}", plan.container_name))
+            .unwrap();
+        assert!(
+            stop < restart,
+            "old canonical must restart after stop failure"
+        );
+        assert!(
+            !commands.contains("run --detach"),
+            "candidate takeover must not begin after stop failure"
+        );
+        assert!(
+            old_server.health_requests.load(Ordering::Relaxed) >= 1,
+            "restored canonical must pass health readiness"
+        );
+        assert!(
+            old_server.contact_requests.load(Ordering::Relaxed) >= 2,
+            "restored canonical must re-prove the original Agent Principal"
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_stop_timeout_restarts_and_verifies_old_canonical() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        launcher.config.command_timeout = Duration::from_secs(1);
+        launcher.config.stop_timeout_secs = 0;
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join("timeout-stop-after-exit"), "1").unwrap();
+
+        let error = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_stop_timeout"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                .unwrap(),
+            "running"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            old_image
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let stop = commands
+            .find(&format!("stop --time 0 {}", plan.container_name))
+            .unwrap();
+        let restart = commands
+            .find(&format!("start {}", plan.container_name))
+            .unwrap();
+        assert!(
+            stop < restart,
+            "old canonical must restart after stop timeout"
+        );
+        assert!(
+            !commands.contains("run --detach"),
+            "candidate takeover must not begin after stop timeout"
+        );
+        assert!(
+            old_server.health_requests.load(Ordering::Relaxed) >= 1,
+            "restored canonical must pass health readiness"
+        );
+        assert!(
+            old_server.contact_requests.load(Ordering::Relaxed) >= 2,
+            "restored canonical must re-prove the original Agent Principal"
         );
     }
 
