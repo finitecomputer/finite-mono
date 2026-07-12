@@ -95,6 +95,7 @@ const FiniteBrainProductClient = (() => {
     "okfBundleInput",
     "okfDestinationFolderInput",
     "organizationVaultNameInput",
+    "manageOrganizationVaultNameInput",
     "pageBaseRevisionInput",
     "pageDraftInput",
     "pageFolderIdInput",
@@ -4206,7 +4207,10 @@ const FiniteBrainProductClient = (() => {
 
   function globalVaultControlState(sidebarMode) {
     return {
-      hidden: false,
+      // Vault selection/loading now lives in the footer switcher and Manage Vaults
+      // dialog. Legacy callers can still ask for the chrome state while the old
+      // dense Files/Search controls remain absent from the rendered sidebar.
+      hidden: true,
     };
   }
 
@@ -9532,7 +9536,7 @@ const FiniteBrainProductClient = (() => {
   function bind() {
     window.addEventListener?.("pagehide", handlePageHide);
     window.addEventListener?.("pageshow", handlePageShow);
-    $("connectSignerButton").addEventListener("click", () => {
+    onOptionalClick("connectSignerButton", () => {
       connectSigner().catch((error) => {
         state.lastError = error.message;
         log("Failed to connect signer.", { error: error.message });
@@ -9549,7 +9553,7 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
-    $("vaultSelect").addEventListener("change", () => {
+    $("vaultSelect")?.addEventListener("change", () => {
       setActiveVaultId($("vaultSelect").value);
       render();
     });
@@ -9638,7 +9642,7 @@ const FiniteBrainProductClient = (() => {
       const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
       setSettingsSection(["session", "vault", "access", "invitations"][nextIndex] || "session");
     });
-    $("loadVaultButton").addEventListener("click", () => {
+    $("loadVaultButton")?.addEventListener("click", () => {
       const operation = state.sessionStatus === SESSION_STATUS.LOCKED ? resumeSession() : loadVaultReader();
       operation.catch((error) => {
         state.lastError = error.message;
@@ -9647,14 +9651,14 @@ const FiniteBrainProductClient = (() => {
         render();
       });
     });
-    $("createOrganizationVaultButton").addEventListener("click", () => {
+    $("createOrganizationVaultButton")?.addEventListener("click", () => {
       createOrganizationVaultFromInput().catch((error) => {
         state.lastError = error.message;
         log("Failed to create organization Vault.", { error: error.message });
         render();
       });
     });
-    $("organizationVaultNameInput").addEventListener("keydown", (event) => {
+    $("organizationVaultNameInput")?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
       createOrganizationVaultFromInput().catch((error) => {

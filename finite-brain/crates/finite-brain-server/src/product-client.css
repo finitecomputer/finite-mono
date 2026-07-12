@@ -1054,8 +1054,9 @@ pre {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
-.file-sidebar:has(> .vault-control-strip:not([hidden])[open]) {
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+/* Access and invitation management are mounted into Settings before first paint. */
+.file-sidebar > #accessSidebarPanel {
+  display: none;
 }
 
 .vault-header,
@@ -5055,7 +5056,7 @@ pre {
 
   .settings-nav {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     flex: 0 0 auto;
     overflow-x: hidden;
     overflow-y: visible;

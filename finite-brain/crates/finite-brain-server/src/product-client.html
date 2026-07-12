@@ -57,47 +57,6 @@
           </div>
         </header>
 
-        <details id="vaultControlDetails" class="vault-control-strip" aria-label="Vault controls" open>
-          <summary>
-            <span>Vault</span>
-            <span id="vaultControlSummary">Personal vault</span>
-          </summary>
-          <div class="vault-control-body">
-            <label class="sr-only" for="vaultSelect">Vault</label>
-            <div class="vault-picker">
-              <select id="vaultSelect" aria-label="Vault">
-                <option value="personal">Personal vault</option>
-              </select>
-              <input id="vaultIdInput" type="hidden" value="personal" />
-              <button id="loadVaultButton" class="vault-load-button" type="button" title="Load and decrypt vault" aria-label="Load and decrypt vault">Load</button>
-            </div>
-            <button id="connectSignerButton" class="vault-connect-button" type="button">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="7.5" cy="12.5" r="3.5" />
-                <path d="M11 12.5h9M16 12.5v3M19 12.5v2" />
-              </svg>
-              <span>Connect signer</span>
-            </button>
-            <details id="vaultCreateDetails" class="vault-create-details">
-              <summary>Create organization</summary>
-              <div id="vaultCreateRow" class="vault-create-row">
-                <label class="sr-only" for="organizationVaultNameInput">New organization vault</label>
-                <input
-                  id="organizationVaultNameInput"
-                  placeholder="New organization"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-                <button id="createOrganizationVaultButton" class="compact-icon-button" type="button" title="Create organization vault" aria-label="Create organization vault">
-                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                </button>
-              </div>
-            </details>
-          </div>
-        </details>
-
         <div class="sidebar-toolbar" aria-label="File explorer actions">
           <button id="obsidianNewPageButton" class="sidebar-icon-button" type="button" title="New Page" aria-label="New Page">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">

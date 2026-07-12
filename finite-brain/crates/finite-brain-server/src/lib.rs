@@ -2299,11 +2299,11 @@ mod tests {
         assert!(client_body.contains("resumeSessionButton"));
         assert!(client_body.contains("lockSessionButton"));
         assert!(!client_body.contains("Open accessible vault"));
-        assert!(client_body.contains("vaultControlDetails"));
-        assert!(client_body.contains("vaultSelect"));
-        assert!(client_body.contains("vault-connect-button"));
-        assert!(client_body.contains("organizationVaultNameInput"));
-        assert!(client_body.contains("createOrganizationVaultButton"));
+        assert!(!client_body.contains("vaultControlDetails"));
+        assert!(!client_body.contains("vaultSelect"));
+        assert!(client_body.contains("sessionAccountVaultButton"));
+        assert!(client_body.contains("vaultSwitcherMenu"));
+        assert!(client_body.contains("manageVaultsModal"));
         assert!(client_body.contains("readerFolderList"));
         assert!(client_body.contains("searchSidebarPanel"));
         assert!(client_body.contains("commandPalette"));
