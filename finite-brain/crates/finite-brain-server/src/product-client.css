@@ -159,9 +159,7 @@
   --radius-panel: 12px;
   --radius-popover: 14px;
   --radius-pill: 999px;
-  --control-height: 36px;
-  --control-height-compact: 32px;
-  --control-height-touch: 40px;
+  --control-height: 32px;
   --control-disabled-opacity: 0.48;
 
   --shadow-control:
@@ -318,7 +316,8 @@ button,
   color: var(--text);
   cursor: pointer;
   font-weight: 600;
-  padding: 8px 12px;
+  font-size: 13px;
+  padding: 0 12px;
   text-decoration: none;
   transition-duration: 140ms;
   transition-property: background-color, border-color, box-shadow, color, opacity, transform;
@@ -362,7 +361,8 @@ select {
   border-radius: var(--radius-control);
   background: var(--input-bg);
   color: var(--text);
-  padding: 8px 10px;
+  font-size: 13px;
+  padding: 0 10px;
 }
 
 input::placeholder,
@@ -993,9 +993,9 @@ pre {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  min-height: 40px;
+  width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
   border: 0;
   border-radius: var(--radius-icon);
   background: transparent;
@@ -1051,7 +1051,7 @@ pre {
   grid-column: 2;
   grid-row: 1;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
 }
 
 .vault-header,
@@ -1096,9 +1096,9 @@ pre {
   min-height: 32px;
   color: var(--soft);
   cursor: default;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   list-style: none;
   padding: 0 10px 0 12px;
   text-transform: uppercase;
@@ -1159,6 +1159,7 @@ pre {
 .vault-picker select {
   flex: 1 1 auto;
   padding-right: 28px;
+  background-color: color-mix(in srgb, var(--input-bg) 96%, var(--text));
   background-image:
     linear-gradient(45deg, transparent 50%, var(--muted) 50%),
     linear-gradient(135deg, var(--muted) 50%, transparent 50%);
@@ -1173,7 +1174,7 @@ pre {
 .vault-picker .vault-load-button {
   flex: 0 0 auto;
   min-width: 68px;
-  font-weight: 720;
+  font-weight: 600;
 }
 
 .vault-create-row {
@@ -1227,7 +1228,8 @@ pre {
 
 .vault-control-body input,
 .vault-control-body select {
-  min-height: var(--control-height-compact);
+  height: var(--control-height);
+  min-height: var(--control-height);
   border-color: var(--line-strong);
   background: var(--input-bg);
   color: var(--text);
@@ -1240,29 +1242,31 @@ pre {
 }
 
 .vault-control-body button {
-  min-height: var(--control-height-compact);
+  height: var(--control-height);
+  min-height: var(--control-height);
   border-color: var(--line-strong);
   border-radius: var(--radius-control);
   background: var(--surface-strong);
   color: var(--text);
-  font-size: 12px;
-  padding: 4px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 10px;
 }
 
 .vault-connect-button {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  grid-column: 1 / 2;
+  grid-column: 1 / 3;
   grid-row: 2;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   overflow: hidden;
   border-color: transparent;
   background: transparent;
-  box-shadow: var(--shadow-control);
+  box-shadow: none;
   color: var(--text);
-  font-weight: 750;
+  font-weight: 600;
   text-align: left;
 }
 
@@ -1285,10 +1289,10 @@ pre {
   white-space: nowrap;
 }
 
-.compact-icon-button {
-  width: 36px;
-  min-width: 36px;
-  min-height: 36px;
+.vault-control-body .compact-icon-button {
+  width: var(--control-height);
+  min-width: var(--control-height);
+  min-height: var(--control-height);
   padding: 0;
 }
 
@@ -1309,7 +1313,7 @@ pre {
   gap: 8px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--blue-soft) 56%, var(--sidebar));
-  padding: 8px 10px;
+  padding: 8px 12px;
 }
 
 .session-security-copy {
@@ -1320,26 +1324,29 @@ pre {
 
 .session-security-copy strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   text-wrap: balance;
 }
 
 .session-security-copy span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.35;
   text-wrap: pretty;
 }
 
 .session-security-status button {
-  min-height: var(--control-height-touch);
+  height: var(--control-height);
+  min-height: var(--control-height);
   border-color: transparent;
+  border-radius: var(--radius-pill);
   background: var(--blue);
   box-shadow: var(--shadow-control);
   color: #f6f8ff;
-  font-size: 11px;
-  font-weight: 720;
-  padding: 4px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 13px;
   transition-duration: 140ms;
   transition-property: background-color, box-shadow, color, transform;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
@@ -1361,17 +1368,17 @@ pre {
 
 .sidebar-toolbar {
   gap: 4px;
-  min-height: 40px;
+  min-height: var(--control-height);
   border-bottom: 1px solid var(--line);
   background: var(--obsi-panel);
-  padding: 0 7px;
+  padding: 0 8px;
 }
 
 .sidebar-icon-button {
   flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  min-height: 40px;
+  width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
   border: 0;
   border-radius: var(--radius-icon);
   background: transparent;
@@ -1425,7 +1432,7 @@ pre {
 
 .sidebar-tool-panel input {
   width: calc(100% - 24px);
-  min-height: 30px;
+  min-height: var(--control-height);
   margin: 0 12px;
 }
 
@@ -1519,7 +1526,7 @@ pre {
 
 .access-view-switch button {
   min-width: 0;
-  min-height: 32px;
+  min-height: var(--control-height);
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -1842,8 +1849,8 @@ pre {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 40px;
-  padding: 0 11px 0 13px;
+  min-height: var(--control-height);
+  padding: 0 10px;
   background: transparent;
   border: 0;
   border-radius: 8px;
@@ -1966,8 +1973,8 @@ pre {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+  width: var(--control-height);
+  height: var(--control-height);
   margin-left: auto;
   padding: 0;
   border: 0;
@@ -2034,8 +2041,8 @@ pre {
 }
 
 .access-remove-person {
-  min-width: 40px;
-  min-height: 40px;
+  min-width: var(--control-height);
+  min-height: var(--control-height);
   padding: 0 8px;
   background: transparent;
   border: none;
@@ -2101,12 +2108,12 @@ pre {
   min-width: 0;
   flex: 1;
   width: 100%;
-  min-height: 40px;
+  min-height: var(--control-height);
   margin: 0;
-  padding: 7px 9px;
+  padding: 0 10px;
   background: var(--access-input);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   box-shadow: inset 0 0 0 1px var(--access-border);
   color: var(--access-text);
   font-size: 12px;
@@ -2121,11 +2128,11 @@ pre {
 
 .access-add-button {
   flex-shrink: 0;
-  min-height: 40px;
-  padding: 7px 12px;
+  min-height: var(--control-height);
+  padding: 0 12px;
   background: var(--access-accent);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-pill);
   color: #fff;
   font-size: 12px;
   font-weight: 700;
@@ -2178,7 +2185,7 @@ pre {
 
 .access-segmented-control button {
   min-width: 0;
-  min-height: 40px;
+  min-height: var(--control-height);
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -2220,9 +2227,9 @@ pre {
 }
 
 .access-action-row button {
-  min-height: 40px;
-  border-radius: 7px;
-  padding: 7px 11px;
+  min-height: var(--control-height);
+  border-radius: var(--radius-control);
+  padding: 0 11px;
   transition-property: background-color, border-color, color, transform;
   transition-duration: 140ms;
   transition-timing-function: ease-out;
@@ -2308,10 +2315,10 @@ pre {
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  min-height: 40px;
+  min-height: var(--control-height);
   margin: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--access-input);
   box-shadow: inset 0 0 0 1px var(--access-border);
   font-size: 12px;
@@ -2773,7 +2780,7 @@ pre {
 
 .command-palette-panel input {
   width: calc(100% - 24px);
-  min-height: 40px;
+  min-height: var(--control-height);
   margin: 12px;
   border-color: var(--line-strong);
   background: var(--input-bg);
@@ -3683,15 +3690,16 @@ pre {
 .access-button-row button,
 .access-primary-button {
   min-width: 0;
-  min-height: 40px;
-  border-radius: 7px;
-  padding: 7px 11px;
+  min-height: var(--control-height);
+  border-radius: var(--radius-control);
+  padding: 0 11px;
   transition-property: background-color, border-color, box-shadow, color, transform;
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
 .access-primary-button {
+  border-radius: var(--radius-pill);
   border-color: var(--access-accent);
   background: var(--access-accent-soft);
   color: var(--access-accent-strong);
@@ -4244,6 +4252,14 @@ pre {
 
   .obsidian-workspace {
     display: none;
+  }
+
+  .session-security-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .session-security-status button {
+    width: 100%;
   }
 
   .access-folder-selector,
