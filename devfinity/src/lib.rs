@@ -143,9 +143,24 @@ impl Default for AppleHostAccess {
 const RUNTIME_ARTIFACT_ID: &str = "devfinity-runtime";
 const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
 const RUNNER_ID: &str = "devfinity-apple-runner";
+const RUNNER_CLASS: &str = "apple_container";
 const RUNNER_SOURCE_HOST_ID: &str = "devfinity-apple";
+const DEVFINITY_RUNNER_CREDENTIAL_ID: &str = "devfinity-apple-current";
+const DEVFINITY_RUNNER_TOKEN_ENV: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFINITY_APPLE_CURRENT";
 const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
 const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
+
+fn devfinity_runner_credentials_json() -> String {
+    serde_json::json!([{
+        "credentialId": DEVFINITY_RUNNER_CREDENTIAL_ID,
+        "tokenEnv": DEVFINITY_RUNNER_TOKEN_ENV,
+        "runnerId": RUNNER_ID,
+        "runnerClasses": [RUNNER_CLASS],
+        "sourceHostId": RUNNER_SOURCE_HOST_ID,
+        "revoked": false,
+    }])
+    .to_string()
+}
 
 impl std::fmt::Display for ManagedProcess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -344,11 +359,17 @@ impl Stack {
         prepare_workos_fixture(&fixture, &self.workos_fixture_url())?;
         let workos_api_key = fs::read_to_string(&fixture.api_key)?;
         let customer_token = fs::read_to_string(&fixture.customer_token)?;
+        let runner_credentials_json = devfinity_runner_credentials_json();
         write_mode_600(
             &self.core_secret_file(),
             format!(
-                "export FC_CORE_API_TOKEN={}\nexport FC_CORE_RUNNER_API_TOKEN={}\nexport FC_FINITE_PRIVATE_USAGE_API_TOKEN={}\nexport WORKOS_API_KEY={}\n",
-                shell_quote(&self.core_token), shell_quote(DEVFINITY_RUNNER_TOKEN), shell_quote(DEVFINITY_USAGE_TOKEN), shell_quote(workos_api_key.trim())
+                "export FC_CORE_API_TOKEN={}\nexport FC_CORE_RUNNER_CREDENTIALS_JSON={}\nexport {}={}\nexport FC_FINITE_PRIVATE_USAGE_API_TOKEN={}\nexport WORKOS_API_KEY={}\n",
+                shell_quote(&self.core_token),
+                shell_quote(&runner_credentials_json),
+                DEVFINITY_RUNNER_TOKEN_ENV,
+                shell_quote(DEVFINITY_RUNNER_TOKEN),
+                shell_quote(DEVFINITY_USAGE_TOKEN),
+                shell_quote(workos_api_key.trim())
             ).as_bytes(),
         )?;
         write_mode_600(
@@ -1238,7 +1259,7 @@ wait "$postgres_pid"
         self.write_environment(
             yaml,
             &[
-                ("FC_RUNNER_CLASS", "apple_container".to_string()),
+                ("FC_RUNNER_CLASS", RUNNER_CLASS.to_string()),
                 ("FC_CORE_URL", self.core_url()),
                 (
                     "FC_RUNNER_RUNTIME_ARTIFACT_ID",
@@ -1353,9 +1374,9 @@ wait "$postgres_pid"
             ),
             (
                 "FC_DASHBOARD_DEFAULT_RUNNER_CLASS",
-                "apple_container".to_string(),
+                RUNNER_CLASS.to_string(),
             ),
-            ("FC_DASHBOARD_RUNNER_CLASSES", "apple_container".to_string()),
+            ("FC_DASHBOARD_RUNNER_CLASSES", RUNNER_CLASS.to_string()),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
@@ -2805,6 +2826,59 @@ fn yaml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_credential_metadata_matches_local_runner_identity() {
+        let metadata: serde_json::Value =
+            serde_json::from_str(&devfinity_runner_credentials_json()).unwrap();
+
+        assert_eq!(
+            metadata,
+            serde_json::json!([{
+                "credentialId": "devfinity-apple-current",
+                "tokenEnv": "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFINITY_APPLE_CURRENT",
+                "runnerId": "devfinity-apple-runner",
+                "runnerClasses": ["apple_container"],
+                "sourceHostId": "devfinity-apple",
+                "revoked": false,
+            }])
+        );
+    }
+
+    #[test]
+    fn core_uses_bound_runner_keyring_while_runner_keeps_process_token_env() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-runner-credential-wiring-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+        let stack = Stack::new(state_dir.clone())
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        stack.ensure_dirs().unwrap();
+        stack.write_secret_files().unwrap();
+
+        let core_exports = fs::read_to_string(stack.core_secret_file()).unwrap();
+        let runner_exports = fs::read_to_string(stack.runner_auth_secret_file()).unwrap();
+        assert!(core_exports.contains(&format!(
+            "export FC_CORE_RUNNER_CREDENTIALS_JSON={}\n",
+            shell_quote(&devfinity_runner_credentials_json())
+        )));
+        assert!(core_exports.contains(&format!(
+            "export {DEVFINITY_RUNNER_TOKEN_ENV}={}\n",
+            shell_quote(DEVFINITY_RUNNER_TOKEN)
+        )));
+        assert!(!core_exports.contains("export FC_CORE_RUNNER_API_TOKEN="));
+        assert_eq!(
+            runner_exports,
+            format!(
+                "export FC_CORE_RUNNER_API_TOKEN={}\n",
+                shell_quote(DEVFINITY_RUNNER_TOKEN)
+            )
+        );
+
+        let _ = fs::remove_dir_all(state_dir);
+    }
 
     #[test]
     fn env_exports_are_shell_quoted() {
