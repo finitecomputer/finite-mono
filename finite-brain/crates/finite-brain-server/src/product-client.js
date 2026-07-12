@@ -874,7 +874,7 @@ const FiniteBrainProductClient = (() => {
     const normalized = visibleVaults.map(normalizeVisibleVault).filter(Boolean);
     if (normalized.some((vault) => vault.vaultId === activeVaultId)) return null;
     const personal = normalized.find((vault) => vault.kind === "personal");
-    const fallbackVaultId = personal?.vaultId || personalVaultIdForPubkey(pubkeyHex);
+    const fallbackVaultId = personal?.vaultId || normalized[0]?.vaultId || personalVaultIdForPubkey(pubkeyHex);
     return fallbackVaultId && fallbackVaultId !== activeVaultId ? fallbackVaultId : null;
   }
 
