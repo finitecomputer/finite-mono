@@ -21,8 +21,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   launchCodeDownloadFilename,
   launchCodeDownloadText,
+  launchCodeHostingTierLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
   type OneTimeKeyActionState,
@@ -185,7 +193,7 @@ export function AdminLaunchCodeBatchIssueForm() {
       <p className="text-sm text-muted-foreground">
         Choose a named, exact-size batch. Codes are shown once after issuance and are never available in later views.
       </p>
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-4">
         <div className="grid gap-2 md:col-span-1">
           <Label htmlFor="launchCodeBatchName">Batch name</Label>
           <Input id="launchCodeBatchName" name="name" maxLength={120} required placeholder="July training" />
@@ -193,6 +201,18 @@ export function AdminLaunchCodeBatchIssueForm() {
         <div className="grid gap-2">
           <Label htmlFor="launchCodeBatchCount">Exact code count</Label>
           <Input id="launchCodeBatchCount" name="codeCount" type="number" min={1} max={1000} defaultValue={1} required />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="launchCodeBatchHostingTier">Hosting tier</Label>
+          <Select name="hostingTier" defaultValue="standard">
+            <SelectTrigger id="launchCodeBatchHostingTier" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="standard">Standard</SelectItem>
+              <SelectItem value="confidential">Confidential</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div className="grid gap-2">
           <Label htmlFor="launchCodeBatchExpiry">Expiry (hours)</Label>
@@ -261,7 +281,10 @@ function OneTimeLaunchCodePanel({ state }: { state: OneTimeLaunchCodeActionState
           <DownloadIcon />
           Download codes
         </Button>
-        <span>{state.batch.name} · expires {new Date(state.batch.expiresAt).toLocaleString()}</span>
+        <span>
+          {state.batch.name} · {launchCodeHostingTierLabel(state.batch.hostingTier)} · expires{" "}
+          {new Date(state.batch.expiresAt).toLocaleString()}
+        </span>
       </div>
     </div>
   );

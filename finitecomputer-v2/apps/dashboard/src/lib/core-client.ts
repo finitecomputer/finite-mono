@@ -211,6 +211,7 @@ export type CoreAdminRuntimesResult = CoreBridgeStatus & {
 export type CoreLaunchCodeBatch = {
   id: string;
   name: string;
+  hosting_tier?: CoreHostingTier | null;
   code_count: number;
   expires_at: string;
   revoked_at?: string | null;
@@ -218,6 +219,8 @@ export type CoreLaunchCodeBatch = {
   created_by_workos_user_id: string;
   created_at: string;
 };
+
+export type CoreHostingTier = "standard" | "confidential";
 
 /** Metadata-only code status returned by later reads and revocation. */
 export type CoreLaunchCodeStatus = {
@@ -887,20 +890,31 @@ export async function adminIssueCoreLaunchCodeBatch(input: {
   name: string;
   codeCount: number;
   expiresInHours?: number | null;
+  hostingTier?: CoreHostingTier | null;
 }) {
   const result = await coreAdminFetch<CoreIssuedLaunchCodeBatch>(
     "/api/core/v1/admin/launch-code-batches",
     {
       method: "POST",
-      body: JSON.stringify({
-        name: requiredString(input.name, "Batch name is required."),
-        codeCount: input.codeCount,
-        expiresInHours: input.expiresInHours ?? undefined,
-      }),
+      body: JSON.stringify(coreLaunchCodeBatchRequestBody(input)),
     }
   );
   invalidateCoreReadCache();
   return result;
+}
+
+export function coreLaunchCodeBatchRequestBody(input: {
+  name: string;
+  codeCount: number;
+  expiresInHours?: number | null;
+  hostingTier?: CoreHostingTier | null;
+}) {
+  return {
+    name: requiredString(input.name, "Batch name is required."),
+    codeCount: input.codeCount,
+    expiresInHours: input.expiresInHours ?? undefined,
+    hostingTier: input.hostingTier ?? "standard",
+  };
 }
 
 export async function adminRevokeCoreLaunchCodeBatch(batchId: string) {

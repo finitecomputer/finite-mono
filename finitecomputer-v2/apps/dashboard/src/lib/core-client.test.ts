@@ -6,6 +6,7 @@ import {
   coreAgentCreationRequestBody,
   coreBridgeStatus,
   coreIdentityHeaders,
+  coreLaunchCodeBatchRequestBody,
   coreProjectLabel,
   coreProjectLaunchStatusLabel,
   coreProjectLocationLabel,
@@ -17,6 +18,36 @@ import {
   type CoreVisibleProject,
   loadCoreSourceHostRelayEndpoint,
 } from "./core-client";
+
+test("Launch Code issuance requests default to Standard and carry explicit Confidential", () => {
+  assert.deepEqual(
+    coreLaunchCodeBatchRequestBody({
+      name: "Default batch",
+      codeCount: 1,
+      expiresInHours: 24,
+    }),
+    {
+      name: "Default batch",
+      codeCount: 1,
+      expiresInHours: 24,
+      hostingTier: "standard",
+    }
+  );
+  assert.deepEqual(
+    coreLaunchCodeBatchRequestBody({
+      name: "Confidential batch",
+      codeCount: 2,
+      expiresInHours: 48,
+      hostingTier: "confidential",
+    }),
+    {
+      name: "Confidential batch",
+      codeCount: 2,
+      expiresInHours: 48,
+      hostingTier: "confidential",
+    }
+  );
+});
 
 test("agent creation payload cannot submit provider placement", () => {
   const staleInput = {

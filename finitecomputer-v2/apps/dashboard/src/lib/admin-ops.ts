@@ -104,7 +104,10 @@ export type LaunchCodeBatchFormInput = {
   name: string;
   codeCount: number;
   expiresInHours?: number;
+  hostingTier: LaunchCodeHostingTier;
 };
+
+export type LaunchCodeHostingTier = "standard" | "confidential";
 
 /**
  * Validate the intentionally small operator form before it reaches Core. Core
@@ -125,7 +128,23 @@ export function launchCodeBatchFormInput(formData: FormData): LaunchCodeBatchFor
   const expiresInHours = expiryValue
     ? boundedWholeNumber(expiryValue, 1, 720, "Expiry hours")
     : undefined;
-  return { name, codeCount, expiresInHours };
+  const hostingTier = launchCodeHostingTier(formData.get("hostingTier"));
+  return { name, codeCount, expiresInHours, hostingTier };
+}
+
+export function launchCodeHostingTier(value: FormDataEntryValue | string | null | undefined): LaunchCodeHostingTier {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized || normalized === "standard") {
+    return "standard";
+  }
+  if (normalized === "confidential") {
+    return "confidential";
+  }
+  throw new Error("Hosting tier must be Standard or Confidential.");
+}
+
+export function launchCodeHostingTierLabel(value: string | null | undefined) {
+  return launchCodeHostingTier(value) === "confidential" ? "Confidential" : "Standard";
 }
 
 function boundedWholeNumber(
@@ -151,6 +170,7 @@ export type OneTimeLaunchCodeActionState =
         name: string;
         codeCount: number;
         expiresAt: string;
+        hostingTier: LaunchCodeHostingTier;
       };
       codes: Array<{ id: string; code: string }>;
     };

@@ -365,6 +365,7 @@ export async function adminOpsIssueLaunchCodeBatchAction(
         name: issued.batch.name,
         codeCount: issued.batch.code_count,
         expiresAt: issued.batch.expires_at,
+        hostingTier: issued.batch.hosting_tier ?? "standard",
       },
       codes: issued.codes.map((code) => ({ id: code.id, code: code.code })),
     };

@@ -7,7 +7,7 @@ import {
   launchCodeDownloadText,
 } from "@/lib/admin-ops";
 
-test("Launch Code form accepts a one-code 24-hour canary and a 12-person batch", () => {
+test("Launch Code form defaults to Standard and accepts an explicit Confidential batch", () => {
   const canary = new FormData();
   canary.set("name", "Paul canary");
   canary.set("codeCount", "1");
@@ -16,16 +16,19 @@ test("Launch Code form accepts a one-code 24-hour canary and a 12-person batch",
     name: "Paul canary",
     codeCount: 1,
     expiresInHours: 24,
+    hostingTier: "standard",
   });
 
   const training = new FormData();
   training.set("name", "July training");
   training.set("codeCount", "12");
   training.set("expiresInHours", "168");
+  training.set("hostingTier", "confidential");
   assert.deepEqual(launchCodeBatchFormInput(training), {
     name: "July training",
     codeCount: 12,
     expiresInHours: 168,
+    hostingTier: "confidential",
   });
 });
 
@@ -38,6 +41,10 @@ test("Launch Code form refuses indefinite or oversized issuance", () => {
 
   invalid.set("codeCount", "1");
   assert.throws(() => launchCodeBatchFormInput(invalid), /Expiry hours/u);
+
+  invalid.set("expiresInHours", "24");
+  invalid.set("hostingTier", "provider-specific");
+  assert.throws(() => launchCodeBatchFormInput(invalid), /Hosting tier/u);
 });
 
 test("one-time download text includes only plaintext codes, not database ids", () => {

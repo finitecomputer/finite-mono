@@ -15,7 +15,7 @@ const ADMIN_ACCESS_TOKEN = [
   "browser-signature",
 ].join(".");
 
-test("admins keep the SaaS dashboard and separate Finite Private controls", { timeout: 120_000 }, async () => {
+test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 }, async () => {
   const core = await startFakeCore();
   const dashboardPort = await freePort();
   const dashboard = startDashboard(dashboardPort, core.url);
@@ -53,6 +53,32 @@ test("admins keep the SaaS dashboard and separate Finite Private controls", { ti
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByText("fp_grant_1", { exact: true }).waitFor({ state: "visible" });
     await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
+    await page.getByText("Legacy Standard batch", { exact: true }).waitFor({ state: "visible" });
+    await page.getByText("Confidential batch", { exact: true }).waitFor({ state: "visible" });
+    await page.getByText("Standard batch details", { exact: true }).waitFor({ state: "visible" });
+    await page
+      .getByText("Confidential batch details", { exact: true })
+      .waitFor({ state: "visible" });
+
+    await page.getByLabel("Batch name").fill("Browser default batch");
+    await page.getByLabel("Exact code count").fill("1");
+    await page.getByLabel("Expiry (hours)").fill("24");
+    assert.equal(await page.getByLabel("Hosting tier").textContent(), "Standard");
+    await page.getByRole("button", { name: "Issue codes" }).click();
+    await page.getByLabel("Issued Launch Codes").waitFor({ state: "visible" });
+    await waitFor(() => core.state.issuancePosts.length === 1);
+    assert.equal(core.state.issuancePosts[0]?.hostingTier, "standard");
+    await page.getByText(/Browser default batch · Standard · expires/u).waitFor({ state: "visible" });
+
+    await page.getByLabel("Batch name").fill("Browser confidential batch");
+    await page.getByLabel("Hosting tier").click();
+    await page.getByRole("option", { name: "Confidential" }).click();
+    await page.getByRole("button", { name: "Issue codes" }).click();
+    await waitFor(() => core.state.issuancePosts.length === 2);
+    assert.equal(core.state.issuancePosts[1]?.hostingTier, "confidential");
+    await page.getByText(/Browser confidential batch · Confidential · expires/u).waitFor({
+      state: "visible",
+    });
 
     await context.close();
   } finally {
@@ -91,9 +117,12 @@ function startDashboard(port: number, coreUrl: string) {
 }
 
 async function startFakeCore() {
+  const state = {
+    issuancePosts: [] as Array<Record<string, unknown>>,
+  };
   const server = http.createServer(async (request, response) => {
     try {
-      await handleCoreRequest(request, response);
+      await handleCoreRequest(request, response, state);
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: String(error) }));
@@ -107,12 +136,14 @@ async function startFakeCore() {
   return {
     server,
     url: `http://127.0.0.1:${address.port}`,
+    state,
   };
 }
 
 async function handleCoreRequest(
   request: IncomingMessage,
-  response: ServerResponse
+  response: ServerResponse,
+  state: { issuancePosts: Array<Record<string, unknown>> }
 ) {
   if (
     request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
@@ -124,6 +155,41 @@ async function handleCoreRequest(
 
   if (request.method === "GET" && request.url === "/api/core/v1/finite-private/admin-state") {
     writeJson(response, 200, finitePrivateAdminState());
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/core/v1/admin/runtimes") {
+    writeJson(response, 200, []);
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/core/v1/admin/launch-code-batches") {
+    writeJson(response, 200, launchCodeBatches());
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/api/core/v1/admin/launch-code-batches") {
+    const body = JSON.parse(await readBody(request)) as Record<string, unknown>;
+    state.issuancePosts.push(body);
+    const index = state.issuancePosts.length;
+    const codeCount = Number(body.codeCount);
+    writeJson(response, 200, {
+      batch: {
+        id: `launch_batch_browser_${index}`,
+        name: String(body.name),
+        hosting_tier: String(body.hostingTier),
+        code_count: codeCount,
+        expires_at: "2026-07-18T12:00:00Z",
+        revoked_at: null,
+        revoked_by_workos_user_id: null,
+        created_by_workos_user_id: "user_admin",
+        created_at: "2026-07-11T12:00:00Z",
+      },
+      codes: Array.from({ length: codeCount }, (_, codeIndex) => ({
+        id: `launch_code_browser_${index}_${codeIndex}`,
+        code: `finite_browser_${index}_${codeIndex}`,
+      })),
+    });
     return;
   }
 
@@ -157,6 +223,47 @@ async function handleCoreRequest(
   }
 
   writeJson(response, 404, { error: "not found" });
+}
+
+function launchCodeBatches() {
+  return [
+    {
+      batch: {
+        id: "launch_batch_legacy",
+        name: "Legacy Standard batch",
+        code_count: 1,
+        expires_at: "2026-07-18T12:00:00Z",
+        revoked_at: null,
+        created_by_workos_user_id: "user_admin",
+        created_at: "2026-07-11T12:00:00Z",
+      },
+      codes: [{ id: "launch_code_legacy", redeemed_at: null }],
+    },
+    {
+      batch: {
+        id: "launch_batch_confidential",
+        name: "Confidential batch",
+        hosting_tier: "confidential",
+        code_count: 2,
+        expires_at: "2026-07-18T12:00:00Z",
+        revoked_at: null,
+        created_by_workos_user_id: "user_admin",
+        created_at: "2026-07-11T12:00:00Z",
+      },
+      codes: [
+        { id: "launch_code_confidential_1", redeemed_at: null },
+        { id: "launch_code_confidential_2", redeemed_at: "2026-07-11T13:00:00Z" },
+      ],
+    },
+  ];
+}
+
+async function readBody(request: IncomingMessage) {
+  let body = "";
+  for await (const chunk of request) {
+    body += chunk.toString();
+  }
+  return body;
 }
 
 function legacyProject() {

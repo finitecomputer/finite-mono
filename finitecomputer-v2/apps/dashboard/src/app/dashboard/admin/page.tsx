@@ -25,7 +25,11 @@ import {
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
 import { Button } from "@/components/ui/button";
-import { canAccessAdminOps, heartbeatAgeLabel } from "@/lib/admin-ops";
+import {
+  canAccessAdminOps,
+  heartbeatAgeLabel,
+  launchCodeHostingTierLabel,
+} from "@/lib/admin-ops";
 import {
   loadCoreAdminRuntimes,
   loadCoreFinitePrivateAdminState,
@@ -124,6 +128,9 @@ function LaunchCodeBatchList({ batches }: { batches: CoreLaunchCodeBatchDetails[
                 <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                   {revoked ? "revoked" : "active"}
                 </span>
+                <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                  {launchCodeHostingTierLabel(batch.hosting_tier)}
+                </span>
               </div>
               <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
                 <span>{batch.code_count} codes · {redeemed} redeemed</span>
@@ -132,7 +139,9 @@ function LaunchCodeBatchList({ batches }: { batches: CoreLaunchCodeBatchDetails[
                 {batch.revoked_at ? <span>revoked {formatAdminDate(batch.revoked_at)}</span> : null}
               </div>
               <details className="mt-3 text-xs text-muted-foreground">
-                <summary className="cursor-pointer">Redemption metadata</summary>
+                <summary className="cursor-pointer">
+                  {launchCodeHostingTierLabel(batch.hosting_tier)} batch details
+                </summary>
                 <div className="mt-2 grid gap-1 font-mono">
                   {codes.map((code) => (
                     <span key={code.id}>
