@@ -68,6 +68,16 @@ pub(crate) fn state_preserving_runtime_capabilities(
     })
 }
 
+pub(crate) fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
+    RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        restart: true,
+        recover_known_good_chat: true,
+        runtime_upgrade: true,
+        stop: true,
+        runtime_retirement: false,
+    })
+}
+
 fn wait_with_captured_output(
     mut child: Child,
     program: &Path,
@@ -617,6 +627,8 @@ where
                             state_schema_version: upgrade_facts
                                 .as_ref()
                                 .map(|facts| facts.state_schema_version.clone()),
+                            runtime_capabilities: (kind == RuntimeControlKind::Upgrade)
+                                .then(|| self.launcher.runtime_capabilities()),
                             runtime_host: upgrade_facts
                                 .as_ref()
                                 .map(|facts| facts.runtime_host.clone()),
@@ -1524,6 +1536,8 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
         key,
         "FINITE_SERVER_URL"
             | "FINITECHAT_SERVER_URL"
+            | "FINITE_AGENT_BOOT_INTENT_JSON"
+            | "FINITE_AGENT_STATE_ROOT"
             | "FINITECHAT_HOME"
             | "FINITE_HOME"
             | "HERMES_HOME"
@@ -3305,7 +3319,6 @@ mod tests {
     #[test]
     fn adapters_advertise_only_proven_runtime_controls() {
         let state_preserving = state_preserving_runtime_capabilities(false);
-        let state_preserving_with_upgrade = state_preserving_runtime_capabilities(true);
 
         assert_eq!(
             DockerLauncher::new(DockerConfig::default()).runtime_capabilities(),
@@ -3325,7 +3338,7 @@ mod tests {
         );
         assert_eq!(
             KataLauncher::new(KataConfig::default()).runtime_capabilities(),
-            state_preserving_with_upgrade
+            kata_runtime_capabilities()
         );
     }
 
@@ -3616,12 +3629,72 @@ mod tests {
     }
 
     #[test]
+    fn run_once_dispatches_core_bound_known_good_recovery_to_kata() {
+        let mut runtime_control = sample_runtime_control_lease_with_kind(
+            "runtime_ctl_recovery",
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+        );
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        runtime_control.runtime.placement = Some(placement);
+        let mut runtime_spec = sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::Kata,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )]),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        );
+        let RuntimeSpecEnvelope::V1(spec) = &mut runtime_spec;
+        spec.boot_intent = RuntimeBootIntent::RecoverKnownGood;
+        runtime_control.runtime_spec = Some(runtime_spec);
+
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .without_core_heartbeat(),
+            FixedLeaseTokens::new(["lease-recovery"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeRecoveredKnownGoodChat {
+                request_id: runtime_control.request.id,
+                runtime_id: runtime_control.runtime.id,
+            }
+        );
+        assert_eq!(runner.launcher.recovered, vec!["oslo-agent-001"]);
+        assert_eq!(
+            runner.launcher.restart_options[0].environment(),
+            &BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )])
+        );
+        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
+        assert_eq!(
+            runner.queue.completed_runtime_control[0].runtime_capabilities, None,
+            "recovery must not rewrite persisted capabilities"
+        );
+        assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
     fn run_once_upgrades_only_the_core_bound_artifact_and_reports_actual_facts() {
         let runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample())
-                .for_kata_upgrade()
+                .for_kata()
                 .without_core_heartbeat(),
             FixedLeaseTokens::new(["lease-upgrade"]),
             "runner-1",
@@ -3646,6 +3719,11 @@ mod tests {
             Some("artifact-v2")
         );
         assert_eq!(completion.state_schema_version.as_deref(), Some("state-v1"));
+        assert_eq!(
+            completion.runtime_capabilities,
+            Some(kata_runtime_capabilities()),
+            "successful Kata upgrade refreshes the exact advertised envelope"
+        );
         assert_eq!(
             completion.runtime_host.as_deref(),
             Some("http://127.0.0.1:41002")
@@ -3682,6 +3760,10 @@ mod tests {
         assert_eq!(runner.launcher.stopped, vec!["oslo-agent-001".to_string()]);
         assert!(runner.queue.heartbeat_checks.is_empty());
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
+        assert_eq!(
+            runner.queue.completed_runtime_control[0].runtime_capabilities, None,
+            "non-upgrade lifecycle operations preserve persisted capabilities"
+        );
         assert!(runner.queue.failed_runtime_control.is_empty());
     }
 
@@ -4451,6 +4533,8 @@ mod tests {
 
         for key in [
             "FINITECHAT_SERVER_URL",
+            "FINITE_AGENT_BOOT_INTENT_JSON",
+            "FINITE_AGENT_STATE_ROOT",
             "FINITE_HOME",
             "OPENAI_API_KEY",
             "GOOGLE_OAUTH_TOKEN",
@@ -4991,7 +5075,6 @@ mod tests {
         destroyed: Vec<String>,
         runner_capacity: RunnerLeaseCapacity,
         runner_class: RunnerClass,
-        runtime_upgrade: bool,
         uses_core_heartbeat: bool,
     }
 
@@ -5014,7 +5097,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -5037,7 +5119,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -5060,7 +5141,6 @@ mod tests {
                     ..RunnerLeaseCapacity::default()
                 },
                 runner_class: RunnerClass::LocalDocker,
-                runtime_upgrade: false,
                 uses_core_heartbeat: true,
             }
         }
@@ -5075,9 +5155,8 @@ mod tests {
             self
         }
 
-        fn for_kata_upgrade(mut self) -> Self {
+        fn for_kata(mut self) -> Self {
             self.runner_class = RunnerClass::Kata;
-            self.runtime_upgrade = true;
             self.runner_capacity.runner_classes = vec![RunnerClass::Kata];
             self
         }
@@ -5092,7 +5171,11 @@ mod tests {
         }
 
         fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
-            state_preserving_runtime_capabilities(self.runtime_upgrade)
+            if self.runner_class == RunnerClass::Kata {
+                kata_runtime_capabilities()
+            } else {
+                state_preserving_runtime_capabilities(false)
+            }
         }
 
         fn runner_class(&self) -> RunnerClass {
@@ -5274,6 +5357,7 @@ mod tests {
                 created_at: "2026-05-25T12:00:00Z".to_string(),
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
+            provider_operation: None,
         }
     }
 
