@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: all remediation tickets implemented; final browser acceptance passed; final CodeRabbit recheck pending
+- Current status: all remediation tickets implemented; final browser acceptance and independent review passed; bounded CodeRabbit follow-up timed out without findings
 - Skill setup status: present (`finite-brain/AGENTS.md` and `finite-brain/docs/agents/`)
 
 ## Goal
@@ -28,7 +28,7 @@ undefined or ambiguous.
 - Ticket sessions: `finite-brain/docs/feature-dev/2026-07-12-product-client-audit-remediation-ticket-{18,19,20,21,22,23}-session.md`
 - Agent briefs: audit and alignment evidence are recorded in this ledger/spec
 - Review packets: `finite-brain/docs/feature-dev/2026-07-12-product-client-audit-remediation-ticket-{18,19,20,21,22,23}-review.md`
-- Local CodeRabbit report: final recheck pending; round-one findings are being recorded with the final evidence
+- Local CodeRabbit reports: `finite-brain/docs/feature-dev/2026-07-12-product-client-audit-remediation-local-coderabbit-round.md` (completed, findings fixed) and `finite-brain/docs/feature-dev/2026-07-12-product-client-audit-remediation-local-coderabbit-final-round.md` (bounded follow-up timed out without findings)
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/16
 
 ## Commands
