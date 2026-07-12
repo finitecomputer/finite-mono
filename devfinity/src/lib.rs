@@ -891,6 +891,15 @@ wait "$postgres_pid"
                     "FC_WORKOS_OPERATOR_ORG_ID",
                     WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
                 ),
+                (
+                    "FC_CORE_RUNTIME_ENV_JSON",
+                    serde_json::json!({
+                        "FINITE_SITES_API": self.finitesites_api_url(),
+                        "FINITE_BRAIN_SERVER_URL": self.finite_brain_url(),
+                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
+                    })
+                    .to_string(),
+                ),
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.core, 2, 2, 3, 45);
@@ -1282,6 +1291,8 @@ wait "$postgres_pid"
                     "FC_RUNNER_RUNTIME_ENV_JSON",
                     serde_json::json!({
                         "FINITE_SITES_API": self.finitesites_api_url(),
+                        "FINITE_BRAIN_SERVER_URL": self.finite_brain_url(),
+                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
                     })
                     .to_string(),
                 ),
@@ -2932,7 +2943,9 @@ mod tests {
         assert!(yaml.contains("finite-saas-runner -- serve"));
         assert!(yaml.contains("FC_RUNNER_CLASS=apple_container"));
         assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
+        assert!(yaml.contains("FC_CORE_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FINITE_SITES_API"));
+        assert!(yaml.contains("FINITE_BRAIN_SERVER_URL"));
         assert!(!yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE"));
         assert!(!yaml.contains("FC_CORE_RUNNER_API_TOKEN="));
         assert!(!yaml.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN="));

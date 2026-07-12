@@ -12,6 +12,7 @@ use finite_saas_core::{
     UpsertSourceHostRelayEndpointInput,
 };
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Read};
 use std::net::SocketAddr;
@@ -765,7 +766,11 @@ async fn postgres_store_from_env() -> Result<CoreStore> {
     let database_url = required_env("FC_CORE_DATABASE_URL")?;
     let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
     let retry_interval = optional_duration_millis("FC_CORE_POSTGRES_CONNECT_RETRY_MS", 1_000)?;
-    postgres_store_with_retry(&database_url, timeout, retry_interval).await
+    let runtime_environment = optional_runtime_environment()?;
+    postgres_store_with_retry(&database_url, timeout, retry_interval)
+        .await?
+        .with_runtime_environment(runtime_environment)
+        .map_err(Into::into)
 }
 
 async fn postgres_store_with_retry(
@@ -847,6 +852,16 @@ fn required_env(name: &str) -> Result<String> {
         bail!("{name} must not be empty");
     }
     Ok(value)
+}
+
+fn optional_runtime_environment() -> Result<BTreeMap<String, String>> {
+    let raw = match env::var("FC_CORE_RUNTIME_ENV_JSON") {
+        Ok(raw) if !raw.trim().is_empty() => raw,
+        Ok(_) | Err(env::VarError::NotPresent) => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error).context("failed to read FC_CORE_RUNTIME_ENV_JSON"),
+    };
+    serde_json::from_str(&raw)
+        .context("FC_CORE_RUNTIME_ENV_JSON must be a JSON object of string values")
 }
 
 fn optional_duration_secs(name: &str, default: u64) -> Result<Duration> {

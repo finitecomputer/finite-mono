@@ -99,21 +99,26 @@ The same black-box suite runs against fake, Kata, and Phala adapters:
 
 ## Current Gaps
 
-Each worker advertises one adapter class and Core matches it to the class stored
-on the Project. Project requests do not yet carry a complete provider-neutral
-`RuntimeSpec`, and Core does not persist a structured handle early enough for
-full adopt/reconcile. Compute destroy now preserves durable state, but the
-separate Recovery Snapshot/export/purge lifecycle remains open.
+Each worker advertises the adapter classes it can actually reconcile and Core
+matches those classes to immutable Project placement. Empty capability claims
+no work. Before granting a creation lease, Core selects the newest promoted,
+non-retired digest-pinned OCI artifact and persists a complete versioned
+`RuntimeSpec`: resource class, exact image, durable identity, endpoint contract,
+boot intent, bounded public environment, and secret references. Retries reuse
+that same spec even if a newer artifact is promoted meanwhile. Lifecycle leases
+derive their desired spec from the persisted creation spec.
 
-The shared launch path now accepts a bounded `FC_RUNNER_RUNTIME_ENV_JSON` map as
-transitional local-development scaffolding. Every adapter carries the same
-non-secret map opaquely; contract-owned keys, secret-looking names, malformed
-names, and oversized values fail closed, and diagnostics expose keys only. It
-exists so Devfinity can hand an Agent Runtime reachable local product-service
-URLs without an Apple-specific Sites or Brain branch. Production still needs
-Core-owned per-Project RuntimeSpec persistence and secret references; the
-process-wide JSON setting is not that final contract and must not be used for
-connection credentials.
+`FC_CORE_RUNTIME_ENV_JSON` is the operator-owned source for the bounded public
+environment copied into new RuntimeSpecs. It is validated with the same rules
+as Runner. `FC_RUNNER_RUNTIME_ENV_JSON` remains only for N-1 rows that genuinely
+lack a RuntimeSpec during the expand window; a present spec is authoritative
+and is never silently merged with process-global Runner defaults. Neither map
+may contain connection credentials or secret-looking keys.
+
+Core now persists provider handles early enough for the typed lifecycle path,
+but a complete adapter capability model for inspect/adopt/reconcile remains a
+separate readiness item. Compute destroy preserves durable state; the separate
+Recovery Snapshot/export/purge lifecycle also remains open.
 
 Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
 root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the

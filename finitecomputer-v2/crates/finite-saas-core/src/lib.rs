@@ -164,6 +164,14 @@ pub struct RuntimeEndpointContractV1 {
     pub contact_path: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBootIntent {
+    #[default]
+    Normal,
+    RecoverKnownGood,
+}
+
 /// Complete immutable launch input owned by Core. The envelope is explicitly
 /// versioned so readers reject an unknown contract instead of guessing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -178,6 +186,8 @@ pub struct RuntimeSpecV1 {
     pub state_schema_version: String,
     pub durable_state_id: String,
     pub endpoints: RuntimeEndpointContractV1,
+    #[serde(default)]
+    pub boot_intent: RuntimeBootIntent,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
@@ -291,6 +301,10 @@ pub enum CoreError {
     InvalidRuntimeContactEndpoint,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
+    #[error("runtime spec does not match its persisted project, placement, runtime, or artifact")]
+    RuntimeSpecMismatch,
+    #[error("no promoted runtime artifact is available for a new runtime")]
+    RuntimeArtifactUnavailable,
     #[error("hosting tier is required before creating an agent")]
     MissingHostingTier,
     #[error("launch code is required")]
@@ -756,6 +770,10 @@ pub struct RuntimeControlRequest {
 pub struct RuntimeControlLease {
     pub request: RuntimeControlRequest,
     pub runtime: AgentRuntime,
+    /// Desired provider-neutral contract for this exact lifecycle operation.
+    /// Absent only for N-1 rows during the expand/rollback window.
+    #[serde(default)]
+    pub runtime_spec: Option<RuntimeSpecEnvelope>,
     /// Core-resolved immutable target for Upgrade. Runner adapters never choose
     /// a product release from process-global configuration while handling an
     /// existing Runtime.
@@ -1301,20 +1319,20 @@ pub struct RunnerLeaseCapacity {
     pub active_sandbox_count: Option<u32>,
     #[serde(default)]
     pub available_memory_bytes: Option<u64>,
-    /// Adapter classes this worker can actually reconcile. Empty is accepted
-    /// only for backwards-compatible test/old-worker leasing; current workers
-    /// always advertise one or more classes.
+    /// Adapter classes this worker can actually reconcile. Empty claims no
+    /// creation or lifecycle work. An omitted capacity object remains the
+    /// bounded N-1 compatibility path for an old worker.
     #[serde(default)]
     pub runner_classes: Vec<RunnerClass>,
 }
 
 impl RunnerLeaseCapacity {
     pub fn accepts_runtime_control(&self) -> bool {
-        true
+        !self.runner_classes.is_empty()
     }
 
     pub fn accepts_agent_creation(&self) -> bool {
-        !self.draining && !self.sandbox_limit_reached()
+        !self.runner_classes.is_empty() && !self.draining && !self.sandbox_limit_reached()
     }
 
     pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
@@ -1322,7 +1340,9 @@ impl RunnerLeaseCapacity {
     }
 
     pub fn agent_creation_rejection_reason(&self) -> Option<&'static str> {
-        if self.draining {
+        if self.runner_classes.is_empty() {
+            Some("runner advertises no classes")
+        } else if self.draining {
             Some("runner is draining")
         } else if self.sandbox_limit_reached() {
             Some("runner sandbox capacity is full")
@@ -2227,6 +2247,15 @@ impl BridgeCoreState {
         &mut self,
         input: LeaseAgentCreationRequestInput,
     ) -> CoreResult<Option<AgentCreationLease>> {
+        self.lease_agent_creation_request_with_runtime_environment(input, &BTreeMap::new())
+    }
+
+    pub(crate) fn lease_agent_creation_request_with_runtime_environment(
+        &mut self,
+        input: LeaseAgentCreationRequestInput,
+        runtime_environment: &BTreeMap<String, String>,
+    ) -> CoreResult<Option<AgentCreationLease>> {
+        validate_runtime_spec_environment(runtime_environment)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -2264,10 +2293,89 @@ impl BridgeCoreState {
         let Some(request_id) = request_id else {
             return Ok(None);
         };
+        let candidate = self
+            .agent_creation_requests
+            .get(&request_id)
+            .cloned()
+            .ok_or(CoreError::AgentCreationRequestUnavailable)?;
+        let project = self
+            .projects
+            .get(&candidate.project_id)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::Store(format!(
+                    "agent creation request {} references missing project {}",
+                    candidate.id, candidate.project_id
+                ))
+            })?;
+        let placement = candidate
+            .placement
+            .or(project.placement)
+            .or_else(|| RuntimePlacement::from_legacy_runner_class(candidate.runner_class));
+        if placement.is_some_and(|placement| placement.runner_class != candidate.runner_class) {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let prepared = if let Some(existing_spec) = candidate.runtime_spec.as_ref() {
+            let spec = runtime_spec_v1(existing_spec);
+            let runtime_id = candidate
+                .agent_runtime_id
+                .as_deref()
+                .unwrap_or(spec.agent_runtime_id.as_str());
+            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+            let artifact_id = candidate
+                .desired_runtime_artifact_id
+                .as_deref()
+                .unwrap_or(spec.runtime_artifact_id.as_str());
+            let artifact = self.launchable_runtime_artifact(artifact_id)?;
+            validate_runtime_spec_binding(
+                existing_spec,
+                Some(&candidate.id),
+                &candidate.project_id,
+                runtime_id,
+                placement,
+                &artifact,
+            )?;
+            Some((runtime_id.to_string(), artifact.id, existing_spec.clone()))
+        } else if let Some(placement) = placement {
+            let runtime_id = candidate
+                .agent_runtime_id
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(new_agent_runtime_id)?;
+            let artifact = match candidate.desired_runtime_artifact_id.as_deref() {
+                Some(artifact_id) => self.launchable_runtime_artifact(artifact_id)?,
+                None => self.latest_launchable_runtime_artifact()?,
+            };
+            let runtime_spec = build_runtime_spec_v1(
+                RuntimeSpecIdentity {
+                    operation_id: &candidate.id,
+                    project_id: &candidate.project_id,
+                    agent_runtime_id: &runtime_id,
+                    placement,
+                },
+                &artifact,
+                &runtime_id,
+                runtime_environment.clone(),
+                vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+                RuntimeBootIntent::Normal,
+            )?;
+            Some((runtime_id, artifact.id, runtime_spec))
+        } else {
+            // Expand-generation compatibility for experimental N-1 rows that
+            // predate provider-neutral placement. They remain controllable by
+            // the legacy Runner but cannot silently invent a RuntimeSpec.
+            None
+        };
         let request = {
             let Some(request) = self.agent_creation_requests.get_mut(&request_id) else {
                 return Err(CoreError::AgentCreationRequestUnavailable);
             };
+
+            if let Some((runtime_id, artifact_id, runtime_spec)) = prepared {
+                request.agent_runtime_id = Some(runtime_id);
+                request.desired_runtime_artifact_id = Some(artifact_id);
+                request.runtime_spec = Some(runtime_spec);
+            }
 
             request.status = AgentCreationRequestStatus::Launching;
             request.runner_id = Some(runner_id);
@@ -2277,17 +2385,6 @@ impl BridgeCoreState {
             request.updated_at = now;
             request.clone()
         };
-
-        let project = self
-            .projects
-            .get(&request.project_id)
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Store(format!(
-                    "agent creation request {} references missing project {}",
-                    request.id, request.project_id
-                ))
-            })?;
         Ok(Some(AgentCreationLease { project, request }))
     }
 
@@ -2391,6 +2488,49 @@ impl BridgeCoreState {
                 }
                 Err(error) => return Err(error),
             };
+            let runtime_spec = self
+                .agent_creation_requests
+                .values()
+                .find(|request| {
+                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                        && request.runtime_spec.is_some()
+                })
+                .and_then(|request| request.runtime_spec.as_ref())
+                .map(|current_spec| {
+                    let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+                    let current_artifact_id = runtime
+                        .runtime_artifact_id
+                        .as_deref()
+                        .ok_or(CoreError::RuntimeSpecMismatch)?;
+                    let current_artifact = self
+                        .runtime_artifacts
+                        .get(current_artifact_id)
+                        .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                    let desired_artifact =
+                        target_runtime_artifact.as_ref().unwrap_or(current_artifact);
+                    let boot_intent = match pending.kind {
+                        RuntimeControlKind::RecoverKnownGoodChatRuntime => {
+                            RuntimeBootIntent::RecoverKnownGood
+                        }
+                        RuntimeControlKind::Restart
+                        | RuntimeControlKind::Upgrade
+                        | RuntimeControlKind::Stop
+                        | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
+                    };
+                    runtime_operation_spec_v1(
+                        current_spec,
+                        RuntimeSpecIdentity {
+                            operation_id: &pending.id,
+                            project_id: &runtime.project_id,
+                            agent_runtime_id: &runtime.id,
+                            placement,
+                        },
+                        current_artifact,
+                        desired_artifact,
+                        boot_intent,
+                    )
+                })
+                .transpose()?;
             let request = {
                 let Some(request) = self.runtime_control_requests.get_mut(&request_id) else {
                     return Err(CoreError::RuntimeControlRequestNotFound);
@@ -2406,6 +2546,7 @@ impl BridgeCoreState {
             return Ok(Some(RuntimeControlLease {
                 request,
                 runtime,
+                runtime_spec,
                 target_runtime_artifact,
             }));
         }
@@ -2453,11 +2594,44 @@ impl BridgeCoreState {
             if reported_id != target.id || reported_schema != target.state_schema_version {
                 return Err(CoreError::RuntimeUpgradeCompletionMismatch);
             }
+            let upgraded_spec = self
+                .agent_creation_requests
+                .values()
+                .find(|request| {
+                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                        && request.runtime_spec.is_some()
+                })
+                .and_then(|request| request.runtime_spec.as_ref())
+                .map(|current_spec| {
+                    let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+                    let current_artifact_id = runtime
+                        .runtime_artifact_id
+                        .as_deref()
+                        .ok_or(CoreError::RuntimeSpecMismatch)?;
+                    let current_artifact = self
+                        .runtime_artifacts
+                        .get(current_artifact_id)
+                        .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                    runtime_operation_spec_v1(
+                        current_spec,
+                        RuntimeSpecIdentity {
+                            operation_id: &verified.id,
+                            project_id: &runtime.project_id,
+                            agent_runtime_id: &runtime.id,
+                            placement,
+                        },
+                        current_artifact,
+                        &target,
+                        RuntimeBootIntent::Normal,
+                    )
+                })
+                .transpose()?;
             Some((
                 reported_id,
                 reported_schema,
                 runtime_host,
                 published_app_urls,
+                upgraded_spec,
             ))
         } else {
             if input.runtime_artifact_id.is_some()
@@ -2489,7 +2663,7 @@ impl BridgeCoreState {
         };
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = completed_status;
-            if let Some((artifact_id, schema, runtime_host, published_app_urls)) =
+            if let Some((artifact_id, schema, runtime_host, published_app_urls, _)) =
                 upgrade_facts.as_ref()
             {
                 runtime.runtime_artifact_id = Some(artifact_id.clone());
@@ -2509,14 +2683,23 @@ impl BridgeCoreState {
             .get_mut(&request.agent_runtime_id)
         {
             snapshot.status = completed_status;
-            if let Some((_, _, runtime_host, _)) = upgrade_facts.as_ref() {
+            if let Some((_, _, runtime_host, _, _)) = upgrade_facts.as_ref() {
                 snapshot.runtime_host = runtime_host.clone();
                 snapshot.hermes_available = Some(true);
             }
             if request.kind == RuntimeControlKind::Destroy {
                 snapshot.hermes_available = Some(false);
             }
-            snapshot.updated_at = now;
+            snapshot.updated_at = now.clone();
+        }
+        if let Some((artifact_id, _, _, _, Some(runtime_spec))) = upgrade_facts.as_ref()
+            && let Some(creation) = self.agent_creation_requests.values_mut().find(|creation| {
+                creation.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
+            })
+        {
+            creation.desired_runtime_artifact_id = Some(artifact_id.clone());
+            creation.runtime_spec = Some(runtime_spec.clone());
+            creation.updated_at = now.clone();
         }
         if request.kind == RuntimeControlKind::Destroy {
             self.offboard_destroyed_runtime(&request);
@@ -2603,15 +2786,42 @@ impl BridgeCoreState {
         // Resolve the runtime by its natural key (source_import_key is UNIQUE):
         // reuse the existing surrogate id when the source is already known, mint
         // a fresh one otherwise. The id is never derived from the source.
-        let existing_runtime = self.find_agent_runtime_by_source_import_key(&source_import_key);
-        let runtime_id = existing_runtime
-            .as_ref()
-            .map(|runtime| runtime.id.clone())
-            .map(Ok)
-            .unwrap_or_else(new_agent_runtime_id)?;
-        let placement = request.placement.or(project.placement).or(existing_runtime
+        let runtime_by_source = self.find_agent_runtime_by_source_import_key(&source_import_key);
+        let placement = request.placement.or(project.placement).or(runtime_by_source
             .as_ref()
             .and_then(|runtime| runtime.placement));
+        let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
+            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+            let spec = runtime_spec_v1(runtime_spec);
+            validate_runtime_spec_binding(
+                runtime_spec,
+                Some(&request.id),
+                &project.id,
+                &spec.agent_runtime_id,
+                placement,
+                &artifact,
+            )?;
+            if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
+                || runtime_by_source
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
+            {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
+            spec.agent_runtime_id.clone()
+        } else {
+            runtime_by_source
+                .as_ref()
+                .map(|runtime| runtime.id.clone())
+                .map(Ok)
+                .unwrap_or_else(new_agent_runtime_id)?
+        };
+        let existing_runtime = runtime_by_source.or_else(|| {
+            self.agent_runtimes
+                .get(&runtime_id)
+                .filter(|runtime| runtime.source_import_key == source_import_key)
+                .cloned()
+        });
         let (provider_runtime_handle, provider_runtime_handle_history) =
             merge_provider_runtime_handle(
                 existing_runtime.as_ref(),
@@ -2743,15 +2953,47 @@ impl BridgeCoreState {
         // resolved by its UNIQUE source_import_key); mint a fresh surrogate id
         // only for a source we have never seen.
         let runtime_by_source = self.find_agent_runtime_by_source_import_key(&source_import_key);
-        let runtime_id = runtime_by_source
-            .as_ref()
-            .map(|runtime| runtime.id.clone())
-            .map(Ok)
-            .unwrap_or_else(new_agent_runtime_id)?;
-        let existing_runtime = existing_runtime.or(runtime_by_source);
-        let placement = request.placement.or(project.placement).or(existing_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.placement));
+        let placement = request
+            .placement
+            .or(project.placement)
+            .or(existing_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.placement))
+            .or(runtime_by_source
+                .as_ref()
+                .and_then(|runtime| runtime.placement));
+        let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
+            let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+            let spec = runtime_spec_v1(runtime_spec);
+            validate_runtime_spec_binding(
+                runtime_spec,
+                Some(&request.id),
+                &project.id,
+                &spec.agent_runtime_id,
+                placement,
+                &artifact,
+            )?;
+            if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
+                || runtime_by_source
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
+            {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
+            spec.agent_runtime_id.clone()
+        } else {
+            runtime_by_source
+                .as_ref()
+                .map(|runtime| runtime.id.clone())
+                .map(Ok)
+                .unwrap_or_else(new_agent_runtime_id)?
+        };
+        let existing_runtime = existing_runtime.or(runtime_by_source).or_else(|| {
+            self.agent_runtimes
+                .get(&runtime_id)
+                .filter(|runtime| runtime.source_import_key == source_import_key)
+                .cloned()
+        });
         let (provider_runtime_handle, provider_runtime_handle_history) =
             merge_provider_runtime_handle(
                 existing_runtime.as_ref(),
@@ -4417,6 +4659,26 @@ impl BridgeCoreState {
         Ok(artifact)
     }
 
+    fn latest_launchable_runtime_artifact(&self) -> CoreResult<RuntimeArtifact> {
+        self.runtime_artifacts
+            .values()
+            .filter(|artifact| {
+                artifact.promoted_at.is_some()
+                    && artifact.retired_at.is_none()
+                    && artifact.kind == RuntimeArtifactKind::OciImage
+                    && runtime_artifact_reference_is_immutable_oci(&artifact.reference)
+            })
+            .max_by_key(|artifact| {
+                (
+                    artifact.promoted_at.as_deref().unwrap_or_default(),
+                    artifact.created_at.as_str(),
+                    artifact.id.as_str(),
+                )
+            })
+            .cloned()
+            .ok_or(CoreError::RuntimeArtifactUnavailable)
+    }
+
     fn compatible_runtime_upgrade_artifact(
         &self,
         runtime: &AgentRuntime,
@@ -4990,6 +5252,221 @@ fn trim_to_option(value: Option<&str>) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+const RUNTIME_SPEC_SERVICE_PORT: u16 = 8080;
+const RUNTIME_SPEC_HEALTH_PATH: &str = "/healthz";
+const RUNTIME_SPEC_CONTACT_PATH: &str = "/contact";
+pub(crate) const FINITE_PRIVATE_SECRET_REFERENCE: &str = "FINITE_PRIVATE_API_KEY";
+
+pub(crate) struct RuntimeSpecIdentity<'a> {
+    pub operation_id: &'a str,
+    pub project_id: &'a str,
+    pub agent_runtime_id: &'a str,
+    pub placement: RuntimePlacement,
+}
+
+pub(crate) fn build_runtime_spec_v1(
+    identity: RuntimeSpecIdentity<'_>,
+    artifact: &RuntimeArtifact,
+    durable_state_id: &str,
+    environment: BTreeMap<String, String>,
+    secret_references: Vec<String>,
+    boot_intent: RuntimeBootIntent,
+) -> CoreResult<RuntimeSpecEnvelope> {
+    let spec = RuntimeSpecV1 {
+        operation_id: identity.operation_id.to_string(),
+        project_id: identity.project_id.to_string(),
+        agent_runtime_id: identity.agent_runtime_id.to_string(),
+        placement: identity.placement,
+        runtime_artifact_id: artifact.id.clone(),
+        // This is the complete immutable OCI reference, including its digest;
+        // adapters must not reconstruct a repository from process state.
+        runtime_image_digest: artifact.reference.clone(),
+        state_schema_version: artifact.state_schema_version.clone(),
+        durable_state_id: durable_state_id.to_string(),
+        endpoints: RuntimeEndpointContractV1 {
+            service_port: RUNTIME_SPEC_SERVICE_PORT,
+            health_path: RUNTIME_SPEC_HEALTH_PATH.to_string(),
+            contact_path: RUNTIME_SPEC_CONTACT_PATH.to_string(),
+        },
+        boot_intent,
+        environment,
+        secret_references,
+    };
+    validate_runtime_spec_v1(&spec, artifact)?;
+    Ok(RuntimeSpecEnvelope::V1(spec))
+}
+
+pub(crate) fn runtime_spec_v1(spec: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
+    match spec {
+        RuntimeSpecEnvelope::V1(spec) => spec,
+    }
+}
+
+pub(crate) fn validate_runtime_spec_binding(
+    envelope: &RuntimeSpecEnvelope,
+    operation_id: Option<&str>,
+    project_id: &str,
+    agent_runtime_id: &str,
+    placement: RuntimePlacement,
+    artifact: &RuntimeArtifact,
+) -> CoreResult<()> {
+    let spec = runtime_spec_v1(envelope);
+    validate_runtime_spec_v1(spec, artifact)?;
+    if operation_id.is_some_and(|operation_id| spec.operation_id != operation_id)
+        || spec.project_id != project_id
+        || spec.agent_runtime_id != agent_runtime_id
+        || spec.placement != placement
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn runtime_operation_spec_v1(
+    current: &RuntimeSpecEnvelope,
+    identity: RuntimeSpecIdentity<'_>,
+    current_artifact: &RuntimeArtifact,
+    desired_artifact: &RuntimeArtifact,
+    boot_intent: RuntimeBootIntent,
+) -> CoreResult<RuntimeSpecEnvelope> {
+    validate_runtime_spec_binding(
+        current,
+        None,
+        identity.project_id,
+        identity.agent_runtime_id,
+        identity.placement,
+        current_artifact,
+    )?;
+    let current = runtime_spec_v1(current);
+    build_runtime_spec_v1(
+        identity,
+        desired_artifact,
+        &current.durable_state_id,
+        current.environment.clone(),
+        current.secret_references.clone(),
+        boot_intent,
+    )
+}
+
+fn validate_runtime_spec_v1(spec: &RuntimeSpecV1, artifact: &RuntimeArtifact) -> CoreResult<()> {
+    let ids_valid = [
+        spec.operation_id.as_str(),
+        spec.project_id.as_str(),
+        spec.agent_runtime_id.as_str(),
+        spec.runtime_artifact_id.as_str(),
+        spec.durable_state_id.as_str(),
+    ]
+    .iter()
+    .all(|value| {
+        !value.trim().is_empty()
+            && value.len() <= 256
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    });
+    if !ids_valid
+        || artifact.kind != RuntimeArtifactKind::OciImage
+        || !runtime_artifact_reference_is_immutable_oci(&artifact.reference)
+        || spec.runtime_artifact_id != artifact.id
+        || spec.runtime_image_digest != artifact.reference
+        || spec.state_schema_version != artifact.state_schema_version
+        || spec.endpoints.service_port != RUNTIME_SPEC_SERVICE_PORT
+        || spec.endpoints.health_path != RUNTIME_SPEC_HEALTH_PATH
+        || spec.endpoints.contact_path != RUNTIME_SPEC_CONTACT_PATH
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+
+    validate_runtime_spec_environment(&spec.environment)?;
+
+    let mut references = BTreeSet::new();
+    for reference in &spec.secret_references {
+        if !runtime_spec_environment_key_is_valid(reference)
+            || spec.environment.contains_key(reference)
+            || !references.insert(reference)
+            || (reference != FINITE_PRIVATE_SECRET_REFERENCE
+                && !runtime_spec_secret_environment_key(reference))
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+    }
+    if references.len() > 64 {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_runtime_spec_environment(
+    environment: &BTreeMap<String, String>,
+) -> CoreResult<()> {
+    let mut total_environment_bytes = 0usize;
+    for (key, value) in environment {
+        if !runtime_spec_environment_key_is_valid(key)
+            || runtime_spec_reserved_environment_key(key)
+            || runtime_spec_secret_environment_key(key)
+            || value.is_empty()
+            || value.len() > 4 * 1024
+            || value.contains('\0')
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        total_environment_bytes = total_environment_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+    if environment.len() > 64 || total_environment_bytes > 32 * 1024 {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(())
+}
+
+fn runtime_spec_environment_key_is_valid(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
+fn runtime_spec_reserved_environment_key(key: &str) -> bool {
+    matches!(
+        key,
+        "FINITE_SERVER_URL"
+            | "FINITECHAT_SERVER_URL"
+            | "FINITECHAT_HOME"
+            | "FINITE_HOME"
+            | "HERMES_HOME"
+            | "FINITECHAT_WORKSPACE"
+            | "FINITE_AGENT_HTTP_HOST"
+            | "FINITE_AGENT_HTTP_PORT"
+            | "FINITECHAT_HERMES_AGENT_DEVICE_ID"
+            | "FINITE_AGENT_ID"
+            | "FINITE_AGENT_NAME"
+            | "FINITECHAT_HERMES_AGENT_NAME"
+            | "FINITECHAT_HERMES_ROOM_NAME"
+            | "FINITECHAT_HERMES_AGENT_PICTURE_URL"
+            | "FINITECHAT_HERMES_INBOUND_STREAM"
+            | "FINITECHAT_ALLOW_ALL_USERS"
+            | "FINITE_ALLOW_ALL_USERS"
+            | "GATEWAY_ALLOW_ALL_USERS"
+            | "FINITE_DEFAULT_INFERENCE_PROFILE"
+            | "FINITE_PRIVATE_MODEL"
+            | "FINITE_PRIVATE_BASE_URL"
+            | "FINITE_PRIVATE_API_KEY"
+            | "FINITECHAT_HERMES_MODEL"
+            | "FINITECHAT_HERMES_PROVIDER"
+            | "FINITECHAT_HERMES_BASE_URL"
+            | "FINITECHAT_HERMES_API_MODE"
+            | "OPENAI_API_KEY"
+    )
+}
+
+fn runtime_spec_secret_environment_key(key: &str) -> bool {
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+        .iter()
+        .any(|part| key.split('_').any(|segment| segment == *part))
 }
 
 fn normalize_idempotency_key(value: &str) -> Option<String> {
@@ -5846,6 +6323,97 @@ mod tests {
     }
 
     #[test]
+    fn creation_retry_reuses_the_persisted_complete_runtime_spec() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let launch_code = issue_test_launch_code(&mut state);
+        let requested = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "retry@finite.vip".to_string(),
+                workos_user_id: "user_workos_retry".to_string(),
+                display_name: "Retry Agent".to_string(),
+                launch_code,
+                idempotency_key: "retry-submit".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let original_environment = BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "https://api.finite.chat".to_string(),
+        )]);
+        let first = state
+            .lease_agent_creation_request_with_runtime_environment(
+                LeaseAgentCreationRequestInput {
+                    runner_id: "kata-worker-1".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-one".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                },
+                &original_environment,
+            )
+            .unwrap()
+            .unwrap();
+        let first_spec = first.request.runtime_spec.clone().unwrap();
+        let first_runtime_id = first.request.agent_runtime_id.clone().unwrap();
+        let first_spec_v1 = runtime_spec_v1(&first_spec);
+        assert_eq!(first_spec_v1.operation_id, requested.request.id);
+        assert_eq!(first_spec_v1.agent_runtime_id, first_runtime_id);
+        assert_eq!(first_spec_v1.durable_state_id, first_runtime_id);
+        assert_eq!(first_spec_v1.environment, original_environment);
+        assert_eq!(
+            first_spec_v1.secret_references,
+            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()]
+        );
+
+        promote_runtime_artifact_version(
+            &mut state,
+            "artifact-v2",
+            &format!(
+                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                "b".repeat(64)
+            ),
+            "v2",
+            "state-v1",
+            "2026-05-25T13:05:00Z",
+        );
+        let second = state
+            .lease_agent_creation_request_with_runtime_environment(
+                LeaseAgentCreationRequestInput {
+                    runner_id: "kata-worker-2".to_string(),
+                    source_host_id: None,
+                    lease_token: "lease-two".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                },
+                &BTreeMap::from([(
+                    "FINITE_SITES_API".to_string(),
+                    "https://changed.example.test".to_string(),
+                )]),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(second.request.runtime_spec.as_ref(), Some(&first_spec));
+        assert_eq!(
+            second.request.desired_runtime_artifact_id.as_deref(),
+            Some("artifact-v1")
+        );
+        assert_eq!(
+            second.request.agent_runtime_id.as_deref(),
+            Some(first_runtime_id.as_str())
+        );
+    }
+
+    #[test]
     fn runner_leases_and_completes_self_serve_agent_request() {
         let mut state = BridgeCoreState::default();
         let launch_code = issue_test_launch_code(&mut state);
@@ -5960,7 +6528,10 @@ mod tests {
         promote_runtime_artifact_version(
             &mut state,
             "artifact-v2",
-            "finite-runtime-v2",
+            &format!(
+                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                "b".repeat(64)
+            ),
             "v2",
             "state-v1",
             "2026-05-25T14:00:00Z",
@@ -6112,7 +6683,7 @@ mod tests {
                 now: Some(NOW.to_string()),
             })
             .unwrap();
-        let lease = state
+        let error = state
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
                 runner_id: "runner-oslo-1".to_string(),
                 source_host_id: None,
@@ -6121,36 +6692,13 @@ mod tests {
                 runner_capacity: None,
                 now: Some(LATER.to_string()),
             })
-            .unwrap()
-            .expect("pending request should be leased");
-
-        let error = state
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: lease.request.id,
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: "lease-token-1".to_string(),
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "oslo-agent-001".to_string(),
-                runtime_artifact_id: Some("artifact-v1".to_string()),
-                state_schema_version: None,
-                provider_runtime_handle: None,
-                contact_endpoint: None,
-                display_name: None,
-                hostname: None,
-                runtime_host: None,
-                runtime_status: None,
-                active_inference_profile: None,
-                hermes_available: None,
-                published_app_urls: Vec::new(),
-                now: Some("2026-05-25T13:02:00Z".to_string()),
-            })
             .unwrap_err();
 
-        assert!(matches!(error, CoreError::RuntimeArtifactNotPromoted));
+        assert!(matches!(error, CoreError::RuntimeArtifactUnavailable));
         assert!(state.agent_runtimes.is_empty());
         assert_eq!(
             state.agent_creation_requests[&requested.request.id].status,
-            AgentCreationRequestStatus::Launching
+            AgentCreationRequestStatus::Requested
         );
     }
 
@@ -6772,6 +7320,7 @@ mod tests {
     #[test]
     fn runner_can_mark_agent_creation_request_failed_without_runtime() {
         let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
         let launch_code = issue_test_launch_code(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
@@ -6817,6 +7366,7 @@ mod tests {
     #[test]
     fn cancelled_request_does_not_make_a_redeemed_launch_code_reusable() {
         let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
         let launch_code = issue_test_launch_code(&mut state);
         let requested = state
             .request_agent_creation(RequestAgentCreationInput {
@@ -8234,6 +8784,38 @@ mod tests {
         }));
         assert!(unknown_spec.is_err());
 
+        let n_minus_one_spec = serde_json::from_value::<RuntimeSpecEnvelope>(json!({
+            "schema": "runtime_spec.v1",
+            "spec": {
+                "operationId": "agent-request-old",
+                "projectId": "project-old",
+                "agentRuntimeId": "runtime-old",
+                "placement": {
+                    "runnerClass": "kata",
+                    "runtimeResourceClass": "vcpu4_memory8_gib"
+                },
+                "runtimeArtifactId": "artifact-v1",
+                "runtimeImageDigest": format!(
+                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                    "a".repeat(64)
+                ),
+                "stateSchemaVersion": "state-v1",
+                "durableStateId": "runtime-old",
+                "endpoints": {
+                    "servicePort": 8080,
+                    "healthPath": "/healthz",
+                    "contactPath": "/contact"
+                },
+                "environment": {},
+                "secretReferences": ["FINITE_PRIVATE_API_KEY"]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            runtime_spec_v1(&n_minus_one_spec).boot_intent,
+            RuntimeBootIntent::Normal
+        );
+
         let unknown_handle = serde_json::from_value::<ProviderRuntimeHandleEnvelope>(json!({
             "schema": "provider_runtime_handle.v2",
             "handle": {"runnerClass": "phala", "opaque": {}}
@@ -8964,7 +9546,10 @@ mod tests {
         promote_runtime_artifact_version(
             state,
             "artifact-v1",
-            "finite-runtime-v1",
+            &format!(
+                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                "a".repeat(64)
+            ),
             "v1",
             "state-v1",
             NOW,

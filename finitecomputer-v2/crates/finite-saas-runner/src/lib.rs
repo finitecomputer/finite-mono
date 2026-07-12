@@ -1,15 +1,15 @@
-#[cfg(test)]
-use finite_saas_core::FinitePrivateApiKey;
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
-    RuntimeArtifact, RuntimeArtifactKind, RuntimeControlKind, RuntimeControlLease,
-    RuntimeControlRequest, RuntimeSummaryStatus,
-    runtime_relay_token_hash as hash_runtime_relay_token,
+    RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent, RuntimeControlKind,
+    RuntimeControlLease, RuntimeControlRequest, RuntimeResourceClass, RuntimeSpecEnvelope,
+    RuntimeSpecV1, RuntimeSummaryStatus, runtime_relay_token_hash as hash_runtime_relay_token,
 };
+#[cfg(test)]
+use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1, RuntimePlacement};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -336,11 +336,12 @@ where
         self.launcher.validate_ready()?;
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
-        let mut runner_capacity = self.launcher.runner_capacity();
+        let runner_capacity = self.launcher.runner_capacity();
         if runner_capacity.runner_classes.is_empty() {
-            runner_capacity
-                .runner_classes
-                .push(self.launcher.runner_class());
+            return Ok(RunOnceOutcome::CapacityUnavailable {
+                reason: "runner advertises no classes".to_string(),
+                runner_capacity,
+            });
         }
         if let Some(lease) = self.queue.lease_runtime_control(
             &self.runner_id,
@@ -402,7 +403,7 @@ where
                         runtime_artifact_id: facts.runtime_artifact_id.clone(),
                         state_schema_version: facts.state_schema_version.clone(),
                         provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                        contact_endpoint: None,
+                        contact_endpoint: facts.contact_endpoint.clone(),
                         runtime_relay_token_hash: facts.runtime_relay_token_hash.clone(),
                         display_name: facts.display_name.clone(),
                         hostname: facts.hostname.clone(),
@@ -427,7 +428,7 @@ where
                                 runtime_artifact_id: facts.runtime_artifact_id.clone(),
                                 state_schema_version: facts.state_schema_version.clone(),
                                 provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                contact_endpoint: None,
+                                contact_endpoint: facts.contact_endpoint.clone(),
                                 display_name: facts.display_name.clone(),
                                 hostname: facts.hostname.clone(),
                                 runtime_host: facts.runtime_host.clone(),
@@ -539,7 +540,10 @@ where
                 .map(|heartbeat| heartbeat.last_seen_at),
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
         };
-        let restart_options = RuntimeRestartOptions::new(self.runtime_environment.clone())?;
+        let desired_environment = control_runtime_spec(&lease, self.launcher.runner_class())?
+            .map(|spec| spec.environment.clone())
+            .unwrap_or_else(|| self.runtime_environment.clone());
+        let restart_options = RuntimeRestartOptions::new(desired_environment)?;
         let operation_result: Result<Option<RuntimeUpgradeFacts>, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
                 .launcher
@@ -652,15 +656,58 @@ where
         lease: &AgentCreationLease,
         lease_token: &str,
     ) -> Result<RuntimeLaunchOptions, RunnerError> {
+        let runtime_spec = creation_runtime_spec(lease, self.launcher.runner_class())?;
+        let environment = runtime_spec
+            .map(|spec| spec.environment.clone())
+            .unwrap_or_else(|| self.runtime_environment.clone());
+        let secret_environment = if let Some(spec) = runtime_spec {
+            let mut resolved = BTreeMap::new();
+            for reference in &spec.secret_references {
+                if reference == "FINITE_PRIVATE_API_KEY" {
+                    continue;
+                }
+                let value = self
+                    .runtime_secret_environment
+                    .get(reference)
+                    .cloned()
+                    .ok_or_else(|| {
+                        RunnerError::InvalidRuntimeEnvironment(format!(
+                            "RuntimeSpec secret reference {reference} is unavailable"
+                        ))
+                    })?;
+                resolved.insert(reference.clone(), value);
+            }
+            resolved
+        } else {
+            self.runtime_secret_environment.clone()
+        };
+        validate_runtime_environment(&environment)?;
+        validate_runtime_secret_environment(&secret_environment)?;
+        validate_runtime_environment_disjoint(&environment, &secret_environment)?;
         let mut options = RuntimeLaunchOptions {
             profile_picture_url: lease.request.profile_picture_url.clone(),
-            environment: self.runtime_environment.clone(),
-            secret_environment: self.runtime_secret_environment.clone(),
+            environment,
+            secret_environment,
             ..RuntimeLaunchOptions::default()
         };
+        let requires_finite_private = runtime_spec.is_some_and(|spec| {
+            spec.secret_references
+                .iter()
+                .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
+        });
         let Some(defaults) = self.default_finite_private.clone() else {
+            if requires_finite_private {
+                return Err(RunnerError::InvalidRuntimeEnvironment(
+                    "RuntimeSpec Finite Private secret reference could not be resolved".to_string(),
+                ));
+            }
             return Ok(options);
         };
+        if runtime_spec.is_some() && !requires_finite_private {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "RuntimeSpec omitted the Finite Private secret reference".to_string(),
+            ));
+        }
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -1035,6 +1082,8 @@ pub struct RuntimeLaunchFacts {
     pub state_schema_version: Option<String>,
     #[serde(default)]
     pub provider_runtime_handle: Option<ProviderRuntimeHandleEnvelope>,
+    #[serde(default)]
+    pub contact_endpoint: Option<String>,
     pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
@@ -1097,6 +1146,147 @@ pub struct RuntimeLaunchOptions {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RuntimeRestartOptions {
     environment: BTreeMap<String, String>,
+}
+
+fn runtime_spec_v1(envelope: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
+    match envelope {
+        RuntimeSpecEnvelope::V1(spec) => spec,
+    }
+}
+
+fn creation_runtime_spec(
+    lease: &AgentCreationLease,
+    runner_class: RunnerClass,
+) -> Result<Option<&RuntimeSpecV1>, RunnerError> {
+    let Some(envelope) = lease.request.runtime_spec.as_ref() else {
+        return Ok(None);
+    };
+    let spec = runtime_spec_v1(envelope);
+    let expected_runtime_id = lease.request.agent_runtime_id.as_deref().ok_or_else(|| {
+        RunnerError::RuntimeLaunch(
+            "Core-bound RuntimeSpec did not reserve an Agent Runtime id".to_string(),
+        )
+    })?;
+    let placement = lease
+        .request
+        .placement
+        .or(lease.project.placement)
+        .ok_or_else(|| {
+            RunnerError::RuntimeLaunch(
+                "Core-bound RuntimeSpec did not have persisted placement".to_string(),
+            )
+        })?;
+    validate_runtime_spec_contract(spec, runner_class)?;
+    if spec.operation_id != lease.request.id
+        || spec.project_id != lease.project.id
+        || spec.agent_runtime_id != expected_runtime_id
+        || spec.placement != placement
+        || lease.request.runner_class != runner_class
+        || lease.request.desired_runtime_artifact_id.as_deref()
+            != Some(spec.runtime_artifact_id.as_str())
+        || spec.boot_intent != RuntimeBootIntent::Normal
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Core-bound RuntimeSpec did not match its creation lease".to_string(),
+        ));
+    }
+    Ok(Some(spec))
+}
+
+fn control_runtime_spec(
+    lease: &RuntimeControlLease,
+    runner_class: RunnerClass,
+) -> Result<Option<&RuntimeSpecV1>, RunnerError> {
+    let Some(envelope) = lease.runtime_spec.as_ref() else {
+        return Ok(None);
+    };
+    let spec = runtime_spec_v1(envelope);
+    let placement = lease.runtime.placement.ok_or_else(|| {
+        RunnerError::RuntimeLaunch(
+            "Core-bound lifecycle RuntimeSpec did not have persisted placement".to_string(),
+        )
+    })?;
+    validate_runtime_spec_contract(spec, runner_class)?;
+    let expected_artifact_id = if lease.request.kind == RuntimeControlKind::Upgrade {
+        lease.request.target_runtime_artifact_id.as_deref()
+    } else {
+        lease.runtime.runtime_artifact_id.as_deref()
+    };
+    let expected_schema = if lease.request.kind == RuntimeControlKind::Upgrade {
+        lease
+            .target_runtime_artifact
+            .as_ref()
+            .map(|artifact| artifact.state_schema_version.as_str())
+    } else {
+        lease.runtime.state_schema_version.as_deref()
+    };
+    let expected_boot_intent = match lease.request.kind {
+        RuntimeControlKind::RecoverKnownGoodChatRuntime => RuntimeBootIntent::RecoverKnownGood,
+        RuntimeControlKind::Restart
+        | RuntimeControlKind::Upgrade
+        | RuntimeControlKind::Stop
+        | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
+    };
+    if spec.operation_id != lease.request.id
+        || spec.project_id != lease.runtime.project_id
+        || spec.agent_runtime_id != lease.runtime.id
+        || spec.placement != placement
+        || expected_artifact_id != Some(spec.runtime_artifact_id.as_str())
+        || expected_schema != Some(spec.state_schema_version.as_str())
+        || spec.boot_intent != expected_boot_intent
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Core-bound RuntimeSpec did not match its lifecycle lease".to_string(),
+        ));
+    }
+    Ok(Some(spec))
+}
+
+fn validate_runtime_spec_contract(
+    spec: &RuntimeSpecV1,
+    runner_class: RunnerClass,
+) -> Result<(), RunnerError> {
+    let expected_resource_class = match runner_class {
+        RunnerClass::Kata => Some(RuntimeResourceClass::Vcpu4Memory8Gib),
+        RunnerClass::Phala => Some(RuntimeResourceClass::Vcpu2Memory4Gib),
+        RunnerClass::LocalDocker | RunnerClass::AppleContainer | RunnerClass::Enclavia => None,
+    };
+    if spec.placement.runner_class != runner_class
+        || expected_resource_class
+            .is_some_and(|resource_class| spec.placement.runtime_resource_class != resource_class)
+        || !runtime_spec_image_is_immutable(&spec.runtime_image_digest)
+        || spec.durable_state_id.trim().is_empty()
+        || spec.endpoints.service_port != DEFAULT_DOCKER_CONTAINER_PORT
+        || spec.endpoints.health_path != "/healthz"
+        || spec.endpoints.contact_path != "/contact"
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Core-bound RuntimeSpec violated the Runner contract".to_string(),
+        ));
+    }
+    validate_runtime_environment(&spec.environment)?;
+    let mut references = std::collections::BTreeSet::new();
+    for reference in &spec.secret_references {
+        if !valid_runtime_environment_key(reference)
+            || spec.environment.contains_key(reference)
+            || !references.insert(reference)
+            || (reference != "FINITE_PRIVATE_API_KEY" && !secret_runtime_environment_key(reference))
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "RuntimeSpec secret references were invalid or duplicated".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_spec_image_is_immutable(reference: &str) -> bool {
+    let Some((repository, digest)) = reference.trim().rsplit_once("@sha256:") else {
+        return false;
+    };
+    !repository.is_empty()
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 impl RuntimeRestartOptions {
@@ -1908,6 +2098,7 @@ impl RuntimeLauncher for DockerLauncher {
             runtime_artifact_id: self.config.runtime_artifact_id.clone(),
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
+            contact_endpoint: Some(plan.contact_url.clone()),
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
@@ -2788,6 +2979,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
             runtime_artifact_id: self.config.runtime_artifact_id.clone(),
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
+            contact_endpoint: Some(endpoint.contact_url.clone()),
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: Some(endpoint.hostname.clone()),
@@ -3095,6 +3287,33 @@ mod tests {
     }
 
     #[test]
+    fn run_once_with_no_advertised_classes_claims_no_work() {
+        let capacity = RunnerLeaseCapacity::default();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .with_runner_capacity(capacity.clone()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::CapacityUnavailable {
+                reason: "runner advertises no classes".to_string(),
+                runner_capacity: capacity,
+            }
+        );
+        assert!(runner.queue.runtime_control_leases.is_empty());
+        assert!(runner.queue.leases.is_empty());
+        assert_eq!(runner.launcher.launch_count, 0);
+    }
+
+    #[test]
     fn run_once_reports_capacity_without_agent_lease_when_runner_is_draining() {
         let capacity = RunnerLeaseCapacity {
             runner_classes: vec![RunnerClass::LocalDocker],
@@ -3221,6 +3440,59 @@ mod tests {
             vec!["oslo-agent-001".to_string(), "oslo-agent-001".to_string()]
         );
         assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn runtime_restart_uses_the_persisted_spec_environment_not_runner_defaults() {
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_123");
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        runtime_control.runtime.placement = Some(placement);
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )]),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
+                RelayHeartbeat {
+                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
+                    ..sample_heartbeat("oslo-agent-001")
+                },
+            ),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).with_runner_capacity(
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::LocalDocker],
+                    ..RunnerLeaseCapacity::default()
+                },
+            ),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_environment(BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "https://runner-default.invalid".to_string(),
+        )]))
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::RuntimeRestarted { .. }));
+        assert_eq!(
+            runner.launcher.restart_options[0].environment(),
+            &BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )])
+        );
     }
 
     #[test]
@@ -3440,6 +3712,10 @@ mod tests {
             Some(provider_runtime_handle.clone())
         );
         assert_eq!(
+            runner.queue.registered[0].contact_endpoint.as_deref(),
+            Some("http://oslo-host-1/contact")
+        );
+        assert_eq!(
             runner.queue.heartbeat_checks,
             vec!["finite-agent_123".to_string()]
         );
@@ -3456,7 +3732,96 @@ mod tests {
             runner.queue.completed[0].provider_runtime_handle,
             Some(provider_runtime_handle)
         );
+        assert_eq!(
+            runner.queue.completed[0].contact_endpoint.as_deref(),
+            Some("http://oslo-host-1/contact")
+        );
         assert!(runner.queue.failed.is_empty());
+    }
+
+    #[test]
+    fn run_once_uses_only_the_core_bound_spec_and_resolves_every_secret_reference() {
+        let lease = sample_spec_lease("agent_request_123");
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).with_runner_capacity(
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::LocalDocker],
+                    ..RunnerLeaseCapacity::default()
+                },
+            ),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_environment(BTreeMap::from([(
+            "FINITE_SITES_API".to_string(),
+            "https://runner-default.invalid".to_string(),
+        )]))
+        .unwrap()
+        .with_runtime_secret_environment(BTreeMap::from([
+            ("FAL_KEY".to_string(), "fal-value".to_string()),
+            ("XAI_API_KEY".to_string(), "unused-value".to_string()),
+        ]))
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        let options = &runner.launcher.launch_options[0];
+        assert_eq!(
+            options.environment,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )])
+        );
+        assert_eq!(
+            options.secret_environment,
+            BTreeMap::from([("FAL_KEY".to_string(), "fal-value".to_string())])
+        );
+        assert_eq!(
+            options.finite_private.as_ref().unwrap().raw_api_key,
+            "fpk_live_test"
+        );
+        assert_eq!(runner.queue.provisioned.len(), 1);
+    }
+
+    #[test]
+    fn run_once_rejects_a_core_bound_spec_for_another_runner_class() {
+        let mut lease = sample_spec_lease("agent_request_123");
+        lease.request.runner_class = RunnerClass::Kata;
+        let RuntimeSpecEnvelope::V1(spec) = lease.request.runtime_spec.as_mut().unwrap();
+        spec.placement =
+            RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Standard);
+        lease.request.placement = Some(spec.placement);
+        lease.project.placement = Some(spec.placement);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).with_runner_capacity(
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::LocalDocker],
+                    ..RunnerLeaseCapacity::default()
+                },
+            ),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
+        assert_eq!(runner.launcher.launch_count, 0);
+        assert_eq!(runner.queue.failed.len(), 1);
+        assert!(
+            runner.queue.failed[0]
+                .failure_message
+                .contains("RuntimeSpec violated the Runner contract")
+        );
     }
 
     #[test]
@@ -4561,7 +4926,10 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
-                runner_capacity: RunnerLeaseCapacity::default(),
+                runner_capacity: RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    ..RunnerLeaseCapacity::default()
+                },
                 uses_core_heartbeat: true,
             }
         }
@@ -4579,7 +4947,10 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
-                runner_capacity: RunnerLeaseCapacity::default(),
+                runner_capacity: RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    ..RunnerLeaseCapacity::default()
+                },
                 uses_core_heartbeat: true,
             }
         }
@@ -4597,7 +4968,10 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
-                runner_capacity: RunnerLeaseCapacity::default(),
+                runner_capacity: RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    ..RunnerLeaseCapacity::default()
+                },
                 uses_core_heartbeat: true,
             }
         }
@@ -4747,6 +5121,7 @@ mod tests {
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: Some("state-v1".to_string()),
                 provider_runtime_handle: None,
+                contact_endpoint: Some("http://oslo-host-1/contact".to_string()),
                 runtime_relay_token_hash: "hash-runtime-token".to_string(),
                 display_name: Some("Oslo Agent".to_string()),
                 hostname: None,
@@ -4796,6 +5171,67 @@ mod tests {
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
         }
+    }
+
+    fn sample_runtime_spec(
+        operation_id: &str,
+        runner_class: RunnerClass,
+        environment: BTreeMap<String, String>,
+        secret_references: Vec<String>,
+    ) -> RuntimeSpecEnvelope {
+        RuntimeSpecEnvelope::V1(RuntimeSpecV1 {
+            operation_id: operation_id.to_string(),
+            project_id: "project_123".to_string(),
+            agent_runtime_id: "runtime_123".to_string(),
+            placement: RuntimePlacement {
+                runner_class,
+                runtime_resource_class: match runner_class {
+                    RunnerClass::Phala => RuntimeResourceClass::Vcpu2Memory4Gib,
+                    RunnerClass::LocalDocker
+                    | RunnerClass::AppleContainer
+                    | RunnerClass::Kata
+                    | RunnerClass::Enclavia => RuntimeResourceClass::Vcpu4Memory8Gib,
+                },
+            },
+            runtime_artifact_id: "artifact-v1".to_string(),
+            runtime_image_digest: format!(
+                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                "a".repeat(64)
+            ),
+            state_schema_version: "state-v1".to_string(),
+            durable_state_id: "runtime_123".to_string(),
+            endpoints: RuntimeEndpointContractV1 {
+                service_port: DEFAULT_DOCKER_CONTAINER_PORT,
+                health_path: "/healthz".to_string(),
+                contact_path: "/contact".to_string(),
+            },
+            boot_intent: RuntimeBootIntent::Normal,
+            environment,
+            secret_references,
+        })
+    }
+
+    fn sample_spec_lease(request_id: &str) -> AgentCreationLease {
+        let mut lease = sample_lease(request_id);
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        lease.project.placement = Some(placement);
+        lease.request.runner_class = RunnerClass::LocalDocker;
+        lease.request.placement = Some(placement);
+        lease.request.agent_runtime_id = Some("runtime_123".to_string());
+        lease.request.desired_runtime_artifact_id = Some("artifact-v1".to_string());
+        lease.request.runtime_spec = Some(sample_runtime_spec(
+            request_id,
+            RunnerClass::LocalDocker,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )]),
+            vec!["FINITE_PRIVATE_API_KEY".to_string(), "FAL_KEY".to_string()],
+        ));
+        lease
     }
 
     fn sample_runtime_control_lease(request_id: &str) -> RuntimeControlLease {
@@ -4874,6 +5310,7 @@ mod tests {
                 created_at: "2026-05-25T12:00:00Z".to_string(),
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
+            runtime_spec: None,
             target_runtime_artifact: None,
         }
     }

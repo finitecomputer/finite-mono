@@ -13,27 +13,29 @@ use crate::{
     BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
     ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential, RuntimeStatusSnapshot,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
-    agent_creation_entitlement_id_for, chat_identity_id_for_user, current_time_iso,
-    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProjectMembershipRole, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
+    RelayHeartbeat, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeBootIntent, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeControlRequestStatus, RuntimePlacement, RuntimeRelayCredential, RuntimeSpecEnvelope,
+    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
+    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
+    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
+    agent_creation_entitlement_id_for, build_runtime_spec_v1, chat_identity_id_for_user,
+    current_time_iso, finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     new_agent_creation_request_id, new_agent_runtime_id, new_customer_org_id,
     new_self_service_project_id, new_user_id, normalize_id_part, normalize_idempotency_key,
@@ -45,12 +47,14 @@ use crate::{
     parse_runtime_control_kind, parse_runtime_control_request_status, parse_runtime_resource_class,
     parse_runtime_summary_status, parse_time, parse_user_link_status,
     project_room_membership_id_for, project_runtime_link_id_for, runtime_artifact_material_matches,
-    runtime_artifact_reference_is_immutable_oci, runtime_relay_token_hash,
-    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option,
+    runtime_artifact_reference_is_immutable_oci, runtime_operation_spec_v1,
+    runtime_relay_token_hash, runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
+    should_replace_stripe_subscription, source_import_key, trim_to_option,
+    validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
@@ -67,11 +71,13 @@ pub enum CoreStore {
 #[derive(Clone, Default)]
 pub struct MemoryCoreStore {
     state: Arc<Mutex<BridgeCoreState>>,
+    runtime_environment: Arc<BTreeMap<String, String>>,
 }
 
 #[derive(Clone)]
 pub struct PostgresCoreStore {
     client: Arc<Mutex<Client>>,
+    runtime_environment: Arc<BTreeMap<String, String>>,
 }
 
 struct FinitePrivateAdminAuditInsert<'a> {
@@ -95,6 +101,19 @@ impl CoreStore {
         Ok(Self::Postgres(
             PostgresCoreStore::connect(database_url).await?,
         ))
+    }
+
+    pub fn with_runtime_environment(
+        mut self,
+        runtime_environment: BTreeMap<String, String>,
+    ) -> CoreResult<Self> {
+        validate_runtime_spec_environment(&runtime_environment)?;
+        let runtime_environment = Arc::new(runtime_environment);
+        match &mut self {
+            Self::Memory(store) => store.runtime_environment = runtime_environment,
+            Self::Postgres(store) => store.runtime_environment = runtime_environment,
+        }
+        Ok(self)
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {
@@ -824,7 +843,10 @@ impl MemoryCoreStore {
         input: LeaseAgentCreationRequestInput,
     ) -> CoreResult<Option<AgentCreationLease>> {
         let mut state = self.state.lock().await;
-        state.lease_agent_creation_request(input)
+        state.lease_agent_creation_request_with_runtime_environment(
+            input,
+            self.runtime_environment.as_ref(),
+        )
     }
 
     pub async fn lease_runtime_control_request(
@@ -1136,6 +1158,7 @@ impl PostgresCoreStore {
 
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
+            runtime_environment: Arc::new(BTreeMap::new()),
         })
     }
 
@@ -1446,7 +1469,9 @@ impl PostgresCoreStore {
     ) -> CoreResult<Option<AgentCreationLease>> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_lease_agent_creation_request(&tx, input).await?;
+        let result =
+            postgres_lease_agent_creation_request(&tx, input, self.runtime_environment.as_ref())
+                .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2613,10 +2638,12 @@ where
 async fn postgres_lease_agent_creation_request<C>(
     client: &C,
     input: LeaseAgentCreationRequestInput,
+    runtime_environment: &BTreeMap<String, String>,
 ) -> CoreResult<Option<AgentCreationLease>>
 where
     C: GenericClient + Sync,
 {
+    validate_runtime_spec_environment(runtime_environment)?;
     let now = input.now.unwrap_or(current_time_iso()?);
     let now_time = parse_time(&now)?;
     let runner_id =
@@ -2711,10 +2738,90 @@ where
     else {
         return Ok(None);
     };
-    let request = agent_creation_request_from_row(&row)?;
+    let mut request = agent_creation_request_from_row(&row)?;
     let project = select_project(client, &request.project_id)
         .await?
         .ok_or_else(|| missing_request_project_error(&request))?;
+    let placement = request
+        .placement
+        .or(project.placement)
+        .or_else(|| RuntimePlacement::from_legacy_runner_class(request.runner_class));
+    if placement.is_some_and(|placement| placement.runner_class != request.runner_class) {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    let prepared = if let Some(existing_spec) = request.runtime_spec.as_ref() {
+        let spec = runtime_spec_v1(existing_spec);
+        let runtime_id = request
+            .agent_runtime_id
+            .as_deref()
+            .unwrap_or(spec.agent_runtime_id.as_str());
+        let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+        let artifact_id = request
+            .desired_runtime_artifact_id
+            .as_deref()
+            .unwrap_or(spec.runtime_artifact_id.as_str());
+        let artifact = select_runtime_artifact(client, artifact_id)
+            .await?
+            .ok_or(CoreError::RuntimeArtifactNotFound)?;
+        ensure_artifact_launchable(&artifact)?;
+        validate_runtime_spec_binding(
+            existing_spec,
+            Some(&request.id),
+            &request.project_id,
+            runtime_id,
+            placement,
+            &artifact,
+        )?;
+        Some((runtime_id.to_string(), artifact.id, existing_spec.clone()))
+    } else if let Some(placement) = placement {
+        let runtime_id = request
+            .agent_runtime_id
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(new_agent_runtime_id)?;
+        let artifact = match request.desired_runtime_artifact_id.as_deref() {
+            Some(artifact_id) => {
+                let artifact = select_runtime_artifact(client, artifact_id)
+                    .await?
+                    .ok_or(CoreError::RuntimeArtifactNotFound)?;
+                ensure_artifact_launchable(&artifact)?;
+                artifact
+            }
+            None => select_latest_launchable_runtime_artifact(client).await?,
+        };
+        let runtime_spec = build_runtime_spec_v1(
+            RuntimeSpecIdentity {
+                operation_id: &request.id,
+                project_id: &request.project_id,
+                agent_runtime_id: &runtime_id,
+                placement,
+            },
+            &artifact,
+            &runtime_id,
+            runtime_environment.clone(),
+            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+            RuntimeBootIntent::Normal,
+        )?;
+        Some((runtime_id, artifact.id, runtime_spec))
+    } else {
+        None
+    };
+    if let Some((runtime_id, artifact_id, runtime_spec)) = prepared {
+        let runtime_spec_value = serde_json::to_value(&runtime_spec).map_err(json_error)?;
+        client
+            .execute(
+                "UPDATE agent_creation_requests
+                 SET agent_runtime_id = $2, desired_runtime_artifact_id = $3,
+                     runtime_spec = $4
+                 WHERE id = $1",
+                &[&request.id, &runtime_id, &artifact_id, &runtime_spec_value],
+            )
+            .await
+            .map_err(store_error)?;
+        request.agent_runtime_id = Some(runtime_id);
+        request.desired_runtime_artifact_id = Some(artifact_id);
+        request.runtime_spec = Some(runtime_spec);
+    }
     Ok(Some(AgentCreationLease { project, request }))
 }
 
@@ -2748,17 +2855,45 @@ where
         .ok_or_else(|| missing_request_project_error(&request))?;
     let source_import_key = source_import_key(&source_host_id, &source_machine_id);
     ensure_runtime_source_available(client, &source_import_key, &project.id).await?;
-    // Reuse the existing runtime's surrogate id when this source is already
-    // known (its source_import_key is UNIQUE), else mint a fresh one.
-    let runtime_id =
-        match select_agent_runtime_by_source_import_key(client, &source_import_key).await? {
-            Some(existing) => existing.id,
-            None => new_agent_runtime_id()?,
-        };
-    let existing_runtime = select_agent_runtime(client, &runtime_id).await?;
-    let placement = request.placement.or(project.placement).or(existing_runtime
+    // New-generation requests preallocate the Core runtime id inside their
+    // persisted RuntimeSpec. N-1 rows retain source-key adoption semantics.
+    let runtime_by_source =
+        select_agent_runtime_by_source_import_key(client, &source_import_key).await?;
+    let placement = request.placement.or(project.placement).or(runtime_by_source
         .as_ref()
         .and_then(|runtime| runtime.placement));
+    let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
+        let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+        let spec = runtime_spec_v1(runtime_spec);
+        validate_runtime_spec_binding(
+            runtime_spec,
+            Some(&request.id),
+            &project.id,
+            &spec.agent_runtime_id,
+            placement,
+            &artifact,
+        )?;
+        if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
+            || runtime_by_source
+                .as_ref()
+                .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        spec.agent_runtime_id.clone()
+    } else {
+        runtime_by_source
+            .as_ref()
+            .map(|runtime| runtime.id.clone())
+            .map(Ok)
+            .unwrap_or_else(new_agent_runtime_id)?
+    };
+    let existing_runtime = match runtime_by_source {
+        Some(runtime) => Some(runtime),
+        None => select_agent_runtime(client, &runtime_id)
+            .await?
+            .filter(|runtime| runtime.source_import_key == source_import_key),
+    };
     let (provider_runtime_handle, provider_runtime_handle_history) = merge_provider_runtime_handle(
         existing_runtime.as_ref(),
         input.provider_runtime_handle.clone(),
@@ -2836,18 +2971,45 @@ where
         .ok_or_else(|| missing_request_project_error(&request))?;
     let source_import_key = source_import_key(&source_host_id, &source_machine_id);
     ensure_runtime_source_available(client, &source_import_key, &project.id).await?;
-    // Reuse the runtime already registered for this source (resolved by its
-    // UNIQUE source_import_key); mint a fresh surrogate id only for a new source.
-    let runtime_id =
-        match select_agent_runtime_by_source_import_key(client, &source_import_key).await? {
-            Some(existing) => existing.id,
-            None => new_agent_runtime_id()?,
-        };
-    let runtime_by_source = select_agent_runtime(client, &runtime_id).await?;
-    let existing_runtime = existing_runtime.or(runtime_by_source);
-    let placement = request.placement.or(project.placement).or(existing_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.placement));
+    let runtime_by_source =
+        select_agent_runtime_by_source_import_key(client, &source_import_key).await?;
+    let placement = request
+        .placement
+        .or(project.placement)
+        .or(existing_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.placement))
+        .or(runtime_by_source
+            .as_ref()
+            .and_then(|runtime| runtime.placement));
+    let runtime_id = if let Some(runtime_spec) = request.runtime_spec.as_ref() {
+        let placement = placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+        let spec = runtime_spec_v1(runtime_spec);
+        validate_runtime_spec_binding(
+            runtime_spec,
+            Some(&request.id),
+            &project.id,
+            &spec.agent_runtime_id,
+            placement,
+            &artifact,
+        )?;
+        if request.agent_runtime_id.as_deref() != Some(spec.agent_runtime_id.as_str())
+            || runtime_by_source
+                .as_ref()
+                .is_some_and(|runtime| runtime.id != spec.agent_runtime_id)
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        spec.agent_runtime_id.clone()
+    } else {
+        runtime_by_source
+            .as_ref()
+            .map(|runtime| runtime.id.clone())
+            .map(Ok)
+            .unwrap_or_else(new_agent_runtime_id)?
+    };
+    let runtime_by_id = select_agent_runtime(client, &runtime_id).await?;
+    let existing_runtime = existing_runtime.or(runtime_by_source).or(runtime_by_id);
     let (provider_runtime_handle, provider_runtime_handle_history) = merge_provider_runtime_handle(
         existing_runtime.as_ref(),
         input.provider_runtime_handle.clone(),
@@ -3720,6 +3882,29 @@ where
         .map_err(store_error)?
         .map(|row| runtime_artifact_from_row(&row))
         .transpose()
+}
+
+async fn select_latest_launchable_runtime_artifact<C>(client: &C) -> CoreResult<RuntimeArtifact>
+where
+    C: GenericClient + Sync,
+{
+    client
+        .query_opt(
+            "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
+                    hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
+                    base_image, created_at::text, promoted_at::text, retired_at::text
+             FROM runtime_artifacts
+             WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
+             ORDER BY promoted_at DESC, created_at DESC, id DESC
+             LIMIT 1",
+            &[],
+        )
+        .await
+        .map_err(store_error)?
+        .map(|row| runtime_artifact_from_row(&row))
+        .transpose()?
+        .filter(|artifact| runtime_artifact_reference_is_immutable_oci(&artifact.reference))
+        .ok_or(CoreError::RuntimeArtifactUnavailable)
 }
 
 async fn select_agent_runtime<C>(client: &C, runtime_id: &str) -> CoreResult<Option<AgentRuntime>>
@@ -5238,9 +5423,60 @@ where
             }
             Err(error) => return Err(error),
         };
+        let runtime_spec = if let Some(row) = client
+            .query_opt(
+                "SELECT runtime_spec
+                 FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                &[&runtime.id],
+            )
+            .await
+            .map_err(store_error)?
+        {
+            let value: Value = row.get("runtime_spec");
+            let current_spec: RuntimeSpecEnvelope =
+                serde_json::from_value(value).map_err(json_error)?;
+            let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+            let current_artifact_id = runtime
+                .runtime_artifact_id
+                .as_deref()
+                .ok_or(CoreError::RuntimeSpecMismatch)?;
+            let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                .await?
+                .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            let desired_artifact = target_runtime_artifact
+                .as_ref()
+                .unwrap_or(&current_artifact);
+            let boot_intent = match request.kind {
+                RuntimeControlKind::RecoverKnownGoodChatRuntime => {
+                    RuntimeBootIntent::RecoverKnownGood
+                }
+                RuntimeControlKind::Restart
+                | RuntimeControlKind::Upgrade
+                | RuntimeControlKind::Stop
+                | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
+            };
+            Some(runtime_operation_spec_v1(
+                &current_spec,
+                RuntimeSpecIdentity {
+                    operation_id: &request.id,
+                    project_id: &runtime.project_id,
+                    agent_runtime_id: &runtime.id,
+                    placement,
+                },
+                &current_artifact,
+                desired_artifact,
+                boot_intent,
+            )?)
+        } else {
+            None
+        };
         return Ok(Some(RuntimeControlLease {
             request,
             runtime,
+            runtime_spec,
             target_runtime_artifact,
         }));
     }
@@ -5273,6 +5509,7 @@ struct RuntimeUpgradeCompletion {
     state_schema_version: String,
     runtime_host: String,
     published_app_urls: Vec<String>,
+    runtime_spec: Option<RuntimeSpecEnvelope>,
 }
 
 async fn apply_runtime_control_completion<C>(
@@ -5380,11 +5617,50 @@ where
         if reported_id != target.id || state_schema_version != target.state_schema_version {
             return Err(CoreError::RuntimeUpgradeCompletionMismatch);
         }
+        let runtime_spec = if let Some(row) = client
+            .query_opt(
+                "SELECT runtime_spec
+                 FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                &[&runtime.id],
+            )
+            .await
+            .map_err(store_error)?
+        {
+            let value: Value = row.get("runtime_spec");
+            let current_spec: RuntimeSpecEnvelope =
+                serde_json::from_value(value).map_err(json_error)?;
+            let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+            let current_artifact_id = runtime
+                .runtime_artifact_id
+                .as_deref()
+                .ok_or(CoreError::RuntimeSpecMismatch)?;
+            let current_artifact = select_runtime_artifact(client, current_artifact_id)
+                .await?
+                .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            Some(runtime_operation_spec_v1(
+                &current_spec,
+                RuntimeSpecIdentity {
+                    operation_id: &locked.id,
+                    project_id: &runtime.project_id,
+                    agent_runtime_id: &runtime.id,
+                    placement,
+                },
+                &current_artifact,
+                &target,
+                RuntimeBootIntent::Normal,
+            )?)
+        } else {
+            None
+        };
         Some(RuntimeUpgradeCompletion {
             runtime_artifact_id: reported_id,
             state_schema_version,
             runtime_host,
             published_app_urls,
+            runtime_spec,
         })
     } else {
         if input.runtime_artifact_id.is_some()
@@ -5432,6 +5708,26 @@ where
         &now,
     )
     .await?;
+    if let Some(upgrade) = upgrade.as_ref()
+        && let Some(runtime_spec) = upgrade.runtime_spec.as_ref()
+    {
+        let runtime_spec = serde_json::to_value(runtime_spec).map_err(json_error)?;
+        client
+            .execute(
+                "UPDATE agent_creation_requests
+                 SET desired_runtime_artifact_id = $2, runtime_spec = $3,
+                     updated_at = $4::text::timestamptz
+                 WHERE agent_runtime_id = $1",
+                &[
+                    &request.agent_runtime_id,
+                    &upgrade.runtime_artifact_id,
+                    &runtime_spec,
+                    &now,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+    }
     if destroy {
         postgres_offboard_destroyed_runtime(client, &request, &now).await?;
     }

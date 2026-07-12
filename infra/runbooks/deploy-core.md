@@ -33,6 +33,11 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 
 - The change (Core source and/or the dashboard digest bump) is merged to
   `main` — you deploy a committed rev, not a working tree.
+- Before deploying the RuntimeSpec generation, verify the Core Nix module
+  carries the same non-secret `FINITE_SITES_API`,
+  `FINITE_BRAIN_SERVER_URL`, and `FINITE_BRAIN_PUBLIC_BASE_URL` values in
+  `FC_CORE_RUNTIME_ENV_JSON` that previously lived only in Runner config.
+  Runner's `FC_RUNNER_RUNTIME_ENV_JSON` is N-1 fallback only.
 - ssh access to lat1 (`ssh root@64.34.82.77`, key-only) or a driver host with
   nix that can reach it as root.
 - For a dashboard bump: the new image is CI-built and pushed to GHCR, and you

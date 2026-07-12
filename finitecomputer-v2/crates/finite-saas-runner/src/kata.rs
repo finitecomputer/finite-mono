@@ -179,6 +179,32 @@ impl KataLauncher {
         kata_launch_plan(&self.config, lease)
     }
 
+    fn config_for_creation(&self, lease: &AgentCreationLease) -> Result<KataConfig, RunnerError> {
+        let mut config = self.config.clone();
+        if let Some(spec) = creation_runtime_spec(lease, RunnerClass::Kata)? {
+            config.image = spec.runtime_image_digest.clone();
+            config.runtime_artifact_id = Some(spec.runtime_artifact_id.clone());
+            config.runtime_artifact_kind = Some(RuntimeArtifactKind::OciImage);
+            config.runtime_state_schema_version = Some(spec.state_schema_version.clone());
+            config.container_port = spec.endpoints.service_port;
+            config.cpus = Some(4);
+            config.memory = Some("8G".to_string());
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn plan_for_control(&self, lease: &RuntimeControlLease) -> Result<KataLaunchPlan, RunnerError> {
+        let spec = control_runtime_spec(lease, RunnerClass::Kata)?;
+        Ok(kata_launch_plan_for_source_machine(
+            &self.config,
+            &lease.request.source_machine_id,
+            spec.map(|spec| spec.durable_state_id.as_str()),
+            spec.map(|spec| spec.endpoints.service_port)
+                .unwrap_or(self.config.container_port),
+        ))
+    }
+
     fn command(&self, args: Vec<OsString>) -> PlannedCommand {
         let mut namespaced = vec![
             OsString::from("--namespace"),
@@ -648,8 +674,7 @@ impl KataLauncher {
                 lease.runtime.source_machine_id, lease.request.source_machine_id
             )));
         }
-        let plan =
-            kata_launch_plan_for_source_machine(&self.config, &lease.request.source_machine_id);
+        let plan = self.plan_for_control(lease)?;
         let inspected = self.inspect(&plan.container_name)?.ok_or_else(|| {
             RunnerError::RuntimeLaunch(format!(
                 "owned Kata container {} does not exist",
@@ -824,9 +849,17 @@ impl RuntimeLauncher for KataLauncher {
                     .to_string(),
             ));
         }
+        if let Some(spec) = control_runtime_spec(lease, RunnerClass::Kata)?
+            && (spec.runtime_artifact_id != target.id
+                || spec.runtime_image_digest != target.reference
+                || spec.state_schema_version != target.state_schema_version)
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Core-bound RuntimeSpec did not match the Kata upgrade target".to_string(),
+            ));
+        }
 
-        let canonical_plan =
-            kata_launch_plan_for_source_machine(&self.config, &lease.request.source_machine_id);
+        let canonical_plan = self.plan_for_control(lease)?;
         self.reconcile_interrupted_upgrade(
             &canonical_plan,
             &lease.runtime.project_id,
@@ -1133,20 +1166,22 @@ impl RuntimeLauncher for KataLauncher {
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
-        self.validate_ready()?;
-        let plan = self.plan_launch(lease);
-        let host_port = self.run_fresh(&plan, lease, options)?;
+        let launcher = KataLauncher::new(self.config_for_creation(lease)?);
+        launcher.validate_ready()?;
+        let plan = launcher.plan_launch(lease);
+        let host_port = launcher.run_fresh(&plan, lease, options)?;
         let runtime_bootstrap_token = random_runtime_bootstrap_token();
         let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         let public_base_url = plan.public_base_url(host_port);
 
         Ok(RuntimeLaunchFacts {
-            source_host_id: self.config.source_host_id.clone(),
+            source_host_id: launcher.config.source_host_id.clone(),
             source_machine_id: plan.container_name.clone(),
-            runtime_artifact_id: self.config.runtime_artifact_id.clone(),
-            state_schema_version: self.config.runtime_state_schema_version.clone(),
+            runtime_artifact_id: launcher.config.runtime_artifact_id.clone(),
+            state_schema_version: launcher.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
+            contact_endpoint: Some(plan.contact_url(host_port)),
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
@@ -1178,14 +1213,27 @@ pub(crate) fn kata_launch_plan(config: &KataConfig, lease: &AgentCreationLease) 
     let container_name =
         sanitize_sandbox_name(&format!("{}-{request_suffix}", config.name_prefix.trim()))
             .to_ascii_lowercase();
-    kata_launch_plan_for_source_machine(config, &container_name)
+    let spec = lease.request.runtime_spec.as_ref().map(runtime_spec_v1);
+    kata_launch_plan_for_source_machine(
+        config,
+        &container_name,
+        spec.map(|spec| spec.durable_state_id.as_str()),
+        spec.map(|spec| spec.endpoints.service_port)
+            .unwrap_or(config.container_port),
+    )
 }
 
 fn kata_launch_plan_for_source_machine(
     config: &KataConfig,
     source_machine_id: &str,
+    durable_state_id: Option<&str>,
+    container_port: u16,
 ) -> KataLaunchPlan {
     let container_name = sanitize_sandbox_name(source_machine_id).to_ascii_lowercase();
+    let durable_state_id = durable_state_id
+        .map(sanitize_sandbox_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| container_name.clone());
     let metadata_root = config
         .work_root
         .join(KATA_METADATA_DIR)
@@ -1194,10 +1242,10 @@ fn kata_launch_plan_for_source_machine(
         state_root: config
             .work_root
             .join(KATA_PROVIDER_DIR)
-            .join(&container_name),
+            .join(durable_state_id),
         env_file: metadata_root.join("launch.env"),
         metadata_root,
-        container_port: config.container_port,
+        container_port,
         container_name,
     }
 }
@@ -1925,6 +1973,7 @@ esac
                 created_at: "2026-07-10T00:00:00Z".to_string(),
                 updated_at: "2026-07-10T00:00:00Z".to_string(),
             },
+            runtime_spec: None,
             target_runtime_artifact: Some(target_artifact()),
         }
     }
@@ -1982,8 +2031,12 @@ esac
             ..KataConfig::default()
         };
         let launcher = KataLauncher::new(config);
-        let plan =
-            kata_launch_plan_for_source_machine(&launcher.config, "finite-kata-upgrade-agent");
+        let plan = kata_launch_plan_for_source_machine(
+            &launcher.config,
+            "finite-kata-upgrade-agent",
+            None,
+            launcher.config.container_port,
+        );
         std::fs::create_dir_all(&plan.state_root).unwrap();
         std::fs::create_dir_all(&plan.metadata_root).unwrap();
         std::fs::write(plan.state_root.join("identity-marker"), "same-agent").unwrap();
@@ -2232,7 +2285,12 @@ esac
             work_root: PathBuf::from("/var/lib/finite-saas-runner"),
             ..KataConfig::default()
         };
-        let canonical = kata_launch_plan_for_source_machine(&config, "finite-kata-agent");
+        let canonical = kata_launch_plan_for_source_machine(
+            &config,
+            "finite-kata-agent",
+            None,
+            config.container_port,
+        );
         let helper = kata_upgrade_plan(
             &canonical,
             kata_upgrade_helper_name("finite-kata-agent", "candidate", "runtime_ctl_123"),

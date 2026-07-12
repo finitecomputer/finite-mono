@@ -10,7 +10,8 @@ use super::{
     DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
     RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
-    RuntimeUpgradeFacts, docker_equivalent_runtime_env, wait_for_http_json_ready,
+    RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
+    docker_equivalent_runtime_env, wait_for_http_json_ready,
 };
 use finite_saas_core::{
     AgentCreationLease, ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass,
@@ -403,6 +404,7 @@ impl RuntimeLauncher for PhalaLauncher {
         _options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.config.validate()?;
+        control_runtime_spec(lease, RunnerClass::Phala)?;
         let handle = self.runtime_handle(lease)?;
         let cvm = self.inspect_verified(&handle)?;
         if status_is_stopped(&cvm.status) {
@@ -428,9 +430,10 @@ impl RuntimeLauncher for PhalaLauncher {
 
     fn upgrade_runtime(
         &mut self,
-        _lease: &RuntimeControlLease,
+        lease: &RuntimeControlLease,
         _options: &RuntimeRestartOptions,
     ) -> Result<RuntimeUpgradeFacts, RunnerError> {
+        control_runtime_spec(lease, RunnerClass::Phala)?;
         Err(RunnerError::RuntimeLaunch(
             "Phala upgrade is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
                 .to_string(),
@@ -439,6 +442,7 @@ impl RuntimeLauncher for PhalaLauncher {
 
     fn stop_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         self.config.validate()?;
+        control_runtime_spec(lease, RunnerClass::Phala)?;
         let handle = self.runtime_handle(lease)?;
         let cvm = self.inspect_verified(&handle)?;
         if status_is_stopped(&cvm.status) {
@@ -461,11 +465,18 @@ impl RuntimeLauncher for PhalaLauncher {
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
-        self.config.validate()?;
+        let mut config = self.config.clone();
+        if let Some(spec) = creation_runtime_spec(lease, RunnerClass::Phala)? {
+            config.image = spec.runtime_image_digest.clone();
+            config.runtime_artifact_id = Some(spec.runtime_artifact_id.clone());
+            config.runtime_artifact_kind = Some(RuntimeArtifactKind::OciImage);
+            config.runtime_state_schema_version = Some(spec.state_schema_version.clone());
+        }
+        config.validate()?;
         // Render and validate the reviewed compose contract in memory only.
         // No provider provision call or plaintext environment staging is
         // allowed on this side of the encryption-and-acknowledgment boundary.
-        let _compose = phala_compose(&self.config, lease, options)?;
+        let _compose = phala_compose(&config, lease, options)?;
         Err(RunnerError::RuntimeLaunch(
             "Phala creation is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
                 .to_string(),
@@ -1991,6 +2002,7 @@ mod tests {
                 created_at: "2026-07-01T00:00:00Z".to_string(),
                 updated_at: "2026-07-01T00:00:00Z".to_string(),
             },
+            runtime_spec: None,
             target_runtime_artifact: None,
         }
     }

@@ -23,6 +23,14 @@
       # required active-operation preflight was clean before first use; see
       # the rollback-rescue procedure in infra/runbooks/runtime-image.md.
       FC_CORE_ENABLE_RUNTIME_UPGRADES = "true";
+      # Core persists these bounded, public service endpoints into each new
+      # RuntimeSpec. Runner keeps its process-global copy only for N-1 rows
+      # without a spec during the expand window.
+      FC_CORE_RUNTIME_ENV_JSON = builtins.toJSON {
+        FINITE_SITES_API = "https://api.finite.chat";
+        FINITE_BRAIN_SERVER_URL = "https://finite.computer";
+        FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
+      };
       # Public Stripe price id (ConfigMap value; not a secret).
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
     };

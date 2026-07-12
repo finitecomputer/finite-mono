@@ -392,6 +392,7 @@ impl AppleContainerLauncher {
             runtime_artifact_id: self.config.runtime_artifact_id.clone(),
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
+            contact_endpoint: Some(plan.contact_url.clone()),
             runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
