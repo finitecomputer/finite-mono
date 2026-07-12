@@ -585,6 +585,8 @@ assert.match(
 );
 assert.match(htmlSource, /id="zoomInGraphButton"[^>]*title="Zoom in"/);
 assert.match(htmlSource, /id="zoomOutGraphButton"[^>]*title="Zoom out"/);
+assert.doesNotMatch(htmlSource, /id="zoomInGraphButton"[\s\S]{0,180}<circle/);
+assert.doesNotMatch(htmlSource, /id="zoomOutGraphButton"[\s\S]{0,180}<circle/);
 assert.match(htmlSource, /id="fitGraphButton"[^>]*title="Reset zoom"/);
 assert.match(htmlSource, /id="fullscreenGraphButton"[^>]*title="Enter full screen"/);
 assert.doesNotMatch(htmlSource, /id="resetGraphButton"/);
