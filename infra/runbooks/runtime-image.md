@@ -49,12 +49,13 @@ cohort.
    `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
    the summary. Copy that pinned ref — it is the only thing you promote.
 
-**Recovery TODO:** the current Docker Restic smoke is not product Recovery
-Readiness. It is opt-in, backs up `/data/agent` but not `/data/workspace`, uses
-an operator-supplied password, and is not enabled by the v2 Runner. It proves a
-component mechanism only. Restic suitability, provider-independent Recovery
-Snapshots, key backup, and empty-target restore remain open post-MVP questions;
-they do not block the first trusted-cohort SaaS slice.
+**Recovery boundary:** the canonical image now has the narrow, one-shot
+`recover_known_good` boot receiver and the snapshot-root contract covers all of
+`/data`, including `/data/workspace`. That does not prove an
+application-consistent, provider-independent Recovery Snapshot, independent key
+custody, or an empty-target restore. Those remain separate paid-cohort gates;
+do not describe the boot repair or a provider-volume restart as product
+Recovery Readiness.
 
 ### 3. Promote to the lat1 runner
 
@@ -72,10 +73,20 @@ So promotion is two steps:
 1. Register the new pinned image as an artifact in Core.
    Use Core's service-authenticated runtime-artifact registration endpoint;
    supply the OCI kind, immutable digest reference, source revision, and state
-   schema, then promote that artifact for the Kata class.
+   schema, then promote that artifact for the Kata class. Recovery support is
+   immutable artifact material: set `recoverKnownGoodChat=true` only for an
+   image whose exact digest passed the one-shot recovery receiver tests. The
+   additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
+   not inherit a control their image cannot execute.
 2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on lat1.
    No restart needed: the timer re-invokes the runner with the new env (set
    `FC_RUNNER_DRAIN=true` first if you want in-flight launches to settle).
+
+When introducing the artifact-capability column, drain new Kata creation before
+the Core/Runner generation switch, register the new recovery-capable digest
+through that generation, update `FC_RUNNER_RUNTIME_ARTIFACT_ID`, and only then
+clear the drain. Existing lifecycle controls remain available while creation is
+drained.
 
 ### 4. Record
 
