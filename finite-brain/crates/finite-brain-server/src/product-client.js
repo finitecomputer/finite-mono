@@ -28,6 +28,10 @@ const FiniteBrainProductClient = (() => {
     settingsModalOpen: false,
     settingsSection: "session",
     settingsModalPreviousFocus: null,
+    vaultSwitcherOpen: false,
+    vaultSwitcherPreviousFocus: null,
+    manageVaultsModalOpen: false,
+    manageVaultsModalPreviousFocus: null,
     activeAccessFolderId: null,
     activeAccessView: "vault",
     activeAccessIntent: "overview",
@@ -757,7 +761,9 @@ const FiniteBrainProductClient = (() => {
       "sidebarSearchResults",
       "vaultInvitationList",
       "vaultPeopleList",
+      "vaultSwitcherList",
       "vaultSwitchList",
+      "manageVaultsList",
     ]) {
       $(id)?.replaceChildren?.();
     }
@@ -1984,6 +1990,8 @@ const FiniteBrainProductClient = (() => {
   function openSettingsModal(section = state.settingsSection) {
     const modal = $("settingsModal");
     if (!modal) return;
+    if (state.vaultSwitcherOpen) closeVaultSwitcher({ restoreFocus: false });
+    if (state.manageVaultsModalOpen) closeManageVaultsModal();
     if (!state.settingsModalOpen) {
       state.settingsModalPreviousFocus = document.activeElement || null;
     }
@@ -2003,6 +2011,100 @@ const FiniteBrainProductClient = (() => {
     state.settingsModalPreviousFocus = null;
     render();
     previousFocus?.focus?.();
+  }
+
+  function overlayFocusableElements(id) {
+    const overlay = $(id);
+    if (!overlay) return [];
+    return Array.from(
+      overlay.querySelectorAll?.(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || []
+    ).filter((element) => !element.hidden && !element.closest?.("[hidden]"));
+  }
+
+  function vaultSwitcherFocusableElements() {
+    return overlayFocusableElements("vaultSwitcherMenu");
+  }
+
+  function focusVaultSwitcherItem(index = 0) {
+    const items = vaultSwitcherFocusableElements();
+    if (!items.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), items.length - 1);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => items[nextIndex]?.focus?.());
+    } else {
+      items[nextIndex]?.focus?.();
+    }
+  }
+
+  function openVaultSwitcher() {
+    if (state.vaultSwitcherOpen) {
+      closeVaultSwitcher();
+      return;
+    }
+    if (state.settingsModalOpen) closeSettingsModal();
+    if (state.manageVaultsModalOpen) closeManageVaultsModal();
+    state.vaultSwitcherPreviousFocus = document.activeElement || null;
+    state.vaultSwitcherOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    focusVaultSwitcherItem(0);
+  }
+
+  function closeVaultSwitcher(options = {}) {
+    if (!state.vaultSwitcherOpen) return;
+    state.vaultSwitcherOpen = false;
+    const previousFocus = state.vaultSwitcherPreviousFocus;
+    state.vaultSwitcherPreviousFocus = null;
+    render();
+    if (options.restoreFocus !== false) previousFocus?.focus?.();
+  }
+
+  function manageVaultsModalFocusableElements() {
+    return overlayFocusableElements("manageVaultsModal");
+  }
+
+  function openManageVaultsModal() {
+    if (state.manageVaultsModalOpen) return;
+    const menuFocus = state.vaultSwitcherPreviousFocus;
+    state.manageVaultsModalPreviousFocus = menuFocus || document.activeElement || null;
+    closeVaultSwitcher({ restoreFocus: false });
+    if (state.settingsModalOpen) closeSettingsModal();
+    state.manageVaultsModalOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    const focusTarget = $("closeManageVaultsButton");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => focusTarget?.focus?.());
+    } else {
+      focusTarget?.focus?.();
+    }
+  }
+
+  function closeManageVaultsModal() {
+    if (!state.manageVaultsModalOpen) return;
+    state.manageVaultsModalOpen = false;
+    const previousFocus = state.manageVaultsModalPreviousFocus;
+    state.manageVaultsModalPreviousFocus = null;
+    render();
+    previousFocus?.focus?.();
+  }
+
+  function manageVaultsLoadAction() {
+    const operation = state.sessionStatus === SESSION_STATUS.LOCKED
+      ? resumeSession()
+      : loadVaultReader();
+    operation.catch((error) => {
+      state.lastError = error.message;
+      log("Failed to load Vault from Manage Vaults.", { error: error.message });
+      state.readerBusy = false;
+      render();
+    });
   }
 
   function setSettingsSection(section) {
@@ -2049,6 +2151,67 @@ const FiniteBrainProductClient = (() => {
       "settingsConnectSignerButton",
       !deriveSignerState(window.nostr).canConnect
     );
+  }
+
+  function renderVaultSwitcher() {
+    const menu = $("vaultSwitcherMenu");
+    const trigger = $("sessionAccountVaultButton");
+    if (!menu || !trigger) return;
+    menu.hidden = !state.vaultSwitcherOpen;
+    trigger.setAttribute("aria-expanded", String(state.vaultSwitcherOpen));
+    setText("vaultSwitcherCount", `${visibleVaultOptions().length}`);
+    const rows = visibleVaultOptions();
+    const emptyText = state.signerStatus === "connected"
+      ? "No Vaults available."
+      : "Connect a signer to list Vaults.";
+    setList("vaultSwitcherList", rows, emptyText, (item, vault) => {
+      const button = vaultSwitchButton(vault, "switcher");
+      button.setAttribute("role", "menuitem");
+      item.appendChild(button);
+    });
+  }
+
+  function renderManageVaultsModal() {
+    const modal = $("manageVaultsModal");
+    if (!modal) return;
+    modal.hidden = !state.manageVaultsModalOpen;
+    modal.setAttribute("aria-hidden", String(!state.manageVaultsModalOpen));
+    const shell = document.querySelector?.(".obsidian-shell");
+    if (shell) shell.dataset.manageVaultsOpen = state.manageVaultsModalOpen ? "true" : "false";
+    setText("manageVaultsCurrentName", activeVaultLabel());
+    const status = sessionStatusView(state.sessionStatus);
+    setText(
+      "manageVaultsCurrentDetail",
+      state.metadata
+        ? `${status.title}. ${vaultManagementSummary(state.metadata)}`
+        : `${status.title}. Select a Vault, then ${status.locked ? "Resume" : "Load"} to open encrypted content.`
+    );
+    const signerConnected = state.signerStatus === "connected";
+    safeSetHidden("manageVaultsConnectSignerButton", signerConnected);
+    setOptionalDisabled(
+      "manageVaultsConnectSignerButton",
+      !deriveSignerState(window.nostr).canConnect
+    );
+    const action = state.sessionStatus === SESSION_STATUS.LOCKED
+      ? "Resume"
+      : state.sessionStatus === SESSION_STATUS.RESUMING
+        ? "Resuming…"
+        : "Load";
+    setText("manageVaultsLoadButton", action);
+    setOptionalDisabled(
+      "manageVaultsLoadButton",
+      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
+    );
+    safeSetHidden("manageVaultCreateDetails", !showsCreateOrganizationControl(state.metadata));
+    setOptionalDisabled(
+      "manageCreateOrganizationVaultButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
+    );
+    const rows = visibleVaultOptions();
+    const emptyText = signerConnected ? "No Vaults available." : "Connect a signer to list Vaults.";
+    setList("manageVaultsList", rows, emptyText, (item, vault) => {
+      item.appendChild(vaultSwitchButton(vault, "manage"));
+    });
   }
 
   function sessionGrantOpeningAllowed(status) {
@@ -5844,24 +6007,36 @@ const FiniteBrainProductClient = (() => {
     return `${kind} - ${role}${isLoaded ? " - loaded" : ""}`;
   }
 
-  function vaultSwitchButton(vault) {
+  function vaultSwitchButton(vault, surface = "management") {
     const isSelected = vault.vaultId === state.activeVaultId;
     const isLoaded = state.metadata?.vaultId === vault.vaultId;
+    const isLocked = state.sessionStatus === SESSION_STATUS.LOCKED && !state.visibleVaults.length;
+    const statusText = isLoaded
+      ? "loaded"
+      : isLocked
+        ? "locked"
+        : isSelected
+          ? "selected"
+          : "available";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `vault-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}`;
+    button.className = `vault-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}${isLocked ? " locked" : ""}`;
     button.setAttribute("aria-pressed", String(isSelected));
     button.setAttribute(
       "aria-label",
       `${vault.name || vault.vaultId}, ${vaultSwitchRowMeta(vault, isLoaded)}, ${
-        isLoaded ? "loaded" : isSelected ? "selected" : "not selected"
+        statusText
       }`
     );
     button.addEventListener("click", () => {
-      if (vault.vaultId === state.activeVaultId) return;
+      if (vault.vaultId === state.activeVaultId) {
+        if (surface === "switcher") closeVaultSwitcher();
+        return;
+      }
       setActiveVaultId(vault.vaultId);
       log("Selected Vault.", { vaultId: vault.vaultId });
-      render();
+      if (surface === "switcher") closeVaultSwitcher();
+      else render();
     });
 
     const title = document.createElement("span");
@@ -5873,8 +6048,8 @@ const FiniteBrainProductClient = (() => {
     meta.textContent = vaultSwitchRowMeta(vault, isLoaded);
 
     const status = document.createElement("span");
-    status.className = `pill ${isLoaded ? "ready" : isSelected ? "warn" : "muted"}`;
-    status.textContent = isLoaded ? "loaded" : isSelected ? "selected" : "select";
+    status.className = `pill ${isLoaded ? "ready" : isLocked ? "warn" : isSelected ? "warn" : "muted"}`;
+    status.textContent = statusText;
     status.setAttribute("aria-hidden", "true");
 
     button.appendChild(title);
@@ -6672,6 +6847,10 @@ const FiniteBrainProductClient = (() => {
     setText("sessionAccountVault", activeVaultLabel());
     setText("sessionAccountIdentity", sessionIdentityLabel());
     setText("sessionAccountStatus", view.title);
+    const vaultTrigger = $("sessionAccountVaultButton");
+    vaultTrigger?.setAttribute("aria-label", `Switch Vault (current: ${activeVaultLabel()})`);
+    vaultTrigger?.setAttribute("title", "Switch Vault");
+    vaultTrigger?.setAttribute("aria-expanded", String(state.vaultSwitcherOpen));
     setText("sessionSecurityTitle", view.title);
     setText("sessionSecurityDetail", state.sessionNotice || view.detail);
     safeSetHidden("resumeSessionButton", !view.locked);
@@ -6716,6 +6895,8 @@ const FiniteBrainProductClient = (() => {
 
     renderSessionSecurity();
     renderSettingsModal();
+    renderVaultSwitcher();
+    renderManageVaultsModal();
     renderVaultControlChrome();
     renderSidebarMode();
     renderReader();
@@ -9314,7 +9495,38 @@ const FiniteBrainProductClient = (() => {
       openSettingsModal("session");
     });
     $("sessionAccountVaultButton")?.addEventListener("click", () => {
-      openSettingsModal("vault");
+      openVaultSwitcher();
+    });
+    $("manageVaultsButton")?.addEventListener("click", () => {
+      openManageVaultsModal();
+    });
+    $("closeManageVaultsButton")?.addEventListener("click", () => {
+      closeManageVaultsModal();
+    });
+    $("manageVaultsModal")?.addEventListener("click", (event) => {
+      if (event.target === $("manageVaultsModal")) closeManageVaultsModal();
+    });
+    $("manageVaultsConnectSignerButton")?.addEventListener("click", () => {
+      connectSigner().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to connect signer from Manage Vaults.", { error: error.message });
+        render();
+      });
+    });
+    $("manageVaultsLoadButton")?.addEventListener("click", () => {
+      manageVaultsLoadAction();
+    });
+    $("manageCreateOrganizationVaultButton")?.addEventListener("click", () => {
+      createOrganizationVaultFromInput("manageOrganizationVaultNameInput").catch((error) => {
+        state.lastError = error.message;
+        log("Failed to create organization Vault from Manage Vaults.", { error: error.message });
+        render();
+      });
+    });
+    $("manageOrganizationVaultNameInput")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      $("manageCreateOrganizationVaultButton")?.click?.();
     });
     $("settingsConnectSignerButton")?.addEventListener("click", () => {
       connectSigner().catch((error) => {
@@ -9700,6 +9912,16 @@ const FiniteBrainProductClient = (() => {
     document.addEventListener("click", (event) => {
       const menu = $("contextMenu");
       if (!menu.hidden && !menu.contains(event.target)) closeContextMenu();
+      const vaultSwitcher = $("vaultSwitcherMenu");
+      const vaultSwitcherTrigger = $("sessionAccountVaultButton");
+      if (
+        state.vaultSwitcherOpen &&
+        vaultSwitcher &&
+        !vaultSwitcher.contains(event.target) &&
+        !vaultSwitcherTrigger?.contains?.(event.target)
+      ) {
+        closeVaultSwitcher();
+      }
       const slashMenu = $("editorSlashMenu");
       if (state.editorSlashOpen && slashMenu && !slashMenu.contains(event.target) && !visualEditorElement()?.contains(event.target)) {
         closeEditorSlashMenu();
@@ -9709,6 +9931,57 @@ const FiniteBrainProductClient = (() => {
       if (state.editorSlashOpen) refreshEditorSlashMenu();
     });
     document.addEventListener("keydown", (event) => {
+      if (state.manageVaultsModalOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeManageVaultsModal();
+          return;
+        }
+        if (event.key === "Tab") {
+          const focusable = manageVaultsModalFocusableElements();
+          if (!focusable.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+          return;
+        }
+        return;
+      }
+      if (state.vaultSwitcherOpen) {
+        if (event.key === "Escape" || event.key === "Tab") {
+          event.preventDefault();
+          closeVaultSwitcher();
+          return;
+        }
+        const direction =
+          event.key === "ArrowDown" ? 1 :
+          event.key === "ArrowUp" ? -1 :
+          event.key === "Home" ? 0 :
+          event.key === "End" ? Number.POSITIVE_INFINITY :
+          null;
+        if (direction !== null) {
+          const items = vaultSwitcherFocusableElements();
+          if (!items.length) return;
+          event.preventDefault();
+          const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+          const nextIndex = direction === Number.POSITIVE_INFINITY
+            ? items.length - 1
+            : direction === 0
+              ? 0
+              : (currentIndex + direction + items.length) % items.length;
+          items[nextIndex]?.focus?.();
+        }
+        return;
+      }
       if (state.settingsModalOpen) {
         if (event.key === "Escape") {
           event.preventDefault();

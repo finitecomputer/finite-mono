@@ -1325,6 +1325,8 @@ pre {
 }
 
 .sidebar-account-footer {
+  position: relative;
+  z-index: 12;
   min-width: 0;
   border-top: 1px solid var(--line);
   background: var(--obsi-panel);
@@ -1581,6 +1583,229 @@ pre {
 .session-account-row > .session-settings-button .icon {
   width: 17px;
   height: 17px;
+}
+
+.vault-switcher-menu {
+  position: absolute;
+  z-index: 28;
+  right: 8px;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  max-width: min(320px, calc(100% - 16px));
+  max-height: min(420px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-popover);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-obsi-popover);
+  padding: 8px;
+}
+
+.vault-switcher-menu[hidden] {
+  display: none;
+}
+
+.vault-switcher-header,
+.vault-switcher-footer {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.vault-switcher-header {
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 2px 3px 8px;
+}
+
+.vault-switcher-header > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-switcher-header strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-switcher-list {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  max-height: min(280px, 42vh);
+  margin: 0;
+  overflow-y: auto;
+  padding: 0;
+  list-style: none;
+}
+
+.vault-switcher-list li {
+  min-width: 0;
+}
+
+.vault-switcher-list .empty-row {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 10px;
+}
+
+.vault-switcher-manage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.vault-switcher-manage:hover,
+.vault-switcher-manage:focus-visible {
+  border-color: transparent;
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.vault-switcher-manage .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--icon);
+}
+
+.manage-vaults-modal-panel {
+  width: min(640px, 100%);
+  min-height: min(520px, calc(100vh - 48px));
+}
+
+.manage-vaults-modal-content {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  overflow: auto;
+  padding: 20px;
+}
+
+.manage-vaults-summary {
+  display: grid;
+  gap: 5px;
+}
+
+.manage-vaults-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.manage-vaults-summary strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manage-vaults-summary p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.manage-vaults-list-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-section-header.compact {
+  gap: 3px;
+}
+
+.settings-section-header.compact h3 {
+  font-size: 15px;
+}
+
+.manage-vaults-list {
+  max-height: min(330px, 42vh);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  padding: 6px;
+}
+
+.manage-vault-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.manage-vault-actions button {
+  min-height: 36px;
+}
+
+.manage-vault-create {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.manage-vault-create summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  list-style: none;
+}
+
+.manage-vault-create summary::-webkit-details-marker {
+  display: none;
+}
+
+.manage-vault-create summary::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: 0.58;
+  transform: rotate(-45deg);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.manage-vault-create[open] summary::after {
+  opacity: 0.86;
+  transform: rotate(45deg);
+}
+
+.manage-vault-create-body {
+  display: grid;
+  gap: 7px;
+  padding-top: 7px;
+}
+
+.manage-vault-create-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.manage-vault-create-row input {
+  min-width: 0;
 }
 
 .settings-modal-backdrop {
@@ -4802,6 +5027,24 @@ pre {
 
   .settings-modal-content {
     padding: 18px 16px 20px;
+  }
+
+  .vault-switcher-menu {
+    right: 6px;
+    left: 6px;
+    max-width: none;
+  }
+
+  .manage-vaults-modal-panel {
+    min-height: min(520px, calc(100vh - 20px));
+  }
+
+  .manage-vaults-modal-content {
+    padding: 16px;
+  }
+
+  .manage-vault-actions {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .settings-vault-summary dl {
