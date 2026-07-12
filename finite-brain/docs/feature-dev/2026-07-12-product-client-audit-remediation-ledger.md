@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: #18 through #21 complete; Child Folder and Graph implementation in progress
+- Current status: #18 through #22 complete; Graph implementation in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and `finite-brain/docs/agents/`)
 
 ## Goal
@@ -46,7 +46,7 @@ undefined or ambiguous.
 | #19 | AFK | complete | standards/spec pass after three P2 corrections; integrated browser proof pending | safe visible client feedback | Node contract; syntax; diff |
 | #20 | AFK | complete | focused self-review pass; integrated browser proof pending | authorization-loss Session Lock | Node contract; syntax; diff |
 | #21 | AFK | complete | independent focused review pass; integrated browser proof pending | invitation Session Lock/reactivity/revoke | Node contract; syntax; diff |
-| #22 | AFK | ready | pending | Child Folder hierarchy metadata | pending |
+| #22 | AFK | complete | standards/spec review pass; integrated browser proof pending | Child Folder hierarchy metadata | Node contract; syntax; diff |
 | #23 | AFK | ready | pending | hidden Graph filter removal | pending |
 
 ## Parked HITL Slices
@@ -63,6 +63,7 @@ undefined or ambiguous.
 | #19 | `7fc85c4` | `/root/ticket_19_client_feedback` | `cae93df` | standards/spec pass after corrections | Node contract; syntax; diff |
 | #20 | `65b98a7` | `/root/ticket_20_access_loss` | `390c801` | focused self-review pass | Node contract; syntax; diff |
 | #21 | `fe577fc` | `/root/ticket_21_invitations` | `dfc8a0b` | independent focused review pass | Node contract; syntax; diff |
+| #22 | `ca86dbe` | `/root/ticket_22_child_folders` | `f4d66f8` | standards/spec pass | Node contract; syntax; diff |
 
 ## Open Questions
 
