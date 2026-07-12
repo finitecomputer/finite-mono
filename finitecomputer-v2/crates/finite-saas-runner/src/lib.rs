@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 mod apple_container;
 mod kata;
+pub mod phala;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use kata::{KataConfig, KataLaunchPlan, KataLauncher};

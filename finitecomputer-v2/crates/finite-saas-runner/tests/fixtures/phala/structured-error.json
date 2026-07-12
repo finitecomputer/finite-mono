@@ -1,0 +1,5 @@
+{
+  "message": "fixture-sensitive-echo",
+  "request_id": "request_fixture_01",
+  "error_code": "ERR-FIXTURE-CONFLICT"
+}

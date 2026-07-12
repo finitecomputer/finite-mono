@@ -1,0 +1,13 @@
+{
+  "app_id": "app_fixture_01",
+  "compose_hash": "compose_fixture_01",
+  "app_env_encrypt_pubkey": "fixture-unverified-encryption-key",
+  "kms_info": {
+    "encrypted_env_pubkey": "fixture-unverified-encryption-key",
+    "k256_pubkey": "fixture-unverified-signing-key",
+    "dstack_kms_address": "fixture-kms-id",
+    "dstack_app_address": "fixture-app-id"
+  },
+  "instance_type": "tdx.medium",
+  "node_id": 101
+}

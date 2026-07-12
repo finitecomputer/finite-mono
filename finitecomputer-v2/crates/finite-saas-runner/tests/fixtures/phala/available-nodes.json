@@ -1,0 +1,23 @@
+{
+  "tier": "fixture",
+  "capacity": {
+    "max_instances": 1,
+    "max_vcpu": 2,
+    "max_memory": 4096,
+    "max_disk": 40
+  },
+  "nodes": [
+    {
+      "teepod_id": 101,
+      "name": "fixture-node",
+      "listed": true,
+      "resource_score": 1.0,
+      "remaining_vcpu": 2.0,
+      "remaining_memory": 4096.0,
+      "remaining_cvm_slots": 1.0,
+      "images": [],
+      "region_identifier": "fixture-region"
+    }
+  ],
+  "kms_list": []
+}
