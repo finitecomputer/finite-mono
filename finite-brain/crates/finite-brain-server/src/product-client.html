@@ -98,15 +98,6 @@
           </div>
         </details>
 
-        <section id="sessionSecurityStatus" class="session-security-status" aria-live="polite">
-          <div class="session-security-copy">
-            <strong id="sessionSecurityTitle">Session locked</strong>
-            <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
-          </div>
-          <button id="resumeSessionButton" type="button">Resume session</button>
-          <button id="lockSessionButton" type="button" hidden>Lock session</button>
-        </section>
-
         <div class="sidebar-toolbar" aria-label="File explorer actions">
           <button id="obsidianNewPageButton" class="sidebar-icon-button" type="button" title="New Page" aria-label="New Page">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -560,6 +551,47 @@
           ></div>
           <p id="accessBusyStatus" class="access-busy-status" hidden aria-live="polite">Working…</p>
         </section>
+
+        <footer class="sidebar-account-footer">
+          <details id="sessionAccountDetails" class="session-account-details">
+            <summary>
+              <span class="session-account-avatar" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24">
+                  <circle cx="12" cy="8" r="3.5" />
+                  <path d="M5 20c.8-3.2 3.1-5 7-5s6.2 1.8 7 5" />
+                </svg>
+              </span>
+              <span class="session-account-summary">
+                <strong id="sessionAccountVault">Personal vault</strong>
+                <span>
+                  <span id="sessionAccountIdentity">Signer unavailable</span>
+                  <span aria-hidden="true"> · </span>
+                  <span id="sessionAccountStatus">Session locked</span>
+                </span>
+              </span>
+              <svg class="session-account-chevron icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m8 10 4 4 4-4" />
+              </svg>
+            </summary>
+            <div class="session-account-panel">
+              <section id="sessionSecurityStatus" class="session-security-status" aria-live="polite">
+                <div class="session-security-copy">
+                  <strong id="sessionSecurityTitle">Session locked</strong>
+                  <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.</span>
+                </div>
+                <button id="resumeSessionButton" type="button">Resume session</button>
+                <button id="lockSessionButton" type="button" hidden>Lock session</button>
+              </section>
+              <button id="sessionSettingsButton" class="session-settings-button" type="button">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M5.9 5.9l1.4 1.4M16.7 16.7l1.4 1.4M18.1 5.9l-1.4 1.4M7.3 16.7l-1.4 1.4" />
+                  <circle cx="12" cy="12" r="3.5" />
+                </svg>
+                <span>Vault settings</span>
+              </button>
+            </div>
+          </details>
+        </footer>
 
       </aside>
 
