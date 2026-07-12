@@ -9,7 +9,7 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-11
-- Current status: all tickets complete; ready for final review and PR publication
+- Current status: all tickets complete; final review evidence recorded; PR #16 open on `main`
 - Skill setup status: present (`finite-brain/AGENTS.md`, `docs/agents/issue-tracker.md`, `triage-labels.md`, `domain.md`)
 
 ## Goal
@@ -41,7 +41,7 @@ security lifecycle semantics.
 - Typecheck: `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
 - Test: `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`; `scripts/with-dev-env cargo test -p finite-brain-server`
 - Build: `scripts/with-dev-env cargo build -p finite-brain-server`
-- Visual verification: local Rust-served Product Client at `http://127.0.0.1:4039/client`, with desktop/mobile captures for Vault switcher, settings modal, Manage Vaults modal, access/sharing flows, and Session Lock
+- Visual verification: local Rust-served Product Client at `http://127.0.0.1:4039/client`, with desktop/mobile captures and live interaction checks for Vault switcher, settings modal, Manage Vaults modal, access/sharing flows, Invitations, and Session Lock
 
 ## Ticket Ledger
 
@@ -78,4 +78,4 @@ security lifecycle semantics.
 
 ## Escalations
 
-- None.
+- GitHub PR run `29179994430` completed with Dashboard, Hermes, Skills/search, and devfinity checks passing. The Rust workspace check failed on an unrelated `finitecomputer-v2/crates/finite-saas-core/src/api.rs` `bool::then` Clippy lint introduced on newer `main`; the feature branch's local workspace Clippy and all scoped FiniteBrain checks pass.
