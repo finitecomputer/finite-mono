@@ -182,6 +182,7 @@ type HostedDeviceState = {
   releaseOwnerClaimGate: (() => void) | null;
   app: FakeHostedChatState;
   actions: Array<Record<string, unknown>>;
+  newChatRequests: Array<Record<string, unknown>>;
   runtimeCommands: Array<Record<string, unknown>>;
   authRequests: HostedAuthRequest[];
   agentBindings: Map<
@@ -843,6 +844,51 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         /\/_finite\/auth\?token=/u
       );
 
+      const binding = hostedDevice.state.app.hosted_agent_binding;
+      assert(binding);
+      binding.associated_room_ids = ["room_browser_legacy"];
+      hostedDevice.state.app.rooms.push({
+        room_id: "room_browser_legacy",
+        display_name: "Previous room",
+        state: "Connected",
+        status: "Connected",
+        user_status_text: "Connected",
+        last_message_preview: "Old chat",
+        unread_count: 0,
+        is_agent_chat: true,
+      });
+      hostedDevice.state.app.topics.push({
+        room_id: "room_browser_legacy",
+        topic_id: "topic_browser_legacy",
+        title: "Previous topic",
+        active_chat_id: "chat_browser_legacy",
+        chats: [{
+          chat_id: "chat_browser_legacy",
+          title: "Old chat",
+          active: true,
+        }],
+      });
+      hostedDevice.emit();
+      await page.getByRole("button", { name: "Old chat", exact: true }).click();
+      await waitFor(() => hostedDevice.state.app.selected_room_id === "room_browser_legacy");
+      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      await waitFor(() => hostedDevice.state.newChatRequests.length === 1);
+      assert.deepEqual(hostedDevice.state.newChatRequests[0], {
+        project_id: "project_running",
+        room_id: "room_browser_agent",
+        topic_id: "topic_browser_agent",
+        reason: null,
+        intent_key: hostedDevice.state.newChatRequests[0]!.intent_key,
+      });
+      assert.match(String(hostedDevice.state.newChatRequests[0]!.intent_key), /.+/);
+      assert.equal(hostedDevice.state.app.selected_room_id, "room_browser_agent");
+      assert.equal(hostedDevice.state.app.selected_topic_id, "topic_browser_agent");
+      assert(
+        hostedDevice.state.app.topics
+          .find((topic) => topic.room_id === "room_browser_agent")
+          ?.chats.some((chat) => chat.chat_id === "chat_browser_new_1")
+      );
+
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -1104,6 +1150,7 @@ async function startFakeHostedDevice() {
     releaseOwnerClaimGate: null,
     app: initialHostedChatState(),
     actions: [],
+    newChatRequests: [],
     runtimeCommands: [],
     authRequests: [],
     agentBindings: new Map(),
@@ -1275,7 +1322,7 @@ async function handleHostedDeviceRequest(
         agent_account_id: "agent-account-browser",
         agent_npub: String(body.agent_npub ?? AGENT_NPUB),
         canonical_room_id: "room_browser_agent",
-        associated_room_ids: ["room_browser_agent"],
+        associated_room_ids: [],
       };
       state.agentBindings.set(projectId, binding);
     }
@@ -1290,6 +1337,25 @@ async function handleHostedDeviceRequest(
       hostedImageMessage("Image sent from browser.", true, state.app.messages.length + 1, "browser-proof.png")
     );
     state.app.rev += 1;
+    emitHostedState(streams, state.app);
+    writeJson(response, 200, state.app);
+    return;
+  }
+
+  if (request.method === "POST" && path === "/v1/app/new-chat") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    state.newChatRequests.push(body);
+    assert.equal(body.project_id, "project_running");
+    assert.equal(body.room_id, "room_browser_agent");
+    assert.equal(body.topic_id, "topic_browser_agent");
+    applyHostedAction(state.app, {
+      StartTopicChatIntent: {
+        room_id: body.room_id,
+        topic_id: body.topic_id,
+        reason: body.reason,
+        intent_key: body.intent_key,
+      },
+    });
     emitHostedState(streams, state.app);
     writeJson(response, 200, state.app);
     return;
@@ -1507,6 +1573,23 @@ function applyHostedAction(
           }
         : candidate
     );
+  } else if (operation === "StartTopicChatIntent") {
+    const payload = action.StartTopicChatIntent as Record<string, unknown> | undefined;
+    assert(payload);
+    const roomId = String(payload.room_id ?? "");
+    const topicId = String(payload.topic_id ?? "");
+    const topic = state.topics.find(
+      (candidate) => candidate.room_id === roomId && candidate.topic_id === topicId
+    );
+    assert(topic);
+    const chatId = `chat_browser_new_${topic.chats.filter((chat) =>
+      chat.chat_id.startsWith("chat_browser_new_")
+    ).length + 1}`;
+    topic.chats.push({ chat_id: chatId, title: "New chat", active: true });
+    topic.active_chat_id = chatId;
+    state.selected_room_id = roomId;
+    state.selected_topic_id = topicId;
+    state.selected_chat_id = chatId;
   } else if (operation === "SendChatMessage") {
     const payload = action.SendChatMessage as Record<string, unknown> | undefined;
     assert(payload);

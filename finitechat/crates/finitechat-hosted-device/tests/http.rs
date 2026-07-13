@@ -1080,7 +1080,30 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
         .as_array()
         .unwrap()
         .len();
+    let legacy_new_chat = hosted
+        .clone()
+        .oneshot(
+            Request::post("/v1/app/new-chat")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, "binding-user")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "project_id": "project-one",
+                        "room_id": expected[1],
+                        "topic_id": "home",
+                        "reason": null,
+                        "intent_key": "legacy-browser-new-chat"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy_new_chat.status(), StatusCode::CONFLICT);
     let new_chat = serde_json::json!({
+        "project_id": "project-one",
         "room_id": expected[0],
         "topic_id": "home",
         "reason": null,

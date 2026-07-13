@@ -341,7 +341,9 @@ export async function hostedDeviceEnsureAgentBinding(
 export async function hostedDeviceNewChat(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
-  input: Extract<HostedChatAction, { StartTopicChatIntent: unknown }>["StartTopicChatIntent"]
+  input: Extract<HostedChatAction, { StartTopicChatIntent: unknown }>["StartTopicChatIntent"] & {
+    project_id: string;
+  }
 ) {
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/new-chat", {
     method: "POST",

@@ -21,7 +21,7 @@ use finitechat_core::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkEncryptInput, encrypt_device_link_payload,
 };
 use finitechat_core::{
-    AppAction, AppState, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
+    AppAction, AppState, AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
     FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_http::{
@@ -191,6 +191,8 @@ pub enum HostedDeviceError {
     AgentBindingNotFound,
     #[error("canonical Agent conversation requires recovery: {0}")]
     AgentBindingInvalid(String),
+    #[error("new chat must stay in the canonical Agent conversation: {0}")]
+    CanonicalChatConflict(String),
     #[error("hosted chat state could not be inspected: {0}")]
     Io(#[from] std::io::Error),
     #[error("hosted device task failed: {0}")]
@@ -214,7 +216,7 @@ impl IntoResponse for HostedDeviceError {
             Self::AttachmentNotFound | Self::DeviceLinkNotFound | Self::AgentBindingNotFound => {
                 StatusCode::NOT_FOUND
             }
-            Self::DeviceLinkConflict(_) => StatusCode::CONFLICT,
+            Self::DeviceLinkConflict(_) | Self::CanonicalChatConflict(_) => StatusCode::CONFLICT,
             Self::InvalidDeviceLink(_) => StatusCode::BAD_REQUEST,
             Self::DeviceLinkService(_) => StatusCode::BAD_GATEWAY,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
@@ -1471,6 +1473,7 @@ async fn dispatch_action(
 
 #[derive(Deserialize)]
 struct StartNewChatRequest {
+    project_id: String,
     room_id: String,
     topic_id: String,
     reason: Option<String>,
@@ -1483,18 +1486,45 @@ async fn start_new_chat(
     Json(input): Json<StartNewChatRequest>,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
-    let runtime = state.runtime_for(&user_id)?;
-    let next = tokio::task::spawn_blocking(move || {
-        runtime.start_topic_chat_intent_and_wait(
+    validate_binding_field("project_id", &input.project_id)?;
+    let next = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let runtime = state.runtime_for(&user_id)?;
+        let binding = load_agent_binding(&state, &user_id, &input.project_id, &runtime)?
+            .ok_or(HostedDeviceError::AgentBindingNotFound)?;
+        let opened = open_validated_agent_binding(&runtime, binding)?;
+        validate_new_chat_target(&opened.hosted_agent_binding, &input, &opened.state.topics)?;
+        persist_agent_binding(&state, &user_id, &opened.hosted_agent_binding, &runtime)?;
+        Ok(runtime.start_topic_chat_intent_and_wait(
             input.room_id,
             input.topic_id,
             input.reason,
             input.intent_key,
-        )
+        )?)
     })
     .await
     .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
+}
+
+fn validate_new_chat_target(
+    binding: &HostedAgentBindingV1,
+    input: &StartNewChatRequest,
+    topics: &[AppTopicSummary],
+) -> Result<(), HostedDeviceError> {
+    if input.room_id != binding.canonical_room_id {
+        return Err(HostedDeviceError::CanonicalChatConflict(
+            "Room does not match the persisted binding".to_owned(),
+        ));
+    }
+    if !topics
+        .iter()
+        .any(|topic| topic.room_id == binding.canonical_room_id && topic.topic_id == input.topic_id)
+    {
+        return Err(HostedDeviceError::CanonicalChatConflict(
+            "Topic does not belong to the canonical Room".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2086,6 +2116,76 @@ fn error_event(error: impl ToString) -> Event {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn test_binding() -> HostedAgentBindingV1 {
+        HostedAgentBindingV1 {
+            version: AGENT_BINDING_VERSION,
+            project_id: "project-1".to_owned(),
+            human_account_id: "human-1".to_owned(),
+            agent_account_id: "agent-1".to_owned(),
+            agent_npub: "npub1agent".to_owned(),
+            canonical_room_id: "canonical-room".to_owned(),
+            associated_room_ids: vec!["legacy-room".to_owned()],
+        }
+    }
+
+    fn test_topic(room_id: &str, topic_id: &str) -> AppTopicSummary {
+        AppTopicSummary {
+            room_id: room_id.to_owned(),
+            topic_id: topic_id.to_owned(),
+            title: topic_id.to_owned(),
+            description: None,
+            last_message_preview: String::new(),
+            unread_count: 0,
+            message_count: 0,
+            created_seq: 0,
+            updated_seq: 0,
+            archived: false,
+            active_chat_id: None,
+            chats: Vec::new(),
+        }
+    }
+
+    fn test_new_chat(room_id: &str, topic_id: &str) -> StartNewChatRequest {
+        StartNewChatRequest {
+            project_id: "project-1".to_owned(),
+            room_id: room_id.to_owned(),
+            topic_id: topic_id.to_owned(),
+            reason: None,
+            intent_key: "intent-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn new_chat_target_requires_a_topic_in_the_bound_canonical_room() {
+        let binding = test_binding();
+        let canonical_topics = vec![test_topic("canonical-room", "home")];
+
+        assert!(
+            validate_new_chat_target(
+                &binding,
+                &test_new_chat("canonical-room", "home"),
+                &canonical_topics,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_new_chat_target(
+                &binding,
+                &test_new_chat("legacy-room", "legacy-topic"),
+                &[test_topic("legacy-room", "legacy-topic")],
+            ),
+            Err(HostedDeviceError::CanonicalChatConflict(_))
+        ));
+        assert!(matches!(
+            validate_new_chat_target(
+                &binding,
+                &test_new_chat("canonical-room", "legacy-topic"),
+                &[test_topic("legacy-room", "legacy-topic")],
+            ),
+            Err(HostedDeviceError::CanonicalChatConflict(_))
+        ));
+    }
 
     #[tokio::test]
     async fn attachment_reader_confines_files_to_the_users_cache() {

@@ -90,6 +90,10 @@ import {
   type HostedChatRetryAttempt,
 } from "@/lib/hosted-web-chat-retry";
 import {
+  canonicalNewChatTopic,
+  HOME_TOPIC_ID,
+} from "@/lib/hosted-web-chat-topics";
+import {
   beginPendingChatTurn,
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
@@ -107,7 +111,6 @@ const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_ATTACHMENTS = 8;
 const AUTO_FOLLOW_SCROLL_THRESHOLD_PX = 120;
-const HOME_TOPIC_ID = "home";
 
 type PendingAttachment = {
   id: string;
@@ -658,7 +661,7 @@ export function HostedWebChat({
     }
   }
 
-  async function createChat(topic = canonicalTopics.find((item) => item.topic_id === HOME_TOPIC_ID) ?? canonicalTopics[0]) {
+  async function createChat(topic = canonicalNewChatTopic(canonicalTopics) ?? undefined) {
     if (!canonicalRoomId || !topic) return;
     setError(null);
     try {
@@ -1206,6 +1209,8 @@ function ChatSidebar({
   previousTopics: HostedChatTopic[];
   viewerEmail?: string | null;
 }) {
+  const defaultNewChatTopic = canonicalNewChatTopic(topics);
+
   return (
     <aside className={`finite-chat__sidebar ${isOpen ? "is-open" : ""}`}>
       <div className="finite-chat__sidebar-top">
@@ -1331,8 +1336,8 @@ function ChatSidebar({
       <button
         type="button"
         className="finite-chat__sidebar-new-chat-fab"
-        disabled={!selectedTopic}
-        onClick={() => selectedTopic && onCreateChat(selectedTopic)}
+        disabled={!defaultNewChatTopic}
+        onClick={() => defaultNewChatTopic && onCreateChat(defaultNewChatTopic)}
       >
         <PlusIcon className="size-4" />
         <span>New chat</span>

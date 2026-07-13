@@ -79,12 +79,32 @@ export async function dispatchHostedWebChatAction(machineId: string, payload: un
       context.account,
       context.projectId
     );
-    if (action.StartTopicChatIntent.room_id !== bound.hosted_agent_binding?.canonical_room_id) {
+    const target = action.StartTopicChatIntent;
+    if (!isCanonicalNewChatTarget(bound, target)) {
       throw new HostedWebChatError("New chats must stay in the Agent conversation.", 409);
     }
-    return hostedDeviceNewChat(context.config, context.account, action.StartTopicChatIntent);
+    return hostedDeviceNewChat(context.config, context.account, {
+      project_id: context.projectId,
+      ...target,
+    });
   }
   return hostedDeviceAction(context.config, context.account, action);
+}
+
+export function isCanonicalNewChatTarget(
+  state: HostedChatState,
+  target: Extract<HostedChatAction, { StartTopicChatIntent: unknown }>["StartTopicChatIntent"]
+) {
+  const binding = state.hosted_agent_binding;
+  return Boolean(
+    binding
+    && target.room_id === binding.canonical_room_id
+    && state.topics.some(
+      (topic) =>
+        topic.room_id === binding.canonical_room_id
+        && topic.topic_id === target.topic_id
+    )
+  );
 }
 
 export async function streamHostedWebChat(machineId: string, signal: AbortSignal) {

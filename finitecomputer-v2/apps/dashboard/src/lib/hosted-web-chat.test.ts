@@ -4,9 +4,69 @@ import test from "node:test";
 import {
   HostedWebChatError,
   hostedWebChatErrorMessage,
+  isCanonicalNewChatTarget,
   parseHostedChatAction,
 } from "@/lib/hosted-web-chat";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
+import type { HostedChatState } from "@/lib/hosted-web-device";
+
+function targetState(): HostedChatState {
+  return {
+    rev: 1,
+    identity: { account_id: "human-1", device_id: "hosted-web" },
+    rooms: [],
+    topics: [{
+      room_id: "canonical-room",
+      topic_id: "home",
+      title: "Home",
+      last_message_preview: "",
+      unread_count: 0,
+      message_count: 0,
+      created_seq: 0,
+      updated_seq: 0,
+      archived: false,
+      chats: [],
+    }],
+    status: "ready",
+    messages: [],
+    profiles: [],
+    devices: [],
+    typing_members: [],
+    hosted_agent_binding: {
+      version: 1,
+      project_id: "project-1",
+      human_account_id: "human-1",
+      agent_account_id: "agent-1",
+      agent_npub: "npub1agent",
+      canonical_room_id: "canonical-room",
+      associated_room_ids: ["legacy-room"],
+    },
+    flow: {
+      notice_busy: false,
+      scan_in_flight: false,
+      scan_result: "",
+    },
+  };
+}
+
+test("new chat validation rejects legacy and cross-room topic targets", () => {
+  const state = targetState();
+  assert.equal(isCanonicalNewChatTarget(state, {
+    room_id: "canonical-room",
+    topic_id: "home",
+    intent_key: "intent-1",
+  }), true);
+  assert.equal(isCanonicalNewChatTarget(state, {
+    room_id: "legacy-room",
+    topic_id: "home",
+    intent_key: "intent-2",
+  }), false);
+  assert.equal(isCanonicalNewChatTarget(state, {
+    room_id: "canonical-room",
+    topic_id: "legacy-topic",
+    intent_key: "intent-3",
+  }), false);
+});
 
 test("unexpected chat infrastructure errors are replaced with plain product copy", () => {
   assert.equal(
