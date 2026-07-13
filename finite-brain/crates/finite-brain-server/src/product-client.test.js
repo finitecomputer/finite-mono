@@ -1189,7 +1189,9 @@ async function assertClipboardInvitationFeedbackContracts() {
   const expiringState = expiringClipboardFeedback.seams.state;
   const expiringElement = expiringClipboardFeedback.context.document.getElementById("clientActionFeedback");
   expiringState.sessionStatus = "unlocked";
+  expiringState.lastError = "older-client-error-sentinel";
   await expiringClipboardFeedback.seams.copyToClipboard("first-copy-sentinel", "page-id");
+  assert.equal(expiringState.lastError, null, "A newer successful client action must supersede an older generic error");
   const staleTimerId = nextTimerId - 1;
   await expiringClipboardFeedback.seams.copyToClipboard("second-copy-sentinel", "folder-id");
   const currentTimerId = nextTimerId - 1;

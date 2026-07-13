@@ -56,6 +56,13 @@
   both wrap directions, Escape return focus, global shortcut suppression, and
   context-menu Access return focus.
 
+## Independent final-review follow-up
+
+- A final independent review found that an old generic error could otherwise
+  reappear after a newer successful copy notice expired. A successful client
+  action now supersedes that stale generic error, and the deterministic expiry
+  seam proves the feedback hides rather than resurrecting it.
+
 ## Limits
 
 - Browser and full-stack verification are left to the coordinating session,

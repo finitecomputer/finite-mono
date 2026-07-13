@@ -9,7 +9,8 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: spec and dependency-ordered AFK tickets published; implementation pending
+- Current status: all AFK tickets and post-review fixes are committed; final
+  local verification and existing-PR refresh are in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and
   `finite-brain/docs/agents/`)
 
@@ -30,11 +31,12 @@ undefined.
 - Prototype source branch, if any: none
 - Spec issue: #24 — https://github.com/finitecomputer/finite-mono/issues/24
 - Tickets: #25, #26, #27, #28
-- Ticket sessions: pending
+- Ticket sessions: #25, #26, #27, #28, and post-review follow-up recorded
 - Agent briefs: read-only affordance, keyboard/accessibility, and product-truth
   audits completed before specification
-- Review packets: pending
-- Local CodeRabbit report: pending
+- Review packets: scoped standards/spec and independent post-review audits
+  completed; worthy P2 findings were fixed
+- Local CodeRabbit report: pending final branch review
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/16
 
 ## Commands
@@ -50,10 +52,10 @@ undefined.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| #25 | AFK | ready | pending | truthful Page and Folder affordances | pending |
-| #26 | AFK | ready | pending | canonical Vault navigation and legacy-control hard cut | pending |
-| #27 | AFK | ready | pending | clipboard and invitation handoff feedback | pending |
-| #28 | AFK | ready; blocked by #25 and #26 | pending | keyboard and focus semantics | pending |
+| #25 | AFK | complete | scoped review complete | truthful Page and Folder affordances | targeted client, asset, build, and browser checks |
+| #26 | AFK | complete | scoped review + post-review P2 complete | canonical Vault navigation and legacy-control hard cut | targeted client, asset, and build checks |
+| #27 | AFK | complete | scoped review + post-review P2 complete | clipboard and invitation handoff feedback | deterministic lifecycle/race, asset, and build checks |
+| #28 | AFK | complete | scoped review + post-review P2 complete | keyboard and focus semantics | deterministic keyboard/focus, asset, and build checks |
 
 ## Parked HITL Slices
 
@@ -65,7 +67,11 @@ undefined.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- |
-| Pending | | | | | |
+| #25 | `c7ca3ef` | `/root/ticket_25_truthful_page_affordances` | `7bf2581`, `5d46c75` | accepted | targeted client, asset, build, browser |
+| #26 | `2c6de13` | `/root/ticket_26_vault_legacy_cleanup` | `3a2f3c9`, `539ad30`, `8a58f70` | accepted; post-review follow-up | targeted client, asset, build |
+| #27 | `8a58f70` | `/root/ticket_27_clipboard_invitation_feedback` | `398236d`, `44c669e` | accepted; post-review follow-up | deterministic client, asset, build |
+| #28 | `44c669e` | `/root/ticket_28_keyboard_navigation` | `341df32` | accepted; post-review follow-up | deterministic client, asset, build |
+| #26–#28 follow-up | `341df32` | `/root/post_review_interaction_fixes` | `8d41bc7` + final branch follow-up | independent P2 audit fixed | deterministic client, asset, build |
 
 ## Open Questions
 

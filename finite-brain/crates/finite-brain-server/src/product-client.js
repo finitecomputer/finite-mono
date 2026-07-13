@@ -606,6 +606,9 @@ const FiniteBrainProductClient = (() => {
     if (options.generation !== undefined && generation !== state.clientActionFeedbackGeneration) {
       return false;
     }
+    // The newest successful client action supersedes an older generic error.
+    // Otherwise that error would reappear when this short-lived notice expires.
+    if (tone === "success") lastErrorValue = null;
     clearClientActionFeedbackTimer();
     state.clientActionFeedbackGeneration = generation;
     state.clientActionFeedback = { message, tone };
