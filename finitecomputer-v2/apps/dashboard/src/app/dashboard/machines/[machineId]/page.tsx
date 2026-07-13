@@ -14,8 +14,8 @@ import {
   stopCoreRuntimeAction,
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
+import { AgentHeroCard } from "@/components/agent-hero-card";
 import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
-import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
 import {
   loadDashboardMachineAccess,
@@ -100,15 +100,12 @@ async function ImportedMachineOverview({
           This agent cannot be removed from the dashboard.
         </section>
       ) : null}
-      <section className="ocean-status-card" data-cube-state={prismState}>
-        <div className="ocean-status-card__inner">
-          <StatusPrism state={prismState} className="justify-self-center" />
-          <div className="ocean-status-card__copy">
-            <h1 className="ocean-status-card__title">{access.displayName}</h1>
-            <p className="ocean-status-card__description">
-              {overview.description}
-            </p>
-            <div className="ocean-status-card__actions">
+      <AgentHeroCard
+        name={access.displayName}
+        description={overview.description}
+        state={prismState}
+        actions={
+          <>
               {canRestartRuntime ? (
                 <form action={restartCoreRuntimeAction}>
                   <input type="hidden" name="machineId" value={access.machineId} />
@@ -135,10 +132,9 @@ async function ImportedMachineOverview({
                   Open chat
                 </Link>
               </Button>
-            </div>
-          </div>
-        </div>
-      </section>
+          </>
+        }
+      />
       {canRecoverRuntime ? (
         <section className="rounded-xl border bg-card p-5">
           <h2 className="font-semibold">Chat recovery</h2>

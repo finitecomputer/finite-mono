@@ -19,12 +19,14 @@ import {
   approveFinitePrivateGrantAction,
   cancelFailedAgentCreationRequestAction,
   issueFinitePrivateApiKeyAction,
+  openBillingPortalAction,
   resetFinitePrivateGrantAction,
   revokeFinitePrivateApiKeyAction,
   revokeFinitePrivateGrantAction,
   rotateFinitePrivateApiKeyAction,
 } from "@/app/actions";
 import { CoreAgentCreationForm } from "@/components/core-agent-creation-form";
+import { AgentHeroCard } from "@/components/agent-hero-card";
 import { FormActionButton } from "@/components/form-action-button";
 import { PendingRefresh } from "@/components/pending-refresh";
 import { Button } from "@/components/ui/button";
@@ -135,9 +137,6 @@ export default async function DashboardPage({
     const failedAgentCreationRequests = agentCreationRequests.filter(
       (request) => request.status === "failed"
     );
-    const firstAgentHref = coreProjects
-      .map((project) => coreProjectOverviewHref(project))
-      .find((href): href is string => Boolean(href));
     const returnProject =
       coreProjects.find((project) => project.runtime?.id === originMachineId) ??
       coreProjects.find((project) => Boolean(coreProjectOverviewHref(project))) ??
@@ -154,9 +153,6 @@ export default async function DashboardPage({
           .find((href): href is string => Boolean(href)) ?? null
       : null;
 
-    if (firstAgentHref && !isNewAgentFlow) {
-      redirect(firstAgentHref);
-    }
     if (
       isNewAgentFlow &&
       trackedCreationRequest?.status === "running" &&
@@ -241,6 +237,11 @@ export default async function DashboardPage({
             agentCreationRequests={agentCreationRequests}
           />
         ) : null}
+        {!isNewAgentFlow && billing.billing ? (
+          <AccountBillingPanel
+            billingClass={billing.billing.customer_org.billing_class}
+          />
+        ) : null}
         {pendingAgentCreationRequests.length ? (
           <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
         ) : null}
@@ -321,6 +322,38 @@ export default async function DashboardPage({
 
       <FinitePrivateAdminPanel result={finitePrivateAdmin} />
     </div>
+  );
+}
+
+function AccountBillingPanel({
+  billingClass,
+}: {
+  billingClass: "grandfathered" | "sponsored" | "standard";
+}) {
+  return (
+    <section id="billing" className="ocean-utility-card scroll-mt-20">
+      <div className="ocean-utility-card__header">
+        <span className="ocean-utility-card__icon" aria-hidden>
+          <CreditCardIcon className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h1 className="ocean-utility-card__title">Billing</h1>
+          <p className="text-sm text-muted-foreground">
+            {billingClass === "standard"
+              ? "Manage your subscription and payment method."
+              : `Your account has ${billingClass} access.`}
+          </p>
+        </div>
+        {billingClass === "standard" ? (
+          <form action={openBillingPortalAction}>
+            <FormActionButton variant="outline" pendingLabel="Opening…">
+              <CreditCardIcon />
+              Manage billing
+            </FormActionButton>
+          </form>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -666,11 +699,17 @@ function CoreProjectsPanel({
           <ServerIcon className="size-5" />
         </span>
         <div>
-          <h1 className="ocean-utility-card__title">Agent</h1>
+          <h1 className="ocean-utility-card__title">Your agents</h1>
           <p className="text-sm text-muted-foreground">
-            Manage your agent and chat with it from your dashboard.
+            Open an agent workspace or jump straight into chat.
           </p>
         </div>
+        <Button asChild variant="outline" size="sm" className="ml-auto">
+          <Link href="/dashboard?new=1">
+            <PlusIcon />
+            New agent
+          </Link>
+        </Button>
       </div>
 
       <div className="grid gap-3">
@@ -694,46 +733,46 @@ function CoreProjectCard({
   request: CoreAgentCreationRequestSummary | null;
 }) {
   const overviewHref = coreProjectOverviewHref(project);
+  const chatHref = overviewHref ? `${overviewHref}/chat` : null;
   const statusLabel = coreProjectLaunchStatusLabel(project, request);
-  const locationLabel = coreProjectLocationLabel(project, request);
+  const runtimeStatus = project.runtime?.runtime_status ?? "unknown";
+  const heroState = runtimeStatus === "online"
+    ? "happy"
+    : runtimeStatus === "stale"
+      ? "working"
+      : "stuck";
+  const description = request?.status === "failed"
+    ? "We could not start this agent. Ask a team member to retry it."
+    : statusLabel === "Online"
+      ? "Your agent is online."
+      : statusLabel || coreProjectLocationLabel(project, request);
 
   return (
-    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[minmax(0,1fr)_auto]">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          {overviewHref ? (
-            <Link href={overviewHref} className="truncate font-semibold text-foreground hover:underline">
-              {coreProjectLabel(project)}
-            </Link>
-          ) : (
-            <h2 className="truncate font-semibold text-foreground">{coreProjectLabel(project)}</h2>
-          )}
-          {statusLabel ? (
-            <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-              {statusLabel}
-            </span>
+    <AgentHeroCard
+      name={coreProjectLabel(project)}
+      description={description}
+      state={heroState}
+      actions={
+        <>
+          {chatHref ? (
+            <Button asChild>
+              <Link href={chatHref}>
+                <MessageSquareIcon />
+                Open chat
+              </Link>
+            </Button>
           ) : null}
-        </div>
-        <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-          {locationLabel}
-        </p>
-        {request?.status === "failed" ? (
-          <p className="mt-2 text-sm text-muted-foreground">
-            We could not start this agent. Ask a team member to retry it.
-          </p>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {overviewHref ? (
-          <Button asChild variant="outline" size="sm">
-            <Link href={overviewHref}>
-              <ServerIcon />
-              Agent
-            </Link>
-          </Button>
-        ) : null}
-      </div>
-    </div>
+          {overviewHref ? (
+            <Button asChild variant="outline">
+              <Link href={overviewHref}>
+                <ServerIcon />
+                Agent
+              </Link>
+            </Button>
+          ) : null}
+        </>
+      }
+    />
   );
 }
 

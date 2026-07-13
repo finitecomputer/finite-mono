@@ -32,20 +32,9 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     const page = await context.newPage();
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
-    await page
-      .getByRole("link", { name: "Agent", exact: true })
-      .waitFor({ state: "visible" });
     await page.getByLabel("Agent name").waitFor({ state: "visible" });
-    const machineSwitcher = page.locator(".ocean-machine-switcher__button");
-    await machineSwitcher.waitFor({ state: "visible" });
-    assert.equal(await machineSwitcher.evaluate((element) => element.tagName), "A");
-    assert.equal((await machineSwitcher.textContent())?.trim(), "New agent");
-    const newAgentUrl = new URL(
-      (await machineSwitcher.getAttribute("href")) ?? "",
-      page.url()
-    );
-    assert.equal(newAgentUrl.pathname, "/dashboard");
-    assert.equal(newAgentUrl.searchParams.get("new"), "1");
+    await page.getByRole("link", { name: "Finite.Computer" }).waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
     assert.equal(await page.getByText("Legacy Agent", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
 

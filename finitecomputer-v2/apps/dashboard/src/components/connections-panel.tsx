@@ -13,7 +13,6 @@ import {
 import { ConnectionCard } from "@/components/connection-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { connectionsReadiness } from "@/lib/connections-readiness";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
 
 export const CONNECTIONS_REQUEST_TIMEOUT_MS = 20_000;
@@ -63,34 +62,15 @@ export function ConnectionsPanel({
     }
   }
 
-  const readiness = connectionsReadiness(Boolean(status), error);
-  if (readiness === "loading") {
-    return (
-      <div
-        className="rounded-xl border border-border bg-white/[0.03] px-4 py-6 text-sm text-muted-foreground"
-        role="status"
-      >
-        Preparing your connections…
-      </div>
-    );
-  }
-  if (readiness === "error") {
-    return (
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
-        <span>{error}</span>
-        <Button variant="outline" size="sm" onClick={() => void refresh()}>
-          <RefreshCwIcon />
-          Try again
-        </Button>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-4">
-      {error ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
-          <span>{error}</span>
+      {!status ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.03] px-4 py-3 text-sm">
+          <span>
+            {error
+              ? `${error} The controls remain visible for local UI development.`
+              : "Checking live connection status… Controls will unlock when the agent responds."}
+          </span>
           <Button variant="outline" size="sm" onClick={() => void refresh()}>
             <RefreshCwIcon />
             Try again
@@ -100,7 +80,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Inference"
-        state="connected"
+        state={status ? "connected" : "unavailable"}
         account={status ? inferenceLabel(status) : null}
         description="Choose the service your agent uses to think."
         icon={<CpuIcon className="size-5" />}
@@ -110,7 +90,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Telegram"
-        state={status?.telegram.connected ? "connected" : "disconnected"}
+        state={!status ? "unavailable" : status.telegram.connected ? "connected" : "disconnected"}
         account={status?.telegram.home_channel ?? null}
         description="Talk to the same agent from Telegram."
         icon={<SendIcon className="size-5" />}
@@ -128,7 +108,7 @@ export function ConnectionsPanel({
 
       <ConnectionCard
         name="Google Workspace"
-        state={status?.google.connected ? "connected" : "disconnected"}
+        state={!status ? "unavailable" : status.google.connected ? "connected" : "disconnected"}
         account={status?.google.email ?? null}
         description="Let your agent work with Gmail, Calendar, Drive, Docs, and Sheets."
         icon={<BriefcaseBusinessIcon className="size-5" />}
@@ -145,7 +125,7 @@ export function ConnectionsPanel({
               {busy === "google" ? "Disconnecting…" : "Disconnect"}
             </Button>
           ) : null}
-          {googleConfigured ? (
+          {googleConfigured && status ? (
             <Button asChild disabled={Boolean(busy)}>
               <a
                 href={`/google-workspace/start?machineId=${encodeURIComponent(machineId)}`}

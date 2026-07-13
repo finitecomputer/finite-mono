@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import type { ComponentProps } from "react";
 import {
   FormEvent,
@@ -23,29 +22,20 @@ import {
   DownloadIcon,
   ExternalLinkIcon,
   FileTextIcon,
-  HashIcon,
   Loader2Icon,
-  LogOutIcon,
   MonitorIcon,
-  MonitorSmartphoneIcon,
-  MoreHorizontalIcon,
   PanelLeftIcon,
   PaperclipIcon,
   PencilIcon,
-  PlugIcon,
-  PlusIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   Share2Icon,
   WrenchIcon,
   XIcon,
-  type LucideIcon,
 } from "lucide-react";
 
-import { FiniteBrand } from "@/components/finite-brand";
 import {
   CHAT_INVALID_UPDATE_MESSAGE,
-  CHAT_TOPIC_DESCRIPTION,
   CHAT_UNAVAILABLE_MESSAGE,
   CHAT_WAITING_FOR_AGENT_MESSAGE,
 } from "@/lib/chat-product-copy";
@@ -58,24 +48,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import type {
   HostedChatAction,
-  HostedChatDevice,
   HostedChatMediaAttachment,
   HostedChatMessage,
   HostedChatState,
   HostedChatSummary,
   HostedChatTopic,
-  HostedChatTypingMember,
 } from "@/lib/hosted-web-device";
 import {
   initialHostedChatSnapshotSource,
@@ -89,10 +69,7 @@ import {
   shouldRetryHostedChatRequest,
   type HostedChatRetryAttempt,
 } from "@/lib/hosted-web-chat-retry";
-import {
-  canonicalNewChatTopic,
-  HOME_TOPIC_ID,
-} from "@/lib/hosted-web-chat-topics";
+import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
   beginPendingChatTurn,
   attachmentSendError,
@@ -125,19 +102,13 @@ type PreviewSite = {
 };
 
 export function HostedWebChat({
-  connectionsHref,
   initialDraft,
   machineId,
   machineLabel,
-  showSkills,
-  viewerEmail,
 }: {
-  connectionsHref?: string | null;
   initialDraft?: string;
   machineId: string;
   machineLabel: string;
-  showSkills: boolean;
-  viewerEmail?: string | null;
 }) {
   const apiBase = `/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device`;
   const [state, setState] = useState<HostedChatState | null>(null);
@@ -148,16 +119,9 @@ export function HostedWebChat({
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [createTopicOpen, setCreateTopicOpen] = useState(false);
-  const [createTopicTitle, setCreateTopicTitle] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
-  const [devicesOpen, setDevicesOpen] = useState(false);
-  const [deviceBusy, setDeviceBusy] = useState(false);
-  const [deviceToRevoke, setDeviceToRevoke] = useState<HostedChatDevice | null>(null);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
@@ -172,6 +136,7 @@ export function HostedWebChat({
   const markedReadSeqRef = useRef(new Map<string, number>());
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
+  const lastLoadErrorRef = useRef<string | null>(null);
   const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   const hasState = state !== null;
@@ -189,7 +154,7 @@ export function HostedWebChat({
     return true;
   }, []);
 
-  const load = useCallback(() => {
+  const load = useCallback((showError = true) => {
     if (stateLoadRef.current) return stateLoadRef.current;
     const requestGeneration = snapshotSourceRef.current.generation;
     const pending = (async (): Promise<HostedChatRetryAttempt> => {
@@ -199,7 +164,9 @@ export function HostedWebChat({
         setError(null);
         return "succeeded";
       } catch (caught) {
-        setError(errorMessage(caught));
+        const message = errorMessage(caught);
+        lastLoadErrorRef.current = message;
+        if (showError) setError(message);
         const status = caught instanceof HostedChatHttpError ? caught.status : null;
         return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
       }
@@ -259,7 +226,11 @@ export function HostedWebChat({
   useEffect(() => {
     if (hasState) return;
     const controller = new AbortController();
-    void runInitialHostedChatRetries(load, controller.signal);
+    void runInitialHostedChatRetries(() => load(false), controller.signal).then((result) => {
+      if (result === "stop" && !controller.signal.aborted) {
+        setError(lastLoadErrorRef.current ?? CHAT_UNAVAILABLE_MESSAGE);
+      }
+    });
     return () => controller.abort();
   }, [hasState, load]);
 
@@ -349,22 +320,6 @@ export function HostedWebChat({
         }),
     [selectedRoom?.room_id, state?.topics]
   );
-  const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? selectedRoom?.room_id;
-  const canonicalTopics = useMemo(
-    () => (state?.topics ?? []).filter(
-      (topic) => topic.room_id === canonicalRoomId && !topic.archived
-    ),
-    [canonicalRoomId, state?.topics]
-  );
-  const previousTopics = useMemo(() => {
-    const associated = new Set(state?.hosted_agent_binding?.associated_room_ids ?? []);
-    return (state?.topics ?? []).filter(
-      (topic) =>
-        topic.room_id !== canonicalRoomId
-        && associated.has(topic.room_id)
-        && !topic.archived
-    );
-  }, [canonicalRoomId, state?.hosted_agent_binding?.associated_room_ids, state?.topics]);
   const selectedTopic = useMemo(
     () =>
       roomTopics.find((topic) => topic.topic_id === state?.selected_topic_id)
@@ -639,61 +594,6 @@ export function HostedWebChat({
     });
   }
 
-  async function openTopic(topic: HostedChatTopic) {
-    setError(null);
-    try {
-      await dispatch({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
-      setSidebarOpen(false);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }
-
-  async function openChat(topic: HostedChatTopic, chat: HostedChatSummary) {
-    setError(null);
-    try {
-      await dispatch({
-        OpenChat: { room_id: topic.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id },
-      });
-      setSidebarOpen(false);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }
-
-  async function createChat(topic = canonicalNewChatTopic(canonicalTopics) ?? undefined) {
-    if (!canonicalRoomId || !topic) return;
-    setError(null);
-    try {
-      await dispatch({
-        StartTopicChatIntent: {
-          room_id: canonicalRoomId,
-          topic_id: topic.topic_id,
-          reason: null,
-          intent_key: crypto.randomUUID(),
-        },
-      });
-      setSidebarOpen(false);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }
-
-  async function createTopic(event: FormEvent) {
-    event.preventDefault();
-    if (!canonicalRoomId || !createTopicTitle.trim()) return;
-    try {
-      await dispatch({
-        CreateTopic: { room_id: canonicalRoomId, title: createTopicTitle.trim() },
-      });
-      setCreateTopicTitle("");
-      setCreateTopicOpen(false);
-      setSidebarOpen(false);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }
-
   async function renameChat(event: FormEvent) {
     event.preventDefault();
     if (!selectedRoom || !selectedTopic || !selectedChat || !renameTitle.trim()) return;
@@ -712,75 +612,11 @@ export function HostedWebChat({
     }
   }
 
-  async function openDevices() {
-    setDevicesOpen(true);
-    setDeviceToRevoke(null);
-    setDeviceBusy(true);
-    setError(null);
-    try {
-      await dispatch({ RefreshDevices: null });
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setDeviceBusy(false);
-    }
-  }
-
-  async function revokeDevice() {
-    if (!deviceToRevoke || deviceToRevoke.current_device || deviceToRevoke.revoked) return;
-    setDeviceBusy(true);
-    setError(null);
-    try {
-      await dispatch({
-        RevokeDevice: {
-          account_id: deviceToRevoke.account_id,
-          device_id: deviceToRevoke.device_id,
-        },
-      });
-      setDeviceToRevoke(null);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setDeviceBusy(false);
-    }
-  }
-
   const connected = ownerClaimed && selectedRoom?.state === "Connected";
-  const availableConnectionsHref = ownerClaimed ? connectionsHref : null;
   const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
 
   return (
-    <div className={sidebarCollapsed ? "finite-chat is-sidebar-collapsed" : "finite-chat"}>
-      <ChatSidebar
-        collapsed={sidebarCollapsed}
-        isOpen={sidebarOpen}
-        machineId={machineId}
-        machineLabel={machineLabel}
-        viewerEmail={viewerEmail}
-        topics={canonicalTopics}
-        previousTopics={previousTopics}
-        selectedTopic={selectedTopic}
-        selectedChat={selectedChat}
-        liveMembers={state?.typing_members ?? []}
-        connectionsHref={availableConnectionsHref}
-        showSkills={showSkills}
-        onCreateChat={(topic) => void createChat(topic)}
-        onCreateTopic={() => setCreateTopicOpen(true)}
-        onOpenChat={(topic, chat) => void openChat(topic, chat)}
-        onOpenTopic={(topic) => void openTopic(topic)}
-        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
-        onToggleOpen={() => setSidebarOpen((value) => !value)}
-      />
-
-      {sidebarOpen ? (
-        <button
-          type="button"
-          className="finite-chat__sidebar-backdrop"
-          aria-label="Close sidebar"
-          onClick={() => setSidebarOpen(false)}
-        />
-      ) : null}
-
+    <div className="finite-chat finite-chat--embedded">
       <div className="finite-chat__workspace">
         <header className="finite-chat__topbar">
           <div className="finite-chat__breadcrumb">
@@ -788,7 +624,7 @@ export function HostedWebChat({
               type="button"
               className="ocean-icon-button finite-chat__sidebar-toggle"
               aria-label="Open chats"
-              onClick={() => setSidebarOpen(true)}
+              onClick={() => window.dispatchEvent(new Event("finite:open-agent-sidebar"))}
             >
               <PanelLeftIcon className="size-4" />
             </button>
@@ -814,11 +650,6 @@ export function HostedWebChat({
             {!streamConnected && state ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
-            <ProductNavButton href={availableConnectionsHref} icon={PlugIcon} label="Connections" />
-            <Button type="button" variant="ghost" size="sm" onClick={() => void openDevices()}>
-              <MonitorSmartphoneIcon />
-              <span>Devices</span>
-            </Button>
             {sites.length > 0 ? (
               <button
                 type="button"
@@ -915,7 +746,7 @@ export function HostedWebChat({
                     type="button"
                     variant="outline"
                     size="sm"
-                    onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load())}
+                    onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load(true))}
                   >
                     <RotateCcwIcon />
                     {hasState && !ownerClaimed ? "Retry claim" : "Retry load"}
@@ -1056,31 +887,6 @@ export function HostedWebChat({
         </Drawer.Root>
       ) : null}
 
-      <Dialog open={createTopicOpen} onOpenChange={setCreateTopicOpen}>
-        <DialogContent>
-          <form className="finite-chat__rename-form" onSubmit={createTopic}>
-            <DialogHeader>
-              <DialogTitle>New topic</DialogTitle>
-              <DialogDescription>{CHAT_TOPIC_DESCRIPTION}</DialogDescription>
-            </DialogHeader>
-            <div className="finite-chat__rename-field">
-              <label htmlFor="finite-chat-topic-title">Name</label>
-              <Input
-                id="finite-chat-topic-title"
-                autoFocus
-                maxLength={120}
-                value={createTopicTitle}
-                onChange={(event) => setCreateTopicTitle(event.target.value)}
-              />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setCreateTopicOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={!createTopicTitle.trim()}>Create topic</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent>
           <form className="finite-chat__rename-form" onSubmit={renameChat}>
@@ -1106,307 +912,8 @@ export function HostedWebChat({
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={devicesOpen}
-        onOpenChange={(open) => {
-          setDevicesOpen(open);
-          if (!open) setDeviceToRevoke(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{deviceToRevoke ? `Revoke ${deviceToRevoke.device_id}?` : "Your devices"}</DialogTitle>
-            <DialogDescription>
-              {deviceToRevoke
-                ? "This permanently stops that Device from sending, receiving, or linking again with the same Device identity."
-                : "Each linked browser or computer is a separate encrypted Device. Revoke one you no longer trust."}
-            </DialogDescription>
-          </DialogHeader>
-          {deviceToRevoke ? (
-            <DialogFooter>
-              <Button type="button" variant="outline" disabled={deviceBusy} onClick={() => setDeviceToRevoke(null)}>
-                Cancel
-              </Button>
-              <Button type="button" variant="destructive" disabled={deviceBusy} onClick={() => void revokeDevice()}>
-                {deviceBusy ? "Revoking…" : "Revoke Device"}
-              </Button>
-            </DialogFooter>
-          ) : (
-            <div className="grid gap-2">
-              {deviceBusy ? <ChatLoading label="Refreshing devices…" /> : null}
-              {!deviceBusy && (state?.devices ?? []).length === 0 ? (
-                <p className="text-sm text-muted-foreground">No linked Devices are visible yet.</p>
-              ) : null}
-              {(state?.devices ?? []).map((device) => (
-                <div
-                  key={`${device.account_id}:${device.device_id}`}
-                  className="flex items-center gap-3 rounded-xl border border-border p-3"
-                >
-                  <MonitorSmartphoneIcon className="size-4 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <strong className="block truncate text-sm">{device.device_id}</strong>
-                    <span className="text-xs text-muted-foreground">
-                      {device.current_device
-                        ? "This browser"
-                        : device.revoked
-                          ? "Revoked"
-                          : device.active
-                            ? `Active in ${device.room_count} ${pluralize("room", device.room_count)}`
-                            : "Linked, not currently active"}
-                    </span>
-                  </div>
-                  {!device.current_device && !device.revoked ? (
-                    <Button type="button" variant="outline" size="sm" onClick={() => setDeviceToRevoke(device)}>
-                      Revoke
-                    </Button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
-}
-
-function ChatSidebar({
-  collapsed,
-  connectionsHref,
-  isOpen,
-  liveMembers,
-  machineId,
-  machineLabel,
-  onCreateChat,
-  onCreateTopic,
-  onOpenChat,
-  onOpenTopic,
-  onToggleCollapsed,
-  onToggleOpen,
-  selectedChat,
-  selectedTopic,
-  showSkills,
-  topics,
-  previousTopics,
-  viewerEmail,
-}: {
-  collapsed: boolean;
-  connectionsHref?: string | null;
-  isOpen: boolean;
-  liveMembers: HostedChatTypingMember[];
-  machineId: string;
-  machineLabel: string;
-  onCreateChat: (topic: HostedChatTopic) => void;
-  onCreateTopic: () => void;
-  onOpenChat: (topic: HostedChatTopic, chat: HostedChatSummary) => void;
-  onOpenTopic: (topic: HostedChatTopic) => void;
-  onToggleCollapsed: () => void;
-  onToggleOpen: () => void;
-  selectedChat: HostedChatSummary | null;
-  selectedTopic: HostedChatTopic | null;
-  showSkills: boolean;
-  topics: HostedChatTopic[];
-  previousTopics: HostedChatTopic[];
-  viewerEmail?: string | null;
-}) {
-  const defaultNewChatTopic = canonicalNewChatTopic(topics);
-
-  return (
-    <aside className={`finite-chat__sidebar ${isOpen ? "is-open" : ""}`}>
-      <div className="finite-chat__sidebar-top">
-        <div className="finite-chat__brand"><FiniteBrand /></div>
-        <button
-          type="button"
-          className="ocean-icon-button finite-chat__desktop-collapse-button"
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-pressed={collapsed}
-          onClick={onToggleCollapsed}
-        >
-          <PanelLeftIcon className="size-4" />
-        </button>
-        <button
-          type="button"
-          className="ocean-icon-button finite-chat__mobile-collapse-button"
-          aria-label="Close sidebar"
-          onClick={onToggleOpen}
-        >
-          <PanelLeftIcon className="size-4" />
-        </button>
-      </div>
-
-      <nav className="finite-chat__sidebar-nav" aria-label="Topics and chats">
-        <div className="finite-chat__sidebar-section-row">
-          <span className="finite-chat__sidebar-section">Topics</span>
-          <button type="button" className="ocean-icon-button" aria-label="New topic" onClick={onCreateTopic}>
-            <PlusIcon className="size-3.5" />
-          </button>
-        </div>
-        {topics.map((topic) => {
-          const topicMembers = liveMembers.filter(
-            (member) => !member.topic_id || member.topic_id === topic.topic_id
-          );
-          return (
-            <div className="finite-chat__folder" key={`${topic.room_id}:${topic.topic_id}`}>
-              <div className="finite-chat__folder-header">
-                <button
-                  type="button"
-                  className={`finite-chat__folder-summary ${topic.topic_id === selectedTopic?.topic_id ? "is-active" : ""}`}
-                  onClick={() => onOpenTopic(topic)}
-                >
-                  <span className="finite-chat__folder-main">
-                  <span className="finite-chat__folder-icon" aria-hidden><HashIcon className="size-3.5" /></span>
-                  <span className="finite-chat__folder-label">{topic.title}</span>
-                  </span>
-                  {topic.unread_count > 0 ? <span className="finite-chat__unread-count">{topic.unread_count}</span> : null}
-                </button>
-                <button
-                  type="button"
-                  className="finite-chat__topic-new-chat"
-                  aria-label={`New chat in ${topic.title}`}
-                  onClick={() => onCreateChat(topic)}
-                >
-                  <PlusIcon className="size-3.5" />
-                </button>
-              </div>
-              <div className="finite-chat__folder-body">
-                {topic.chats.map((chat) => {
-                  const activity = activityForChat(topicMembers, topic, chat);
-                  const active = topic.topic_id === selectedTopic?.topic_id && chat.chat_id === selectedChat?.chat_id;
-                  return (
-                    <button
-                      key={chat.chat_id}
-                      type="button"
-                      className={[active ? "is-active" : "", activity ? "is-working" : ""].filter(Boolean).join(" ")}
-                      aria-current={active ? "page" : undefined}
-                      aria-busy={activity ? true : undefined}
-                      onClick={() => onOpenChat(topic, chat)}
-                    >
-                      <ThreadActivityIndicator state={activity} />
-                      <span className="finite-chat__thread-main">
-                        <span className="finite-chat__thread-title">{chat.title || "New chat"}</span>
-                        {chat.unread_count > 0 ? <span className="finite-chat__unread-count">{chat.unread_count}</span> : null}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
-        {previousTopics.length > 0 ? (
-          <>
-            <div className="finite-chat__sidebar-section-row">
-              <span className="finite-chat__sidebar-section">Previous conversations</span>
-            </div>
-            {previousTopics.map((topic) => (
-              <div className="finite-chat__folder" key={`previous:${topic.room_id}:${topic.topic_id}`}>
-                <div className="finite-chat__folder-header">
-                  <button
-                    type="button"
-                    className={`finite-chat__folder-summary ${topic.room_id === selectedTopic?.room_id && topic.topic_id === selectedTopic?.topic_id ? "is-active" : ""}`}
-                    onClick={() => onOpenTopic(topic)}
-                  >
-                    <span className="finite-chat__folder-main">
-                      <span className="finite-chat__folder-icon" aria-hidden><HashIcon className="size-3.5" /></span>
-                      <span className="finite-chat__folder-label">{topic.title}</span>
-                    </span>
-                  </button>
-                </div>
-                <div className="finite-chat__folder-body">
-                  {topic.chats.map((chat) => (
-                    <button
-                      key={chat.chat_id}
-                      type="button"
-                      className={topic.room_id === selectedTopic?.room_id && topic.topic_id === selectedTopic?.topic_id && chat.chat_id === selectedChat?.chat_id ? "is-active" : ""}
-                      onClick={() => onOpenChat(topic, chat)}
-                    >
-                      <ThreadActivityIndicator state={null} />
-                      <span className="finite-chat__thread-main">
-                        <span className="finite-chat__thread-title">{chat.title || "New chat"}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </>
-        ) : null}
-      </nav>
-
-      <button
-        type="button"
-        className="finite-chat__sidebar-new-chat-fab"
-        disabled={!defaultNewChatTopic}
-        onClick={() => defaultNewChatTopic && onCreateChat(defaultNewChatTopic)}
-      >
-        <PlusIcon className="size-4" />
-        <span>New chat</span>
-      </button>
-
-      <div className="finite-chat__sidebar-footer">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="finite-chat__user-row">
-              <span className="finite-chat__avatar" aria-hidden>{initials(viewerEmail || machineLabel)}</span>
-              <span className="finite-chat__user-name">{viewerEmail || machineLabel}</span>
-              <MoreHorizontalIcon className="size-4" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side="top" sideOffset={8} className="finite-chat__app-menu">
-            <DropdownMenuLabel className="finite-chat__app-menu-heading">Signed in as</DropdownMenuLabel>
-            <div className="finite-chat__app-menu-account">
-              <span className="finite-chat__avatar" aria-hidden>{initials(viewerEmail || machineLabel)}</span>
-              <span>{viewerEmail || "Local development account"}</span>
-            </div>
-            <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
-            <AppMenuLink href={`/dashboard/machines/${encodeURIComponent(machineId)}`} icon={MonitorIcon} label="Agent" note="Status and recovery" />
-            <AppMenuLink href={connectionsHref} icon={PlugIcon} label="Connections" note="Product access" />
-            {showSkills ? <AppMenuLink href={`/dashboard/skills?machine=${encodeURIComponent(machineId)}`} icon={WrenchIcon} label="Skills" note="Managed capabilities" /> : null}
-            <DropdownMenuSeparator className="finite-chat__app-menu-separator" />
-            <DropdownMenuItem asChild className="finite-chat__app-menu-item">
-              <Link href="/logout"><LogOutIcon /><span><strong>Sign out</strong><small>End this session</small></span></Link>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-    </aside>
-  );
-}
-
-function ProductNavButton({ href, icon: Icon, label }: { href?: string | null; icon: LucideIcon; label: string }) {
-  if (!href) {
-    return (
-      <Button type="button" variant="ghost" size="sm" disabled title={`${label} is not connected to Account Auth yet`}>
-        <Icon />
-        <span>{label}</span>
-      </Button>
-    );
-  }
-  return <Button asChild variant="ghost" size="sm"><Link href={href}><Icon /><span>{label}</span></Link></Button>;
-}
-
-function AppMenuLink({ href, icon: Icon, label, note }: { href?: string | null; icon: LucideIcon; label: string; note: string }) {
-  if (!href) {
-    return <DropdownMenuItem disabled className="finite-chat__app-menu-item"><Icon /><span><strong>{label}</strong><small>{note} · not configured</small></span></DropdownMenuItem>;
-  }
-  return <DropdownMenuItem asChild className="finite-chat__app-menu-item"><Link href={href}><Icon /><span><strong>{label}</strong><small>{note}</small></span></Link></DropdownMenuItem>;
-}
-
-function ThreadActivityIndicator({ state }: { state: string | null }) {
-  return (
-    <span className={`finite-chat__thread-indicator ${state ? `is-${state}` : ""}`} aria-hidden>
-      {state ? <span className="finite-chat__thread-pulse" /> : null}
-    </span>
-  );
-}
-
-function activityForChat(members: HostedChatTypingMember[], topic: HostedChatTopic, chat: HostedChatSummary) {
-  const member = members.find(
-    (candidate) =>
-      (!candidate.topic_id || candidate.topic_id === topic.topic_id)
-      && (!candidate.chat_id || candidate.chat_id === chat.chat_id)
-  );
-  return member?.activity_kind ?? null;
 }
 
 function LiveActivity({ label }: { label: string }) {
@@ -1668,13 +1175,6 @@ function attachmentId(file: File) {
 
 function revokeAttachmentPreview(attachment: PendingAttachment) {
   if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-}
-
-function initials(value: string) {
-  const parts = value.split(/[@._\-\s]+/u).filter(Boolean);
-  if (parts.length === 0) return "FC";
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return `${parts[0]![0] ?? "F"}${parts[1]![0] ?? "C"}`.toUpperCase();
 }
 
 function pluralize(word: string, count: number) {
