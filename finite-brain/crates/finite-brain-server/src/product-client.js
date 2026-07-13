@@ -55,11 +55,15 @@ const FiniteBrainProductClient = (() => {
     editorMode: "visual",
     expandedFolderIds: new Set(),
     contextMenuTarget: null,
+    contextMenuPreviousFocus: null,
     commandPaletteOpen: false,
+    commandPaletteSelectedIndex: 0,
     editorSlashOpen: false,
     editorSlashQuery: "",
     editorSlashRange: null,
     editorSlashSelectedIndex: 0,
+    accessFolderDropdownOpen: false,
+    accessFolderFocusedIndex: 0,
     accessFolderDropdownListenerBound: false,
   };
   const handledAccessFailures = new WeakSet();
@@ -1895,10 +1899,14 @@ const FiniteBrainProductClient = (() => {
     target.editorMode = "visual";
     target.expandedFolderIds = new Set();
     target.contextMenuTarget = null;
+    target.contextMenuPreviousFocus = null;
     target.commandPaletteOpen = false;
+    target.commandPaletteSelectedIndex = 0;
     target.editorSlashOpen = false;
     target.editorSlashQuery = "";
     target.editorSlashRange = null;
+    target.accessFolderDropdownOpen = false;
+    target.accessFolderFocusedIndex = 0;
     target.readerBusy = false;
     target.accessBusy = false;
     target.manageVaultsReturnToSettings = null;
@@ -2016,6 +2024,7 @@ const FiniteBrainProductClient = (() => {
   function closeSettingsModal(options = {}) {
     if (!state.settingsModalOpen) return;
     state.settingsModalOpen = false;
+    closeAccessFolderDropdown();
     const previousFocus = state.settingsModalPreviousFocus;
     state.settingsModalPreviousFocus = null;
     render();
@@ -2034,6 +2043,30 @@ const FiniteBrainProductClient = (() => {
 
   function vaultSwitcherFocusableElements() {
     return overlayFocusableElements("vaultSwitcherMenu");
+  }
+
+  function documentFocusableElements(excludedContainer = null) {
+    return Array.from(
+      document.querySelectorAll?.(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || []
+    ).filter(
+      (element) =>
+        !element.hidden &&
+        !element.closest?.("[hidden]") &&
+        !excludedContainer?.contains?.(element)
+    );
+  }
+
+  function moveVaultSwitcherFocusOut(options = {}) {
+    const menu = $("vaultSwitcherMenu");
+    const trigger = $("sessionAccountVaultButton");
+    const focusable = documentFocusableElements(menu);
+    const triggerIndex = focusable.indexOf(trigger);
+    const direction = options.backwards ? -1 : 1;
+    const nextTarget = triggerIndex >= 0 ? focusable[triggerIndex + direction] : null;
+    closeVaultSwitcher({ restoreFocus: false });
+    nextTarget?.focus?.();
   }
 
   function focusVaultSwitcherItem(index = 0) {
@@ -5578,6 +5611,69 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function keyboardListNavigationIndex(key, currentIndex, itemCount) {
+    const count = Number.isInteger(itemCount) ? itemCount : 0;
+    if (count < 1) return null;
+    const hasCurrentIndex = Number.isInteger(currentIndex) && currentIndex >= 0 && currentIndex < count;
+    if (!hasCurrentIndex) {
+      if (key === "ArrowDown" || key === "Home") return 0;
+      if (key === "ArrowUp" || key === "End") return count - 1;
+      return null;
+    }
+    const current = Math.min(Math.max(Number.isInteger(currentIndex) ? currentIndex : 0, 0), count - 1);
+    if (key === "ArrowDown") return (current + 1) % count;
+    if (key === "ArrowUp") return (current - 1 + count) % count;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    return null;
+  }
+
+  function commandPaletteSelectionIndex(rows, currentIndex = state.commandPaletteSelectedIndex) {
+    const count = Array.isArray(rows) ? rows.length : 0;
+    if (count < 1) return -1;
+    return Math.min(Math.max(Number.isInteger(currentIndex) ? currentIndex : 0, 0), count - 1);
+  }
+
+  function primaryFormActionForInput(inputId) {
+    return (
+      {
+        accessShareTargetInput: "createShareLinkButton",
+        accessShareExpiresAtInput: "createShareLinkButton",
+        accessShareLinkInput: "acceptShareLinkButton",
+        vaultInviteTargetNpubInput: "createVaultInvitationButton",
+        vaultInviteFoldersInput: "createVaultInvitationButton",
+        vaultInviteExpiresAtInput: "createVaultInvitationButton",
+        vaultInviteCodeInput: "getVaultInvitationButton",
+        vaultInviteEmailInput: "getEmailInviteInstructionsButton",
+        vaultInviteEmailProofCreatedAtInput: "getEmailInviteInstructionsButton",
+        vaultInviteSecretInput: "getEmailInviteInstructionsButton",
+      }[inputId] || null
+    );
+  }
+
+  function shouldRunPrimaryFormAction(event, button) {
+    return Boolean(
+      event?.key === "Enter" &&
+        !event.isComposing &&
+        event.keyCode !== 229 &&
+        !event.currentTarget?.disabled &&
+        button &&
+        !button.disabled
+    );
+  }
+
+  function bindPrimaryFormAction(inputId) {
+    const input = $(inputId);
+    const buttonId = primaryFormActionForInput(inputId);
+    if (!input || !buttonId) return;
+    input.addEventListener("keydown", (event) => {
+      const button = $(buttonId);
+      if (!shouldRunPrimaryFormAction(event, button)) return;
+      event.preventDefault();
+      button.click();
+    });
+  }
+
   function log(message, _value) {
     // Event labels are useful during development, but values can contain
     // decrypted titles, paths, identity metadata, or invite material. Never
@@ -5585,19 +5681,64 @@ const FiniteBrainProductClient = (() => {
     console.debug(`[FiniteBrain] ${message}`);
   }
 
-  function closeContextMenu() {
-    state.contextMenuTarget = null;
+  function contextMenuFocusableElements() {
     const menu = $("contextMenu");
-    if (!menu) return;
-    menu.hidden = true;
-    menu.replaceChildren();
+    if (!menu) return [];
+    return Array.from(menu.querySelectorAll?.('button[role="menuitem"]:not([disabled])') || []);
+  }
+
+  function focusContextMenuItem(index = 0) {
+    const items = contextMenuFocusableElements();
+    if (!items.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), items.length - 1);
+    items[nextIndex]?.focus?.();
+  }
+
+  function handleContextMenuKeydown(event) {
+    const menu = $("contextMenu");
+    if (!menu || menu.hidden || event.isComposing || event.keyCode === 229) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeContextMenu({ restoreFocus: true });
+      return true;
+    }
+    const items = contextMenuFocusableElements();
+    const currentIndex = items.indexOf(document.activeElement);
+    const nextIndex = keyboardListNavigationIndex(event.key, currentIndex, items.length);
+    if (nextIndex !== null) {
+      event.preventDefault();
+      focusContextMenuItem(nextIndex);
+      return true;
+    }
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return false;
+    const item = items[currentIndex];
+    if (!item) return false;
+    event.preventDefault();
+    item.click();
+    return true;
+  }
+
+  function closeContextMenu(options = {}) {
+    const previousFocus = state.contextMenuPreviousFocus;
+    state.contextMenuTarget = null;
+    state.contextMenuPreviousFocus = null;
+    const menu = $("contextMenu");
+    if (menu) {
+      menu.hidden = true;
+      menu.replaceChildren();
+    }
+    if (options.restoreFocus) previousFocus?.focus?.();
   }
 
   function closeCommandPalette() {
     state.commandPaletteOpen = false;
+    state.commandPaletteSelectedIndex = 0;
     const palette = $("commandPalette");
     if (!palette) return;
     palette.hidden = true;
+    const input = $("commandPaletteInput");
+    input?.setAttribute("aria-expanded", "false");
+    input?.removeAttribute("aria-activedescendant");
     setPressed("ribbonCommandButton", false);
     $("ribbonCommandButton").className = "ribbon-button";
   }
@@ -5643,9 +5784,14 @@ const FiniteBrainProductClient = (() => {
     $("ribbonCommandButton").className = `ribbon-button${state.commandPaletteOpen ? " utility-active" : ""}`;
     if (!state.commandPaletteOpen) return;
     const list = $("commandPaletteList");
-    const rows = commandPaletteRows($("commandPaletteInput").value);
+    const input = $("commandPaletteInput");
+    const rows = commandPaletteRows(input.value);
+    const selectedIndex = commandPaletteSelectionIndex(rows);
+    state.commandPaletteSelectedIndex = Math.max(selectedIndex, 0);
+    input.setAttribute("aria-expanded", "true");
     list.replaceChildren();
     if (!rows.length) {
+      input.removeAttribute("aria-activedescendant");
       const item = document.createElement("li");
       item.className = "empty-row";
       item.textContent = "No matching commands or Pages";
@@ -5656,7 +5802,11 @@ const FiniteBrainProductClient = (() => {
       const item = document.createElement("li");
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `command-palette-row${index === 0 ? " active" : ""}`;
+      button.id = `commandPaletteOption-${index}`;
+      button.tabIndex = -1;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === selectedIndex));
+      button.className = `command-palette-row${index === selectedIndex ? " active" : ""}`;
       const copy = document.createElement("span");
       const title = document.createElement("span");
       title.className = "command-palette-row-title";
@@ -5675,10 +5825,12 @@ const FiniteBrainProductClient = (() => {
       item.appendChild(button);
       list.appendChild(item);
     });
+    input.setAttribute("aria-activedescendant", `commandPaletteOption-${selectedIndex}`);
   }
 
   function openCommandPalette(seed = "") {
     state.commandPaletteOpen = true;
+    state.commandPaletteSelectedIndex = 0;
     closeContextMenu();
     $("commandPaletteInput").value = seed;
     renderCommandPalette();
@@ -5780,16 +5932,18 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function openContextMenu(target, x, y) {
+  function openContextMenu(target, x, y, previousFocus = document.activeElement || null) {
     const menu = $("contextMenu");
     if (!menu) return;
     state.contextMenuTarget = target;
+    state.contextMenuPreviousFocus = previousFocus;
     menu.replaceChildren();
     const items = contextMenuItemsForTarget(target);
     for (const item of items) {
       if (item.separator) {
         const separator = document.createElement("div");
         separator.className = "context-menu-separator";
+        separator.setAttribute("role", "separator");
         menu.appendChild(separator);
         continue;
       }
@@ -5798,11 +5952,13 @@ const FiniteBrainProductClient = (() => {
       button.textContent = item.label;
       button.disabled = Boolean(item.disabled);
       button.className = item.danger ? "danger" : "";
+      button.setAttribute("role", "menuitem");
       button.addEventListener("click", () => handleContextMenuAction(item, target));
       menu.appendChild(button);
     }
     menu.hidden = false;
     positionContextMenu(menu, x, y, items.length);
+    focusContextMenuItem(0);
   }
 
   function appendObsidianDetail(button, detail) {
@@ -5852,18 +6008,34 @@ const FiniteBrainProductClient = (() => {
     if (options.contextTarget) {
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        openContextMenu(options.contextTarget, event.clientX, event.clientY);
+        openContextMenu(options.contextTarget, event.clientX, event.clientY, button);
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        const bounds = button.getBoundingClientRect?.();
+        openContextMenu(
+          options.contextTarget,
+          bounds?.left || 8,
+          bounds?.bottom || 8,
+          button
+        );
       });
     }
     return button;
   }
 
-  function accessFolderOptionButton(row, isActive, openedFolders, onClick) {
+  function accessFolderOptionButton(row, options = {}) {
+    const { index = 0, isActive = false, isFocused = false, openedFolders } = options;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `folder-option-button ${row.status}${isActive ? " active" : ""}`;
+    button.id = `accessFolderOption-${index}`;
+    button.dataset.folderId = row.id;
+    button.dataset.folderIndex = String(index);
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", String(isActive));
+    button.tabIndex = isFocused ? 0 : -1;
 
     const title = document.createElement("span");
     title.className = "folder-option-title";
@@ -5875,7 +6047,6 @@ const FiniteBrainProductClient = (() => {
 
     button.appendChild(title);
     button.appendChild(meta);
-    button.addEventListener("click", onClick);
     return button;
   }
 
@@ -6509,8 +6680,135 @@ const FiniteBrainProductClient = (() => {
     });
   }
 
+  function accessFolderOptionElements() {
+    const list = $("accessFolderList");
+    if (!list) return [];
+    return Array.from(list.querySelectorAll?.('[role="option"]:not([disabled])') || []);
+  }
+
+  function setAccessFolderDropdownOpen(open) {
+    const isOpen = Boolean(open);
+    state.accessFolderDropdownOpen = isOpen;
+    const dropdown = $("accessFolderDropdown");
+    const button = $("accessFolderButton");
+    if (dropdown) dropdown.hidden = !isOpen;
+    button?.setAttribute("aria-expanded", String(isOpen));
+  }
+
+  function closeAccessFolderDropdown(options = {}) {
+    setAccessFolderDropdownOpen(false);
+    if (options.focusTrigger) $("accessFolderButton")?.focus?.();
+  }
+
+  function openAccessFolderDropdown(options = {}) {
+    const optionElements = accessFolderOptionElements();
+    if (!state.accessFolderDropdownOpen) {
+      const selectedIndex = optionElements.findIndex(
+        (option) => option.getAttribute("aria-selected") === "true"
+      );
+      state.accessFolderFocusedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+    }
+    setAccessFolderDropdownOpen(true);
+    if (options.focus) focusAccessFolderOption(state.accessFolderFocusedIndex);
+  }
+
+  function focusAccessFolderOption(index) {
+    const optionElements = accessFolderOptionElements();
+    if (!optionElements.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), optionElements.length - 1);
+    state.accessFolderFocusedIndex = nextIndex;
+    optionElements.forEach((option, optionIndex) => {
+      option.tabIndex = optionIndex === nextIndex ? 0 : -1;
+    });
+    optionElements[nextIndex]?.focus?.();
+  }
+
+  function accessFolderOptionFromEvent(event) {
+    return event.target?.closest?.('[role="option"][data-folder-id]') || null;
+  }
+
+  function selectAccessFolderOption(option) {
+    const folderId = option?.dataset?.folderId;
+    if (!folderId) return;
+    const index = Number(option.dataset.folderIndex);
+    if (Number.isInteger(index) && index >= 0) state.accessFolderFocusedIndex = index;
+    closeAccessFolderDropdown();
+    selectAccessFolder(folderId);
+    $("accessFolderButton")?.focus?.();
+  }
+
+  function bindAccessFolderSelector() {
+    const button = $("accessFolderButton");
+    const list = $("accessFolderList");
+    if (!button || !list) return;
+    button.addEventListener("click", () => {
+      if (state.accessFolderDropdownOpen) {
+        closeAccessFolderDropdown();
+      } else {
+        openAccessFolderDropdown();
+      }
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape" && state.accessFolderDropdownOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAccessFolderDropdown({ focusTrigger: true });
+        return;
+      }
+      const optionElements = accessFolderOptionElements();
+      const nextIndex = keyboardListNavigationIndex(
+        event.key,
+        state.accessFolderFocusedIndex,
+        optionElements.length
+      );
+      if (nextIndex === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAccessFolderDropdown();
+      focusAccessFolderOption(nextIndex);
+    });
+    list.addEventListener("click", (event) => {
+      const option = accessFolderOptionFromEvent(event);
+      if (!option) return;
+      selectAccessFolderOption(option);
+    });
+    list.addEventListener("focusin", (event) => {
+      const option = accessFolderOptionFromEvent(event);
+      const index = Number(option?.dataset?.folderIndex);
+      if (Number.isInteger(index) && index >= 0) state.accessFolderFocusedIndex = index;
+    });
+    list.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAccessFolderDropdown({ focusTrigger: true });
+        return;
+      }
+      const optionElements = accessFolderOptionElements();
+      const activeIndex = optionElements.indexOf(document.activeElement);
+      const nextIndex = keyboardListNavigationIndex(
+        event.key,
+        activeIndex >= 0 ? activeIndex : state.accessFolderFocusedIndex,
+        optionElements.length
+      );
+      if (nextIndex !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        focusAccessFolderOption(nextIndex);
+        return;
+      }
+      if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+      const option = accessFolderOptionFromEvent(event) || optionElements[state.accessFolderFocusedIndex];
+      if (!option) return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectAccessFolderOption(option);
+    });
+  }
+
   function renderFolderSelector(activeRow, rows, openedFolders) {
-    // Update folder selector button
     if (activeRow) {
       setText("accessFolderTitle", activeRow.path);
       setPill("accessFolderStatus", activeRow.accessLabel, activeRow.status === "ready" ? "ready" : "warn");
@@ -6519,29 +6817,31 @@ const FiniteBrainProductClient = (() => {
       setPill("accessFolderStatus", "empty", "muted");
     }
 
-    // Setup folder dropdown
     const dropdown = $("accessFolderDropdown");
     const button = $("accessFolderButton");
-
-    button.onclick = () => {
-      const isOpen = !dropdown.hidden;
-      dropdown.hidden = isOpen;
-      button.setAttribute("aria-expanded", String(!isOpen));
-    };
-
-    // Populate dropdown list
+    if (!dropdown || !button) return;
+    button.setAttribute("aria-controls", "accessFolderList");
+    dropdown.hidden = !state.accessFolderDropdownOpen;
+    button.setAttribute("aria-expanded", String(state.accessFolderDropdownOpen));
+    const selectedIndex = rows.findIndex((row) => row.id === activeRow?.id);
+    if (
+      !Number.isInteger(state.accessFolderFocusedIndex) ||
+      state.accessFolderFocusedIndex < 0 ||
+      state.accessFolderFocusedIndex >= rows.length ||
+      !state.accessFolderDropdownOpen
+    ) {
+      state.accessFolderFocusedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+    }
     setList("accessFolderList", rows, "Load a Vault to inspect access", (item, row) => {
-      const folderButton = accessFolderOptionButton(
-        row,
-        row.id === activeRow?.id,
-        openedFolders,
-        () => {
-          selectAccessFolder(row.id);
-          dropdown.hidden = true;
-          button.setAttribute("aria-expanded", "false");
-        }
+      const index = rows.indexOf(row);
+      item.appendChild(
+        accessFolderOptionButton(row, {
+          index,
+          isActive: row.id === activeRow?.id,
+          isFocused: index === state.accessFolderFocusedIndex,
+          openedFolders,
+        })
       );
-      item.appendChild(folderButton);
     });
 
     if (!state.accessFolderDropdownListenerBound) {
@@ -6549,10 +6849,9 @@ const FiniteBrainProductClient = (() => {
       document.addEventListener("click", (event) => {
         const currentButton = $("accessFolderButton");
         const currentDropdown = $("accessFolderDropdown");
-        if (!currentButton || !currentDropdown || currentDropdown.hidden) return;
+        if (!currentButton || !currentDropdown || !state.accessFolderDropdownOpen) return;
         if (!currentButton.contains(event.target) && !currentDropdown.contains(event.target)) {
-          currentDropdown.hidden = true;
-          currentButton.setAttribute("aria-expanded", "false");
+          closeAccessFolderDropdown();
         }
       });
     }
@@ -9689,6 +9988,7 @@ const FiniteBrainProductClient = (() => {
       const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
       setSettingsSection(["session", "vault", "access", "invitations"][nextIndex] || "session");
     });
+    bindAccessFolderSelector();
     $("refreshReaderButton").addEventListener("click", () => {
       refreshReader().catch((error) => {
         reportClientActionFailure(error);
@@ -9809,6 +10109,20 @@ const FiniteBrainProductClient = (() => {
       });
     });
     for (const inputId of [
+      "accessShareTargetInput",
+      "accessShareExpiresAtInput",
+      "accessShareLinkInput",
+      "vaultInviteTargetNpubInput",
+      "vaultInviteFoldersInput",
+      "vaultInviteExpiresAtInput",
+      "vaultInviteCodeInput",
+      "vaultInviteEmailInput",
+      "vaultInviteEmailProofCreatedAtInput",
+      "vaultInviteSecretInput",
+    ]) {
+      bindPrimaryFormAction(inputId);
+    }
+    for (const inputId of [
       "vaultInviteCodeInput",
       "vaultInviteEmailInput",
       "vaultInviteEmailProofCreatedAtInput",
@@ -9828,12 +10142,24 @@ const FiniteBrainProductClient = (() => {
       renderSearchPanel();
     });
     $("commandPaletteInput").addEventListener("input", () => {
+      state.commandPaletteSelectedIndex = 0;
       renderCommandPalette();
     });
     $("commandPaletteInput").addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      const rows = commandPaletteRows($("commandPaletteInput").value);
+      const currentIndex = commandPaletteSelectionIndex(rows);
+      const nextIndex = keyboardListNavigationIndex(event.key, currentIndex, rows.length);
+      if (nextIndex !== null) {
+        event.preventDefault();
+        state.commandPaletteSelectedIndex = nextIndex;
+        renderCommandPalette();
+        $("commandPaletteOption-" + nextIndex)?.scrollIntoView?.({ block: "nearest" });
+        return;
+      }
       if (event.key !== "Enter") return;
       event.preventDefault();
-      runCommandPaletteRow(commandPaletteRows($("commandPaletteInput").value)[0]);
+      runCommandPaletteRow(rows[currentIndex]);
     });
     $("closeCommandPaletteButton").addEventListener("click", () => {
       closeCommandPalette();
@@ -9935,9 +10261,14 @@ const FiniteBrainProductClient = (() => {
         return;
       }
       if (state.vaultSwitcherOpen) {
-        if (event.key === "Escape" || event.key === "Tab") {
+        if (event.key === "Escape") {
           event.preventDefault();
           closeVaultSwitcher();
+          return;
+        }
+        if (event.key === "Tab") {
+          event.preventDefault();
+          moveVaultSwitcherFocusOut({ backwards: event.shiftKey });
           return;
         }
         const direction =
@@ -9960,6 +10291,7 @@ const FiniteBrainProductClient = (() => {
         }
         return;
       }
+      if (handleContextMenuKeydown(event)) return;
       if (state.settingsModalOpen) {
         if (event.key === "Escape") {
           event.preventDefault();

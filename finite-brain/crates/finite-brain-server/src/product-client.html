@@ -129,7 +129,7 @@
                   <div class="access-folder-selector">
                     <div class="access-folder-picker">
                       <span class="access-selector-label section-title">Folder</span>
-                      <button id="accessFolderButton" class="folder-selector-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <button id="accessFolderButton" class="folder-selector-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="accessFolderList">
                         <span id="accessFolderTitle">No Folder selected</span>
                         <span id="accessFolderStatus" class="pill muted">empty</span>
                         <svg class="icon selector-chevron" viewBox="0 0 24 24" aria-hidden="true">
@@ -138,7 +138,7 @@
                       </button>
                     </div>
                     <div id="accessFolderDropdown" class="folder-dropdown" hidden>
-                      <ol id="accessFolderList" class="folder-dropdown-list" role="listbox"></ol>
+                      <ol id="accessFolderList" class="folder-dropdown-list" role="listbox" aria-label="Vault folders"></ol>
                     </div>
                   </div>
 
@@ -655,12 +655,16 @@ Start writing here.</textarea>
           </header>
           <input
             id="commandPaletteInput"
+            role="combobox"
             aria-label="Search commands and pages"
+            aria-autocomplete="list"
+            aria-controls="commandPaletteList"
+            aria-expanded="false"
             placeholder="Search commands and pages"
             autocomplete="off"
             spellcheck="false"
           />
-          <ol id="commandPaletteList" class="command-palette-list"></ol>
+          <ol id="commandPaletteList" class="command-palette-list" role="listbox"></ol>
         </section>
       </div>
 

@@ -204,6 +204,277 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue) {
   return { context: testContext, elements: testElements, seams };
 }
 
+function keyboardNavigationTestSeams() {
+  const testContext = {
+    ...context,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_KEYBOARD_NAVIGATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_KEYBOARD_NAVIGATION_TEST_SEAMS__?.({ commandPaletteSelectionIndex, keyboardListNavigationIndex, primaryFormActionForInput, shouldRunPrimaryFormAction });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The keyboard test must capture the Product Client's real navigation seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-keyboard-navigation.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured keyboard-navigation seams");
+  return seams;
+}
+
+const keyboardNavigation = keyboardNavigationTestSeams();
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 0, 4), 1);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 3, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowUp", 0, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", -1, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowUp", -1, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("Home", 2, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("End", 1, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("Enter", 1, 4), null);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 0, 0), null);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex([], 4), -1);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex(["one", "two"], 4), 1);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex(["one", "two"], -4), 0);
+
+for (const [inputId, buttonId] of [
+  ["accessShareTargetInput", "createShareLinkButton"],
+  ["accessShareExpiresAtInput", "createShareLinkButton"],
+  ["accessShareLinkInput", "acceptShareLinkButton"],
+  ["vaultInviteTargetNpubInput", "createVaultInvitationButton"],
+  ["vaultInviteFoldersInput", "createVaultInvitationButton"],
+  ["vaultInviteExpiresAtInput", "createVaultInvitationButton"],
+  ["vaultInviteCodeInput", "getVaultInvitationButton"],
+  ["vaultInviteEmailInput", "getEmailInviteInstructionsButton"],
+  ["vaultInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
+  ["vaultInviteSecretInput", "getEmailInviteInstructionsButton"],
+]) {
+  assert.equal(
+    keyboardNavigation.primaryFormActionForInput(inputId),
+    buttonId,
+    `${inputId} must submit only its non-destructive primary action`
+  );
+}
+for (const inputId of ["acceptVaultInvitationButton", "revokeVaultInvitationButton", "not-an-input"]) {
+  assert.equal(
+    keyboardNavigation.primaryFormActionForInput(inputId),
+    null,
+    `${inputId} must never receive an Enter shortcut`
+  );
+}
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  true
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: true, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: true } },
+    { disabled: false }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: true }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Space", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  false
+);
+
+function keyboardMenuElement(documentRef, tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const node = {
+    tagName: tagName.toUpperCase(),
+    children: [],
+    className: "",
+    dataset: {},
+    disabled: false,
+    hidden: false,
+    parentElement: null,
+    style: {},
+    textContent: "",
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      return child;
+    },
+    addEventListener(type, listener) {
+      const handlers = listeners.get(type) || [];
+      handlers.push(listener);
+      listeners.set(type, handlers);
+    },
+    click() {
+      for (const listener of listeners.get("click") || []) {
+        listener({ currentTarget: this, target: this });
+      }
+    },
+    contains(target) {
+      return target === this || this.children.some((child) => child.contains?.(target));
+    },
+    focus() {
+      documentRef.activeElement = this;
+    },
+    getAttribute(name) {
+      return attributes.get(name) ?? null;
+    },
+    querySelectorAll(selector) {
+      const descendants = [];
+      const visit = (child) => {
+        descendants.push(child);
+        for (const grandchild of child.children || []) visit(grandchild);
+      };
+      for (const child of this.children) visit(child);
+      if (selector === 'button[role="menuitem"]:not([disabled])') {
+        return descendants.filter(
+          (child) =>
+            child.tagName === "BUTTON" &&
+            child.getAttribute("role") === "menuitem" &&
+            !child.disabled
+        );
+      }
+      return [];
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
+    replaceChildren(...children) {
+      this.children = [];
+      for (const child of children) this.appendChild(child);
+    },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+    },
+  };
+  return node;
+}
+
+function contextMenuKeyboardFocusTestSeams() {
+  const elements = new Map();
+  const document = {
+    activeElement: null,
+    addEventListener() {},
+    createElement(tagName) {
+      return keyboardMenuElement(document, tagName);
+    },
+    createTextNode(value) {
+      return { nodeType: 3, textContent: value };
+    },
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, keyboardMenuElement(document));
+      return elements.get(id);
+    },
+    querySelector() {
+      return keyboardMenuElement(document);
+    },
+    querySelectorAll() {
+      return [];
+    },
+    title: "FiniteBrain",
+  };
+  const testContext = {
+    ...context,
+    document,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      innerHeight: 800,
+      innerWidth: 1200,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_CONTEXT_MENU_KEYBOARD_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_CONTEXT_MENU_KEYBOARD_TEST_SEAMS__?.({ handleContextMenuKeydown, openContextMenu });\n\n  return {\n    accessActionRoute,"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-context-menu-keyboard-focus.test.js",
+  });
+  assert.ok(seams, "The context-menu focus test must capture Product Client keyboard behavior");
+  return { document, elements, seams };
+}
+
+const contextMenuKeyboard = contextMenuKeyboardFocusTestSeams();
+const contextMenuTrigger = keyboardMenuElement(contextMenuKeyboard.document, "button");
+contextMenuKeyboard.document.activeElement = contextMenuTrigger;
+contextMenuKeyboard.seams.openContextMenu(
+  { folderId: "folder-fixture", type: "folder" },
+  24,
+  24,
+  contextMenuTrigger
+);
+const keyboardContextMenu = contextMenuKeyboard.elements.get("contextMenu");
+const keyboardContextMenuItems = keyboardContextMenu.querySelectorAll(
+  'button[role="menuitem"]:not([disabled])'
+);
+assert.equal(keyboardContextMenu.hidden, false);
+assert.equal(contextMenuKeyboard.document.activeElement, keyboardContextMenuItems[0]);
+keyboardContextMenuItems[1].disabled = true;
+let contextMenuPrevented = false;
+assert.equal(
+  contextMenuKeyboard.seams.handleContextMenuKeydown({
+    isComposing: false,
+    key: "ArrowDown",
+    keyCode: 0,
+    preventDefault() {
+      contextMenuPrevented = true;
+    },
+  }),
+  true
+);
+assert.equal(contextMenuPrevented, true);
+assert.equal(
+  contextMenuKeyboard.document.activeElement,
+  keyboardContextMenuItems[2],
+  "Context-menu arrows must skip unavailable menuitems"
+);
+assert.equal(
+  contextMenuKeyboard.seams.handleContextMenuKeydown({
+    isComposing: false,
+    key: "Escape",
+    keyCode: 0,
+    preventDefault() {},
+  }),
+  true
+);
+assert.equal(keyboardContextMenu.hidden, true);
+assert.equal(
+  contextMenuKeyboard.document.activeElement,
+  contextMenuTrigger,
+  "Escape must restore focus to the context-menu trigger"
+);
+
 const prepareDraftWriteSource = source.slice(
   source.indexOf("async function prepareDraftWrite(options = {})"),
   source.indexOf("async function savePreparedPage()")
@@ -1233,6 +1504,68 @@ assert.doesNotMatch(source, /"folderKeyInput"/);
 assert.doesNotMatch(source, /"okfBundleInput"/);
 assert.match(source, /"pageDraftInput"/);
 assert.match(source, /"vaultInviteSecretInput"/);
+assert.match(
+  htmlSource,
+  /id="commandPaletteInput"[\s\S]{0,260}role="combobox"[\s\S]{0,260}aria-controls="commandPaletteList"[\s\S]{0,260}aria-expanded="false"/,
+  "Quick Switcher input must expose its visible result list as a combobox"
+);
+assert.match(htmlSource, /id="commandPaletteList"[^>]*role="listbox"/);
+assert.match(htmlSource, /id="accessFolderButton"[^>]*aria-controls="accessFolderList"/);
+assert.match(htmlSource, /id="accessFolderList"[^>]*role="listbox"/);
+const renderCommandPaletteSource = source.slice(
+  source.indexOf("function renderCommandPalette()"),
+  source.indexOf("function openCommandPalette(")
+);
+assert.match(
+  renderCommandPaletteSource,
+  /button\.tabIndex = -1;[\s\S]{0,160}button\.setAttribute\("role", "option"\);[\s\S]{0,160}button\.setAttribute\("aria-selected", String\(index === selectedIndex\)\);/,
+  "Quick Switcher rows must remain click targets while combobox focus stays on the input"
+);
+assert.match(
+  renderCommandPaletteSource,
+  /input\.setAttribute\("aria-activedescendant", `commandPaletteOption-\$\{selectedIndex\}`\);/,
+  "Quick Switcher must expose its tracked selected row through aria-activedescendant"
+);
+const contextMenuKeyboardSource = source.slice(
+  source.indexOf("function contextMenuFocusableElements()"),
+  source.indexOf("function closeCommandPalette()")
+);
+assert.match(contextMenuKeyboardSource, /button\[role="menuitem"\]:not\(\[disabled\]\)/);
+assert.match(contextMenuKeyboardSource, /closeContextMenu\(\{ restoreFocus: true \}\)/);
+assert.match(source, /button\.setAttribute\("role", "menuitem"\);/);
+assert.match(source, /separator\.setAttribute\("role", "separator"\);/);
+assert.match(source, /event\.key !== "ContextMenu"/);
+const folderSelectorKeyboardSource = source.slice(
+  source.indexOf("function bindAccessFolderSelector()"),
+  source.indexOf("function renderFolderSelector(")
+);
+assert.match(folderSelectorKeyboardSource, /list\.addEventListener\("keydown"/);
+assert.match(folderSelectorKeyboardSource, /event\.stopPropagation\(\);/);
+assert.match(folderSelectorKeyboardSource, /closeAccessFolderDropdown\(\{ focusTrigger: true \}\)/);
+const selectAccessFolderOptionSource = source.slice(
+  source.indexOf("function selectAccessFolderOption(option)"),
+  source.indexOf("function bindAccessFolderSelector()")
+);
+assert.match(
+  selectAccessFolderOptionSource,
+  /closeAccessFolderDropdown\(\);\s*selectAccessFolder\(folderId\);\s*\$\("accessFolderButton"\)\?\.focus\?\.\(\);/,
+  "Selecting a Folder must return focus to the selector trigger after its list rerenders"
+);
+const vaultSwitcherKeyboardSource = source.slice(
+  source.lastIndexOf("if (state.vaultSwitcherOpen) {"),
+  source.indexOf("if (state.settingsModalOpen) {", source.lastIndexOf("if (state.vaultSwitcherOpen) {"))
+);
+assert.doesNotMatch(vaultSwitcherKeyboardSource, /event\.key === "Escape" \|\| event\.key === "Tab"/);
+assert.match(
+  vaultSwitcherKeyboardSource,
+  /if \(event\.key === "Tab"\) \{\s*event\.preventDefault\(\);\s*moveVaultSwitcherFocusOut\(\{ backwards: event\.shiftKey \}\);/s,
+  "Vault switcher Tab must leave in its direction instead of behaving like Escape"
+);
+assert.doesNotMatch(
+  source.slice(source.indexOf("function primaryFormActionForInput"), source.indexOf("function shouldRunPrimaryFormAction")),
+  /(?:acceptVaultInvitationButton|revokeVaultInvitationButton)/,
+  "Invitation acceptance and revocation must remain explicit actions"
+);
 
 (async () => {
   await assertClipboardInvitationFeedbackContracts();
