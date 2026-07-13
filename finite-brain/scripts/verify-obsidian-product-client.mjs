@@ -174,7 +174,7 @@ function checkStaticShell() {
 
   for (const marker of [
     "obsidian-shell",
-    "app-ribbon",
+    "sidebar-primary-nav",
     "file-sidebar",
     "ribbonFilesButton",
     "ribbonGraphButton",
@@ -262,6 +262,20 @@ function checkStaticShell() {
   ]) {
     assertIncludes(html, marker, "Product Client HTML");
   }
+  const primaryNavigationMarkup = html.match(
+    /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/
+  )?.[1];
+  assert.ok(primaryNavigationMarkup, "Product Client HTML should keep primary navigation in the File sidebar header");
+  for (const buttonId of [
+    "ribbonFilesButton",
+    "ribbonGraphButton",
+    "ribbonSearchButton",
+    "ribbonCommandButton",
+    "ribbonAccessButton",
+  ]) {
+    assertIncludes(primaryNavigationMarkup, `id="${buttonId}"`, "Product Client primary navigation");
+  }
+  assertNotIncludes(html, "app-ribbon", "Product Client HTML");
   assert.ok(
     !/id="vaultInvitationPanel"[^>]*open/.test(html),
     "Product Client HTML should keep the Vault invitation panel closed by default"
@@ -298,7 +312,7 @@ function checkStaticShell() {
     ".obsidian-shell[data-workspace-view=\"graph\"]",
     "[hidden]",
     "--shadow-access-ring",
-    ".app-ribbon",
+    ".sidebar-primary-nav",
     ".obsidian-folder-button",
     ".obsidian-file-title",
     ".context-menu",
@@ -352,6 +366,7 @@ function checkStaticShell() {
   ]) {
     assertIncludes(css, marker, "Product Client CSS");
   }
+  assertNotIncludes(css, ".app-ribbon", "Product Client CSS");
 
   for (const marker of [
     "buildGraphProjection",

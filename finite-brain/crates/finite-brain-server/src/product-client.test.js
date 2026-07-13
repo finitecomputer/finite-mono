@@ -1617,9 +1617,17 @@ assert.match(
 assert.match(cssSource, /\.client-action-feedback\[hidden\]\s*\{\s*display:\s*none;/);
 assert.match(
   cssSource,
-  /@media \(max-width: 1180px\) \{[\s\S]*?\.obsidian-shell\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto;/,
-  "The compact shell must retain the status-feedback row"
+  /@media \(max-width: 1180px\) \{[\s\S]*?\.obsidian-shell,\s*\.obsidian-shell\[data-workspace-view="graph"\]\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto;/,
+  "The compact page and Graph View shells must retain the status-feedback row"
 );
+assert.match(
+  htmlSource,
+  /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">[\s\S]*?id="ribbonFilesButton"[\s\S]*?id="ribbonGraphButton"[\s\S]*?id="ribbonSearchButton"[\s\S]*?id="ribbonCommandButton"[\s\S]*?id="ribbonAccessButton"[\s\S]*?<\/nav>/,
+  "Primary navigation must live with the File sidebar heading"
+);
+assert.doesNotMatch(htmlSource, /app-ribbon/, "The Product Client must not retain a second left navigation rail");
+assert.match(cssSource, /\.sidebar-primary-nav\s*\{[\s\S]*?display:\s*flex;/);
+assert.doesNotMatch(cssSource, /\.app-ribbon\s*\{/, "The Product Client CSS must remove the legacy rail");
 assert.doesNotMatch(source, /window\.alert/);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-haspopup="menu"/);
 assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-controls="vaultSwitcherMenu"/);

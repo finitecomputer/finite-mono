@@ -199,3 +199,67 @@ server implementation details; the no-backend-change boundary remains intact.
   free CLI allowance and reached its summarizing phase, but returned no review
   report or findings. The independent review and the scoped test/browser
   evidence remain the review fallback for this local-only run.
+
+## 2026-07-13 Continuation: Sidebar Navigation Consolidation
+
+### Scope and decision
+
+- Continue the existing Product Client PR (#16) on
+  `feature/finitebrain-settings-vault-ui` against the user-selected `main`
+  base. This is a tiny, isolated, low-risk Product Client markup/CSS slice;
+  the current Codex thread is the recorded implementation owner.
+- Remove the separate far-left activity ribbon. Move its existing Files, Graph
+  View, Search, Quick switcher, and Vault access controls into one semantic
+  navigation row in the header of the existing File sidebar.
+- Keep the controls' order, IDs, titles, `aria-label`/`aria-pressed` behavior,
+  keyboard focus restoration, command behavior, and active-state semantics.
+  No Vault, Folder, Page, Graph View, Session, or access behavior changes.
+
+### Acceptance and verification seams
+
+- The Product Client shell has no `.app-ribbon`; it has one File sidebar and a
+  primary navigation landmark within its header.
+- Existing script and Rust served-client contracts prove the new landmark and
+  reject the old rail. Existing JavaScript IDs preserve handler and focus
+  seams.
+- Agent-performable visual verification covers desktop, Graph View, Search,
+  and a narrow viewport with no horizontal overflow or inaccessible controls.
+- Planned checks: Product Client deterministic suite, Product Client static
+  verification, finite-brain-server tests, formatting, diff validation, build,
+  browser smoke, and review.
+
+### Implementation and verification
+
+- Removed the standalone rail from the Product Client markup and placed its
+  existing five controls in `sidebar-primary-nav` within `vault-header`.
+  Their IDs and JavaScript behavior remain unchanged.
+- The shell grid is now two-column at desktop and medium widths, and a true
+  one-column sidebar at narrow widths. The workspace and feedback row shifted
+  to their new grid columns; no hidden 44px or 52px rail remains.
+- Static Product Client, Rust served-client, and deterministic client
+  contracts now require the new header landmark and reject the old rail.
+- Browser smoke verified all five 40px header targets, Search, Graph View,
+  Files, Quick switcher Escape focus restoration, and Vault access. It passed
+  at 1440px, 1000px, 390px, and 320px with no horizontal overflow or browser
+  console errors.
+- Passed: deterministic Product Client suite, targeted served-client test,
+  full finite-brain-server suite (40 tests), clippy with warnings denied,
+  formatting, diff validation, and finite-brain-app build.
+- The seeded Product Client verifier remains blocked by the documented absent
+  local Folder Key manifest; its syntax check passed and the live browser
+  smoke covers this slice's public UI behavior.
+
+### Review and publish record
+
+- Independent standards review passed after a single P3 cleanup: remove the
+  redundant base Graph shell grid declaration.
+- Independent spec review passed; it requested the narrow browser check, which
+  was completed before finalization.
+- Local CodeRabbit returned a recoverable free-CLI rate limit (26-minute wait)
+  with no findings. The fresh independent reviews above are the fallback;
+  details are in `2026-07-13-sidebar-navigation-local-coderabbit-round.md`.
+- Committed as `00952d4ff808e614e6368ddcb67b269181d762ae`
+  (`feat(fbrain): consolidate sidebar navigation`); push remains pending.
+- Session and two-axis review artifacts are
+  `2026-07-13-sidebar-navigation-session.md` and
+  `2026-07-13-sidebar-navigation-review-packet.md`.

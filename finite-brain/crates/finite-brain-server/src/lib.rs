@@ -2292,7 +2292,8 @@ mod tests {
         assert!(!client_body.contains("pageTabButton"));
         assert!(!client_body.contains("graphTabButton"));
         assert!(!client_body.contains("titlebarNewTabButton"));
-        assert!(client_body.contains("app-ribbon"));
+        assert!(client_body.contains("sidebar-primary-nav"));
+        assert!(!client_body.contains("app-ribbon"));
         assert!(client_body.contains("file-sidebar"));
         assert!(client_body.contains("Connect signer"));
         assert!(client_body.contains("Session locked"));
@@ -2417,7 +2418,8 @@ mod tests {
         assert!(!css_body.contains(".obsidian-titlebar"));
         assert!(!css_body.contains(".traffic-light"));
         assert!(!css_body.contains(".titlebar-tab"));
-        assert!(css_body.contains(".app-ribbon"));
+        assert!(css_body.contains(".sidebar-primary-nav"));
+        assert!(!css_body.contains(".app-ribbon"));
         assert!(css_body.contains(".vault-picker"));
         assert!(css_body.contains(".vault-create-row"));
         assert!(css_body.contains(".folder-option-button"));
