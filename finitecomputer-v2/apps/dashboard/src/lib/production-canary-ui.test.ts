@@ -43,19 +43,25 @@ test("Connections stays closed until claimed status loads", () => {
   );
 });
 
-test("Connections initial render exposes no connection controls", () => {
+test("Connections initial render keeps truthful disabled controls inspectable", () => {
   const html = renderToStaticMarkup(
     createElement(ConnectionsPanel, {
       machineId: "canary-agent",
       googleConfigured: true,
     })
   );
-  assert.match(html, /Preparing your connections/u);
-  assert.doesNotMatch(html, /<(?:a|button|input|form)\b/u);
+  assert.match(html, /Checking live connection status/u);
+  assert.match(html, /Status unavailable/u);
+  assert.match(html, /Use Finite Private/u);
+  assert.match(html, /Telegram/u);
+  assert.match(html, /Google Workspace/u);
+  assert.doesNotMatch(html, /<a\b/u, "no external connection flow is live before status loads");
+  assert.match(html, /<button[^>]+disabled/u);
 });
 
 test("Connections stops waiting at its browser deadline and offers a retry", async (t) => {
   const originalFetch = globalThis.fetch;
+  const keepEventLoopAlive = setTimeout(() => {}, 100);
   globalThis.fetch = async (_input, init) =>
     new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal;
@@ -63,6 +69,7 @@ test("Connections stops waiting at its browser deadline and offers a retry", asy
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
     });
   t.after(() => {
+    clearTimeout(keepEventLoopAlive);
     globalThis.fetch = originalFetch;
   });
 

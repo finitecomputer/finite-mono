@@ -3,7 +3,7 @@ import { CheckCircle2Icon, CircleAlertIcon, LoaderCircleIcon } from "lucide-reac
 
 import { cn } from "@/lib/utils";
 
-type ConnectionState = "connected" | "disconnected" | "loading";
+type ConnectionState = "connected" | "disconnected" | "loading" | "unavailable";
 
 export function ConnectionCard({
   account,
@@ -37,7 +37,7 @@ export function ConnectionCard({
               className={cn(
                 "ocean-connection-card__status",
                 state === "connected" && "is-connected",
-                state === "disconnected" && "is-disconnected"
+                (state === "disconnected" || state === "unavailable") && "is-disconnected"
               )}
             >
               <StatusIcon className="size-4" />
@@ -58,5 +58,6 @@ export function ConnectionCard({
 function connectionStatus(state: ConnectionState) {
   if (state === "connected") return { icon: CheckCircle2Icon, label: "Connected" };
   if (state === "disconnected") return { icon: CircleAlertIcon, label: "Not connected" };
+  if (state === "unavailable") return { icon: CircleAlertIcon, label: "Status unavailable" };
   return { icon: LoaderCircleIcon, label: "Checking…" };
 }

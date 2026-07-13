@@ -10,12 +10,14 @@ import {
   Layers3Icon,
   LogOutIcon,
   MessageSquareIcon,
+  PanelLeftIcon,
   PlusIcon,
-  PlugIcon,
   ShieldCheckIcon,
   type LucideIcon,
 } from "lucide-react";
 
+import { AccountMenu } from "@/components/agent-navigation";
+import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { SignOutLink } from "@/components/sign-out-link";
 import { cn } from "@/lib/utils";
@@ -52,39 +54,14 @@ function sectionLinks(
   pathname: string,
   machine: MachineNavItem | null,
   saasMode: boolean,
-  isAdmin: boolean,
-  isNewAgentFlow: boolean
+  isAdmin: boolean
 ): SectionLink[] {
   const machineHref = machine ? `/dashboard/machines/${machine.id}` : "/dashboard";
   const chatHref = machine ? `/dashboard/machines/${machine.id}/chat` : "/dashboard";
   const skillsHref = machine ? `/dashboard/skills?machine=${encodeURIComponent(machine.id)}` : "/dashboard/skills";
 
   if (saasMode) {
-    return [
-      {
-        label: "Agent",
-        href: machineHref,
-        icon: BotIcon,
-        active:
-          !isNewAgentFlow &&
-          (pathname === "/dashboard" ||
-            (machine ? pathname === `/dashboard/machines/${machine.id}` : false)),
-      },
-      {
-        label: "Connections",
-        href: machine ? `${machineHref}/connections` : "/dashboard",
-        icon: PlugIcon,
-        active: machine ? pathname === `${machineHref}/connections` : false,
-        disabled: !machine,
-      },
-      {
-        label: "Chat",
-        href: chatHref,
-        icon: MessageSquareIcon,
-        active: machine ? pathname === `/dashboard/machines/${machine.id}/chat` : false,
-        disabled: !machine,
-      },
-    ];
+    return [];
   }
 
   return [
@@ -240,7 +217,7 @@ function DashboardAppSection({
   viewerEmail?: string | null;
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
-  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin, isNewAgentFlow);
+  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin);
   const scrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -251,13 +228,11 @@ function DashboardAppSection({
     <div className="ocean-app-section">
       <header className="ocean-app-header">
         <div className="ocean-app-header__brand">
-          <FiniteBrand
-            href={selectedMachine ? `/dashboard/machines/${selectedMachine.id}` : "/dashboard"}
-          />
+          <FiniteBrand href="/dashboard" />
         </div>
 
         <div className="ocean-app-header__center">
-          {showMachineFleet ? (
+          {showMachineFleet && !saasMode ? (
             <MachineSwitcher
               activeMachine={selectedMachine}
               creatingNewAgent={isNewAgentFlow}
@@ -265,11 +240,12 @@ function DashboardAppSection({
               showNewAgent={saasMode}
             />
           ) : null}
-          <nav
-            className="ocean-section-tabs"
-            aria-label="Dashboard section"
-          >
-            {links.map((item) => {
+          {links.length > 0 ? (
+            <nav
+              className="ocean-section-tabs"
+              aria-label="Dashboard section"
+            >
+              {links.map((item) => {
               const Icon = item.icon;
               const className = cn(
                 "ocean-section-tab",
@@ -297,8 +273,9 @@ function DashboardAppSection({
                   <span>{item.label}</span>
                 </Link>
               );
-            })}
-          </nav>
+              })}
+            </nav>
+          ) : null}
         </div>
 
         <div className="ocean-app-header__actions">
@@ -312,20 +289,96 @@ function DashboardAppSection({
               <span className="hidden md:inline">Admin Ops</span>
             </Link>
           ) : null}
-          {viewerEmail ? (
-            <span className="hidden max-w-56 truncate text-sm text-muted-foreground md:inline">
-              {viewerEmail}
-            </span>
-          ) : null}
-          <SignOutLink className="ocean-sign-out-button" aria-label="Sign out">
-            <LogOutIcon className="size-4" />
-            <span>Sign out</span>
-          </SignOutLink>
+          {saasMode ? (
+            <AccountMenu viewerEmail={viewerEmail} />
+          ) : (
+            <>
+              {viewerEmail ? (
+                <span className="hidden max-w-56 truncate text-sm text-muted-foreground md:inline">
+                  {viewerEmail}
+                </span>
+              ) : null}
+              <SignOutLink className="ocean-sign-out-button" aria-label="Sign out">
+                <LogOutIcon className="size-4" />
+                <span>Sign out</span>
+              </SignOutLink>
+            </>
+          )}
         </div>
       </header>
 
       <main ref={scrollRef} className="ocean-app-scroll">
         <div className="ocean-app-content">{children}</div>
+      </main>
+    </div>
+  );
+}
+
+function AgentAppSection({
+  children,
+  isChatSurface,
+  machine,
+  machines,
+  showSkills,
+  viewerEmail,
+}: {
+  children: React.ReactNode;
+  isChatSurface: boolean;
+  machine: MachineNavItem;
+  machines: MachineNavItem[];
+  showSkills: boolean;
+  viewerEmail?: string | null;
+}) {
+  const pathname = usePathname() ?? "";
+  const scrollRef = useRef<HTMLElement>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [pathname]);
+
+  useEffect(() => {
+    const open = () => setMobileOpen(true);
+    window.addEventListener("finite:open-agent-sidebar", open);
+    return () => window.removeEventListener("finite:open-agent-sidebar", open);
+  }, []);
+
+  return (
+    <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
+      <AgentSidebar
+        collapsed={collapsed}
+        machineId={machine.id}
+        machineLabel={machine.ownerLabel}
+        machineSwitcher={
+          <MachineSwitcher
+            activeMachine={machine}
+            creatingNewAgent={false}
+            machines={machines}
+            onNavigate={() => setMobileOpen(false)}
+            showNewAgent
+          />
+        }
+        mobileOpen={mobileOpen}
+        onCollapsedChange={setCollapsed}
+        onMobileOpenChange={setMobileOpen}
+        showSkills={showSkills}
+        viewerEmail={viewerEmail}
+      />
+      <main
+        ref={scrollRef}
+        className={`ocean-app-scroll finite-agent-shell__content ${isChatSurface ? "is-chat" : ""}`}
+      >
+        {!isChatSurface ? (
+          <button
+            type="button"
+            className="ocean-icon-button finite-agent-shell__mobile-trigger"
+            aria-label="Open agent navigation"
+            onClick={() => setMobileOpen(true)}
+          >
+            <PanelLeftIcon className="size-4" />
+          </button>
+        ) : null}
+        {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
       </main>
     </div>
   );
@@ -350,9 +403,26 @@ export function DashboardShell({
   );
   const showMachineFleet = saasMode || machines.length > 1;
   const isChatSurface = /^\/dashboard\/machines\/[^/]+\/chat\/?$/u.test(pathname);
+  const isAgentSurface = Boolean(
+    saasMode
+    && activeMachine
+    && (activeMachineId || (pathname === "/dashboard/skills" && queryMachineId))
+  );
 
-  if (isChatSurface) {
-    return <div className="ocean-shell ocean-shell--chat">{children}</div>;
+  if (isAgentSurface && activeMachine) {
+    return (
+      <div className="ocean-shell ocean-shell--agent">
+        <AgentAppSection
+          isChatSurface={isChatSurface}
+          machine={activeMachine}
+          machines={machines}
+          showSkills={isAdmin}
+          viewerEmail={viewerEmail}
+        >
+          {children}
+        </AgentAppSection>
+      </div>
+    );
   }
 
   return (
