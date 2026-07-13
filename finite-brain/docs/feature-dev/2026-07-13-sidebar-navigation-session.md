@@ -5,7 +5,7 @@
 - Issue: PR #16 continuation — Sidebar Navigation Consolidation (AFK)
 - Fixed point before session: `af12b52`
 - Worker session: current Codex thread; tiny isolated low-risk UI write
-- Commit: `00952d4ff808e614e6368ddcb67b269181d762ae`
+- Implementation commit: `950509726e474a94246d58ef1fba5fb083b53bec`
 - Status: implementation, review, and final checks complete; publish pending
 
 ## Inputs

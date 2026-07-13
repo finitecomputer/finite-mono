@@ -258,7 +258,7 @@ server implementation details; the no-backend-change boundary remains intact.
 - Local CodeRabbit returned a recoverable free-CLI rate limit (26-minute wait)
   with no findings. The fresh independent reviews above are the fallback;
   details are in `2026-07-13-sidebar-navigation-local-coderabbit-round.md`.
-- Committed as `00952d4ff808e614e6368ddcb67b269181d762ae`
+- Committed as `950509726e474a94246d58ef1fba5fb083b53bec`
   (`feat(fbrain): consolidate sidebar navigation`); push remains pending.
 - Session and two-axis review artifacts are
   `2026-07-13-sidebar-navigation-session.md` and
