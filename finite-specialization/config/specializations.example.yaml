@@ -122,8 +122,17 @@ capabilities:
       vision-capable auxiliary model, then inject text context. Prefer Spark
       image-text routes after current image smoke evidence exists.
     working_instantiations:
+      - id: vision-input.spark-aeon-gemma12
+        status: active_verified_specialization
+        verified_at: "2026-07-13"
+        agent_profile: glm52-text-agent
+        hermes_fragment: config/working/vision-input.spark-aeon-gemma12.hermes-fragment.yaml
+        checkpoint: docs/checkpoints/2026-07-13-austin-multimodal-spark-aeon-gemma12.md
+        model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
+        bridge_required: true
+        bridge_reason: shared_worker_adapts_hermes_chat_completions_to_spark_responses
       - id: vision-input.spark-qwopus
-        status: verified_first_working_specialization
+        status: superseded_verified_specialization
         verified_at: "2026-07-07"
         agent_profile: glm52-text-agent
         hermes_fragment: config/working/vision-input.spark-qwopus.hermes-fragment.yaml

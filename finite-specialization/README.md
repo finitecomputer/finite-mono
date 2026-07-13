@@ -39,8 +39,13 @@ building a router or generator.
 
 ## Working Checkpoints
 
+- [Austin Multimodal Spark AEON Gemma 12B](docs/checkpoints/2026-07-13-austin-multimodal-spark-aeon-gemma12.md)
+  is the active specialization for image input and the verified Spark model for
+  audio interpretation and sampled-video analysis. The reusable Hermes vision
+  fragment is
+  [config/working/vision-input.spark-aeon-gemma12.hermes-fragment.yaml](config/working/vision-input.spark-aeon-gemma12.hermes-fragment.yaml).
 - [Austin Vision Spark Qwopus](docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md)
-  is the first verified specialization: a text-only Hermes agent using
+  is the historical first verified specialization: a text-only Hermes agent using
   `auxiliary.vision` backed by the Spark public-beta Qwopus image-text route.
   The reusable fragment is
   [config/working/vision-input.spark-qwopus.hermes-fragment.yaml](config/working/vision-input.spark-qwopus.hermes-fragment.yaml).
