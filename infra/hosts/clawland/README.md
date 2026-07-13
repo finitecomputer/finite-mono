@@ -3,9 +3,11 @@
 > **UPDATE 2026-07-09 — finitechat-server has MIGRATED to lat1 and is DISABLED
 > here.** `chat.finite.computer` now resolves to lat1 (native
 > `finitechat-server` on :8788). clawland is now **purely the legacy finite.vip
-> fleet box** — it is out of mono's scope again except as the nix build host for
-> smoke deploys. The finitechat section below is **historical** (its migration
-> story is in [`finitechat-server.md`](finitechat-server.md)).
+> fleet box** and is out of mono's scope. **Do not use clawland as a
+> finite-mono build host.** `finite-lat-2` is the current x86_64 Nix builder
+> for finite-mono and lat1 deploys. The finitechat section below is
+> **historical** (its migration story is in
+> [`finitechat-server.md`](finitechat-server.md)).
 
 Legacy finite.vip fleet box, managed by the LEGACY `finitecomputer` repo
 (deliberately outside finite-mono). It **formerly hosted the live finitechat
@@ -29,9 +31,10 @@ hostname `clawland-ovh`, ssh alias `ovh-rescue`. Captured 2026-07-08.
   natively on :8788 (SQLite copied under single-writer doctrine — never two
   writers). Details and migration story in
   [`finitechat-server.md`](finitechat-server.md).
-- It is the **nix build host for ovh-vps-smoke deploys** (`/root/result` →
-  a built `nixos-system-ovh-vps-smoke` closure; `host_deploy.sh
-  --build-host` path).
+- **Historical legacy-only note:** it was the Nix build host for
+  `ovh-vps-smoke` deploys (`/root/result` → a built
+  `nixos-system-ovh-vps-smoke` closure; `host_deploy.sh --build-host` path).
+  That does not authorize it for finite-mono builds or lat1 deploys.
 
 ## Everything else (legacy fleet — one line each, see the legacy repo)
 

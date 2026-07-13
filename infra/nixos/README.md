@@ -39,6 +39,12 @@ only as an explicit replacement-builder override.
 
 ### Every deploy after that
 
+`finite-lat-2` is the required x86_64 build host for finite-mono production
+closures. **Do not use clawland and do not build on finite-lat-1.** From macOS,
+run `just nixos-build-lat1` first; that recipe pins `finite-lat-2` and refuses
+to inherit a personal or stale builder choice. The switch must deploy the same
+reviewed tag or revision that was built.
+
 ```sh
 nixos-rebuild switch --target-host root@finite-lat-1 \
   --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
