@@ -54,6 +54,10 @@ in
     pname = "finite-agentd";
     dir = "finite-agentd";
   };
+  finite-specialization-worker = mkWorkspaceCrate {
+    pname = "finite-specialization-worker";
+    dir = "finitecomputer-v2/crates/finite-specialization-worker";
+  };
   finitesitesd = mkWorkspaceCrate {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";

@@ -131,15 +131,6 @@ capabilities:
         model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
         bridge_required: true
         bridge_reason: shared_worker_adapts_hermes_chat_completions_to_spark_responses
-      - id: vision-input.spark-qwopus
-        status: superseded_verified_specialization
-        verified_at: "2026-07-07"
-        agent_profile: glm52-text-agent
-        hermes_fragment: config/working/vision-input.spark-qwopus.hermes-fragment.yaml
-        checkpoint: docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md
-        model: qwopus3-6-35b-a3b-v1-q5-k-m-gguf-fast
-        bridge_required: true
-        bridge_reason: spark_route_is_responses_shaped_while_hermes_auxiliary_uses_chat_completions
 
   - id: web-search
     priority: config_first

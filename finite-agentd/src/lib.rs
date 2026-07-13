@@ -8,8 +8,11 @@ mod transport;
 use thiserror::Error;
 
 pub use config::{
-    ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1, ConfigPreviewV1, HermesConfigOfferV1,
-    HermesConfigRollbackV1, VISION_CONFIG_PATH, redact_value,
+    AeonSpecializationDesiredStateV1, ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1,
+    ConfigPreviewV1, DEFAULT_AEON_SPECIALIZATION_MODEL, DEFAULT_AEON_SPECIALIZATION_WORKER_URL,
+    HermesConfigOfferV1, HermesConfigRollbackV1, SpecializationCapabilitiesV1,
+    SpecializationNormalizationLimitsV1, SpecializationPromptVersionsV1,
+    SpecializationReconcileResultV1, VISION_CONFIG_PATH, redact_value,
 };
 pub use daemon::{AgentdStatus, DaemonConfig, read_status, run_daemon};
 pub use ledger::{CommandDecision, Ledger};

@@ -33,6 +33,23 @@ compatibility_bridge:
   bridge_base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
   secret_inputs:
     FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN: external_secret_only
+  reconciliation:
+    command: agent.specialization.aeon.reconcile
+    schema: finite.agent.specialization.aeon.reconcile.v1
+    owned_path: auxiliary.vision
+  prompt_versions:
+    image: aeon-image-analysis-v1
+    audio: aeon-audio-understanding-v1
+    video: aeon-video-understanding-v1
+  normalization_limits:
+    max_images: 8
+    max_inline_bytes: 16777216
+    max_download_bytes: 33554432
+    max_output_chars: 32768
+  active_capabilities:
+    image: true
+    audio: false
+    video: false
 
 hermes_fragment:
   auxiliary:
@@ -47,6 +64,12 @@ hermes_fragment:
 
 verification:
   checkpoint: docs/checkpoints/2026-07-13-austin-multimodal-spark-aeon-gemma12.md
+  normalized_result_fields:
+    - capability
+    - text
+    - model
+    - request_id
+    - duration_ms
 
 rollback:
   scope: target_agent_and_shared_worker_model_selection

@@ -19,7 +19,10 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 
 use crate::AgentdError;
-use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
+use crate::config::{
+    AeonSpecializationDesiredStateV1, ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1,
+    VISION_CONFIG_PATH,
+};
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
@@ -36,6 +39,7 @@ const CONFIG_ROLLBACK_SCHEMA: &str = "finite.hermes.config.rollback.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
+const AEON_SPECIALIZATION_RECONCILE_SCHEMA: &str = "finite.agent.specialization.aeon.reconcile.v1";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
@@ -335,6 +339,73 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_offer(&request.request_id, body)?;
                 self.apply_config_offer(offer).await
+            }
+            "agent.specialization.aeon.reconcile" => {
+                let desired = parse_body::<AeonSpecializationDesiredStateV1>(
+                    request,
+                    AEON_SPECIALIZATION_RECONCILE_SCHEMA,
+                )?;
+                let manager = self.config_manager.clone();
+                let hermes_home = self.hermes_home.clone();
+                let desired_for_apply = desired.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    manager.reconcile_aeon_specialization(&desired_for_apply, || {
+                        validate_hermes_config(&hermes_home)
+                    })
+                })
+                .await
+                .map_err(|error| AgentdError::Config(error.to_string()))??;
+                if result.applied
+                    && let Err(error) = self.supervisor.restart_hermes().await
+                {
+                    let rollback = HermesConfigRollbackV1 {
+                        proposal_id: desired.proposal_id.clone(),
+                    };
+                    let manager = self.config_manager.clone();
+                    let hermes_home = self.hermes_home.clone();
+                    tokio::task::spawn_blocking(move || {
+                        manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
+                    })
+                    .await
+                    .map_err(|rollback_error| {
+                        AgentdError::Config(format!(
+                            "Hermes reload and specialization rollback failed: {rollback_error}"
+                        ))
+                    })??;
+                    if let Err(restore_error) = self.supervisor.restart_hermes().await {
+                        return Err(AgentdError::Supervisor(format!(
+                            "Hermes specialization activation failed ({error}); previous configuration was restored on disk but could not be reactivated ({restore_error})"
+                        )));
+                    }
+                    return Err(error);
+                }
+                let effective = self.config_manager.current_value(VISION_CONFIG_PATH)?;
+                if effective.get("model").and_then(Value::as_str)
+                    != Some(desired.model_alias.as_str())
+                    || effective.get("base_url").and_then(Value::as_str)
+                        != Some(desired.worker_base_url.as_str())
+                {
+                    let rollback = HermesConfigRollbackV1 {
+                        proposal_id: desired.proposal_id.clone(),
+                    };
+                    let manager = self.config_manager.clone();
+                    let hermes_home = self.hermes_home.clone();
+                    tokio::task::spawn_blocking(move || {
+                        manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
+                    })
+                    .await
+                    .map_err(|rollback_error| {
+                        AgentdError::Config(format!(
+                            "specialization read-back and rollback failed: {rollback_error}"
+                        ))
+                    })??;
+                    self.supervisor.restart_hermes().await?;
+                    return Err(AgentdError::Config(
+                        "Hermes specialization read-back did not match desired state; previous configuration was restored"
+                            .to_owned(),
+                    ));
+                }
+                Ok(serde_json::to_value(result)?)
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;

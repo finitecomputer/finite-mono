@@ -46,7 +46,8 @@ building a router or generator.
   [config/working/vision-input.spark-aeon-gemma12.hermes-fragment.yaml](config/working/vision-input.spark-aeon-gemma12.hermes-fragment.yaml).
 - [Austin Vision Spark Qwopus](docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md)
   is the historical first verified specialization: a text-only Hermes agent using
-  `auxiliary.vision` backed by the Spark public-beta Qwopus image-text route.
+  `auxiliary.vision` backed by the canonical Spark public-beta AEON Gemma 12B
+  multimodal route through `finite-specialization-worker`.
   The reusable fragment is
   [config/working/vision-input.spark-qwopus.hermes-fragment.yaml](config/working/vision-input.spark-qwopus.hermes-fragment.yaml).
 
