@@ -488,7 +488,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
                     }),
                     json!({
                         "type": "image_url",
-                        "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
+                        "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAEAQMAAACTPww9AAAAA1BMVEX/AAAZ4gk3AAAAC0lEQVQI12NggAAAAAgAAS8g3TEAAAAASUVORK5CYII=" }
                     }),
                 ]),
             }],
