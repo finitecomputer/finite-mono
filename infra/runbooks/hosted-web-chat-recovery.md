@@ -23,7 +23,7 @@ Paid admission is blocked unless all of these are true, regardless of Stripe:
 
 The host definition selects the destination, Borg 1.2 executable, and the same
 credential paths used by `../finitecomputer`. On 2026-07-13 the existing bundle
-was copied byte-for-byte to finite-lat-1, revision `3f26292` was deployed, and
+was copied byte-for-byte to finite-lat-1, revision `7d58aa1` was deployed, and
 the dedicated repository was initialized with a verified first archive. The
 reused SSH credential also accepted an arbitrary read-only remote command, so
 server-enforced append-only protection is **not** present. Paid admission stays

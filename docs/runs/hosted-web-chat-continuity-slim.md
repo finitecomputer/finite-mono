@@ -113,10 +113,10 @@ Work top-down.
 
 ## Production evidence — 2026-07-13
 
-- Deployed revision: `3f26292`; Nix system closure:
-  `/nix/store/mw5mspgziwkyw8bp2m75zrrjqa0sa5wp-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
+- Deployed revision: `7d58aa1`; Nix system closure:
+  `/nix/store/jziqmdsyas39bamhglg1a9fk5vsymnl8-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
 - Dashboard image:
-  `ghcr.io/finitecomputer/finite-saas-dashboard@sha256:1880f742aa93cac12bc1dcd65c5aebab685359b0d9b1fce74209b83ec51bfa60`.
+  `ghcr.io/finitecomputer/finite-saas-dashboard@sha256:f4995d1cdb784ea5ffc2e368578bbc43eef68cecc2a1e57475e4164c1f43b7a8`.
 - The finitecomputer rsync.net credential bundle was copied byte-for-byte to
   finite-lat-1 without entering Git. Snapshot and offsite age checks pass;
   application services and public health endpoints are healthy. The new
@@ -133,7 +133,7 @@ Work top-down.
 
 ## Acceptance Request — blocked on retained queue prerequisites
 
-- **Revision:** `3f26292`; dashboard digest and Nix closure above.
+- **Revision:** `7d58aa1`; dashboard digest and Nix closure above.
 - **Where:** `https://finite.computer`, `https://chat.finite.computer`,
   finite-lat-1, the dedicated synthetic account, and an empty isolated restore
   target. Secrets remain only at the paths named in the recovery runbook.
