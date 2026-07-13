@@ -137,7 +137,7 @@ server implementation details; the no-backend-change boundary remains intact.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| #10 Settings consistency continuation | `d88bffa` | current Codex thread | final branch commit pending | standards/spec pass; CodeRabbit minor addressed | scoped checks pass |
+| #10 Settings consistency continuation | `d88bffa` | current Codex thread | `11b63e3` | standards/spec pass; CodeRabbit minor addressed | scoped checks pass |
 
 ## Open Questions
 
