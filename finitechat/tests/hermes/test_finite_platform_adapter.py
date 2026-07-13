@@ -445,6 +445,60 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             {"room_id": "room-agent-1", "seq": 12, "message_id": "msg-12"},
         )
 
+    def test_configured_aeon_decomposes_mixed_media_before_hermes_handoff(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        class FakeSpecialization:
+            async def interpret(self, instruction, media_urls, media_types):
+                self.call = (instruction, media_urls, media_types)
+                return [
+                    types.SimpleNamespace(
+                        capability="image",
+                        model="aeon-test",
+                        success=True,
+                        text="A red chart.",
+                        error_code="",
+                    ),
+                    types.SimpleNamespace(
+                        capability="audio",
+                        model="aeon-test",
+                        success=False,
+                        text="Audio was corrupt.",
+                        error_code="media_decode_failed",
+                    ),
+                ]
+
+        specialization = FakeSpecialization()
+        adapter._aeon_specialization = specialization
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 20,
+            "message_id": "msg-20",
+            "text": "Compare these inputs",
+            "attachments": [
+                {"path": "/tmp/chart.png", "mime_type": "image/png"},
+                {"path": "/tmp/clip.wav", "mime_type": "audio/wav"},
+            ],
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        self.assertEqual(
+            specialization.call,
+            (
+                "Compare these inputs",
+                ["/tmp/chart.png", "/tmp/clip.wav"],
+                ["image/png", "audio/wav"],
+            ),
+        )
+        event = adapter.handled_messages[0]
+        self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertEqual(event.media_urls, [])
+        self.assertIn("image via aeon-test: A red chart.", event.text)
+        self.assertIn("audio via aeon-test FAILED (media_decode_failed)", event.text)
+
     def test_unavailable_encrypted_attachment_delivers_caption_as_text_then_acks(self):
         adapter = self.adapter()
         calls = []

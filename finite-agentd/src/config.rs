@@ -59,8 +59,8 @@ impl AeonSpecializationDesiredStateV1 {
             worker_base_url: DEFAULT_AEON_SPECIALIZATION_WORKER_URL.to_owned(),
             capabilities: SpecializationCapabilitiesV1 {
                 image: true,
-                audio: false,
-                video: false,
+                audio: true,
+                video: true,
             },
             prompt_versions: SpecializationPromptVersionsV1 {
                 image: "aeon-image-analysis-v1".to_owned(),
@@ -491,14 +491,11 @@ fn validate_aeon_desired_state(
         ));
     }
     let canonical = AeonSpecializationDesiredStateV1::canonical(&desired.proposal_id);
-    if desired.capabilities.audio
-        || desired.capabilities.video
-        || desired.prompt_versions != canonical.prompt_versions
+    if desired.prompt_versions != canonical.prompt_versions
         || desired.normalization_limits != canonical.normalization_limits
     {
         return Err(AgentdError::InvalidPayload(
-            "unfinished AEON capabilities, prompt versions, or normalization limits are not canonical"
-                .to_owned(),
+            "AEON prompt versions or normalization limits are not canonical".to_owned(),
         ));
     }
     Ok(())
@@ -906,8 +903,8 @@ mod tests {
         assert!(!result.effective_matches_desired);
         assert!(manager.aeon_specialization_matches(&desired).unwrap());
         assert!(result.capabilities.image);
-        assert!(!result.capabilities.audio);
-        assert!(!result.capabilities.video);
+        assert!(result.capabilities.audio);
+        assert!(result.capabilities.video);
         let document: Value = serde_yaml::from_slice(&fs::read(manager.path()).unwrap()).unwrap();
         assert_eq!(document["model"]["default"], "main-model");
         assert_eq!(
@@ -925,7 +922,7 @@ mod tests {
         assert_eq!(document["auxiliary"]["vision"]["api_key"], "worker-secret");
         assert_eq!(
             document["auxiliary"]["vision"]["extra_body"]["finite_specialization"]["capabilities"],
-            json!({ "image": true, "audio": false, "video": false })
+            json!({ "image": true, "audio": true, "video": true })
         );
 
         let after_first_apply = fs::read(manager.path()).unwrap();

@@ -14,6 +14,7 @@ import logging
 import os
 import shlex
 import shutil
+import sys
 import threading
 import time
 import urllib.error
@@ -24,6 +25,24 @@ from typing import Any
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+
+try:
+    from .specialization import (
+        AeonSpecialization,
+        _capability_for_mime,
+        compose_for_hermes,
+    )
+except ImportError:  # The regression harness loads adapter.py as a standalone module.
+    _plugin_dir = str(Path(__file__).resolve().parent)
+    sys.path.insert(0, _plugin_dir)
+    try:
+        from specialization import (  # type: ignore[no-redef]
+            AeonSpecialization,
+            _capability_for_mime,
+            compose_for_hermes,
+        )
+    finally:
+        sys.path.remove(_plugin_dir)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +169,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_topics: dict[tuple[str, str], str | None] = {}
+        self._aeon_specialization = AeonSpecialization.from_hermes_config()
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
         if not self.home:
@@ -565,6 +585,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             channel_prompt=_string_or_none(raw_event.get("channel_prompt")),
             internal=bool(raw_event.get("internal") or False),
         )
+        event = await self._specialize_event_media(event)
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
@@ -576,6 +597,36 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+
+    async def _specialize_event_media(self, event: MessageEvent) -> MessageEvent:
+        supported = [
+            (url, mime_type)
+            for url, mime_type in zip(event.media_urls, event.media_types, strict=False)
+            if _capability_for_mime(mime_type) is not None
+        ]
+        if not supported:
+            return event
+        if self._aeon_specialization is None:
+            return event
+        results = await self._aeon_specialization.interpret(
+            event.text,
+            [url for url, _ in supported],
+            [mime_type for _, mime_type in supported],
+        )
+        remaining = [
+            (url, mime_type)
+            for url, mime_type in zip(event.media_urls, event.media_types, strict=False)
+            if _capability_for_mime(mime_type) is None
+        ]
+        event.media_urls = [url for url, _ in remaining]
+        event.media_types = [mime_type for _, mime_type in remaining]
+        event.message_type = (
+            _message_type("", event.media_types) if remaining else MessageType.TEXT
+        )
+        original = event.text.strip()
+        composed = compose_for_hermes(results)
+        event.text = f"{original}\n\n{composed}" if original else composed
+        return event
 
     async def _set_processing_activity(
         self,

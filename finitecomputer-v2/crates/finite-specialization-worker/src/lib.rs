@@ -11,18 +11,29 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 pub const DEFAULT_SPARK_BASE_URL: &str = "https://inference.finite.computer/v1";
 pub const DEFAULT_VISION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
+pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
+pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
 const IMAGE_CAPABILITY_PROMPT: &str = "Interpret the supplied image faithfully. Follow the user's instruction, distinguish visible facts from uncertainty, and do not invoke tools.";
+const AUDIO_CAPABILITY_PROMPT: &str = "Interpret the supplied audio semantically rather than returning a transcript alone. Follow the user's instruction, distinguish audible facts from uncertainty, and do not invoke tools.";
+const VIDEO_CAPABILITY_PROMPT: &str = "Interpret the chronological timestamped frames as one visual sequence. Follow the user's instruction, distinguish visible facts from uncertainty, do not infer unheard audio, and do not invoke tools.";
 const DEFAULT_MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MAX_INLINE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 32 * 1024;
 const DEFAULT_MAX_IMAGES: usize = 8;
+const DEFAULT_MAX_AUDIO_DURATION_SECONDS: u64 = 900;
+const DEFAULT_MAX_VIDEO_DURATION_SECONDS: u64 = 600;
+const DEFAULT_MAX_VIDEO_FRAMES: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -39,6 +50,15 @@ pub struct WorkerConfig {
     pub request_deadline_seconds: u64,
     pub allowed_attachment_hosts: Vec<String>,
     pub image_canary_interval_seconds: Option<u64>,
+    pub audio_canary_interval_seconds: Option<u64>,
+    pub video_canary_interval_seconds: Option<u64>,
+    pub max_audio_duration_seconds: u64,
+    pub max_video_duration_seconds: u64,
+    pub max_video_frames: usize,
+    pub ffmpeg_path: PathBuf,
+    pub ffprobe_path: PathBuf,
+    pub media_temp_dir: PathBuf,
+    pub media_concurrency: usize,
 }
 
 impl WorkerConfig {
@@ -92,6 +112,50 @@ impl WorkerConfig {
                     .unwrap_or(300)
                     .clamp(60, 3600),
             ),
+            audio_canary_interval_seconds: Some(
+                non_empty_env("FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(300)
+                    .clamp(60, 3600),
+            ),
+            video_canary_interval_seconds: Some(
+                non_empty_env("FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(300)
+                    .clamp(60, 3600),
+            ),
+            max_audio_duration_seconds: non_empty_env(
+                "FINITE_SPECIALIZATION_MAX_AUDIO_DURATION_SECONDS",
+            )
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MAX_AUDIO_DURATION_SECONDS)
+            .clamp(1, DEFAULT_MAX_AUDIO_DURATION_SECONDS),
+            max_video_duration_seconds: non_empty_env(
+                "FINITE_SPECIALIZATION_MAX_VIDEO_DURATION_SECONDS",
+            )
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MAX_VIDEO_DURATION_SECONDS)
+            .clamp(1, DEFAULT_MAX_VIDEO_DURATION_SECONDS),
+            max_video_frames: non_empty_env("FINITE_SPECIALIZATION_MAX_VIDEO_FRAMES")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_MAX_VIDEO_FRAMES)
+                .clamp(1, DEFAULT_MAX_VIDEO_FRAMES),
+            ffmpeg_path: PathBuf::from(
+                non_empty_env("FINITE_SPECIALIZATION_FFMPEG_PATH")
+                    .unwrap_or_else(|| "ffmpeg".to_owned()),
+            ),
+            ffprobe_path: PathBuf::from(
+                non_empty_env("FINITE_SPECIALIZATION_FFPROBE_PATH")
+                    .unwrap_or_else(|| "ffprobe".to_owned()),
+            ),
+            media_temp_dir: PathBuf::from(
+                non_empty_env("FINITE_SPECIALIZATION_MEDIA_TEMP_DIR")
+                    .unwrap_or_else(|| "/tmp".to_owned()),
+            ),
+            media_concurrency: non_empty_env("FINITE_SPECIALIZATION_MEDIA_CONCURRENCY")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(2)
+                .clamp(1, 8),
         }
     }
 }
@@ -101,17 +165,49 @@ struct WorkerState {
     config: WorkerConfig,
     client: Client,
     metrics: CapabilityMetrics,
+    media_slots: Arc<Semaphore>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Capability {
+    Image = 0,
+    Audio = 1,
+    Video = 2,
+}
+
+impl Capability {
+    const ALL: [Self; 3] = [Self::Image, Self::Audio, Self::Video];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn prompt_version(self) -> &'static str {
+        match self {
+            Self::Image => IMAGE_PROMPT_VERSION,
+            Self::Audio => AUDIO_PROMPT_VERSION,
+            Self::Video => VIDEO_PROMPT_VERSION,
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Debug)]
-struct ImageCanaryObservation {
+struct CanaryObservation {
     health_state: &'static str,
     consecutive_failures: u64,
     last_completed_timestamp_seconds: u64,
     last_latency_milliseconds: u64,
 }
 
-impl Default for ImageCanaryObservation {
+impl Default for CanaryObservation {
     fn default() -> Self {
         Self {
             health_state: "stale",
@@ -122,24 +218,34 @@ impl Default for ImageCanaryObservation {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CapabilityMetrics {
-    image_canary: Mutex<ImageCanaryObservation>,
-    image_requests: AtomicU64,
-    image_errors_by_code: Mutex<BTreeMap<&'static str, u64>>,
+    canaries: [Mutex<CanaryObservation>; 3],
+    requests: [AtomicU64; 3],
+    errors_by_code: [Mutex<BTreeMap<&'static str, u64>>; 3],
+}
+
+impl Default for CapabilityMetrics {
+    fn default() -> Self {
+        Self {
+            canaries: std::array::from_fn(|_| Mutex::new(CanaryObservation::default())),
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            errors_by_code: std::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl CapabilityMetrics {
-    fn observe_request(&self, error_code: Option<&'static str>) {
-        self.image_requests.fetch_add(1, Ordering::Relaxed);
+    fn observe_request(&self, capability: Capability, error_code: Option<&'static str>) {
+        self.requests[capability.index()].fetch_add(1, Ordering::Relaxed);
         if let Some(error_code) = error_code {
-            let mut errors = self.image_errors_by_code.lock().unwrap();
+            let mut errors = self.errors_by_code[capability.index()].lock().unwrap();
             *errors.entry(error_code).or_default() += 1;
         }
     }
 
-    fn observe_canary(&self, succeeded: bool, latency_milliseconds: u64) {
-        let mut observation = self.image_canary.lock().unwrap();
+    fn observe_canary(&self, capability: Capability, succeeded: bool, latency_milliseconds: u64) {
+        let mut observation = self.canaries[capability.index()].lock().unwrap();
         observation.last_completed_timestamp_seconds = current_unix_timestamp();
         observation.last_latency_milliseconds = latency_milliseconds;
         if succeeded {
@@ -156,47 +262,52 @@ impl CapabilityMetrics {
     }
 
     fn render(&self, model_alias: &str) -> String {
-        let observation = self.image_canary.lock().unwrap();
-        let health_state = effective_canary_health(&observation);
         let model_alias = prometheus_label(model_alias);
-        let mut rendered = format!(
-            concat!(
-                "# HELP finite_specialization_capability_health Semantic canary health for one specialization capability.\n",
-                "# TYPE finite_specialization_capability_health gauge\n",
-                "finite_specialization_capability_health{{capability=\"image\",health_state=\"{}\",model_alias=\"{}\",prompt_version=\"{}\",surface=\"tyk-public-frontdoor\"}} 1\n",
-                "# HELP finite_specialization_canary_last_completed_timestamp_seconds Unix timestamp of the last completed semantic canary.\n",
-                "# TYPE finite_specialization_canary_last_completed_timestamp_seconds gauge\n",
-                "finite_specialization_canary_last_completed_timestamp_seconds{{capability=\"image\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
-                "# HELP finite_specialization_canary_latency_milliseconds Last semantic canary latency.\n",
-                "# TYPE finite_specialization_canary_latency_milliseconds gauge\n",
-                "finite_specialization_canary_latency_milliseconds{{capability=\"image\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
-                "# HELP finite_specialization_requests_total Specialization capability requests.\n",
-                "# TYPE finite_specialization_requests_total counter\n",
-                "finite_specialization_requests_total{{capability=\"image\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
-                "# HELP finite_specialization_errors_total Specialization capability errors.\n",
-                "# TYPE finite_specialization_errors_total counter\n"
-            ),
-            health_state,
-            model_alias,
-            IMAGE_PROMPT_VERSION,
-            model_alias,
-            observation.last_completed_timestamp_seconds,
-            model_alias,
-            observation.last_latency_milliseconds,
-            model_alias,
-            self.image_requests.load(Ordering::Relaxed),
-        );
-        let errors = self.image_errors_by_code.lock().unwrap();
-        if errors.is_empty() {
+        let mut rendered = concat!(
+            "# HELP finite_specialization_capability_health Semantic canary health for one specialization capability.\n",
+            "# TYPE finite_specialization_capability_health gauge\n",
+            "# HELP finite_specialization_canary_last_completed_timestamp_seconds Unix timestamp of the last completed semantic canary.\n",
+            "# TYPE finite_specialization_canary_last_completed_timestamp_seconds gauge\n",
+            "# HELP finite_specialization_canary_latency_milliseconds Last semantic canary latency.\n",
+            "# TYPE finite_specialization_canary_latency_milliseconds gauge\n",
+            "# HELP finite_specialization_requests_total Specialization capability requests.\n",
+            "# TYPE finite_specialization_requests_total counter\n",
+            "# HELP finite_specialization_errors_total Specialization capability errors.\n",
+            "# TYPE finite_specialization_errors_total counter\n"
+        )
+        .to_owned();
+        for capability in Capability::ALL {
+            let observation = self.canaries[capability.index()].lock().unwrap();
+            let health_state = effective_canary_health(&observation);
             rendered.push_str(&format!(
-                "finite_specialization_errors_total{{capability=\"image\",error_code=\"none\",model_alias=\"{model_alias}\",surface=\"tyk-public-frontdoor\"}} 0\n"
+                "finite_specialization_capability_health{{capability=\"{}\",health_state=\"{}\",model_alias=\"{}\",prompt_version=\"{}\",surface=\"tyk-public-frontdoor\"}} 1\n",
+                capability.name(), health_state, model_alias, capability.prompt_version()
             ));
-        } else {
-            for (code, count) in errors.iter() {
+            rendered.push_str(&format!(
+                "finite_specialization_canary_last_completed_timestamp_seconds{{capability=\"{}\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                capability.name(), model_alias, observation.last_completed_timestamp_seconds
+            ));
+            rendered.push_str(&format!(
+                "finite_specialization_canary_latency_milliseconds{{capability=\"{}\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                capability.name(), model_alias, observation.last_latency_milliseconds
+            ));
+            rendered.push_str(&format!(
+                "finite_specialization_requests_total{{capability=\"{}\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                capability.name(), model_alias, self.requests[capability.index()].load(Ordering::Relaxed)
+            ));
+            let errors = self.errors_by_code[capability.index()].lock().unwrap();
+            if errors.is_empty() {
                 rendered.push_str(&format!(
-                    "finite_specialization_errors_total{{capability=\"image\",error_code=\"{}\",model_alias=\"{model_alias}\",surface=\"tyk-public-frontdoor\"}} {count}\n",
-                    prometheus_label(code)
+                    "finite_specialization_errors_total{{capability=\"{}\",error_code=\"none\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} 0\n",
+                    capability.name(), model_alias
                 ));
+            } else {
+                for (code, count) in errors.iter() {
+                    rendered.push_str(&format!(
+                        "finite_specialization_errors_total{{capability=\"{}\",error_code=\"{}\",model_alias=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                        capability.name(), prometheus_label(code), model_alias, count
+                    ));
+                }
             }
         }
         rendered
@@ -279,14 +390,24 @@ pub fn app(config: WorkerConfig) -> Router {
 }
 
 pub fn app_with_client(config: WorkerConfig, client: Client) -> Router {
-    let canary_interval = config.image_canary_interval_seconds;
+    let image_canary_interval = config.image_canary_interval_seconds;
+    let audio_canary_interval = config.audio_canary_interval_seconds;
+    let video_canary_interval = config.video_canary_interval_seconds;
+    let media_concurrency = config.media_concurrency;
     let state = Arc::new(WorkerState {
         config,
         client,
         metrics: CapabilityMetrics::default(),
+        media_slots: Arc::new(Semaphore::new(media_concurrency)),
     });
-    if let Some(interval_seconds) = canary_interval {
+    if let Some(interval_seconds) = image_canary_interval {
         tokio::spawn(run_image_canary_loop(Arc::clone(&state), interval_seconds));
+    }
+    if let Some(interval_seconds) = audio_canary_interval {
+        tokio::spawn(run_audio_canary_loop(Arc::clone(&state), interval_seconds));
+    }
+    if let Some(interval_seconds) = video_canary_interval {
+        tokio::spawn(run_video_canary_loop(Arc::clone(&state), interval_seconds));
     }
     Router::new()
         .route("/health", get(health))
@@ -297,22 +418,29 @@ pub fn app_with_client(config: WorkerConfig, client: Client) -> Router {
 }
 
 async fn health(State(state): State<Arc<WorkerState>>) -> Json<Value> {
-    let observation = state.metrics.image_canary.lock().unwrap();
-    let health_state = effective_canary_health(&observation);
+    let capabilities = Capability::ALL.into_iter().fold(
+        serde_json::Map::new(),
+        |mut capabilities, capability| {
+            let observation = state.metrics.canaries[capability.index()].lock().unwrap();
+            capabilities.insert(
+                capability.name().to_owned(),
+                json!({
+                    "health": effective_canary_health(&observation),
+                    "prompt_version": capability.prompt_version(),
+                    "last_completed_timestamp_seconds": observation.last_completed_timestamp_seconds,
+                }),
+            );
+            capabilities
+        },
+    );
     Json(json!({
         "ok": true,
         "service": "finite-specialization-worker",
-        "capabilities": {
-            "image": {
-                "health": health_state,
-                "prompt_version": IMAGE_PROMPT_VERSION,
-                "last_completed_timestamp_seconds": observation.last_completed_timestamp_seconds,
-            }
-        }
+        "capabilities": capabilities,
     }))
 }
 
-fn effective_canary_health(observation: &ImageCanaryObservation) -> &'static str {
+fn effective_canary_health(observation: &CanaryObservation) -> &'static str {
     if observation.last_completed_timestamp_seconds == 0
         || current_unix_timestamp()
             > observation
@@ -338,20 +466,79 @@ async fn chat_completions(
     Json(input): Json<ChatCompletionRequest>,
 ) -> Result<Json<Value>, WorkerError> {
     authenticate_worker_request(&state.config, &headers)?;
+    let capability = classify_request(&input)?;
     let result = tokio::time::timeout(
         Duration::from_secs(state.config.request_deadline_seconds),
-        analyze_image(&state, &input),
+        analyze_capability(&state, &input, capability),
     )
     .await
     .unwrap_or_else(|_| {
-        Err(WorkerError::request_timeout(
-            "image analysis deadline expired",
-        ))
+        Err(WorkerError::request_timeout(format!(
+            "{} analysis deadline expired",
+            capability.name()
+        )))
     });
     state
         .metrics
-        .observe_request(result.as_ref().err().map(|error| error.code));
+        .observe_request(capability, result.as_ref().err().map(|error| error.code));
     result.map(Json)
+}
+
+async fn analyze_capability(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+    capability: Capability,
+) -> Result<Value, WorkerError> {
+    match capability {
+        Capability::Image => analyze_image(state, input).await,
+        Capability::Audio => analyze_audio(state, input).await,
+        Capability::Video => analyze_video(state, input).await,
+    }
+}
+
+fn classify_request(input: &ChatCompletionRequest) -> Result<Capability, WorkerError> {
+    let mut counts = [0usize; 3];
+    for message in &input.messages {
+        let ChatContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            let capability = match part.get("type").and_then(Value::as_str) {
+                Some("image_url" | "input_image") => Some(Capability::Image),
+                Some("input_audio" | "audio_url") => Some(Capability::Audio),
+                Some("video_url" | "input_video") => Some(Capability::Video),
+                _ => None,
+            };
+            if let Some(capability) = capability {
+                counts[capability.index()] += 1;
+            }
+        }
+    }
+    let active: Vec<Capability> = Capability::ALL
+        .into_iter()
+        .filter(|capability| counts[capability.index()] > 0)
+        .collect();
+    if active.len() > 1 {
+        return Err(WorkerError::bad_request_with_code(
+            "one specialization request must contain one primary media type",
+            "mixed_media_requires_decomposition",
+        ));
+    }
+    let capability = active.into_iter().next().ok_or_else(|| {
+        WorkerError::bad_request_with_code(
+            "specialization analysis requires one primary media item",
+            "unsupported_media_format",
+        )
+    })?;
+    if matches!(capability, Capability::Audio | Capability::Video)
+        && counts[capability.index()] != 1
+    {
+        return Err(WorkerError::bad_request_with_code(
+            "audio and video requests require exactly one media item",
+            "unsupported_media_format",
+        ));
+    }
+    Ok(capability)
 }
 
 async fn analyze_image(
@@ -429,12 +616,6 @@ fn effective_image_limits(
             if !state.capabilities.image {
                 return Err(WorkerError::unavailable("image capability is disabled"));
             }
-            if state.capabilities.audio || state.capabilities.video {
-                return Err(WorkerError::bad_request_with_code(
-                    "audio and video capability activation is not supported by this worker",
-                    "unsupported_media_format",
-                ));
-            }
             if state.prompt_versions.image != IMAGE_PROMPT_VERSION {
                 return Err(WorkerError::bad_request_with_code(
                     "image prompt version is not supported",
@@ -462,6 +643,819 @@ fn effective_image_limits(
             .max_output_chars
             .clamp(256, config.max_output_chars),
     })
+}
+
+fn chat_request_for_audio(
+    input: &ChatCompletionRequest,
+    model: &str,
+) -> Result<Value, WorkerError> {
+    if input.stream.unwrap_or(false) {
+        return Err(WorkerError::bad_request(
+            "streaming audio interpretation is not supported",
+        ));
+    }
+    let mut messages = vec![json!({
+        "role": "developer",
+        "content": AUDIO_CAPABILITY_PROMPT,
+    })];
+    for message in &input.messages {
+        let role = normalize_role(&message.role)?;
+        let content = match &message.content {
+            ChatContent::Text(text) => Value::String(text.clone()),
+            ChatContent::Parts(parts) => Value::Array(
+                parts
+                    .iter()
+                    .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                        Some("text" | "input_text" | "input_audio") => Some(part.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+        };
+        messages.push(json!({ "role": role, "content": content }));
+    }
+    let mut request = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "temperature": input.temperature.clone().unwrap_or_else(|| json!(0)),
+    });
+    if let Some(max_tokens) = input.max_tokens.or(input.max_completion_tokens) {
+        request["max_tokens"] = json!(max_tokens);
+    }
+    Ok(request)
+}
+
+fn uniform_video_timestamps(duration_seconds: f64, max_frames: usize) -> Vec<f64> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 || max_frames == 0 {
+        return Vec::new();
+    }
+    let last = (duration_seconds - 0.001).max(0.0);
+    if duration_seconds <= max_frames as f64 {
+        return (0..=last.floor() as usize)
+            .map(|second| second as f64)
+            .collect();
+    }
+    if max_frames == 1 {
+        return vec![0.0];
+    }
+    (0..max_frames)
+        .map(|index| last * index as f64 / (max_frames - 1) as f64)
+        .collect()
+}
+
+#[derive(Debug)]
+enum MediaSource {
+    DataUri(String),
+    Inline { mime: &'static str, encoded: String },
+    Url(String),
+}
+
+async fn analyze_audio(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+) -> Result<Value, WorkerError> {
+    let started = Instant::now();
+    let limits = effective_media_limits(state, input, Capability::Audio)?;
+    let spark_token = state
+        .config
+        .spark_bearer_token
+        .as_deref()
+        .ok_or_else(|| WorkerError::unavailable("Spark gateway token is not configured"))?;
+    let normalized = normalize_audio_input(state, input, limits).await?;
+    let upstream_request = chat_request_for_audio(&normalized, &state.config.vision_model)?;
+    let response = state
+        .client
+        .post(format!(
+            "{}/chat/completions",
+            state.config.spark_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(spark_token)
+        .json(&upstream_request)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                WorkerError::request_timeout("Spark audio interpretation timed out")
+            } else {
+                WorkerError::bad_gateway("Spark audio interpretation request failed")
+            }
+        })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| WorkerError::bad_gateway("Spark audio response was not readable"))?;
+    if !status.is_success() {
+        return Err(WorkerError::bad_gateway(format!(
+            "Spark audio request failed with status {}",
+            status.as_u16()
+        )));
+    }
+    let upstream: Value = serde_json::from_str(&body)
+        .map_err(|_| WorkerError::bad_gateway("Spark audio response was not valid JSON"))?;
+    let text = truncate_chars(
+        extract_chat_completion_text(&upstream).unwrap_or_default(),
+        limits.max_output_chars,
+    );
+    let request_id = upstream
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("chatcmpl_finite_specialization")
+        .to_owned();
+    let mut output = upstream;
+    if output.pointer("/choices/0/message").is_none() {
+        return Err(WorkerError::bad_gateway(
+            "Spark audio response did not contain an assistant message",
+        ));
+    }
+    output["choices"][0]["message"]["content"] = json!(text);
+    output["specialization_result"] = specialization_result(
+        Capability::Audio,
+        text,
+        &state.config.vision_model,
+        &request_id,
+        started,
+    );
+    Ok(output)
+}
+
+async fn analyze_video(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+) -> Result<Value, WorkerError> {
+    let started = Instant::now();
+    let limits = effective_media_limits(state, input, Capability::Video)?;
+    let spark_token = state
+        .config
+        .spark_bearer_token
+        .as_deref()
+        .ok_or_else(|| WorkerError::unavailable("Spark gateway token is not configured"))?;
+    let normalized = normalize_video_input(state, input, limits).await?;
+    let upstream_request = responses_request_for_video(&normalized, &state.config.vision_model)?;
+    let response = state
+        .client
+        .post(format!(
+            "{}/responses",
+            state.config.spark_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(spark_token)
+        .json(&upstream_request)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                WorkerError::request_timeout("Spark sampled-video analysis timed out")
+            } else {
+                WorkerError::bad_gateway("Spark sampled-video analysis request failed")
+            }
+        })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| WorkerError::bad_gateway("Spark video response was not readable"))?;
+    if !status.is_success() {
+        return Err(WorkerError::bad_gateway(format!(
+            "Spark video request failed with status {}",
+            status.as_u16()
+        )));
+    }
+    let upstream: Value = serde_json::from_str(&body)
+        .map_err(|_| WorkerError::bad_gateway("Spark video response was not valid JSON"))?;
+    let text = truncate_chars(
+        extract_response_text(&upstream).unwrap_or_default(),
+        limits.max_output_chars,
+    );
+    let request_id = upstream
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp_finite_specialization");
+    let mut output = chat_completion_response_from_responses(&upstream, &state.config.vision_model);
+    output["choices"][0]["message"]["content"] = json!(text);
+    output["specialization_result"] = specialization_result(
+        Capability::Video,
+        text,
+        &state.config.vision_model,
+        request_id,
+        started,
+    );
+    Ok(output)
+}
+
+fn specialization_result(
+    capability: Capability,
+    text: String,
+    model: &str,
+    request_id: &str,
+    started: Instant,
+) -> Value {
+    json!({
+        "capability": capability.name(),
+        "text": text,
+        "model": model,
+        "request_id": request_id,
+        "duration_ms": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    })
+}
+
+fn effective_media_limits(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+    capability: Capability,
+) -> Result<InvocationNormalizationLimits, WorkerError> {
+    let requested = input
+        .finite_specialization
+        .as_ref()
+        .map(|desired| {
+            let enabled = match capability {
+                Capability::Image => desired.capabilities.image,
+                Capability::Audio => desired.capabilities.audio,
+                Capability::Video => desired.capabilities.video,
+            };
+            if !enabled {
+                return Err(WorkerError::unavailable(format!(
+                    "{} capability is disabled",
+                    capability.name()
+                )));
+            }
+            let prompt = match capability {
+                Capability::Image => &desired.prompt_versions.image,
+                Capability::Audio => &desired.prompt_versions.audio,
+                Capability::Video => &desired.prompt_versions.video,
+            };
+            if prompt != capability.prompt_version() {
+                return Err(WorkerError::bad_request_with_code(
+                    format!("{} prompt version is not supported", capability.name()),
+                    "unsupported_media_format",
+                ));
+            }
+            Ok(desired.normalization_limits)
+        })
+        .transpose()?
+        .unwrap_or(InvocationNormalizationLimits {
+            max_images: DEFAULT_MAX_IMAGES,
+            max_inline_bytes: state.config.max_inline_image_bytes,
+            max_download_bytes: state.config.max_image_bytes,
+            max_output_chars: state.config.max_output_chars,
+        });
+    Ok(InvocationNormalizationLimits {
+        max_images: requested.max_images.clamp(1, DEFAULT_MAX_IMAGES),
+        max_inline_bytes: requested
+            .max_inline_bytes
+            .clamp(1024, state.config.max_inline_image_bytes),
+        max_download_bytes: requested
+            .max_download_bytes
+            .clamp(1024, state.config.max_image_bytes),
+        max_output_chars: requested
+            .max_output_chars
+            .clamp(256, state.config.max_output_chars),
+    })
+}
+
+async fn normalize_audio_input(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+    limits: InvocationNormalizationLimits,
+) -> Result<ChatCompletionRequest, WorkerError> {
+    let source = media_source(input, Capability::Audio)?;
+    let bytes = retrieve_media(state, source, Capability::Audio, limits).await?;
+    let wav = normalize_audio_bytes(state, bytes, state.config.max_image_bytes).await?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(wav);
+    replace_primary_media(
+        input,
+        Capability::Audio,
+        vec![json!({
+            "type": "input_audio",
+            "input_audio": { "data": encoded, "format": "wav" },
+        })],
+    )
+}
+
+async fn normalize_video_input(
+    state: &WorkerState,
+    input: &ChatCompletionRequest,
+    limits: InvocationNormalizationLimits,
+) -> Result<ChatCompletionRequest, WorkerError> {
+    let source = media_source(input, Capability::Video)?;
+    let bytes = retrieve_media(state, source, Capability::Video, limits).await?;
+    let frames = sample_video_frames(state, bytes).await?;
+    let mut parts = Vec::with_capacity(frames.len() * 2);
+    for (timestamp, png) in frames {
+        parts.push(json!({
+            "type": "text",
+            "text": format!("Frame at {timestamp:.3} seconds"),
+        }));
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(png)
+                )
+            },
+        }));
+    }
+    replace_primary_media(input, Capability::Video, parts)
+}
+
+fn media_source(
+    input: &ChatCompletionRequest,
+    capability: Capability,
+) -> Result<MediaSource, WorkerError> {
+    for message in &input.messages {
+        let ChatContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
+            match (capability, part_type) {
+                (Capability::Audio, "input_audio") => {
+                    let audio = part.get("input_audio").ok_or_else(|| {
+                        WorkerError::bad_request_with_code(
+                            "input_audio content is missing input_audio",
+                            "media_decode_failed",
+                        )
+                    })?;
+                    if let Some(url) = audio.get("url").and_then(Value::as_str) {
+                        return Ok(source_from_url_or_data(url));
+                    }
+                    let encoded = audio.get("data").and_then(Value::as_str).ok_or_else(|| {
+                        WorkerError::bad_request_with_code(
+                            "input_audio content is missing data",
+                            "media_decode_failed",
+                        )
+                    })?;
+                    let format = audio.get("format").and_then(Value::as_str).unwrap_or("wav");
+                    let mime = audio_format_mime(format)?;
+                    return Ok(MediaSource::Inline {
+                        mime,
+                        encoded: encoded.to_owned(),
+                    });
+                }
+                (Capability::Audio, "audio_url") => {
+                    let url = nested_url(part, "audio_url")?;
+                    return Ok(source_from_url_or_data(&url));
+                }
+                (Capability::Video, "video_url") | (Capability::Video, "input_video") => {
+                    let key = if part_type == "video_url" {
+                        "video_url"
+                    } else {
+                        "input_video"
+                    };
+                    let url = nested_url(part, key)?;
+                    return Ok(source_from_url_or_data(&url));
+                }
+                _ => {}
+            }
+        }
+    }
+    Err(WorkerError::bad_request_with_code(
+        format!("{} source is missing", capability.name()),
+        "unsupported_media_format",
+    ))
+}
+
+fn nested_url(part: &Value, key: &str) -> Result<String, WorkerError> {
+    part.get(key)
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("url").and_then(Value::as_str))
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            WorkerError::bad_request_with_code(
+                format!("{key} content is missing url"),
+                "media_fetch_failed",
+            )
+        })
+}
+
+fn source_from_url_or_data(value: &str) -> MediaSource {
+    if value.starts_with("data:") {
+        MediaSource::DataUri(value.to_owned())
+    } else {
+        MediaSource::Url(value.to_owned())
+    }
+}
+
+fn audio_format_mime(format: &str) -> Result<&'static str, WorkerError> {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "wav" | "wave" => Ok("audio/wav"),
+        "mp3" | "mpeg" => Ok("audio/mpeg"),
+        "ogg" | "opus" => Ok("audio/ogg"),
+        "flac" => Ok("audio/flac"),
+        "m4a" | "mp4" => Ok("audio/mp4"),
+        _ => Err(WorkerError::bad_request_with_code(
+            "input_audio format is unsupported",
+            "unsupported_media_format",
+        )),
+    }
+}
+
+async fn retrieve_media(
+    state: &WorkerState,
+    source: MediaSource,
+    capability: Capability,
+    limits: InvocationNormalizationLimits,
+) -> Result<Vec<u8>, WorkerError> {
+    let bytes = match source {
+        MediaSource::DataUri(source) => {
+            decode_media_data_uri(&source, capability, limits.max_inline_bytes)?
+        }
+        MediaSource::Inline { mime, encoded } => {
+            decode_inline_media(mime, &encoded, capability, limits.max_inline_bytes)?
+        }
+        MediaSource::Url(url) => {
+            fetch_binary_media(state, &url, capability, limits.max_download_bytes).await?
+        }
+    };
+    if bytes.is_empty() {
+        return Err(WorkerError::bad_request_with_code(
+            format!("{} media is empty", capability.name()),
+            "media_decode_failed",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_media_data_uri(
+    source: &str,
+    capability: Capability,
+    max_bytes: u64,
+) -> Result<Vec<u8>, WorkerError> {
+    let (metadata, encoded) = source.split_once(',').ok_or_else(|| {
+        WorkerError::bad_request_with_code("inline media is malformed", "media_decode_failed")
+    })?;
+    let mime = metadata
+        .strip_prefix("data:")
+        .and_then(|value| value.strip_suffix(";base64"))
+        .ok_or_else(|| {
+            WorkerError::bad_request_with_code(
+                "inline media must use a base64 data URI",
+                "unsupported_media_format",
+            )
+        })?;
+    let valid_mime = match capability {
+        Capability::Audio => mime.starts_with("audio/"),
+        Capability::Video => mime.starts_with("video/"),
+        Capability::Image => mime.starts_with("image/"),
+    };
+    if !valid_mime {
+        return Err(WorkerError::bad_request_with_code(
+            format!("inline {} has the wrong media type", capability.name()),
+            "unsupported_media_format",
+        ));
+    }
+    decode_inline_media(mime, encoded, capability, max_bytes)
+}
+
+fn decode_inline_media(
+    _mime: &str,
+    encoded: &str,
+    capability: Capability,
+    max_bytes: u64,
+) -> Result<Vec<u8>, WorkerError> {
+    if encoded.len() as u64 > max_bytes.saturating_mul(2) {
+        return Err(WorkerError::payload_too_large(format!(
+            "inline {} exceeds the specialization limit",
+            capability.name()
+        )));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| {
+            WorkerError::bad_request_with_code(
+                format!("inline {} base64 is invalid", capability.name()),
+                "media_decode_failed",
+            )
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(WorkerError::payload_too_large(format!(
+            "inline {} exceeds the specialization limit",
+            capability.name()
+        )));
+    }
+    Ok(bytes)
+}
+
+async fn fetch_binary_media(
+    state: &WorkerState,
+    source: &str,
+    capability: Capability,
+    max_download_bytes: u64,
+) -> Result<Vec<u8>, WorkerError> {
+    let mut url = reqwest::Url::parse(source).map_err(|_| {
+        WorkerError::bad_request_with_code("media URL is invalid", "media_fetch_failed")
+    })?;
+    for redirect_count in 0..=3 {
+        let client = media_client_for_url(state, &url).await?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(state.config.image_download_timeout_seconds),
+            client.get(url.clone()).send(),
+        )
+        .await
+        .map_err(|_| WorkerError::request_timeout("media retrieval timed out"))?
+        .map_err(|_| {
+            WorkerError::bad_request_with_code("media retrieval failed", "media_fetch_failed")
+        })?;
+        if response.status().is_redirection() {
+            if redirect_count == 3 {
+                return Err(WorkerError::bad_request_with_code(
+                    "media retrieval exceeded the redirect limit",
+                    "media_fetch_failed",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    WorkerError::bad_request_with_code(
+                        "media redirect is invalid",
+                        "media_fetch_failed",
+                    )
+                })?;
+            url = url.join(location).map_err(|_| {
+                WorkerError::bad_request_with_code(
+                    "media redirect is invalid",
+                    "media_fetch_failed",
+                )
+            })?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(WorkerError::bad_request_with_code(
+                "media retrieval failed",
+                "media_fetch_failed",
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_download_bytes)
+        {
+            return Err(WorkerError::payload_too_large(format!(
+                "downloaded {} exceeds the specialization limit",
+                capability.name()
+            )));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                WorkerError::bad_request_with_code("media retrieval failed", "media_fetch_failed")
+            })?;
+            if bytes.len().saturating_add(chunk.len()) as u64 > max_download_bytes {
+                return Err(WorkerError::payload_too_large(format!(
+                    "downloaded {} exceeds the specialization limit",
+                    capability.name()
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok(bytes);
+    }
+    unreachable!("redirect loop always returns")
+}
+
+async fn normalize_audio_bytes(
+    state: &WorkerState,
+    bytes: Vec<u8>,
+    max_output_bytes: u64,
+) -> Result<Vec<u8>, WorkerError> {
+    let _permit = state
+        .media_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| WorkerError::capacity("media normalization capacity is exhausted"))?;
+    let directory = tempfile::Builder::new()
+        .prefix("finite-audio-")
+        .tempdir_in(&state.config.media_temp_dir)
+        .map_err(|_| WorkerError::unavailable("audio workspace could not be created"))?;
+    let input = directory.path().join("input.media");
+    let output = directory.path().join("normalized.wav");
+    tokio::fs::write(&input, bytes)
+        .await
+        .map_err(|_| WorkerError::unavailable("audio input could not be staged"))?;
+    let duration = probe_media(state, &input, Capability::Audio).await?;
+    if duration > state.config.max_audio_duration_seconds as f64 {
+        return Err(WorkerError::payload_too_large(
+            "audio duration exceeds the specialization limit",
+        ));
+    }
+    let status = Command::new(&state.config.ffmpeg_path)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&input)
+        .args([
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+        ])
+        .arg(&output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await
+        .map_err(|_| WorkerError::unavailable("audio decoder is unavailable"))?;
+    if !status.success() {
+        return Err(media_decode_failure(Capability::Audio));
+    }
+    let normalized = tokio::fs::read(output)
+        .await
+        .map_err(|_| media_decode_failure(Capability::Audio))?;
+    if normalized.len() as u64 > max_output_bytes {
+        return Err(WorkerError::payload_too_large(
+            "normalized audio exceeds the specialization limit",
+        ));
+    }
+    Ok(normalized)
+}
+
+async fn sample_video_frames(
+    state: &WorkerState,
+    bytes: Vec<u8>,
+) -> Result<Vec<(f64, Vec<u8>)>, WorkerError> {
+    let _permit = state
+        .media_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| WorkerError::capacity("media normalization capacity is exhausted"))?;
+    let directory = tempfile::Builder::new()
+        .prefix("finite-video-")
+        .tempdir_in(&state.config.media_temp_dir)
+        .map_err(|_| WorkerError::unavailable("video workspace could not be created"))?;
+    let input = directory.path().join("input.media");
+    tokio::fs::write(&input, bytes)
+        .await
+        .map_err(|_| WorkerError::unavailable("video input could not be staged"))?;
+    let duration = probe_media(state, &input, Capability::Video).await?;
+    if duration > state.config.max_video_duration_seconds as f64 {
+        return Err(WorkerError::payload_too_large(
+            "video duration exceeds the specialization limit",
+        ));
+    }
+    let timestamps = uniform_video_timestamps(duration, state.config.max_video_frames);
+    if timestamps.is_empty() {
+        return Err(media_decode_failure(Capability::Video));
+    }
+    let mut frames = Vec::with_capacity(timestamps.len());
+    for (index, timestamp) in timestamps.into_iter().enumerate() {
+        let output = directory.path().join(format!("frame-{index:02}.png"));
+        let status = Command::new(&state.config.ffmpeg_path)
+            .args(["-v", "error", "-y", "-ss"])
+            .arg(format!("{timestamp:.3}"))
+            .arg("-i")
+            .arg(&input)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=1280:-2:force_original_aspect_ratio=decrease",
+            ])
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await
+            .map_err(|_| WorkerError::unavailable("video decoder is unavailable"))?;
+        if !status.success() {
+            return Err(media_decode_failure(Capability::Video));
+        }
+        let png = tokio::fs::read(output)
+            .await
+            .map_err(|_| media_decode_failure(Capability::Video))?;
+        image::load_from_memory(&png).map_err(|_| media_decode_failure(Capability::Video))?;
+        frames.push((timestamp, png));
+    }
+    Ok(frames)
+}
+
+async fn probe_media(
+    state: &WorkerState,
+    input: &Path,
+    capability: Capability,
+) -> Result<f64, WorkerError> {
+    let output = Command::new(&state.config.ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+        ])
+        .arg(input)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|_| WorkerError::unavailable("media probe is unavailable"))?;
+    if !output.status.success() {
+        return Err(media_decode_failure(capability));
+    }
+    let probe: Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| media_decode_failure(capability))?;
+    let expected_stream = match capability {
+        Capability::Audio => "audio",
+        Capability::Video => "video",
+        Capability::Image => "video",
+    };
+    let has_stream = probe
+        .get("streams")
+        .and_then(Value::as_array)
+        .is_some_and(|streams| {
+            streams.iter().any(|stream| {
+                stream.get("codec_type").and_then(Value::as_str) == Some(expected_stream)
+            })
+        });
+    let duration = probe
+        .pointer("/format/duration")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0);
+    if !has_stream || duration.is_none() {
+        return Err(media_decode_failure(capability));
+    }
+    Ok(duration.unwrap_or_default())
+}
+
+fn replace_primary_media(
+    input: &ChatCompletionRequest,
+    capability: Capability,
+    replacement: Vec<Value>,
+) -> Result<ChatCompletionRequest, WorkerError> {
+    let mut normalized = input.clone();
+    let mut replaced = false;
+    for message in &mut normalized.messages {
+        let ChatContent::Parts(parts) = &mut message.content else {
+            continue;
+        };
+        let mut output = Vec::new();
+        for part in parts.iter() {
+            let is_primary = matches!(
+                (capability, part.get("type").and_then(Value::as_str)),
+                (Capability::Audio, Some("input_audio" | "audio_url"))
+                    | (Capability::Video, Some("video_url" | "input_video"))
+            );
+            if is_primary {
+                if replaced {
+                    return Err(WorkerError::bad_request_with_code(
+                        "audio and video requests require exactly one media item",
+                        "unsupported_media_format",
+                    ));
+                }
+                output.extend(replacement.clone());
+                replaced = true;
+            } else {
+                output.push(part.clone());
+            }
+        }
+        *parts = output;
+    }
+    if !replaced {
+        return Err(WorkerError::bad_request_with_code(
+            format!("{} source is missing", capability.name()),
+            "unsupported_media_format",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn responses_request_for_video(
+    input: &ChatCompletionRequest,
+    model: &str,
+) -> Result<Value, WorkerError> {
+    let mut request = responses_request_from_chat(input, model)?;
+    request["input"][0]["content"][0]["text"] = json!(VIDEO_CAPABILITY_PROMPT);
+    request["metadata"]["finite_capability"] = json!(Capability::Video.name());
+    request["metadata"]["finite_prompt_version"] = json!(VIDEO_PROMPT_VERSION);
+    Ok(request)
+}
+
+fn extract_chat_completion_text(value: &Value) -> Option<String> {
+    value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn media_decode_failure(capability: Capability) -> WorkerError {
+    WorkerError::bad_request_with_code(
+        format!("{} bytes could not be decoded", capability.name()),
+        "media_decode_failed",
+    )
 }
 
 fn truncate_chars(value: String, max_chars: usize) -> String {
@@ -508,9 +1502,154 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
             })
             .unwrap_or(false);
         state.metrics.observe_canary(
+            Capability::Image,
             passed,
             started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
+    }
+}
+
+async fn run_audio_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    loop {
+        interval.tick().await;
+        let started = Instant::now();
+        let request = audio_canary_request();
+        let passed = analyze_audio(&state, &request)
+            .await
+            .ok()
+            .and_then(|value| {
+                value["specialization_result"]["text"]
+                    .as_str()
+                    .map(|text| text.to_ascii_lowercase().contains("tone"))
+            })
+            .unwrap_or(false);
+        state.metrics.observe_canary(
+            Capability::Audio,
+            passed,
+            started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
+}
+
+async fn run_video_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    loop {
+        interval.tick().await;
+        let started = Instant::now();
+        let passed = match video_canary_request(&state).await {
+            Ok(request) => analyze_video(&state, &request)
+                .await
+                .ok()
+                .and_then(|value| {
+                    value["specialization_result"]["text"]
+                        .as_str()
+                        .map(|text| text.to_ascii_lowercase().contains("red"))
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        state.metrics.observe_canary(
+            Capability::Video,
+            passed,
+            started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
+}
+
+fn audio_canary_request() -> ChatCompletionRequest {
+    let sample_rate = 16_000_u32;
+    let sample_count = sample_rate / 2;
+    let mut pcm = Vec::with_capacity(sample_count as usize * 2);
+    for sample in 0..sample_count {
+        let phase = sample as f32 * 440.0 * std::f32::consts::TAU / sample_rate as f32;
+        pcm.extend_from_slice(&((phase.sin() * 8_000.0) as i16).to_le_bytes());
+    }
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36_u32 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    request_with_media_parts(vec![
+        json!({
+            "type": "text",
+            "text": "Is this audio silent or does it contain a tone? Reply with exactly SILENCE or TONE."
+        }),
+        json!({
+            "type": "input_audio",
+            "input_audio": {
+                "data": base64::engine::general_purpose::STANDARD.encode(wav),
+                "format": "wav"
+            }
+        }),
+    ])
+}
+
+async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionRequest, WorkerError> {
+    let file = tempfile::Builder::new()
+        .prefix("finite-video-canary-")
+        .suffix(".mp4")
+        .tempfile_in(&state.config.media_temp_dir)
+        .map_err(|_| WorkerError::unavailable("video canary workspace is unavailable"))?;
+    let path = file.path().to_owned();
+    let status = Command::new(&state.config.ffmpeg_path)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=32x32:d=1",
+        ])
+        .args(["-an", "-c:v", "mpeg4", "-pix_fmt", "yuv420p"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await
+        .map_err(|_| WorkerError::unavailable("video canary generation failed"))?;
+    if !status.success() {
+        return Err(WorkerError::unavailable("video canary generation failed"));
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| WorkerError::unavailable("video canary could not be read"))?;
+    Ok(request_with_media_parts(vec![
+        json!({
+            "type": "text",
+            "text": "What is the dominant color in this video? Reply with one uppercase color word."
+        }),
+        json!({
+            "type": "video_url",
+            "video_url": { "url": format!("data:video/mp4;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)) }
+        }),
+    ]))
+}
+
+fn request_with_media_parts(parts: Vec<Value>) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: None,
+        messages: vec![ChatMessage {
+            role: "user".to_owned(),
+            content: ChatContent::Parts(parts),
+        }],
+        temperature: Some(json!(0)),
+        max_tokens: Some(32),
+        max_completion_tokens: None,
+        stream: Some(false),
+        finite_specialization: None,
     }
 }
 
@@ -1119,6 +2258,15 @@ impl WorkerError {
             "request_timeout",
         )
     }
+
+    fn capacity(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "server_error",
+            "capacity_exceeded",
+        )
+    }
 }
 
 impl IntoResponse for WorkerError {
@@ -1169,6 +2317,298 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use tower::ServiceExt;
+
+    #[test]
+    fn classifies_one_primary_media_and_rejects_mixed_media() {
+        let audio = request_with_media_parts(vec![
+            json!({ "type": "text", "text": "What is the speaker implying?" }),
+            json!({
+                "type": "input_audio",
+                "input_audio": { "data": "UklGRg==", "format": "wav" }
+            }),
+        ]);
+        assert_eq!(classify_request(&audio).unwrap(), Capability::Audio);
+
+        let video = request_with_media_parts(vec![json!({
+            "type": "video_url",
+            "video_url": { "url": "data:video/mp4;base64,AAAA" }
+        })]);
+        assert_eq!(classify_request(&video).unwrap(), Capability::Video);
+
+        let mixed = request_with_media_parts(vec![
+            json!({
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,AAAA" }
+            }),
+            json!({
+                "type": "input_audio",
+                "input_audio": { "data": "UklGRg==", "format": "wav" }
+            }),
+        ]);
+        let error = classify_request(&mixed).unwrap_err();
+        assert_eq!(error.code, "mixed_media_requires_decomposition");
+    }
+
+    #[test]
+    fn audio_request_uses_canonical_chat_completions_input_audio() {
+        let request = request_with_media_parts(vec![
+            json!({ "type": "text", "text": "Interpret the emotional tone." }),
+            json!({
+                "type": "input_audio",
+                "input_audio": { "data": "UklGRg==", "format": "wav" }
+            }),
+        ]);
+
+        let upstream = chat_request_for_audio(&request, "aeon-test").unwrap();
+
+        assert_eq!(upstream["model"], "aeon-test");
+        assert_eq!(upstream["stream"], false);
+        assert_eq!(upstream["messages"][0]["role"], "developer");
+        assert_eq!(
+            upstream["messages"][1]["content"][1],
+            json!({
+                "type": "input_audio",
+                "input_audio": { "data": "UklGRg==", "format": "wav" }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_round_trip_normalizes_wav_and_calls_chat_completions() {
+        if !media_tools_available().await {
+            return;
+        }
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let upstream_url = spawn_spark_mock(
+            captured.clone(),
+            StatusCode::OK,
+            json!({
+                "id": "chatcmpl_audio",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "A steady tone." },
+                    "finish_reason": "stop"
+                }]
+            }),
+        )
+        .await;
+        let worker = spawn_worker(test_config(&upstream_url)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/chat/completions"))
+            .bearer_auth("worker-secret")
+            .json(&audio_canary_request())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["specialization_result"]["capability"], "audio");
+        assert_eq!(body["specialization_result"]["text"], "A steady tone.");
+        let request = captured.lock().unwrap().clone().unwrap().1;
+        assert_eq!(request["model"], "qwopus-test");
+        assert_eq!(request["messages"][0]["content"], AUDIO_CAPABILITY_PROMPT);
+        let normalized = request["messages"][1]["content"][1]["input_audio"]["data"]
+            .as_str()
+            .unwrap();
+        let wav = base64::engine::general_purpose::STANDARD
+            .decode(normalized)
+            .unwrap();
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    #[tokio::test]
+    async fn corrupt_audio_and_video_return_shared_typed_decode_errors() {
+        if !media_tools_available().await {
+            return;
+        }
+        let state = test_state(test_config("http://127.0.0.1:9"));
+        let audio = request_with_media_parts(vec![json!({
+            "type": "input_audio",
+            "input_audio": { "data": "bm90LW1lZGlh", "format": "wav" }
+        })]);
+        let video = request_with_media_parts(vec![json!({
+            "type": "video_url",
+            "video_url": { "url": "data:video/mp4;base64,bm90LW1lZGlh" }
+        })]);
+
+        let audio_error = analyze_audio(&state, &audio).await.unwrap_err();
+        let video_error = analyze_video(&state, &video).await.unwrap_err();
+
+        assert_eq!(audio_error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(audio_error.code, "media_decode_failed");
+        assert_eq!(video_error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(video_error.code, "media_decode_failed");
+    }
+
+    #[tokio::test]
+    async fn exhausted_media_capacity_returns_typed_retryable_boundary() {
+        let mut config = test_config("http://127.0.0.1:9");
+        config.media_concurrency = 1;
+        let state = test_state(config);
+        let _permit = state.media_slots.clone().acquire_owned().await.unwrap();
+
+        let error = normalize_audio_input(&state, &audio_canary_request(), test_limits())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "capacity_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audio_deadline_kills_in_flight_media_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("probe.pid");
+        let probe = directory.path().join("blocking-ffprobe.sh");
+        std::fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = test_config("http://127.0.0.1:9");
+        config.ffprobe_path = probe;
+        config.request_deadline_seconds = 1;
+        let worker = spawn_worker(config).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/chat/completions"))
+            .bearer_auth("worker-secret")
+            .json(&audio_canary_request())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["error"]["code"], "request_timeout");
+        let pid = tokio::fs::read_to_string(&pid_file).await.unwrap();
+        let mut stopped = false;
+        for _ in 0..20 {
+            if !Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success())
+            {
+                stopped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(stopped, "deadline left ffprobe process {pid} running");
+    }
+
+    #[test]
+    fn uniform_video_sampling_covers_short_and_long_clips() {
+        assert_eq!(uniform_video_timestamps(3.2, 16), vec![0.0, 1.0, 2.0, 3.0]);
+
+        let long = uniform_video_timestamps(60.0, 16);
+        assert_eq!(long.len(), 16);
+        assert_eq!(long[0], 0.0);
+        assert!((long[15] - 59.999).abs() < 0.01);
+        assert!(long.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn video_round_trip_samples_frames_in_chronological_responses_input() {
+        if !media_tools_available().await {
+            return;
+        }
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let upstream_url = spawn_spark_mock(
+            captured.clone(),
+            StatusCode::OK,
+            json!({
+                "id": "resp_video",
+                "output_text": "The frames are red."
+            }),
+        )
+        .await;
+        let config = test_config(&upstream_url);
+        let request = video_canary_request(&test_state(config.clone()))
+            .await
+            .unwrap();
+        let worker = spawn_worker(config).await;
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/chat/completions"))
+            .bearer_auth("worker-secret")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["specialization_result"]["capability"], "video");
+        assert_eq!(body["specialization_result"]["text"], "The frames are red.");
+        let request = captured.lock().unwrap().clone().unwrap().1;
+        assert_eq!(request["metadata"]["finite_capability"], "video");
+        assert_eq!(
+            request["input"][0]["content"][0]["text"],
+            VIDEO_CAPABILITY_PROMPT
+        );
+        let content = request["input"][1]["content"].as_array().unwrap();
+        let frame_markers = content
+            .iter()
+            .filter_map(|part| {
+                (part["type"] == "input_text")
+                    .then(|| part["text"].as_str())
+                    .flatten()
+                    .filter(|text| text.starts_with("Frame at "))
+            })
+            .collect::<Vec<_>>();
+        let images = content
+            .iter()
+            .filter(|part| part["type"] == "input_image")
+            .collect::<Vec<_>>();
+        assert_eq!(frame_markers, vec!["Frame at 0.000 seconds"]);
+        assert_eq!(images.len(), 1);
+        assert!(
+            images[0]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+    }
+
+    #[test]
+    fn capability_health_is_independent() {
+        let metrics = CapabilityMetrics::default();
+        metrics.observe_canary(Capability::Image, true, 100);
+        metrics.observe_canary(Capability::Audio, false, 200);
+        metrics.observe_canary(Capability::Video, true, 300);
+
+        let rendered = metrics.render("model-test");
+        assert!(rendered.contains("capability=\"image\",health_state=\"healthy\""));
+        assert!(rendered.contains("capability=\"audio\",health_state=\"degraded\""));
+        assert!(rendered.contains("capability=\"video\",health_state=\"healthy\""));
+    }
+
+    #[test]
+    fn capability_health_becomes_stale_after_fifteen_minutes() {
+        let observation = CanaryObservation {
+            health_state: "healthy",
+            consecutive_failures: 0,
+            last_completed_timestamp_seconds: current_unix_timestamp().saturating_sub(901),
+            last_latency_milliseconds: 100,
+        };
+
+        assert_eq!(effective_canary_health(&observation), "stale");
+    }
 
     #[test]
     fn converts_chat_image_parts_to_responses_input() {
@@ -1517,20 +2957,20 @@ mod tests {
     fn image_canary_health_is_capability_local_and_recovers_immediately() {
         let metrics = CapabilityMetrics::default();
 
-        metrics.observe_canary(false, 1200);
+        metrics.observe_canary(Capability::Image, false, 1200);
         assert!(
             metrics
                 .render("model-test")
                 .contains("health_state=\"degraded\"")
         );
-        metrics.observe_canary(false, 1300);
-        metrics.observe_canary(false, 1400);
+        metrics.observe_canary(Capability::Image, false, 1300);
+        metrics.observe_canary(Capability::Image, false, 1400);
         assert!(
             metrics
                 .render("model-test")
                 .contains("health_state=\"unavailable\"")
         );
-        metrics.observe_canary(true, 900);
+        metrics.observe_canary(Capability::Image, true, 900);
 
         let rendered = metrics.render("model-test");
         assert!(rendered.contains("health_state=\"healthy\""));
@@ -1590,6 +3030,15 @@ mod tests {
             request_deadline_seconds: 120,
             allowed_attachment_hosts: Vec::new(),
             image_canary_interval_seconds: None,
+            audio_canary_interval_seconds: None,
+            video_canary_interval_seconds: None,
+            max_audio_duration_seconds: DEFAULT_MAX_AUDIO_DURATION_SECONDS,
+            max_video_duration_seconds: DEFAULT_MAX_VIDEO_DURATION_SECONDS,
+            max_video_frames: DEFAULT_MAX_VIDEO_FRAMES,
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            ffprobe_path: PathBuf::from("ffprobe"),
+            media_temp_dir: std::env::temp_dir(),
+            media_concurrency: 2,
         }
     }
 
@@ -1636,6 +3085,7 @@ mod tests {
     }
 
     fn test_state(config: WorkerConfig) -> WorkerState {
+        let media_concurrency = config.media_concurrency;
         WorkerState {
             config,
             client: Client::builder()
@@ -1643,6 +3093,7 @@ mod tests {
                 .build()
                 .unwrap(),
             metrics: CapabilityMetrics::default(),
+            media_slots: Arc::new(Semaphore::new(media_concurrency)),
         }
     }
 
@@ -1660,24 +3111,58 @@ mod tests {
         status: StatusCode,
         response: Value,
     ) -> String {
-        let app = Router::new().route(
-            "/responses",
-            post(move |headers: HeaderMap, body: Bytes| {
-                let captured = captured.clone();
-                let response = response.clone();
-                async move {
-                    let payload = serde_json::from_slice::<Value>(&body).unwrap();
-                    *captured.lock().unwrap() = Some((headers, payload));
-                    (status, Json(response))
-                }
-            }),
-        );
+        let responses_captured = captured.clone();
+        let responses_body = response.clone();
+        let app = Router::new()
+            .route(
+                "/responses",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let captured = responses_captured.clone();
+                    let response = responses_body.clone();
+                    async move {
+                        let payload = serde_json::from_slice::<Value>(&body).unwrap();
+                        *captured.lock().unwrap() = Some((headers, payload));
+                        (status, Json(response))
+                    }
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let captured = captured.clone();
+                    let response = response.clone();
+                    async move {
+                        let payload = serde_json::from_slice::<Value>(&body).unwrap();
+                        *captured.lock().unwrap() = Some((headers, payload));
+                        (status, Json(response))
+                    }
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{}", addr)
+    }
+
+    async fn media_tools_available() -> bool {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+            && Command::new("ffprobe")
+                .arg("-version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success())
     }
 
     async fn spawn_image_mock() -> String {

@@ -16,6 +16,8 @@ digest-pinned finite-mono image.
 - The container runs as root only because the existing host-managed secret
   files are root-owned mode `0400`. It has no Linux capabilities, no service
   account token, no privilege escalation, and a read-only root filesystem.
+  FFmpeg media work is confined to a 256 MiB ephemeral workspace with two
+  concurrent normalization slots.
 
 ## Verification
 
@@ -26,10 +28,12 @@ curl --fail --silent http://127.0.0.1:30998/health
 curl --fail --silent http://127.0.0.1:30998/metrics
 ```
 
-Run an authenticated `/v1/chat/completions` image request using the existing
-worker token from the host secret directory. Verify the normal Chat
-Completions answer and the top-level `specialization_result` fields without
-printing either credential.
+Run authenticated `/v1/chat/completions` requests for one deterministic image,
+audio clip, and video clip using the existing worker token from the host secret
+directory. Verify the normal Chat Completions answer and the top-level
+`specialization_result` fields without printing either credential. Confirm
+that `/metrics` reports fresh, independent `image`, `audio`, and `video`
+capability health.
 
 ## Rollback
 
@@ -40,6 +44,6 @@ k3s kubectl -n fc-specializations rollout undo deployment/finite-specialization-
 k3s kubectl -n fc-specializations rollout status deployment/finite-specialization-worker --timeout=180s
 ```
 
-Restore the backed-up k3s manifest after the old replica is ready. A worker
-failure is capability-local: leave Hermes text inference and the Spark AEON
-route untouched.
+Restore the backed-up k3s manifest after the old replica is ready. Disable only
+the failing capability in the agentd desired state, leaving successful
+capabilities, Hermes text inference, and the Spark AEON route untouched.

@@ -61,6 +61,20 @@ spec:
               value: aeon-gemma-4-12b-k4-nvfp4-unified-fast
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
               value: "300"
+            - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS
+              value: "300"
+            - name: FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS
+              value: "300"
+            - name: FINITE_SPECIALIZATION_MEDIA_TEMP_DIR
+              value: /var/run/finite-specialization-media
+            - name: FINITE_SPECIALIZATION_MEDIA_CONCURRENCY
+              value: "2"
+            - name: FINITE_SPECIALIZATION_MAX_AUDIO_DURATION_SECONDS
+              value: "900"
+            - name: FINITE_SPECIALIZATION_MAX_VIDEO_DURATION_SECONDS
+              value: "600"
+            - name: FINITE_SPECIALIZATION_MAX_VIDEO_FRAMES
+              value: "16"
           ports:
             - name: http
               containerPort: 18998
@@ -100,8 +114,13 @@ spec:
             - name: worker-secrets
               mountPath: /worker-secrets
               readOnly: true
+            - name: media-workspace
+              mountPath: /var/run/finite-specialization-media
       terminationGracePeriodSeconds: 30
       volumes:
+        - name: media-workspace
+          emptyDir:
+            sizeLimit: 256Mi
         - name: worker-secrets
           hostPath:
             path: /var/lib/finitecomputer/agent-cluster/secrets/finite-specialization-worker
