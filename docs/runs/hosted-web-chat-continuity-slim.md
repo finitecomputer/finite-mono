@@ -116,6 +116,20 @@ Work top-down.
 
 ## Production evidence — 2026-07-13
 
+- At 16:04 CDT, a real Sol 2 New chat created from a selected Previous
+  conversation appeared under Previous conversations and received no Agent
+  reply. The retained message stayed readable; no bot or Room was deleted.
+  Root cause was a split target assembled by the global New chat button: the
+  canonical Room id plus the selected legacy Topic id. The dashboard checked
+  only the Room, and `/v1/app/new-chat` trusted both identifiers.
+- Candidate revision `3857559` makes the global button choose only from
+  canonical Topics, makes the dashboard reject a Topic outside the bound
+  canonical Room, and makes `finitechat-hosted-device` reopen and validate the
+  encrypted Project binding before creation. Unit, hosted-device HTTP, and
+  browser regressions cover the exact Previous-conversation selection case;
+  a legacy-room request fails with HTTP 409. Production deploy and Paul's
+  fresh-turn check are still required.
+
 - Deployed revision: `7d58aa1`; Nix system closure:
   `/nix/store/jziqmdsyas39bamhglg1a9fk5vsymnl8-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
 - Dashboard image:
