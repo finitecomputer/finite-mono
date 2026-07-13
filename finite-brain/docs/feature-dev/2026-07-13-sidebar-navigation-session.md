@@ -6,7 +6,8 @@
 - Fixed point before session: `af12b52`
 - Worker session: current Codex thread; tiny isolated low-risk UI write
 - Implementation commit: `950509726e474a94246d58ef1fba5fb083b53bec`
-- Status: implementation, review, and final checks complete; publish pending
+- Status: implementation, review, and final checks complete; published to the
+  existing PR branch
 
 ## Inputs
 

@@ -259,7 +259,8 @@ server implementation details; the no-backend-change boundary remains intact.
   with no findings. The fresh independent reviews above are the fallback;
   details are in `2026-07-13-sidebar-navigation-local-coderabbit-round.md`.
 - Committed as `950509726e474a94246d58ef1fba5fb083b53bec`
-  (`feat(fbrain): consolidate sidebar navigation`); push remains pending.
+  (`feat(fbrain): consolidate sidebar navigation`) and published on the
+  existing PR branch.
 - Session and two-axis review artifacts are
   `2026-07-13-sidebar-navigation-session.md` and
   `2026-07-13-sidebar-navigation-review-packet.md`.
