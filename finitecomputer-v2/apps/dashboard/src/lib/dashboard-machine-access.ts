@@ -35,10 +35,13 @@ export async function loadDashboardMachineAccess(
 ): Promise<DashboardMachineAccess | null> {
   const viewer = await loadOptionalViewerContext();
   let core = await loadCoreMe({ cacheMode: options.coreCacheMode });
-  let coreProject = await projectForRouteIdentifier(core.me, routeIdentifier);
+  let coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
   if (!coreProject && options.coreCacheMode === "swr") {
     core = await loadCoreMe();
-    coreProject = await projectForRouteIdentifier(core.me, routeIdentifier);
+    coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
+  }
+  if (!coreProject) {
+    coreProject = await projectForResolvedRoute(core.me, routeIdentifier);
   }
   const runtime = coreProject?.runtime;
   if (!coreProject || !runtime) return null;
@@ -54,7 +57,7 @@ export async function loadDashboardMachineAccess(
   };
 }
 
-async function projectForRouteIdentifier(
+export function dashboardMachineProjectFromSnapshot(
   me: CoreMe | null,
   routeIdentifier: string
 ) {
@@ -67,6 +70,11 @@ async function projectForRouteIdentifier(
   const legacyProject = coreProductProjectForLegacyMachineId(projects, routeIdentifier);
   if (legacyProject) return legacyProject;
 
+  return null;
+}
+
+async function projectForResolvedRoute(me: CoreMe | null, routeIdentifier: string) {
+  const projects = me?.projects ?? [];
   const resolution = await resolveCoreRuntimeRoute(routeIdentifier);
   if (!resolution) return null;
   return (

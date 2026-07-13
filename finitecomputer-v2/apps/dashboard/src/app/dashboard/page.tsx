@@ -186,6 +186,12 @@ export default async function DashboardPage({
     const billingSyncPending =
       billingReturn.kind === "confirming" || billingReturn.kind === "sync-timeout";
 
+    // Core may have durably accepted this exact creation request before chat
+    // bootstrap authorization failed. Keep the retry form visible; the POST
+    // route reuses the signed draft idempotency key instead of creating a
+    // second Project.
+    const creationAuthorizationRetry = Boolean(agentCreationError && draft);
+
     if (
       draftStartedStripeCheckout(draft) &&
       billingReturnParam === "success" &&
@@ -200,9 +206,10 @@ export default async function DashboardPage({
       core.configured &&
       Boolean(core.account.email) &&
       (coreProjects.length === 0 || isNewAgentFlow) &&
-      pendingAgentCreationRequests.length === 0 &&
       !billingSyncPending &&
-      failedAgentCreationRequests.length === 0;
+      (creationAuthorizationRetry ||
+        (pendingAgentCreationRequests.length === 0 &&
+          failedAgentCreationRequests.length === 0));
     // While a successful checkout is still syncing, the billing setup panel
     // (and its Start checkout button) must stay hidden to avoid a second
     // subscription attempt.
@@ -242,7 +249,7 @@ export default async function DashboardPage({
             billingClass={billing.billing.customer_org.billing_class}
           />
         ) : null}
-        {pendingAgentCreationRequests.length ? (
+        {pendingAgentCreationRequests.length && !creationAuthorizationRetry ? (
           <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
         ) : null}
         {failedAgentCreationRequests.length ? (

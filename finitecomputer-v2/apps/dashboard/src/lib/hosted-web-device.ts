@@ -163,6 +163,10 @@ export type HostedAgentBinding = {
   associated_room_ids: string[];
 };
 
+export type HostedAgentBindingBootstrapAuthorization = {
+  status: "authorized" | "already_authorized" | "already_bound";
+};
+
 export type HostedChatAction =
   | { StartRuntime: null }
   | { OpenRoom: { room_id: string } }
@@ -336,6 +340,22 @@ export async function hostedDeviceEnsureAgentBinding(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function hostedDeviceAuthorizeAgentBinding(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: { project_id: string; creation_request_id: string }
+) {
+  return hostedDeviceJson<HostedAgentBindingBootstrapAuthorization>(
+    config,
+    account,
+    "/v1/app/agent-bindings/authorize-bootstrap",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
 }
 
 export async function hostedDeviceNewChat(

@@ -1,7 +1,8 @@
 # Architecture Overview
 
 > Status: imported from `finite-eng-docs` during Phase 7 on 2026-07-06. This
-> document has not been fully revalidated after the monorepo import. Treat it as
+> document has not been fully revalidated after the monorepo import. The chat
+> layering section was revalidated on 2026-07-13; treat the remainder as
 > orientation background, not an authoritative current runbook.
 
 This is the current high-level map. It is meant to help a new engineer decide
@@ -67,7 +68,10 @@ flowchart TB
   end
 
   subgraph Runtime["Agent Runtime"]
+    AgentChatDevice["agent Finite Chat Device and Rust sidecar"]
+    HermesAdapter["thin Hermes platform adapter"]
     Hermes["Hermes"]
+    Agentd["finite-agentd command and authorization ledger"]
     UserHome["durable runtime state and workspace"]
     SkillBaseline["Finite managed skills"]
     FSite["fsite / Finite Sites"]
@@ -87,9 +91,12 @@ flowchart TB
   Core --> PrivateLimiter
   Runner --> Runtime
   V2Dashboard --> HostedWeb
-  HostedWeb --> ChatServer
-  NativeChat --> ChatServer
-  ChatServer --> Hermes
+  HostedWeb <--> ChatServer
+  NativeChat <--> ChatServer
+  ChatServer <--> AgentChatDevice
+  AgentChatDevice <--> HermesAdapter
+  HermesAdapter <--> Hermes
+  AgentChatDevice <--> Agentd
   Runtime --> Brain
   LegacyDashboard --> Finited
   Finited --> Finitec
@@ -106,6 +113,70 @@ flowchart TB
   Reporting -. "reads/summarizes state" .-> LegacyFiniteComputer
   Reporting -. "future SaaS reporting input" .-> Core
 ```
+
+## Chat protocol versus product layers
+
+The Finite Chat server and Devices are the chat system. The Hosted Web API,
+Project binding, and Hermes adapter are product layers using that system; they
+must not acquire protocol authority by convenience.
+
+| Layer | Owns | Must not own |
+| --- | --- | --- |
+| Finite Chat server | Ordered ciphertext log, MLS commits and Welcomes, KeyPackage leases, encrypted blobs, membership intervals, idempotency records, and SSE wake hints | Device-owned applied cursors, WorkOS users, Finite Computer Projects, selected UI state, canonical-Room policy, Hermes turns |
+| Finite Chat Device | One Device credential/key, local MLS groups and epoch state, joined Rooms, applied cursors, and encrypt/decrypt/validation | UI projection, model execution, or authority to infer a Project-to-Room binding |
+| Finite Chat Rust app runtime | A serialized actor around one Device: durable sync, outbox, and the Rooms/Topics/Chats/messages projection shared by clients | Finite Computer Project identity or Hermes model state |
+| Hosted Web Device | A real Finite Chat Device operated for one Account Auth user plus a narrow dashboard HTTP adapter | A second chat protocol, Agent Runtime state, authority to reinterpret ambiguous Rooms |
+| Project-to-Room binding | An immutable authenticated product bookmark telling the dashboard which already-authorized Room one Project opens and where it creates Chats | Room membership, message delivery, agent subscriptions, automatic reconciliation, or recovery by identifier or selection order |
+| Agent Rust sidecar | The Agent Principal's normal Finite Chat Device plus separate local decrypted APIs for Hermes messages and typed `finite-agentd` commands | Model execution or product binding selection |
+| Hermes platform adapter | Thin translation between sidecar records and Hermes callbacks | MLS, Room storage, polling a second chat transport, binding migration |
+| Hermes | Model turns, memory, tools, and replies | Finite Chat identity, encryption, Room authority |
+| `finite-agentd` | Agent-runtime authorization and an idempotent typed command/result ledger, including owner claim | Model chat, Room membership, or Project-to-Room selection |
+
+The agent Rust Device syncs every Room it has joined. The Hermes adapter also
+serves every joined Room by default. Only an explicit `extra.room_id` or
+`FINITECHAT_ROOM_ID` configuration narrows what the adapter hands to Hermes;
+that optional filter still does not change Device membership or protocol sync.
+Hermes's home-channel setting is an outbound routing preference, not a Room
+subscription.
+
+On restart, each Finite Chat Device reopens its same durable store and resumes
+sync for Rooms it has already joined, provided that store is mounted and
+intact. A restart does not create a new server Room, invent membership,
+reclassify a Room, or write a Project binding. It may activate a Welcome that
+was already authorized before restart; processing that Welcome or later
+messages is protocol convergence, not a product migration. Store loss or
+corruption is a separate recovery failure, not normal restart behavior.
+
+The product additions should remain narrow: a hosted human Device for browser
+access, discovery of the Agent Principal, an explicit Project-to-Room bookmark,
+the thin Hermes translation, and a separate typed Agent Platform Channel into
+`finite-agentd`. Hermes is not on the management-command path. Once written,
+the Project binding is immutable under ordinary product flows: opening it
+validates and uses it but does not reconcile, replace, or rewrite it.
+
+The Project-creation workflow writes a sealed one-time bootstrap authorization
+before ordinary chat is opened; only that authorization may initialize the
+first Room. Bootstrap then creates a sealed staged journal. Before any server
+mutation, the journal records the exact Room create request, including the
+intended Room id and MLS group id. It next records the claimed Agent KeyPackage
+before using that claim to create or add membership. The Device sends only the
+journaled Room request; if the server accepted it but the matching local MLS
+group was not saved, restart replays that exact request and group id. Finally,
+the journal records the exact prepared add-member commit before submit. An
+interrupted attempt therefore resumes only those journaled artifacts. After a
+claim is journaled, restart does not claim again, scan Rooms, generate a
+different group, or adopt another candidate.
+
+Ordinary load, restart, deploy, upgrade, and recovery cannot mint the
+authorization. If Core committed creation but the dashboard lost the
+authorization response, ordinary chat load only reports that setup is
+unfinished. The user-visible `Finish chat setup` action may replay the omitted
+handoff only after a fresh Core read proves the exact Account-owned Project and
+exactly one durable creation request for it in `requested`, `launching`, or
+`running` state; it does not inspect or select a Room. There is no automatic
+Room reconciliation or legacy binding migration. Missing authorization, a
+retained unbound candidate, or any other ambiguity fails without choosing from
+selection, display order, timestamps, or opaque identifiers.
 
 ## Ownership Boundaries
 

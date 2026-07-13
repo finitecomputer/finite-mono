@@ -19,6 +19,7 @@ import {
 import { AccountMenu } from "@/components/agent-navigation";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
+import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
@@ -344,43 +345,45 @@ function AgentAppSection({
   }, []);
 
   return (
-    <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
-      <AgentSidebar
-        collapsed={collapsed}
-        machineId={machine.id}
-        machineLabel={machine.ownerLabel}
-        machineSwitcher={
-          <MachineSwitcher
-            activeMachine={machine}
-            creatingNewAgent={false}
-            machines={machines}
-            onNavigate={() => setMobileOpen(false)}
-            showNewAgent
-          />
-        }
-        mobileOpen={mobileOpen}
-        onCollapsedChange={setCollapsed}
-        onMobileOpenChange={setMobileOpen}
-        showSkills={showSkills}
-        viewerEmail={viewerEmail}
-      />
-      <main
-        ref={scrollRef}
-        className={`ocean-app-scroll finite-agent-shell__content ${isChatSurface ? "is-chat" : ""}`}
-      >
-        {!isChatSurface ? (
-          <button
-            type="button"
-            className="ocean-icon-button finite-agent-shell__mobile-trigger"
-            aria-label="Open agent navigation"
-            onClick={() => setMobileOpen(true)}
-          >
-            <PanelLeftIcon className="size-4" />
-          </button>
-        ) : null}
-        {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
-      </main>
-    </div>
+    <HostedChatProvider key={machine.id} machineId={machine.id}>
+      <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
+        <AgentSidebar
+          collapsed={collapsed}
+          machineId={machine.id}
+          machineLabel={machine.ownerLabel}
+          machineSwitcher={
+            <MachineSwitcher
+              activeMachine={machine}
+              creatingNewAgent={false}
+              machines={machines}
+              onNavigate={() => setMobileOpen(false)}
+              showNewAgent
+            />
+          }
+          mobileOpen={mobileOpen}
+          onCollapsedChange={setCollapsed}
+          onMobileOpenChange={setMobileOpen}
+          showSkills={showSkills}
+          viewerEmail={viewerEmail}
+        />
+        <main
+          ref={scrollRef}
+          className={`ocean-app-scroll finite-agent-shell__content ${isChatSurface ? "is-chat" : ""}`}
+        >
+          {!isChatSurface ? (
+            <button
+              type="button"
+              className="ocean-icon-button finite-agent-shell__mobile-trigger"
+              aria-label="Open agent navigation"
+              onClick={() => setMobileOpen(true)}
+            >
+              <PanelLeftIcon className="size-4" />
+            </button>
+          ) : null}
+          {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
+        </main>
+      </div>
+    </HostedChatProvider>
   );
 }
 
@@ -437,7 +440,11 @@ export function DashboardShell({
         showMachineFleet={showMachineFleet}
         viewerEmail={viewerEmail}
       >
-        {children}
+        {isChatSurface && activeMachine ? (
+          <HostedChatProvider key={activeMachine.id} machineId={activeMachine.id}>
+            {children}
+          </HostedChatProvider>
+        ) : children}
       </DashboardAppSection>
     </div>
   );

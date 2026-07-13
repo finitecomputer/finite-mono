@@ -106,10 +106,13 @@ contract lives in `crates/finitechat-hermes`.
 
 Finite Chat room maps to Hermes `source.chat_id`.
 
-Finite Chat conversation/topic maps to Hermes `source.thread_id`.
+When present, a Finite Chat Chat/Segment maps to Hermes `source.thread_id`.
+Otherwise the containing conversation/Topic maps to `source.thread_id`.
 
 Hermes outbound `chat_id` is interpreted as `room_id`. Hermes outbound metadata
-`thread_id` or `conversation_id` is interpreted as `conversation_id`. Reserved
+routes a known `thread_id` back to its Chat/Segment and containing
+conversation/Topic; an explicit `conversation_id` remains the Topic route.
+Reserved
 adapter metadata such as `_finitechat_kind`, `_finitechat_status`, and
 `attachments` is consumed by the bridge and not stored as user metadata.
 

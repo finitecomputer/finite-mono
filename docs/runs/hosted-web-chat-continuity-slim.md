@@ -24,11 +24,19 @@ not claim acceptance.
 
 ## Why
 
-A 2026-07-13 production audit found intact chat history hidden behind a
-duplicate Agent Room: the `/fresh` recovery action created a second
-exact-member Room via `StartGroupChat`, `StartProfileChat` preferred the
-currently selected Room, and the sidebar only projected the selected Room.
-Data was retained but unreachable — for a paying user that is loss.
+On 2026-07-13, Sol 2 replied in older Chats shown under `Previous
+conversations` but initially did not reply in newly created top-level Topics
+and Chats. It later began replying there too. The available evidence did not
+identify the causal transition. An earlier version of this run incorrectly
+declared a split Room/Topic target to be the root cause; that claim is retracted
+below. The confirmed remaining product defect is that selecting a Chat in the
+sidebar does not update the chat pane until the pane receives another local
+interaction.
+
+The incident established that speculative binding migration is itself an
+availability risk. Retained state must not be reclassified or rewritten from a
+selection cursor or arbitrary identifier order merely because a newer product
+model expects a canonical binding.
 
 Separately, the audit found a placeholder Borg destination, a failed last job,
 and live SQLite copies instead of a recovery contract. This run now configures
@@ -39,18 +47,42 @@ the operator activation and empty-target drill pass.
 
 1. **One canonical Agent Room** per (Project, human Principal, Agent
    Principal), recorded as a versioned encrypted binding owned by
-   `finitechat-hosted-device`. Selection is only a cursor; it can never
-   create, choose, or repair the binding.
-2. **Recovery never creates a Room.** Delete `/fresh` outright. Bootstrap
-   opens the recorded binding before any Runtime contact; missing or
-   ambiguous state fails closed as recovery-required. Owner claim gates
-   sending, never reading history, and always travels through the canonical
-   Room.
-3. **The visible conversation set may only grow.** Legacy duplicate Rooms
-   are never deleted or merged; they appear as `Previous conversations`.
-   Migration picks the canonical Room deterministically (existing valid
-   binding wins; else oldest exact-member Room, Room-id order as tiebreak)
-   and is idempotent under crash and rerun.
+   `finitechat-hosted-device`. Once written, ordinary product flows treat the
+   whole binding as immutable: open validates and uses it without reconciling
+   or rewriting it. Selection is only a cursor; it can never create, choose,
+   replace, or repair the binding.
+2. **Recovery never creates a Room.** Delete `/fresh` outright. Bootstrap for
+   an existing Project opens the recorded binding before any Runtime contact;
+   missing or ambiguous retained state fails closed as recovery-required. The
+   explicitly authorized new-Project case is the initialization exception in
+   rule 3.
+   Owner claim gates sending, never reading history, and always travels through
+   the canonical Room.
+3. **The visible conversation set may only grow.** Rooms already recorded as
+   associated are never deleted or merged; they appear as `Previous
+   conversations`. There is no automatic Room reconciliation, including legacy
+   selection or migration. An already-valid binding reopens byte-for-byte
+   unchanged. The Project-creation workflow must durably authorize initial chat
+   bootstrap before ordinary chat load; only that authorization may create the
+   initial Room. Bootstrap uses a sealed staged journal. Before any server
+   mutation it records the exact Room create request, including the intended
+   Room id and MLS group id. It then records the claimed Agent KeyPackage before
+   Room creation and records the exact prepared add-member commit before submit.
+   If the server accepted Room creation but the Device failed before saving the
+   matching local MLS group, restart replays the same journaled request and
+   group id. A crash retry therefore resumes only the intended Room and exact
+   journaled artifacts.
+
+   If Core committed creation but the dashboard lost the authorization
+   response, ordinary chat load must not grant authority. A user-visible
+   `Finish chat setup` action may replay only that lost handoff: a fresh Core
+   read must prove the exact Account-owned Project and exactly one durable
+   creation request for it in `requested`, `launching`, or `running` state
+   before the action writes authorization. It never scans or chooses Rooms.
+   Missing authorization or ambiguous unbound retained state fails closed
+   without creating, choosing, reclassifying, or binding a Room. Ordinary
+   protocol sync may still converge already-authorized messages and Welcomes.
+   Selection and ordering never confer binding authority.
 4. **New chat = new Chat in the canonical Room**, idempotent per client
    intent key. It never creates a Room.
 5. **Snapshots are service-consistent and off-host.** Use SQLite's backup
@@ -72,21 +104,37 @@ Work top-down.
 
 ### P0 — Fix the bug
 
-- Failing regression first: several Topics/Chats, failed claim, retried
-  recovery — Room count, canonical Room id, and reachable Chat ids
+- Failing regressions first: selecting each sidebar Chat updates the pane
+  immediately without a second click; several Topics/Chats, failed claim, and
+  retried load leave Room count, canonical Room id, and reachable Chat ids
   unchanged.
-- Delete `/fresh` and its fixtures; no flag or fallback. Replace with three
-  honest actions: retry load, retry claim, new Chat.
+- Delete `/fresh` and its fixtures; no flag or fallback. Keep the honest normal
+  actions retry load, retry claim, and new Chat. Show `Finish chat setup` only
+  for the narrowly detected lost-creation-authorization case; it is not a Room
+  recovery or migration action.
 - Remove the parked public `/dashboard/device-link` page and its browser-facing
   approve/status APIs; keep device-link protocol support internal until a later
   explicitly authorized client run needs it.
 - Persist the canonical binding in `finitechat-hosted-device`; validate it
-  on reopen; remove `StartProfileChat`'s selected-Room preference.
+  without rewriting it on reopen; remove `StartProfileChat`'s selected-Room
+  preference.
 - Load retained history before Runtime contact; test with the contact
   endpoint down and the model non-interactive.
-- Migrate unbound legacy state per rule 3, with a preflight/postflight
-  identifier-count comparison; project the sidebar across canonical +
-  associated Rooms and fail the release on any retained-vs-visible mismatch.
+- Remove automatic Room reconciliation, including legacy selection/migration.
+  Test unchanged reopen for an already-valid binding, one-time authorization
+  from the Project-creation flow, and the exact journal order: persist the Room
+  create request and MLS group id before any server mutation, persist the
+  claimed KeyPackage before Room creation, and persist the exact prepared
+  add-member commit before submit. Regress the crash after the server accepts
+  Room creation but before the Device saves the matching local MLS group; retry
+  must replay the exact request and produce only the intended Room. Also prove
+  failure without binding/Room mutation when authorization is absent or
+  retained state is ambiguous. Prove ordinary load cannot authorize; prove the
+  explicit `Finish chat setup` action requires a fresh Core-owned exact Project
+  plus one durable `requested`, `launching`, or `running` creation request and
+  performs no Room scan or selection. Normal protocol convergence remains
+  enabled. Project the sidebar across already-recorded canonical + associated
+  Rooms and fail the release on any retained-vs-visible mismatch.
 
 ### P0 — Real backups and one proven restore
 
@@ -104,7 +152,7 @@ Work top-down.
 
 - Lifecycle sweep with the synthetic account: restart/deploy/upgrade each
   covered service and diff the identifier set before and after.
-- ADR for the canonical binding + migration rule; update ADR 0011 and
+- ADR for the canonical binding + fail-closed bootstrap rule; update ADR 0011 and
   CONTEXT.md; add a read-only-first `Chats appear missing` runbook.
 - Update the admission checklist: chat continuity/recovery failure blocks
   paid admission regardless of Stripe.
@@ -116,19 +164,31 @@ Work top-down.
 
 ## Production evidence — 2026-07-13
 
-- At 16:04 CDT, a real Sol 2 New chat created from a selected Previous
-  conversation appeared under Previous conversations and received no Agent
-  reply. The retained message stayed readable; no bot or Room was deleted.
-  Root cause was a split target assembled by the global New chat button: the
-  canonical Room id plus the selected legacy Topic id. The dashboard checked
-  only the Room, and `/v1/app/new-chat` trusted both identifiers.
-- Source revision `3857559` makes the global button choose only from
-  canonical Topics, makes the dashboard reject a Topic outside the bound
-  canonical Room, and makes `finitechat-hosted-device` reopen and validate the
-  encrypted Project binding before creation. Unit, hosted-device HTTP, and
-  browser regressions cover the exact Previous-conversation selection case;
-  a legacy-room request fails with HTTP 409. It is deployed in revision
-  `a350b42`; Paul's fresh-turn check is still required.
+- Observed: Sol 2 replied in older Chats displayed under `Previous
+  conversations`, while newly created top-level Topics and Chats initially did
+  not receive replies. The retained messages remained visible. Sol 2 later
+  began replying in the top-level conversations as well; this run has no
+  read-only evidence identifying why.
+- Retracted: this run previously called a canonical-Room/legacy-Topic split the
+  root cause and treated source revision `3857559` in deployed revision
+  `a350b42` as its correction. That diagnosis did not match the full symptom
+  set and was not proven. The historical deployment record below does not
+  validate that diagnosis or authorize further state migration.
+- Separately observed: switching Chats in the sidebar can leave the chat pane
+  showing the prior Chat until the pane is clicked. This is a UI state-
+  propagation defect and does not justify changing Room bindings or retained
+  conversation state.
+- Before the replacement binding code is deployed, a count-only read-only
+  inventory must compare Core Projects with a reachable Agent contact against
+  exact hashed binding filenames. The 2026-07-13 preflight found every such
+  Project already bound: zero reachable Projects were unbound. No legacy Room
+  selection, repair, or production state rewrite was performed.
+- The immutable-binding, exact Room-create replay after server acceptance but
+  before local save, add-member journal resume, lost-authorization, and sidebar
+  regression test results are local evidence only until the replacement
+  revision is deployed and the lifecycle sweep is repeated against it. They do
+  not explain Sol 2's observed recovery and do not satisfy this run's production
+  acceptance.
 
 - Deployed revision: `a350b42`; Nix system closure:
   `/nix/store/kg0wdxilbjqh4wb5bx9gfmyzr4sam5fd-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
@@ -145,12 +205,14 @@ Work top-down.
   create completed successfully, and a subsequent remote listing found it.
 - The reused SSH credential accepted an arbitrary remote command. It should be
   replaced or restricted to append-only, but Paul explicitly accepted this as
-  hardening debt on 2026-07-13. The empty-target service restore and Paul's
-  browser lifecycle checks remain, so this run is not yet Ready-for-Paul.
+  hardening debt on 2026-07-13. The empty-target service restore has not been
+  completed, and Paul's browser lifecycle checks remain, so this run is not yet
+  Ready-for-Paul.
 
 ## Acceptance Request — blocked on retained queue prerequisites
 
-- **Revision:** `a350b42`; dashboard digest and Nix closure above.
+- **Revision:** to be recorded after the retained fixes and lifecycle proofs;
+  the historical `a350b42` deployment does not satisfy this run's acceptance.
 - **Where:** `https://finite.computer`, `https://chat.finite.computer`,
   finite-lat-1, the dedicated synthetic account, and an empty isolated restore
   target. Secrets remain only at the paths named in the recovery runbook.

@@ -29,10 +29,12 @@ test:
 web-check:
     cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
 
-# Build the x86_64 finite-lat-1 closure on the repository's lat2 builder.
-# A plain Darwin `nix build` inherits unrelated user/global builder settings.
-nixos-build-lat1:
-    scripts/nix-build-lat2
+# Evaluate and build immutable system + disko outputs on finite-lat-2. The
+# helper prints the exact, GC-rooted system path used for the deploy handoff.
+nixos-build-lat1 rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec scripts/nix-build-lat2 {{ quote(rev) }}
 
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:

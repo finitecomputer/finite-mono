@@ -91,12 +91,15 @@ _Avoid_: Browser E2EE, dashboard relay, Agent Principal Key
 **Canonical Agent Room**:
 The exact-member Finite Chat Room durably bound to one Project, human
 Principal, and Agent Principal. Owner claim and new Chats use this Room;
-selection never chooses it.
+selection never chooses it. Ordinary product flows reopen an existing binding
+unchanged and never reconcile or replace it. A missing binding with retained
+candidate Rooms fails without automatic selection or migration.
 _Avoid_: Selected Room, newest Room, recovery Room
 
 **Previous conversations**:
-Retained Topics and Chats in legacy associated exact-member Agent Rooms. They
-remain readable and navigable without merging or deleting protocol history.
+Retained Topics and Chats in already-recorded associated exact-member Agent
+Rooms. They remain readable and navigable without merging, deleting, or
+automatically reclassifying protocol history.
 _Avoid_: Orphaned Rooms, duplicate cleanup, hidden history
 
 **User Nostr Identity**:
@@ -259,6 +262,24 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   device has its own revocable Finite Chat key and durable store.
 - A **Hosted Web Device** is a user device alongside Electron or native
   devices; it is not an **Agent Principal Key** or room authority.
+- A **Canonical Agent Room** binding is product navigation metadata, not Finite
+  Chat membership or delivery state. Restart reopens a valid binding and each
+  Device resumes normal durable sync for Rooms it already joined. Missing
+  binding does not authorize Room creation: only a sealed one-time fact written
+  by the authenticated Project-creation workflow may initialize it. Bootstrap
+  first persists the exact Room create request, including its intended Room id
+  and MLS group id, before any server mutation. It then persists the claimed
+  Agent KeyPackage before Room creation and the exact prepared add-member commit
+  before submit. If the server accepted the Room but the Device did not save
+  the matching local MLS group, restart replays that exact request and group id;
+  it never invents or adopts another Room. Missing authorization or retained
+  candidate Rooms fails without inferring authority from selection or ordering.
+- If Core creation committed but the dashboard lost the authorization response,
+  ordinary chat load cannot authorize. The user-visible **Finish chat setup**
+  action performs a fresh Core read and may replay the omitted authorization
+  only for the exact Account-owned **Project** with exactly one durable agent-
+  creation request in `requested`, `launching`, or `running` state. It never
+  scans or chooses Rooms and cannot reconcile an existing binding.
 - A **User Nostr Identity** and **Agent Principal Key** are always distinct by
   default; the agent signs agent operations as itself.
 - **Email Access Delegations** for Finite Sites and Finite Brain are separate;

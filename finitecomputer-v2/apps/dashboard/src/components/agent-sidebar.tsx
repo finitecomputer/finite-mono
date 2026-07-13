@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   HashIcon,
@@ -12,10 +12,10 @@ import {
 
 import { AccountMenu, AgentNavigation } from "@/components/agent-navigation";
 import { FiniteBrand } from "@/components/finite-brand";
+import { useHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import type {
   HostedChatAction,
-  HostedChatState,
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
@@ -44,55 +44,18 @@ export function AgentSidebar({
 }) {
   const pathname = usePathname() ?? "";
   const router = useRouter();
-  const apiBase = `/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device`;
-  const [state, setState] = useState<HostedChatState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    state,
+    transportError,
+    bindingRecoveryRequired,
+    load,
+    recoverBinding,
+    dispatch,
+  } = useHostedChat();
   const [busy, setBusy] = useState(false);
-  const hasState = state !== null;
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const response = await fetch(`${apiBase}/state`, { cache: "no-store" });
-      if (!response.ok) throw new Error("Chats are temporarily unavailable.");
-      setState(await response.json() as HostedChatState);
-      setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Chats are temporarily unavailable.");
-    }
-  }, [apiBase]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void load();
-    void fetch(`${apiBase}/claim`, {
-      method: "POST",
-      signal: controller.signal,
-    }).catch(() => {
-      // Read-only topic history remains available while the owner claim retries
-      // through the chat/Connections command paths.
-    });
-    return () => controller.abort();
-  }, [apiBase, load]);
-
-  useEffect(() => {
-    if (!hasState) return;
-    const events = new EventSource(`${apiBase}/updates`);
-    const onState = (event: MessageEvent<string>) => {
-      try {
-        setState(JSON.parse(event.data) as HostedChatState);
-        setError(null);
-      } catch {
-        // The next full state or route load will recover the sidebar projection.
-      }
-    };
-    events.addEventListener("state", onState as EventListener);
-    return () => events.close();
-  }, [apiBase, hasState]);
-
-  const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id
-    ?? state?.rooms.find((room) => room.is_agent_chat)?.room_id
-    ?? state?.rooms[0]?.room_id
-    ?? null;
+  const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
     () => (state?.topics ?? [])
       .filter((topic) => topic.room_id === canonicalRoomId && !topic.archived)
@@ -123,27 +86,22 @@ export function AgentSidebar({
   const act = useCallback(async (action: HostedChatAction) => {
     setBusy(true);
     try {
-      const response = await fetch(`${apiBase}/actions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(action),
-      });
-      if (!response.ok) throw new Error("That chat action is temporarily unavailable.");
-      const next = await response.json() as HostedChatState;
-      setState(next);
-      setError(null);
+      const next = await dispatch(action);
+      setActionError(null);
       if (!pathname.endsWith("/chat")) {
         router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
       }
       onMobileOpenChange(false);
       return next;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "That chat action is temporarily unavailable.");
+      setActionError(caught instanceof Error
+        ? caught.message
+        : "That chat action is temporarily unavailable.");
       return null;
     } finally {
       setBusy(false);
     }
-  }, [apiBase, machineId, onMobileOpenChange, pathname, router]);
+  }, [dispatch, machineId, onMobileOpenChange, pathname, router]);
 
   function openTopic(topic: HostedChatTopic) {
     void act({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
@@ -214,12 +172,26 @@ export function AgentSidebar({
           <div className="finite-chat__sidebar-section-row">
             <span className="finite-chat__sidebar-section">Topics</span>
           </div>
-          {!state && !error ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
-          {error ? (
+          {!state && !transportError ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
+          {transportError ? (
             <div className="finite-agent-sidebar__error">
-              <span>{error}</span>
-              <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
-                <RotateCcwIcon /> Retry
+              <span>{transportError}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => void (bindingRecoveryRequired ? recoverBinding() : load())}
+              >
+                <RotateCcwIcon />
+                {bindingRecoveryRequired ? "Finish chat setup" : "Retry"}
+              </Button>
+            </div>
+          ) : null}
+          {actionError ? (
+            <div className="finite-agent-sidebar__error">
+              <span>{actionError}</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setActionError(null)}>
+                Dismiss
               </Button>
             </div>
           ) : null}

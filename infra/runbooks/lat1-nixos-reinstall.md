@@ -27,11 +27,16 @@ drilled the Postgres dump into a scratch container before wiping. Do the same.
 
 ## Prerequisites
 
-- SSH access to `finite-lat-2`, the repository's x86_64 Nix builder. Run
-  `just nixos-build-lat1` first; it explicitly selects lat2 and ignores
-  unrelated ambient builder configuration. This is the go/no-go gate; do NOT
-  wipe until it builds clean.
-- `cpio` installed on BOTH the driver host and the target (nixos-anywhere
+- SSH access to `ubuntu@finite-lat-2`, the repository's only production x86_64
+  Nix builder/driver, with temporary agent forwarding for root access from
+  lat2 to `64.34.82.77`. Never evaluate or build the production closure on the
+  Mac, clawland, or lat1.
+- From the reviewed checkout, fetch `origin/main`, set `REV="$(git rev-parse
+  HEAD)"`, require that exact lowercase 40-hex commit to be on `origin/main`,
+  and run `SYSTEM="$(just nixos-build-lat1 "$REV")"`. Record `REV` and the
+  exact output path `SYSTEM`; the helper also roots the matching disko script
+  on lat2. This is the go/no-go gate. Do NOT wipe until both build clean.
+- `cpio` installed on BOTH lat2 (the driver host) and the target (nixos-anywhere
   needs it to build the kexec initrd; its absence aborts safely pre-wipe).
 - Latitude console access (IPMI + Rescue Mode) — the recovery net if boot
   fails. Confirm you can reach it before starting.
@@ -41,17 +46,75 @@ drilled the Postgres dump into a scratch container before wiping. Do the same.
 ## Install (wipes the box)
 
 ```sh
-# from the driver host, in a finite-mono checkout, target reachable as root:
-nix run github:nix-community/nixos-anywhere -- \
-  --flake .#finite-lat-1 \
+# On the Mac, record the exact immutable handoff:
+set -euo pipefail
+git fetch origin --prune
+REV="$(git rev-parse HEAD)"
+[[ "$REV" =~ ^[0-9a-f]{40}$ ]]
+git merge-base --is-ancestor "$REV" origin/main
+SYSTEM="$(just nixos-build-lat1 "$REV")"
+printf 'REV=%s\nSYSTEM=%s\n' "$REV" "$SYSTEM"
+```
+
+Enter lat2 with temporary agent forwarding. Lat2 stores no lat1 deploy key and
+cannot resolve the `finite-lat-1` alias:
+
+```sh
+ssh -A ubuntu@finite-lat-2
+```
+
+On lat2, paste, do not recompute, `REV` and `SYSTEM` from above. This whole
+block fails before the wipe if any handoff, store, or authentication check
+does not pass:
+
+```sh
+set -euo pipefail
+REV='<exact-40-hex-rev-from-prebuild>'
+SYSTEM='<exact-/nix/store-path-from-prebuild>'
+[[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
+ROOT="$HOME/.local/state/finite-mono/lat1-closures/$REV"
+DISKO_ROOT="$HOME/.local/state/finite-mono/lat1-disko-scripts/$REV"
+test -L "$ROOT"
+test -L "$DISKO_ROOT"
+test "$(readlink -f "$ROOT")" = "$SYSTEM"
+DISKO="$(readlink -f "$DISKO_ROOT")"
+[[ "$DISKO" =~ ^/nix/store/[0-9a-z]{32}-[^/[:space:]]+$ ]] || exit 64
+test -x "$DISKO"
+nix path-info --option builders '' "$SYSTEM" >/dev/null
+nix path-info --option builders '' "$DISKO" >/dev/null
+ssh -o BatchMode=yes root@64.34.82.77 true
+
+# NIX_CONFIG also constrains the Nix subprocesses started by nixos-anywhere.
+export NIX_CONFIG='builders ='
+nix run --option builders '' github:nix-community/nixos-anywhere -- \
+  --build-on local \
+  --store-paths "$DISKO" "$SYSTEM" \
   --target-host root@64.34.82.77 \
   --phases kexec,disko,install
-# then reboot into the installed system:
-ssh root@64.34.82.77 systemctl reboot     # or power-cycle via the console
+ssh -o BatchMode=yes root@64.34.82.77 systemctl --no-block reboot
+```
+
+After the console shows the reboot completed and SSH returns, paste the same
+handoff into a fresh lat2 shell and verify the booted closure exactly:
+
+```sh
+set -euo pipefail
+REV='<exact-40-hex-rev-from-prebuild>'
+SYSTEM='<exact-/nix/store-path-from-prebuild>'
+[[ "$REV" =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ "$SYSTEM" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]] || exit 64
+ACTUAL="$(ssh -o BatchMode=yes root@64.34.82.77 \
+  readlink -f /run/current-system)"
+test "$ACTUAL" = "$SYSTEM"
 ```
 
 nixos-anywhere kexecs its own installer (which CAN partition these disks),
-runs disko (single-disk), installs the closure, and stops before reboot.
+runs disko (single-disk), installs the closure, and stops before reboot. Its
+`--store-paths` inputs are the already-built system and disko outputs rooted by
+the exact `REV`; `--build-on local` additionally forbids the tool's automatic
+target-build fallback. Empty builders keep production evaluation/building on
+lat2 and prevent either clawland or lat1 from becoming a build machine.
 
 ## If it won't boot: rescue-mode recovery
 
@@ -61,9 +124,11 @@ runs disko (single-disk), installs the closure, and stops before reboot.
 2. Diagnose from the IPMI console FIRST (it shows the real screen even with no
    network / no root password): stage-1 mount error vs `login:` prompt (=
    booted, network issue) vs BIOS/no-boot.
-3. To re-deploy a fixed config, re-run nixos-anywhere from the driver host
-   against the rescue environment (it re-kexecs + reinstalls). Single-disk
-   installs are fast (~10 min, closure copy dominates).
+3. To re-deploy a fixed config, prebuild and record a new exact `REV` and
+   `SYSTEM`, then re-run nixos-anywhere from lat2 with `NIX_CONFIG='builders
+   ='` and `--build-on local` against the rescue environment (it re-kexecs +
+   reinstalls).
+   Single-disk installs are fast (~10 min, closure copy dominates).
 4. Read a member/array/NIC with `mdadm --examine`, `ip link`, `lsblk` in
    rescue to confirm the fix before redeploying.
 

@@ -27,5 +27,13 @@ function chatErrorResponse(error: unknown) {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  return Response.json({ error: hostedWebChatErrorMessage(error) }, { status });
+  return Response.json(
+    {
+      error: hostedWebChatErrorMessage(error),
+      ...(error instanceof HostedWebChatError && error.code
+        ? { code: error.code }
+        : {}),
+    },
+    { status }
+  );
 }
