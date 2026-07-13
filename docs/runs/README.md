@@ -28,9 +28,13 @@ control without Paul's one-line authorization.
 6. Once everything left requires Paul, emit the Acceptance Request and stop.
    Reaching **Ready-for-Paul** is the implementation session's successful end;
    do not route around acceptance by starting unrelated work.
-7. During an incident, repair the cause and fail closed. A proposed escape
-   hatch requires a one-line authorization from Paul before implementation or
-   deployment; it never ships as an improvised user-facing recovery feature.
+7. During an incident, start read-only and separate observations from
+   hypotheses. A migration, repair, restart, restore, deploy, or other
+   production mutation requires a reproduced cause, synthetic proof, a named
+   backup and rollback boundary, and Paul's explicit authorization. Selection,
+   display order, timestamps, and identifier order are not authority to choose
+   or rewrite user state. Ambiguity fails closed without mutation. A proposed
+   escape hatch never ships as an improvised user-facing recovery feature.
 8. Link to doctrine and ADRs; do not restate them. Expiry is a
    stop-and-rescope boundary, not acceptance.
 9. A run closes only after every retained item and the named human acceptance

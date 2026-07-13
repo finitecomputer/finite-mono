@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  hostedDeviceAuthorizeAgentBinding,
   hostedDeviceApproveLink,
   hostedDeviceAttachments,
   hostedDeviceConfig,
@@ -40,6 +41,39 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+});
+
+test("agent creation explicitly authorizes binding bootstrap with its durable ids", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedBody = "";
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedBody = String(init?.body);
+    return Response.json({ status: "authorized" });
+  }) as typeof fetch;
+
+  const result = await hostedDeviceAuthorizeAgentBinding(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    {
+      project_id: "project-a",
+      creation_request_id: "creation-a",
+    }
+  );
+
+  assert.equal(
+    observedUrl,
+    "https://device.internal/v1/app/agent-bindings/authorize-bootstrap"
+  );
+  assert.deepEqual(JSON.parse(observedBody), {
+    project_id: "project-a",
+    creation_request_id: "creation-a",
+  });
+  assert.deepEqual(result, { status: "authorized" });
 });
 
 test("hostedDeviceAttachments preserves the browser multipart boundary", async (context) => {

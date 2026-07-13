@@ -10,6 +10,10 @@ import {
   requestCoreAgentCreation,
 } from "@/lib/core-client";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import {
+  hostedDeviceAuthorizeAgentBinding,
+  hostedDeviceConfig,
+} from "@/lib/hosted-web-device";
 import { workosBaseUrl } from "@/lib/workos-auth";
 
 export async function GET(request: Request) {
@@ -48,6 +52,17 @@ export async function GET(request: Request) {
       launchCode: "",
       idempotencyKey: draft.idempotencyKey,
       profilePictureUrl: draft.profilePictureUrl,
+    });
+    if (creation.project.id !== creation.request.project_id) {
+      throw new Error("Agent creation returned inconsistent project identity.");
+    }
+    const device = hostedDeviceConfig();
+    if (!device) {
+      throw new Error("Chat initialization is unavailable right now.");
+    }
+    await hostedDeviceAuthorizeAgentBinding(device, account, {
+      project_id: creation.request.project_id,
+      creation_request_id: creation.request.id,
     });
     dashboard.searchParams.set("new", "1");
     dashboard.searchParams.set("creation", creation.request.id);

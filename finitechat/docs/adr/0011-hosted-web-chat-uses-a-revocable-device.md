@@ -26,6 +26,16 @@ showing server ciphertext as recovered data is not acceptable.
 
 ADR 0012 tightens the continuity rule: the Hosted Web Device also owns the
 encrypted Project/Principal-to-canonical-Room binding. Navigation selection is
-only a cursor, bootstrap opens the binding before Runtime contact, legacy
-duplicate exact-member Rooms remain reachable, and recovery cannot mint a
-replacement Room.
+only a cursor, bootstrap opens an already-valid binding before Runtime contact,
+and recovery cannot mint a replacement Room. The authenticated Project-creation
+workflow writes a durable one-time bootstrap authorization; ordinary chat load,
+restart, deploy, upgrade, and recovery cannot create it. That authorization
+advances to a sealed staged journal: the exact Room create request and MLS group
+id are durable before any server mutation, the claimed Agent KeyPackage is
+durable before Room creation, and the exact prepared add-member commit is
+durable before submit. A crash after server acceptance but before local MLS
+group save replays only that exact Room request. Missing authorization or
+ambiguous unbound retained state fails closed without automatic selection or
+mutation. Durable protocol sync and reconnect processing for already-authorized
+membership remain normal operation: they are not legacy migration and cannot
+choose or repair a binding.

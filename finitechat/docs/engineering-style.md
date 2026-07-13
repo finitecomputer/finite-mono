@@ -51,6 +51,16 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
 - Distinguish the control plane from the data plane. Room creation,
   KeyPackages, Welcomes, link sessions, repair, and idempotency are control
   plane; encrypted application messages and sync are data plane.
+- Do not turn a production hypothesis into a migration or repair. Gather
+  read-only evidence, reproduce the failure, prove the proposed mutation on
+  synthetic state, obtain explicit production authorization, and name the
+  backup and rollback boundary. Selection, display order, timestamps, and
+  identifier order never confer authority to choose or rewrite durable state;
+  ambiguous state fails without mutation.
+- Do not call normal durable protocol convergence a migration or recovery
+  hack. Bounded sync, replay, and processing of already-authorized Welcomes or
+  membership after reconnect are ordinary state-machine work. They may not
+  invent authority, choose a product binding, or conceal corrupt state.
 - Keep hot loops standalone with primitive arguments when they become visible
   in profiles or performance sketches.
 - Treat cache invalidation as a protocol decision. Any derived cache must name

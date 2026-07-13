@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,17 +22,18 @@ use finitechat_core::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkEncryptInput, encrypt_device_link_payload,
 };
 use finitechat_core::{
-    AppAction, AppState, AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
-    FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
+    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
+    OpenOptions, OutboundAttachment, account_id_from_npub,
 };
 use finitechat_http::{
     ExpireLinkSessionRequest, ExpireLinkSessionResponse, GetLinkSessionRequest,
     HttpLinkSessionRecord, HttpLinkSessionState, UploadLinkPayloadRequest,
 };
 use finitechat_proto::{
-    DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
-    RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
-    RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
+    ClaimKeyPackageResult, CreateRoomRequest, DecryptedApplicationEventV1, DurableAppEventKind,
+    RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1,
+    RuntimeCommandResultV1, RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
 };
 use futures_util::{Stream, StreamExt};
 use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
@@ -74,8 +76,16 @@ const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
+// A prepared one-member MLS commit can contain a Welcome, ratchet tree, and
+// envelope near their protocol ceilings. The sealed JSON v1 representation
+// encodes byte vectors as integer arrays, so its bounded disk form needs more
+// room than the 64 KiB device-link records.
+const MAX_AGENT_BINDING_RECORD_BYTES: usize = 64 * 1024 * 1024;
 const AGENT_BINDING_KEY_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding-key.v1";
 const AGENT_BINDING_AAD_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding.v1";
+const AGENT_BINDING_BOOTSTRAP_AAD_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding-bootstrap.v1";
+const AGENT_BINDING_AUTHORIZATION_AAD_DOMAIN: &[u8] =
+    b"finitechat.hosted-agent-binding-authorization.v1";
 
 #[derive(Clone, Debug)]
 pub struct HostedDeviceConfig {
@@ -92,6 +102,10 @@ struct HostedDeviceState {
     config: HostedDeviceConfig,
     runtimes: Arc<Mutex<HashMap<String, Arc<FiniteChatRuntime>>>>,
     device_links: Arc<Mutex<()>>,
+    agent_binding_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    fail_final_agent_binding_persists: Arc<AtomicUsize>,
+    fail_profile_bootstrap_room_creates_after_server_acceptance: Arc<AtomicUsize>,
+    fail_profile_bootstrap_submits_after_device_save: Arc<AtomicUsize>,
     fixed_device_link_now_unix_seconds: Option<u64>,
 }
 
@@ -119,6 +133,35 @@ impl HostedDeviceState {
         self.user_root(user_id)
             .join("agent-bindings")
             .join(format!("{}.json", hex::encode(digest)))
+    }
+
+    fn agent_binding_bootstrap_path(&self, user_id: &str, project_id: &str) -> PathBuf {
+        self.agent_binding_path(user_id, project_id)
+            .with_extension("bootstrap.json")
+    }
+
+    fn agent_binding_authorization_path(&self, user_id: &str, project_id: &str) -> PathBuf {
+        self.agent_binding_path(user_id, project_id)
+            .with_extension("authorization.json")
+    }
+
+    fn agent_binding_lock(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Arc<Mutex<()>>, HostedDeviceError> {
+        let key = format!(
+            "{}:{}",
+            user_storage_id(user_id),
+            hex::encode(Sha256::digest(project_id))
+        );
+        let mut locks = self
+            .agent_binding_locks
+            .lock()
+            .map_err(|_| HostedDeviceError::LockPoisoned)?;
+        Ok(Arc::clone(
+            locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))),
+        ))
     }
 
     fn runtime_for(&self, user_id: &str) -> Result<Arc<FiniteChatRuntime>, HostedDeviceError> {
@@ -246,24 +289,67 @@ struct HealthResponse {
 }
 
 pub fn app(config: HostedDeviceConfig) -> Router {
-    app_with_device_link_now(config, None)
+    app_with_test_options(config, None, 0, 0, 0)
 }
 
 /// Test seam for exercising expiry and restart behavior without sleeping.
 /// Production always calls [`app`] and uses the system clock.
 #[doc(hidden)]
 pub fn app_with_fixed_device_link_now(config: HostedDeviceConfig, now_unix_seconds: u64) -> Router {
-    app_with_device_link_now(config, Some(now_unix_seconds))
+    app_with_test_options(config, Some(now_unix_seconds), 0, 0, 0)
 }
 
-fn app_with_device_link_now(
+/// Test seam for proving recovery when the final binding write fails after its
+/// intended Room has been created. Production always calls [`app`].
+#[doc(hidden)]
+pub fn app_with_final_agent_binding_persist_failures(
+    config: HostedDeviceConfig,
+    failure_count: usize,
+) -> Router {
+    app_with_test_options(config, None, failure_count, 0, 0)
+}
+
+/// Test seam for proving recovery after the server accepted the exact Room
+/// create request but before the Device saved the matching local MLS group.
+#[doc(hidden)]
+pub fn app_with_profile_bootstrap_room_create_failures(
+    config: HostedDeviceConfig,
+    failure_count: usize,
+) -> Router {
+    app_with_test_options(config, None, 0, failure_count, 0)
+}
+
+/// Test seam for proving recovery after pending MLS state is durable but the
+/// exact prepared add-member request has not yet been submitted.
+#[doc(hidden)]
+pub fn app_with_profile_bootstrap_submit_failures(
+    config: HostedDeviceConfig,
+    failure_count: usize,
+) -> Router {
+    app_with_test_options(config, None, 0, 0, failure_count)
+}
+
+fn app_with_test_options(
     config: HostedDeviceConfig,
     fixed_device_link_now_unix_seconds: Option<u64>,
+    fail_final_agent_binding_persists: usize,
+    fail_profile_bootstrap_room_creates_after_server_acceptance: usize,
+    fail_profile_bootstrap_submits_after_device_save: usize,
 ) -> Router {
     let state = HostedDeviceState {
         config,
         runtimes: Arc::new(Mutex::new(HashMap::new())),
         device_links: Arc::new(Mutex::new(())),
+        agent_binding_locks: Arc::new(Mutex::new(HashMap::new())),
+        fail_final_agent_binding_persists: Arc::new(AtomicUsize::new(
+            fail_final_agent_binding_persists,
+        )),
+        fail_profile_bootstrap_room_creates_after_server_acceptance: Arc::new(AtomicUsize::new(
+            fail_profile_bootstrap_room_creates_after_server_acceptance,
+        )),
+        fail_profile_bootstrap_submits_after_device_save: Arc::new(AtomicUsize::new(
+            fail_profile_bootstrap_submits_after_device_save,
+        )),
         fixed_device_link_now_unix_seconds,
     };
     Router::new()
@@ -278,6 +364,11 @@ fn app_with_device_link_now(
         .route(
             "/v1/app/agent-bindings/ensure",
             post(ensure_agent_binding)
+                .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
+        )
+        .route(
+            "/v1/app/agent-bindings/authorize-bootstrap",
+            post(authorize_agent_binding_bootstrap)
                 .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
         )
         .route(
@@ -1147,6 +1238,12 @@ struct EnsureAgentBindingRequest {
     display_name: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct AuthorizeAgentBindingBootstrapRequest {
+    project_id: String,
+    creation_request_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct HostedAgentBindingV1 {
     version: u16,
@@ -1156,6 +1253,33 @@ struct HostedAgentBindingV1 {
     agent_npub: String,
     canonical_room_id: String,
     associated_room_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct HostedAgentBindingAuthorizationV1 {
+    version: u16,
+    project_id: String,
+    human_account_id: String,
+    creation_request_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct HostedAgentBindingBootstrapV1 {
+    version: u16,
+    project_id: String,
+    human_account_id: String,
+    agent_account_id: String,
+    agent_npub: String,
+    profile: finitechat_core::AppProfileSummary,
+    display_name: String,
+    intended_room_id: String,
+    creation_request_id: String,
+    #[serde(default)]
+    room_create_request: Option<CreateRoomRequest>,
+    #[serde(default)]
+    claimed_key_package: Option<ClaimKeyPackageResult>,
+    #[serde(default)]
+    prepared_commit: Option<AppProfileChatBootstrapPreparedCommit>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1172,6 +1296,11 @@ struct HostedAgentBindingResponse {
     hosted_agent_binding: HostedAgentBindingV1,
 }
 
+#[derive(Serialize)]
+struct AuthorizeAgentBindingBootstrapResponse {
+    status: &'static str,
+}
+
 async fn open_agent_binding(
     State(state): State<HostedDeviceState>,
     headers: HeaderMap,
@@ -1183,9 +1312,69 @@ async fn open_agent_binding(
         let runtime = state.runtime_for(&user_id)?;
         let binding = load_agent_binding(&state, &user_id, &input.project_id, &runtime)?
             .ok_or(HostedDeviceError::AgentBindingNotFound)?;
-        let response = open_validated_agent_binding(&runtime, binding)?;
-        persist_agent_binding(&state, &user_id, &response.hosted_agent_binding, &runtime)?;
-        Ok(response)
+        open_validated_agent_binding(&runtime, &binding)
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+async fn authorize_agent_binding_bootstrap(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<AuthorizeAgentBindingBootstrapRequest>,
+) -> Result<Json<AuthorizeAgentBindingBootstrapResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    validate_binding_field("project_id", &input.project_id)?;
+    validate_binding_field("creation_request_id", &input.creation_request_id)?;
+    let binding_lock = state.agent_binding_lock(&user_id, &input.project_id)?;
+    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let _binding_guard = binding_lock
+            .lock()
+            .map_err(|_| HostedDeviceError::LockPoisoned)?;
+        let runtime = state.runtime_for(&user_id)?;
+        if load_agent_binding(&state, &user_id, &input.project_id, &runtime)?.is_some() {
+            return Ok(AuthorizeAgentBindingBootstrapResponse {
+                status: "already_bound",
+            });
+        }
+        if let Some(bootstrap) =
+            load_agent_binding_bootstrap(&state, &user_id, &input.project_id, &runtime)?
+        {
+            if bootstrap.creation_request_id == input.creation_request_id {
+                return Ok(AuthorizeAgentBindingBootstrapResponse {
+                    status: "already_authorized",
+                });
+            }
+            return Err(HostedDeviceError::AgentBindingInvalid(
+                "a different Project creation request already started this binding bootstrap"
+                    .to_owned(),
+            ));
+        }
+        if let Some(authorization) =
+            load_agent_binding_authorization(&state, &user_id, &input.project_id, &runtime)?
+        {
+            if authorization.creation_request_id == input.creation_request_id {
+                return Ok(AuthorizeAgentBindingBootstrapResponse {
+                    status: "already_authorized",
+                });
+            }
+            return Err(HostedDeviceError::AgentBindingInvalid(
+                "a different Project creation request already authorized this binding bootstrap"
+                    .to_owned(),
+            ));
+        }
+        let identity = runtime.state()?.identity;
+        let authorization = HostedAgentBindingAuthorizationV1 {
+            version: AGENT_BINDING_VERSION,
+            project_id: input.project_id,
+            human_account_id: identity.account_id,
+            creation_request_id: input.creation_request_id,
+        };
+        persist_agent_binding_authorization(&state, &user_id, &authorization, &runtime)?;
+        Ok(AuthorizeAgentBindingBootstrapResponse {
+            status: "authorized",
+        })
     })
     .await
     .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
@@ -1201,7 +1390,11 @@ async fn ensure_agent_binding(
     validate_binding_field("project_id", &input.project_id)?;
     validate_binding_field("agent_npub", &input.agent_npub)?;
     validate_binding_field("display_name", &input.display_name)?;
+    let binding_lock = state.agent_binding_lock(&user_id, &input.project_id)?;
     let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let _binding_guard = binding_lock
+            .lock()
+            .map_err(|_| HostedDeviceError::LockPoisoned)?;
         let runtime = state.runtime_for(&user_id)?;
         if let Some(binding) = load_agent_binding(&state, &user_id, &input.project_id, &runtime)? {
             if !binding.agent_npub.eq_ignore_ascii_case(&input.agent_npub) {
@@ -1209,55 +1402,193 @@ async fn ensure_agent_binding(
                     "the observed Agent Principal changed".to_owned(),
                 ));
             }
-            let response = open_validated_agent_binding(&runtime, binding)?;
-            persist_agent_binding(&state, &user_id, &response.hosted_agent_binding, &runtime)?;
-            return Ok(response);
+            return open_validated_agent_binding(&runtime, &binding);
         }
 
-        let before = retained_identifier_counts(&runtime.state()?);
-        let mut app = runtime.dispatch_and_wait(AppAction::ScanTarget {
-            value: input.agent_npub.clone(),
-        })?;
-        let profile = app
-            .profiles
-            .iter()
-            .find(|profile| profile.npub.eq_ignore_ascii_case(&input.agent_npub))
-            .cloned()
-            .ok_or_else(|| {
+        let mut bootstrap = match load_agent_binding_bootstrap(
+            &state,
+            &user_id,
+            &input.project_id,
+            &runtime,
+        )? {
+            Some(bootstrap) => {
+                validate_agent_binding_bootstrap(&bootstrap, &input, &runtime)?;
+                bootstrap
+            }
+            None => {
+                let authorization = load_agent_binding_authorization(
+                    &state,
+                    &user_id,
+                    &input.project_id,
+                    &runtime,
+                )?
+                .ok_or_else(|| {
+                    HostedDeviceError::AgentBindingInvalid(
+                        "first-time binding bootstrap was not authorized by Project creation"
+                            .to_owned(),
+                    )
+                })?;
+                if authorization.human_account_id != runtime.state()?.identity.account_id {
+                    return Err(HostedDeviceError::AgentBindingInvalid(
+                        "the Hosted Web Device identity changed after Project creation"
+                            .to_owned(),
+                    ));
+                }
+                let agent_account_id = account_id_from_npub(input.agent_npub.clone())?;
+                if !runtime
+                    .profile_chat_room_ids(agent_account_id.clone())?
+                    .is_empty()
+                {
+                    return Err(HostedDeviceError::AgentBindingInvalid(
+                        "an existing Agent conversation is unbound; automatic migration is disabled"
+                            .to_owned(),
+                    ));
+                }
+                let app = runtime.dispatch_and_wait(AppAction::ScanTarget {
+                    value: input.agent_npub.clone(),
+                })?;
+                let profile = app
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.npub.eq_ignore_ascii_case(&input.agent_npub))
+                    .cloned()
+                    .ok_or_else(|| {
+                        HostedDeviceError::AgentBindingInvalid(
+                            "the Agent Principal could not be resolved".to_owned(),
+                        )
+                    })?;
+                if profile.account_id != agent_account_id {
+                    return Err(HostedDeviceError::AgentBindingInvalid(
+                        "the resolved Agent Principal does not match the requested npub".to_owned(),
+                    ));
+                }
+                let bootstrap = HostedAgentBindingBootstrapV1 {
+                    version: AGENT_BINDING_VERSION,
+                    project_id: input.project_id.clone(),
+                    human_account_id: app.identity.account_id,
+                    agent_account_id,
+                    agent_npub: profile.npub.clone(),
+                    profile,
+                    display_name: input.display_name.clone(),
+                    intended_room_id: generate_agent_binding_room_id()?,
+                    creation_request_id: authorization.creation_request_id,
+                    room_create_request: None,
+                    claimed_key_package: None,
+                    prepared_commit: None,
+                };
+                let bootstrap =
+                    persist_agent_binding_bootstrap(&state, &user_id, &bootstrap, &runtime)?;
+                remove_agent_binding_authorization(&state, &user_id, &input.project_id)?;
+                bootstrap
+            }
+        };
+
+        if bootstrap.room_create_request.is_none() {
+            bootstrap.room_create_request = Some(
+                runtime.plan_profile_chat_bootstrap_room_and_wait(
+                    bootstrap.intended_room_id.clone(),
+                )?,
+            );
+            persist_agent_binding_bootstrap_update(
+                &state,
+                &user_id,
+                &bootstrap,
+                &runtime,
+            )?;
+        }
+        if bootstrap.claimed_key_package.is_none() {
+            bootstrap.claimed_key_package = Some(
+                runtime
+                    .claim_profile_chat_key_package_and_wait(
+                        bootstrap.agent_account_id.clone(),
+                    )?
+                    .ok_or_else(|| {
+                        HostedDeviceError::AgentBindingInvalid(
+                            "the Agent has no available KeyPackage for first-time bootstrap"
+                                .to_owned(),
+                        )
+                    })?,
+            );
+            persist_agent_binding_bootstrap_update(
+                &state,
+                &user_id,
+                &bootstrap,
+                &runtime,
+            )?;
+        }
+        let fail_after_room_server_acceptance = state
+            .fail_profile_bootstrap_room_creates_after_server_acceptance
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        let preparation = runtime.prepare_profile_chat_bootstrap_and_wait(
+            AppProfileChatBootstrapInput {
+                profile: bootstrap.profile.clone(),
+                display_name: bootstrap.display_name.clone(),
+                intended_room_id: bootstrap.intended_room_id.clone(),
+                room_create_request: bootstrap
+                    .room_create_request
+                    .clone()
+                    .expect("Room create request was persisted above"),
+                claimed_key_package: bootstrap
+                    .claimed_key_package
+                    .clone()
+                    .expect("claimed KeyPackage was persisted above"),
+                persisted_prepared_commit: bootstrap.prepared_commit.clone(),
+            },
+            fail_after_room_server_acceptance,
+        )?;
+        let app = if preparation.complete {
+            preparation.state
+        } else {
+            let prepared_commit = preparation.prepared_commit.ok_or_else(|| {
                 HostedDeviceError::AgentBindingInvalid(
-                    "the Agent Principal could not be resolved".to_owned(),
+                    "profile chat bootstrap preparation omitted its submit request".to_owned(),
                 )
             })?;
-        let mut room_ids = runtime.profile_chat_room_ids(profile.account_id.clone())?;
-        if room_ids.is_empty() {
-            app = runtime.dispatch_and_wait(AppAction::StartProfileChat {
-                profile: profile.clone(),
-                display_name: input.display_name,
-            })?;
-            room_ids = runtime.profile_chat_room_ids(profile.account_id.clone())?;
-        }
-        let canonical_room_id = room_ids.first().cloned().ok_or_else(|| {
-            HostedDeviceError::AgentBindingInvalid(
-                "no exact-member Agent Room is available".to_owned(),
-            )
-        })?;
-        let after = retained_identifier_counts(&app);
-        if !after.is_superset_of(&before) {
+            bootstrap.prepared_commit = Some(prepared_commit.clone());
+            persist_agent_binding_bootstrap_update(
+                &state,
+                &user_id,
+                &bootstrap,
+                &runtime,
+            )?;
+            let fail_after_device_save = state
+                .fail_profile_bootstrap_submits_after_device_save
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            runtime.submit_profile_chat_bootstrap_and_wait(
+                bootstrap.agent_account_id.clone(),
+                bootstrap.display_name.clone(),
+                bootstrap.intended_room_id.clone(),
+                prepared_commit,
+                fail_after_device_save,
+            )?
+        };
+        let room_ids = runtime.profile_chat_room_ids(bootstrap.agent_account_id.clone())?;
+        if !matches!(room_ids.as_slice(), [room_id] if room_id == &bootstrap.intended_room_id)
+            || app.selected_room_id.as_deref() != Some(bootstrap.intended_room_id.as_str())
+        {
             return Err(HostedDeviceError::AgentBindingInvalid(
-                "retained identifiers became unreachable during migration".to_owned(),
+                "the durable bootstrap intent did not produce exactly its intended Agent conversation"
+                    .to_owned(),
             ));
         }
         let binding = HostedAgentBindingV1 {
             version: AGENT_BINDING_VERSION,
-            project_id: input.project_id,
-            human_account_id: app.identity.account_id.clone(),
-            agent_account_id: profile.account_id,
-            agent_npub: profile.npub,
-            canonical_room_id,
-            associated_room_ids: room_ids.into_iter().skip(1).collect(),
+            project_id: bootstrap.project_id,
+            human_account_id: bootstrap.human_account_id,
+            agent_account_id: bootstrap.agent_account_id,
+            agent_npub: bootstrap.agent_npub,
+            canonical_room_id: bootstrap.intended_room_id,
+            associated_room_ids: Vec::new(),
         };
         persist_agent_binding(&state, &user_id, &binding, &runtime)?;
-        open_validated_agent_binding(&runtime, binding)
+        remove_agent_binding_bootstrap(&state, &user_id, &binding.project_id)?;
+        open_validated_agent_binding(&runtime, &binding)
     })
     .await
     .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
@@ -1266,7 +1597,7 @@ async fn ensure_agent_binding(
 
 fn open_validated_agent_binding(
     runtime: &FiniteChatRuntime,
-    mut binding: HostedAgentBindingV1,
+    binding: &HostedAgentBindingV1,
 ) -> Result<HostedAgentBindingResponse, HostedDeviceError> {
     let state = runtime.state()?;
     if state.identity.account_id != binding.human_account_id {
@@ -1280,66 +1611,13 @@ fn open_validated_agent_binding(
             "the canonical Room is missing or has unexpected members".to_owned(),
         ));
     }
-    binding.associated_room_ids = room_ids
-        .into_iter()
-        .filter(|room_id| room_id != &binding.canonical_room_id)
-        .collect();
     let state = runtime.dispatch_and_wait(AppAction::OpenRoom {
         room_id: binding.canonical_room_id.clone(),
     })?;
     Ok(HostedAgentBindingResponse {
         state: redacted_state(state),
-        hosted_agent_binding: binding,
+        hosted_agent_binding: binding.clone(),
     })
-}
-
-#[derive(Default)]
-struct RetainedIdentifierCounts {
-    rooms: HashSet<String>,
-    topics: HashSet<String>,
-    chats: HashSet<String>,
-    messages: HashSet<String>,
-    attachments: HashSet<String>,
-}
-
-impl RetainedIdentifierCounts {
-    fn is_superset_of(&self, other: &Self) -> bool {
-        self.rooms.is_superset(&other.rooms)
-            && self.topics.is_superset(&other.topics)
-            && self.chats.is_superset(&other.chats)
-            && self.messages.is_superset(&other.messages)
-            && self.attachments.is_superset(&other.attachments)
-    }
-}
-
-fn retained_identifier_counts(state: &AppState) -> RetainedIdentifierCounts {
-    RetainedIdentifierCounts {
-        rooms: state
-            .rooms
-            .iter()
-            .map(|room| room.room_id.clone())
-            .collect(),
-        topics: state
-            .topics
-            .iter()
-            .map(|topic| topic.topic_id.clone())
-            .collect(),
-        chats: state
-            .topics
-            .iter()
-            .flat_map(|topic| topic.chats.iter().map(|chat| chat.chat_id.clone()))
-            .collect(),
-        messages: state
-            .messages
-            .iter()
-            .map(|message| message.message_id.clone())
-            .collect(),
-        attachments: state
-            .messages
-            .iter()
-            .flat_map(|message| message.media.iter().map(|item| item.attachment_id.clone()))
-            .collect(),
-    }
 }
 
 fn validate_binding_field(name: &str, value: &str) -> Result<(), HostedDeviceError> {
@@ -1362,7 +1640,19 @@ fn binding_key(runtime: &FiniteChatRuntime) -> Result<[u8; 32], HostedDeviceErro
 }
 
 fn binding_aad(user_id: &str, project_id: &str) -> Vec<u8> {
-    let mut aad = AGENT_BINDING_AAD_DOMAIN.to_vec();
+    binding_record_aad(AGENT_BINDING_AAD_DOMAIN, user_id, project_id)
+}
+
+fn binding_bootstrap_aad(user_id: &str, project_id: &str) -> Vec<u8> {
+    binding_record_aad(AGENT_BINDING_BOOTSTRAP_AAD_DOMAIN, user_id, project_id)
+}
+
+fn binding_authorization_aad(user_id: &str, project_id: &str) -> Vec<u8> {
+    binding_record_aad(AGENT_BINDING_AUTHORIZATION_AAD_DOMAIN, user_id, project_id)
+}
+
+fn binding_record_aad(domain: &[u8], user_id: &str, project_id: &str) -> Vec<u8> {
+    let mut aad = domain.to_vec();
     aad.extend_from_slice(user_storage_id(user_id).as_bytes());
     aad.push(0);
     aad.extend_from_slice(project_id.as_bytes());
@@ -1381,7 +1671,7 @@ fn load_agent_binding(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if bytes.len() > MAX_DEVICE_LINK_RECORD_BYTES as usize {
+    if bytes.len() > MAX_AGENT_BINDING_RECORD_BYTES {
         return Err(HostedDeviceError::AgentBindingInvalid(
             "the binding record is oversized".to_owned(),
         ));
@@ -1420,13 +1710,333 @@ fn load_agent_binding(
     Ok(Some(binding))
 }
 
+fn load_agent_binding_bootstrap(
+    state: &HostedDeviceState,
+    user_id: &str,
+    project_id: &str,
+    runtime: &FiniteChatRuntime,
+) -> Result<Option<HostedAgentBindingBootstrapV1>, HostedDeviceError> {
+    let path = state.agent_binding_bootstrap_path(user_id, project_id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if bytes.len() > MAX_AGENT_BINDING_RECORD_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap intent is oversized".to_owned(),
+        ));
+    }
+    let sealed: SealedHostedAgentBindingV1 = serde_json::from_slice(&bytes).map_err(|_| {
+        HostedDeviceError::AgentBindingInvalid("the bootstrap intent is corrupt".to_owned())
+    })?;
+    if sealed.version != AGENT_BINDING_VERSION || sealed.nonce.len() != AGENT_BINDING_NONCE_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap intent version is unsupported".to_owned(),
+        ));
+    }
+    let provider = OpenMlsRustCrypto::default();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            &binding_key(runtime)?,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &binding_bootstrap_aad(user_id, project_id),
+        )
+        .map_err(|_| {
+            HostedDeviceError::AgentBindingInvalid(
+                "the bootstrap intent failed authentication".to_owned(),
+            )
+        })?;
+    let bootstrap: HostedAgentBindingBootstrapV1 =
+        serde_json::from_slice(&plaintext).map_err(|_| {
+            HostedDeviceError::AgentBindingInvalid("the bootstrap intent is invalid".to_owned())
+        })?;
+    if bootstrap.version != AGENT_BINDING_VERSION || bootstrap.project_id != project_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap intent does not match this Project".to_owned(),
+        ));
+    }
+    Ok(Some(bootstrap))
+}
+
+fn load_agent_binding_authorization(
+    state: &HostedDeviceState,
+    user_id: &str,
+    project_id: &str,
+    runtime: &FiniteChatRuntime,
+) -> Result<Option<HostedAgentBindingAuthorizationV1>, HostedDeviceError> {
+    let path = state.agent_binding_authorization_path(user_id, project_id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if bytes.len() > MAX_AGENT_BINDING_RECORD_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap authorization is oversized".to_owned(),
+        ));
+    }
+    let sealed: SealedHostedAgentBindingV1 = serde_json::from_slice(&bytes).map_err(|_| {
+        HostedDeviceError::AgentBindingInvalid("the bootstrap authorization is corrupt".to_owned())
+    })?;
+    if sealed.version != AGENT_BINDING_VERSION || sealed.nonce.len() != AGENT_BINDING_NONCE_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap authorization version is unsupported".to_owned(),
+        ));
+    }
+    let provider = OpenMlsRustCrypto::default();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            &binding_key(runtime)?,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &binding_authorization_aad(user_id, project_id),
+        )
+        .map_err(|_| {
+            HostedDeviceError::AgentBindingInvalid(
+                "the bootstrap authorization failed authentication".to_owned(),
+            )
+        })?;
+    let authorization: HostedAgentBindingAuthorizationV1 = serde_json::from_slice(&plaintext)
+        .map_err(|_| {
+            HostedDeviceError::AgentBindingInvalid(
+                "the bootstrap authorization is invalid".to_owned(),
+            )
+        })?;
+    if authorization.version != AGENT_BINDING_VERSION || authorization.project_id != project_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the bootstrap authorization does not match this Project".to_owned(),
+        ));
+    }
+    Ok(Some(authorization))
+}
+
+fn validate_agent_binding_bootstrap(
+    bootstrap: &HostedAgentBindingBootstrapV1,
+    request: &EnsureAgentBindingRequest,
+    runtime: &FiniteChatRuntime,
+) -> Result<(), HostedDeviceError> {
+    let identity = runtime.state()?.identity;
+    if identity.account_id != bootstrap.human_account_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the Hosted Web Device identity changed during bootstrap".to_owned(),
+        ));
+    }
+    if !bootstrap
+        .agent_npub
+        .eq_ignore_ascii_case(&request.agent_npub)
+    {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "a different Agent Principal already has a pending bootstrap for this Project"
+                .to_owned(),
+        ));
+    }
+    let requested_account_id = account_id_from_npub(request.agent_npub.clone())?;
+    if requested_account_id != bootstrap.agent_account_id
+        || bootstrap.profile.account_id != bootstrap.agent_account_id
+        || !bootstrap
+            .profile
+            .npub
+            .eq_ignore_ascii_case(&bootstrap.agent_npub)
+    {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the pending bootstrap Agent identity is inconsistent".to_owned(),
+        ));
+    }
+    validate_binding_field("intended_room_id", &bootstrap.intended_room_id)
+}
+
+fn generate_agent_binding_room_id() -> Result<String, HostedDeviceError> {
+    let provider = OpenMlsRustCrypto::default();
+    let bytes: [u8; 8] = provider
+        .rand()
+        .random_array()
+        .map_err(|_| HostedDeviceError::Task("binding Room id generation failed".to_owned()))?;
+    Ok(format!("room-{}", hex::encode(bytes)))
+}
+
+fn persist_agent_binding_bootstrap(
+    state: &HostedDeviceState,
+    user_id: &str,
+    bootstrap: &HostedAgentBindingBootstrapV1,
+    runtime: &FiniteChatRuntime,
+) -> Result<HostedAgentBindingBootstrapV1, HostedDeviceError> {
+    let encoded = seal_agent_binding_record(
+        user_id,
+        &bootstrap.project_id,
+        bootstrap,
+        runtime,
+        AgentBindingRecordKind::Bootstrap,
+    )?;
+    if write_atomic_durable_create_new(
+        &state.agent_binding_bootstrap_path(user_id, &bootstrap.project_id),
+        &encoded,
+    )? {
+        return Ok(bootstrap.clone());
+    }
+    let existing = load_agent_binding_bootstrap(state, user_id, &bootstrap.project_id, runtime)?
+        .ok_or_else(|| {
+            HostedDeviceError::AgentBindingInvalid(
+                "the concurrently created bootstrap intent disappeared".to_owned(),
+            )
+        })?;
+    if existing.project_id == bootstrap.project_id
+        && existing.human_account_id == bootstrap.human_account_id
+        && existing.agent_account_id == bootstrap.agent_account_id
+        && existing
+            .agent_npub
+            .eq_ignore_ascii_case(&bootstrap.agent_npub)
+        && existing.creation_request_id == bootstrap.creation_request_id
+    {
+        Ok(existing)
+    } else {
+        Err(HostedDeviceError::AgentBindingInvalid(
+            "a conflicting bootstrap intent already exists for this Project".to_owned(),
+        ))
+    }
+}
+
+fn persist_agent_binding_bootstrap_update(
+    state: &HostedDeviceState,
+    user_id: &str,
+    bootstrap: &HostedAgentBindingBootstrapV1,
+    runtime: &FiniteChatRuntime,
+) -> Result<(), HostedDeviceError> {
+    let encoded = seal_agent_binding_record(
+        user_id,
+        &bootstrap.project_id,
+        bootstrap,
+        runtime,
+        AgentBindingRecordKind::Bootstrap,
+    )?;
+    write_atomic_durable_replace(
+        &state.agent_binding_bootstrap_path(user_id, &bootstrap.project_id),
+        &encoded,
+    )
+}
+
+fn persist_agent_binding_authorization(
+    state: &HostedDeviceState,
+    user_id: &str,
+    authorization: &HostedAgentBindingAuthorizationV1,
+    runtime: &FiniteChatRuntime,
+) -> Result<HostedAgentBindingAuthorizationV1, HostedDeviceError> {
+    let encoded = seal_agent_binding_record(
+        user_id,
+        &authorization.project_id,
+        authorization,
+        runtime,
+        AgentBindingRecordKind::Authorization,
+    )?;
+    if write_atomic_durable_create_new(
+        &state.agent_binding_authorization_path(user_id, &authorization.project_id),
+        &encoded,
+    )? {
+        return Ok(authorization.clone());
+    }
+    let existing =
+        load_agent_binding_authorization(state, user_id, &authorization.project_id, runtime)?
+            .ok_or_else(|| {
+                HostedDeviceError::AgentBindingInvalid(
+                    "the concurrently created bootstrap authorization disappeared".to_owned(),
+                )
+            })?;
+    if existing == *authorization {
+        Ok(existing)
+    } else {
+        Err(HostedDeviceError::AgentBindingInvalid(
+            "a conflicting bootstrap authorization already exists for this Project".to_owned(),
+        ))
+    }
+}
+
+fn remove_agent_binding_bootstrap(
+    state: &HostedDeviceState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<(), HostedDeviceError> {
+    let path = state.agent_binding_bootstrap_path(user_id, project_id);
+    match fs::remove_file(&path) {
+        Ok(()) => sync_parent_directory(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_agent_binding_authorization(
+    state: &HostedDeviceState,
+    user_id: &str,
+    project_id: &str,
+) -> Result<(), HostedDeviceError> {
+    let path = state.agent_binding_authorization_path(user_id, project_id);
+    match fs::remove_file(&path) {
+        Ok(()) => sync_parent_directory(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn persist_agent_binding(
     state: &HostedDeviceState,
     user_id: &str,
     binding: &HostedAgentBindingV1,
     runtime: &FiniteChatRuntime,
 ) -> Result<(), HostedDeviceError> {
-    let plaintext = serde_json::to_vec(binding)?;
+    if state
+        .fail_final_agent_binding_persists
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return Err(HostedDeviceError::Task(
+            "injected final Agent binding persistence failure".to_owned(),
+        ));
+    }
+    let encoded = seal_agent_binding_record(
+        user_id,
+        &binding.project_id,
+        binding,
+        runtime,
+        AgentBindingRecordKind::Binding,
+    )?;
+    if write_atomic_durable_create_new(
+        &state.agent_binding_path(user_id, &binding.project_id),
+        &encoded,
+    )? {
+        return Ok(());
+    }
+    match load_agent_binding(state, user_id, &binding.project_id, runtime)? {
+        Some(existing) if existing == *binding => Ok(()),
+        Some(_) => Err(HostedDeviceError::AgentBindingInvalid(
+            "a conflicting canonical binding already exists for this Project".to_owned(),
+        )),
+        None => Err(HostedDeviceError::AgentBindingInvalid(
+            "the concurrently created canonical binding disappeared".to_owned(),
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AgentBindingRecordKind {
+    Binding,
+    Bootstrap,
+    Authorization,
+}
+
+fn seal_agent_binding_record<T: Serialize>(
+    user_id: &str,
+    project_id: &str,
+    record: &T,
+    runtime: &FiniteChatRuntime,
+    kind: AgentBindingRecordKind,
+) -> Result<Vec<u8>, HostedDeviceError> {
+    let plaintext = serde_json::to_vec(record)?;
     let provider = OpenMlsRustCrypto::default();
     let nonce: [u8; AGENT_BINDING_NONCE_BYTES] = provider
         .rand()
@@ -1439,7 +2049,13 @@ fn persist_agent_binding(
             &binding_key(runtime)?,
             &plaintext,
             &nonce,
-            &binding_aad(user_id, &binding.project_id),
+            &match kind {
+                AgentBindingRecordKind::Binding => binding_aad(user_id, project_id),
+                AgentBindingRecordKind::Bootstrap => binding_bootstrap_aad(user_id, project_id),
+                AgentBindingRecordKind::Authorization => {
+                    binding_authorization_aad(user_id, project_id)
+                }
+            },
         )
         .map_err(|_| HostedDeviceError::Task("binding encryption failed".to_owned()))?;
     let encoded = serde_json::to_vec(&SealedHostedAgentBindingV1 {
@@ -1447,14 +2063,98 @@ fn persist_agent_binding(
         nonce: nonce.to_vec(),
         ciphertext,
     })?;
-    let path = state.agent_binding_path(user_id, &binding.project_id);
+    if encoded.len() > MAX_AGENT_BINDING_RECORD_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the sealed binding record exceeds its durable size limit".to_owned(),
+        ));
+    }
+    Ok(encoded)
+}
+
+/// Atomically install a durable record without replacing an existing target.
+/// A same-directory hard link gives create-if-absent semantics that `rename`
+/// does not provide, while a unique `create_new` temp avoids cross-process
+/// writers clobbering one another during an overlapping deploy.
+fn write_atomic_durable_create_new(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<bool, HostedDeviceError> {
     let parent = path
         .parent()
         .ok_or_else(|| HostedDeviceError::Task("invalid binding path".to_owned()))?;
     fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, encoded)?;
-    fs::rename(temporary, path)?;
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        HostedDeviceError::Task(format!("binding temporary name generation failed: {error}"))
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| HostedDeviceError::Task("invalid binding file name".to_owned()))?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", hex::encode(entropy)));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    let installed = match fs::hard_link(&temporary, path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    };
+    fs::remove_file(&temporary)?;
+    if installed {
+        sync_parent_directory(path)?;
+    }
+    Ok(installed)
+}
+
+fn write_atomic_durable_replace(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), HostedDeviceError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| HostedDeviceError::Task("invalid binding path".to_owned()))?;
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        HostedDeviceError::Task(format!("binding temporary name generation failed: {error}"))
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| HostedDeviceError::Task("invalid binding file name".to_owned()))?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", hex::encode(entropy)));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    sync_parent_directory(path)
+}
+
+fn sync_parent_directory(path: &std::path::Path) -> Result<(), HostedDeviceError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| HostedDeviceError::Task("invalid binding path".to_owned()))?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -1491,9 +2191,8 @@ async fn start_new_chat(
         let runtime = state.runtime_for(&user_id)?;
         let binding = load_agent_binding(&state, &user_id, &input.project_id, &runtime)?
             .ok_or(HostedDeviceError::AgentBindingNotFound)?;
-        let opened = open_validated_agent_binding(&runtime, binding)?;
+        let opened = open_validated_agent_binding(&runtime, &binding)?;
         validate_new_chat_target(&opened.hosted_agent_binding, &input, &opened.state.topics)?;
-        persist_agent_binding(&state, &user_id, &opened.hosted_agent_binding, &runtime)?;
         Ok(runtime.start_topic_chat_intent_and_wait(
             input.room_id,
             input.topic_id,

@@ -58,6 +58,10 @@ type CoreState = {
   projects: VisibleProject[];
   requests: AgentCreationRequest[];
   creationPosts: unknown[];
+  creationResults: Map<string, { projectId: string; requestId: string }>;
+  meGets: number;
+  runtimeRouteGets: number;
+  runtimeRouteProjectIdOverride: string | null;
   cancelPosts: string[];
   destroyPosts: string[];
   recoverPosts: string[];
@@ -180,11 +184,19 @@ type HostedDeviceState = {
   unavailable: boolean;
   ownerClaimGate: Promise<void> | null;
   releaseOwnerClaimGate: (() => void) | null;
+  navigationActionGate: Promise<void> | null;
+  releaseNavigationActionGate: (() => void) | null;
+  completedSelectionMutations: number;
   app: FakeHostedChatState;
   actions: Array<Record<string, unknown>>;
   newChatRequests: Array<Record<string, unknown>>;
   runtimeCommands: Array<Record<string, unknown>>;
   authRequests: HostedAuthRequest[];
+  bindingAuthorizations: Array<{
+    project_id: string;
+    creation_request_id: string;
+  }>;
+  bindingAuthorizationFailuresRemaining: number;
   agentBindings: Map<
     string,
     NonNullable<FakeHostedChatState["hosted_agent_binding"]>
@@ -303,6 +315,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
       await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
+      assert.deepEqual(hostedDevice.state.bindingAuthorizations.at(-1), {
+        project_id: "project_1",
+        creation_request_id: "agent_request_1",
+      });
       await expectVisibleText(page, "Creating your agent");
       assert(
         hostedDevice.state.authRequests.some((request) => request.path === "/v1/app/images"),
@@ -320,6 +336,56 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(core.state.creationPosts.length, 1);
+    });
+
+    core.reset();
+    hostedDevice.failNextBindingAuthorization();
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByLabel("Agent name").fill("Authorization Retry Bot");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page.getByRole("button", { name: "Apply" }).click();
+      await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
+      assert.equal(
+        new URL(page.url()).searchParams.get("agentCreationError"),
+        "binding authorization is temporarily unavailable"
+      );
+      assert(
+        (await page.context().cookies()).some(
+          (cookie) => cookie.name === "finite-agent-draft"
+        ),
+        "binding authorization failure did not preserve the signed draft cookie"
+      );
+      const retryName = page.getByLabel("Agent name");
+      await retryName.waitFor({ state: "visible" }).catch(async (error) => {
+        throw new Error(
+          `binding authorization retry form did not render: ${String(error)}\n${await pageText(page)}`
+        );
+      });
+      await expectVisibleText(page, "binding authorization is temporarily unavailable");
+      await retryName.fill("Authorization Retry Bot");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page.getByRole("button", { name: "Apply" }).click();
+      await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
+
+      assert.equal(core.state.creationPosts.length, 2);
+      assert.equal(
+        (core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey,
+        (core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey,
+        "authorization retry did not reuse the successful Core creation request"
+      );
+      assert.deepEqual(hostedDevice.state.bindingAuthorizations.slice(-2), [
+        {
+          project_id: "project_1",
+          creation_request_id: "agent_request_1",
+        },
+        {
+          project_id: "project_1",
+          creation_request_id: "agent_request_1",
+        },
+      ]);
     });
 
     core.reset({
@@ -560,6 +626,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
+      hostedDevice.holdOwnerClaim();
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
@@ -576,9 +643,45 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const openWebChat = main.getByRole("link", { name: "Open chat" });
       await openWebChat.waitFor({ state: "visible" });
 
-      hostedDevice.holdOwnerClaim();
+      const bindingAuthorizationCount =
+        hostedDevice.state.bindingAuthorizations.length;
+      core.state.runtimeRouteProjectIdOverride = "project_second";
       await openWebChat.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/chat$/u);
+      await page
+        .getByRole("button", { name: "Finish chat setup", exact: true })
+        .first()
+        .waitFor({ state: "visible" });
+      assert.equal(
+        hostedDevice.state.bindingAuthorizations.length,
+        bindingAuthorizationCount,
+        "ordinary chat load granted binding bootstrap authority"
+      );
+      assert.equal(core.state.creationPosts.length, 0, "chat recovery created another Project");
+      const recoveryMeGets = core.state.meGets;
+      const recoveryRuntimeRouteGets = core.state.runtimeRouteGets;
+      await page
+        .getByRole("button", { name: "Finish chat setup", exact: true })
+        .first()
+        .click();
+      await waitFor(
+        () => hostedDevice.state.bindingAuthorizations.length === bindingAuthorizationCount + 1
+      );
+      assert.equal(
+        core.state.meGets,
+        recoveryMeGets + 1,
+        "binding recovery did not use exactly one fresh Core snapshot"
+      );
+      assert.equal(
+        core.state.runtimeRouteGets,
+        recoveryRuntimeRouteGets,
+        "binding recovery consulted a conflicting runtime-route snapshot"
+      );
+      core.state.runtimeRouteProjectIdOverride = null;
+      assert.deepEqual(hostedDevice.state.bindingAuthorizations.at(-1), {
+        project_id: "project_running",
+        creation_request_id: "agent_request_old",
+      });
       await expectVisibleText(page, "Hello from Completed Oslo Bot.");
       await expectVisibleText(page, "Topics");
       await page
@@ -681,14 +784,22 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "unsupported Devices navigation must stay out of the shared agent shell"
       );
 
-      const bootstrapActions = hostedDevice.state.actions.map(actionName);
-      const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
-      assert(startRuntimeIndex >= 0);
+      assert(
+        hostedDevice.state.authRequests.some(
+          (request) => request.path === "/v1/app/agent-bindings/open"
+        ),
+        "chat bootstrap did not first check for an existing canonical Agent binding"
+      );
       assert(
         hostedDevice.state.authRequests.some(
           (request) => request.path === "/v1/app/agent-bindings/ensure"
         ),
-        "chat bootstrap did not persist the canonical Agent binding"
+        "chat bootstrap did not consume the prior creation authorization"
+      );
+      assert.equal(
+        hostedDevice.state.bindingAuthorizations.length,
+        bindingAuthorizationCount + 1,
+        "only the explicit recovery action may grant Room-creation authority"
       );
 
       const message = "Keep the runtime boundary thin.";
@@ -880,9 +991,21 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           active: true,
         }],
       });
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Legacy room transcript only.", false, 9),
+        room_id: "room_browser_legacy",
+        message_id: "message_legacy_only",
+        conversation_id: "topic_browser_legacy",
+        chat_id: "chat_browser_legacy",
+      });
       hostedDevice.emit();
-      await page.getByRole("button", { name: "Old chat", exact: true }).click();
+      await page.getByRole("button", { name: "Previous topic", exact: true }).click();
       await waitFor(() => hostedDevice.state.app.selected_room_id === "room_browser_legacy");
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Previous topic", { exact: true })
+        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Legacy room transcript only.");
       await page.getByRole("button", { name: "New chat", exact: true }).click();
       await waitFor(() => hostedDevice.state.newChatRequests.length === 1);
       assert.deepEqual(hostedDevice.state.newChatRequests[0], {
@@ -901,6 +1024,11 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           ?.chats.some((chat) => chat.chat_id === "chat_browser_new_1")
       );
 
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Remembered transcript only.", false, 10),
+        message_id: "message_remembered_only",
+        chat_id: "chat_browser_remembered",
+      });
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -908,10 +1036,62 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Remembered transcript only.");
       assert.equal(
         hostedDevice.state.app.selected_chat_id,
         "chat_browser_remembered"
       );
+
+      // New chat also changes the selected Room/Topic/Chat. Hold it before it
+      // mutates the fake daemon, then click an existing chat. If New chat is
+      // outside the navigation lane, that later click arrives first and the
+      // delayed New chat becomes the daemon's final state.
+      const completedSelectionMutations =
+        hostedDevice.state.completedSelectionMutations;
+      const startedNavigationActions = hostedDevice.state.actions.filter(
+        (action) => ["OpenRoom", "OpenTopic", "OpenChat"].includes(actionName(action))
+      ).length;
+      hostedDevice.holdNextNavigationAction();
+      await page
+        .getByRole("button", { name: "New chat in General", exact: true })
+        .click();
+      await waitFor(
+        () => hostedDevice.state.navigationActionGate === null,
+        5_000,
+        () => "the first rapid navigation request did not reach the daemon"
+      );
+      await page
+        .getByRole("button", { name: "Remembered work", exact: true })
+        .click();
+      // Under the buggy concurrent implementation the second request reaches
+      // the daemon during this window. The fixed navigation lane intentionally
+      // leaves it queued until the first request completes.
+      await waitFor(
+        () =>
+          hostedDevice.state.actions.filter(
+            (action) => ["OpenRoom", "OpenTopic", "OpenChat"].includes(actionName(action))
+          ).length === startedNavigationActions + 1,
+        750
+      ).catch(() => undefined);
+      hostedDevice.releaseNavigationAction();
+      await waitFor(
+        () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedSelectionMutations + 2,
+        5_000,
+        () => "New chat and the subsequent navigation did not both finish"
+      );
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_remembered",
+        "delayed network arrival persisted an older click over the user's last navigation intent"
+      );
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Remembered transcript only.");
+
       const bindingOpensBeforeReturn = hostedDevice.state.authRequests.filter(
         (request) => request.path === "/v1/app/agent-bindings/open"
       ).length;
@@ -1037,6 +1217,7 @@ function startDashboard(
         FC_DASHBOARD_RUNTIME_MODE: options.stripeConfigured ? "customer" : "canary",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
+        NEXT_PUBLIC_WORKOS_REDIRECT_URI: `http://127.0.0.1:${port}/callback`,
         STRIPE_SECRET_KEY: options.stripeConfigured ? "sk_test_browser_fixture" : "",
         STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: options.stripeConfigured
           ? "price_browser_fixture"
@@ -1156,15 +1337,26 @@ async function startFakeBrain() {
 }
 
 async function startFakeHostedDevice() {
+  const app = initialHostedChatState();
   const state: HostedDeviceState = {
     unavailable: false,
     ownerClaimGate: null,
     releaseOwnerClaimGate: null,
-    app: initialHostedChatState(),
+    navigationActionGate: null,
+    releaseNavigationActionGate: null,
+    completedSelectionMutations: 0,
+    app,
     actions: [],
     newChatRequests: [],
     runtimeCommands: [],
     authRequests: [],
+    bindingAuthorizations: [
+      {
+        project_id: "project_second",
+        creation_request_id: "agent_request_second",
+      },
+    ],
+    bindingAuthorizationFailuresRemaining: 0,
     agentBindings: new Map(),
     connections: {
       inference: {
@@ -1219,6 +1411,18 @@ async function startFakeHostedDevice() {
       state.ownerClaimGate = null;
       state.releaseOwnerClaimGate = null;
     },
+    holdNextNavigationAction() {
+      if (state.navigationActionGate) {
+        throw new Error("a navigation action is already held");
+      }
+      state.navigationActionGate = new Promise((resolve) => {
+        state.releaseNavigationActionGate = resolve;
+      });
+    },
+    releaseNavigationAction() {
+      state.releaseNavigationActionGate?.();
+      state.releaseNavigationActionGate = null;
+    },
     setAvailable(available: boolean) {
       state.unavailable = !available;
       if (!available) {
@@ -1229,6 +1433,9 @@ async function startFakeHostedDevice() {
     emit() {
       state.app.rev += 1;
       emitHostedState(streams, state.app);
+    },
+    failNextBindingAuthorization() {
+      state.bindingAuthorizationFailuresRemaining += 1;
     },
     close() {
       for (const stream of streams) {
@@ -1320,12 +1527,46 @@ async function handleHostedDeviceRequest(
     return;
   }
 
+  if (
+    request.method === "POST" &&
+    path === "/v1/app/agent-bindings/authorize-bootstrap"
+  ) {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    const authorization = {
+      project_id: String(body.project_id ?? ""),
+      creation_request_id: String(body.creation_request_id ?? ""),
+    };
+    assert(authorization.project_id);
+    assert(authorization.creation_request_id);
+    state.bindingAuthorizations.push(authorization);
+    if (state.bindingAuthorizationFailuresRemaining > 0) {
+      state.bindingAuthorizationFailuresRemaining -= 1;
+      writeJson(response, 503, {
+        error: "binding authorization is temporarily unavailable",
+      });
+      return;
+    }
+    writeJson(response, 200, { status: "authorized" });
+    return;
+  }
+
   if (request.method === "POST" && path === "/v1/app/agent-bindings/ensure") {
     const body = (await readJson(request)) as Record<string, unknown>;
     const projectId = String(body.project_id ?? "");
     assert(projectId);
     let binding = state.agentBindings.get(projectId);
     if (!binding) {
+      if (
+        !state.bindingAuthorizations.some(
+          (authorization) => authorization.project_id === projectId
+        )
+      ) {
+        writeJson(response, 409, {
+          error:
+            "first-time binding bootstrap was not authorized by Project creation",
+        });
+        return;
+      }
       applyHostedAction(state.app, { StartProfileChat: null });
       binding = {
         version: 1,
@@ -1360,6 +1601,11 @@ async function handleHostedDeviceRequest(
     assert.equal(body.project_id, "project_running");
     assert.equal(body.room_id, "room_browser_agent");
     assert.equal(body.topic_id, "topic_browser_agent");
+    if (state.navigationActionGate) {
+      const gate = state.navigationActionGate;
+      state.navigationActionGate = null;
+      await gate;
+    }
     applyHostedAction(state.app, {
       StartTopicChatIntent: {
         room_id: body.room_id,
@@ -1368,6 +1614,7 @@ async function handleHostedDeviceRequest(
         intent_key: body.intent_key,
       },
     });
+    state.completedSelectionMutations += 1;
     emitHostedState(streams, state.app);
     writeJson(response, 200, state.app);
     return;
@@ -1380,9 +1627,20 @@ async function handleHostedDeviceRequest(
 
   if (request.method === "POST" && path === "/v1/app/actions") {
     const action = (await readJson(request)) as Record<string, unknown>;
+    const navigationAction = ["OpenRoom", "OpenTopic", "OpenChat"].includes(
+      actionName(action)
+    );
     state.actions.push(action);
+    if (navigationAction && state.navigationActionGate) {
+      const gate = state.navigationActionGate;
+      state.navigationActionGate = null;
+      await gate;
+    }
     applyHostedAction(state.app, action);
-    emitHostedState(streams, state.app);
+    if (navigationAction) state.completedSelectionMutations += 1;
+    if (!["OpenChat", "OpenTopic"].includes(actionName(action))) {
+      emitHostedState(streams, state.app);
+    }
     writeJson(response, 200, state.app);
     return;
   }
@@ -1585,6 +1843,19 @@ function applyHostedAction(
           }
         : candidate
     );
+  } else if (operation === "OpenTopic") {
+    const payload = action.OpenTopic as Record<string, unknown> | undefined;
+    assert(payload);
+    const roomId = String(payload.room_id ?? "");
+    const topicId = String(payload.topic_id ?? "");
+    const topic = state.topics.find(
+      (candidate) => candidate.room_id === roomId && candidate.topic_id === topicId
+    );
+    assert(topic);
+    const chatId = topic.active_chat_id ?? topic.chats[0]?.chat_id ?? null;
+    state.selected_room_id = roomId;
+    state.selected_topic_id = topicId;
+    state.selected_chat_id = chatId;
   } else if (operation === "StartTopicChatIntent") {
     const payload = action.StartTopicChatIntent as Record<string, unknown> | undefined;
     assert(payload);
@@ -1740,6 +2011,7 @@ async function handleCoreRequest(
   }
 
   if (request.method === "GET" && request.url === "/api/core/v1/me") {
+    state.meGets += 1;
     writeJson(response, 200, {
       email: "browser@finite.vip",
       workos_user_id: "user_browser",
@@ -1754,13 +2026,18 @@ async function handleCoreRequest(
     /^\/api\/core\/v1\/me\/runtime-routes\/([^/]+)$/u
   );
   if (request.method === "GET" && runtimeRouteMatch?.[1]) {
+    state.runtimeRouteGets += 1;
     const identifier = decodeURIComponent(runtimeRouteMatch[1]);
-    const project = state.projects.find(
+    const project = state.runtimeRouteProjectIdOverride
+      ? state.projects.find(
+          (candidate) => candidate.project.id === state.runtimeRouteProjectIdOverride
+        )
+      : state.projects.find(
       (candidate) =>
         candidate.project.id === identifier ||
         candidate.runtime?.id === identifier ||
         candidate.runtime?.id === `runtime_${identifier}`
-    );
+        );
     if (!project?.runtime) {
       writeJson(response, 404, { error: "agent runtime was not found" });
       return;
@@ -1835,17 +2112,35 @@ async function handleCoreRequest(
     if (state.createDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, state.createDelayMs));
     }
-    const projectId = `project_${state.creationPosts.length}`;
+    const idempotencyKey = String(body.idempotencyKey ?? "");
+    const existingResult = state.creationResults.get(idempotencyKey);
+    const resultIdentity = existingResult ?? {
+      projectId: `project_${state.creationResults.size + 1}`,
+      requestId: `agent_request_${state.creationResults.size + 1}`,
+    };
+    state.creationResults.set(idempotencyKey, resultIdentity);
+    const projectId = resultIdentity.projectId;
     const requestRecord = agentCreationRequest({
-      id: `agent_request_${state.creationPosts.length}`,
+      id: resultIdentity.requestId,
       projectId,
       displayName: String(body.displayName ?? "Oslo Bot"),
       status: "requested",
       createdAt: new Date().toISOString(),
     });
+    if (!state.projects.some((candidate) => candidate.project.id === projectId)) {
+      state.projects.push({
+        project: {
+          id: projectId,
+          display_name: requestRecord.display_name,
+          created_at: requestRecord.created_at,
+          updated_at: requestRecord.updated_at,
+        },
+        runtime: null,
+      });
+    }
     state.requests = [requestRecord];
     writeJson(response, 200, {
-      reused: false,
+      reused: Boolean(existingResult),
       project: {
         id: projectId,
         customer_org_id: "org_browser",
@@ -1928,6 +2223,10 @@ function emptyCoreState(): CoreState {
     projects: [],
     requests: [],
     creationPosts: [],
+    creationResults: new Map(),
+    meGets: 0,
+    runtimeRouteGets: 0,
+    runtimeRouteProjectIdOverride: null,
     cancelPosts: [],
     destroyPosts: [],
     recoverPosts: [],

@@ -20,6 +20,7 @@ import {
 } from "@/lib/core-client";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
+  hostedDeviceAuthorizeAgentBinding,
   hostedDeviceConfig,
   hostedDeviceProfileImage,
 } from "@/lib/hosted-web-device";
@@ -61,13 +62,20 @@ export async function POST(request: Request) {
       throw new Error("Sign in again to create your agent.");
     }
     const displayName = normalizeAgentDisplayName(formData.get("displayName"));
-    const idempotencyKey = validIdempotencyKey(formData.get("idempotencyKey"));
     const existingDraft = await currentDraft(request, account.workosUserId);
     const profilePictureUrl = await profilePicture(
       formData.get("profilePicture"),
       existingDraft?.profilePictureUrl ?? null,
       account
     );
+    // A Core creation can succeed before the Hosted Device accepts its
+    // bootstrap authorization. Preserve the signed request identity for an
+    // exact retry instead of creating a second project.
+    const idempotencyKey =
+      existingDraft?.displayName === displayName &&
+      existingDraft.profilePictureUrl === profilePictureUrl
+        ? existingDraft.idempotencyKey
+        : validIdempotencyKey(formData.get("idempotencyKey"));
     draft = {
       version: 1,
       workosUserId: account.workosUserId,
@@ -91,7 +99,7 @@ export async function POST(request: Request) {
       if (!launchCode) {
         throw new Error("Enter your Launch Code.");
       }
-      const creation = await launchDraft(draft, launchCode);
+      const creation = await launchDraft(draft, account, launchCode);
       const response = dashboardRedirect(
         request,
         undefined,
@@ -121,7 +129,7 @@ export async function POST(request: Request) {
     }
 
     if (accessPath === "entitlement") {
-      const creation = await launchDraft(draft);
+      const creation = await launchDraft(draft, account);
       const response = dashboardRedirect(
         request,
         undefined,
@@ -146,13 +154,29 @@ export async function GET(request: Request) {
   return dashboardRedirect(request);
 }
 
-async function launchDraft(draft: AgentOnboardingDraft, launchCode = "") {
-  return requestCoreAgentCreation({
+async function launchDraft(
+  draft: AgentOnboardingDraft,
+  account: Awaited<ReturnType<typeof getAccountAuthContext>>,
+  launchCode = ""
+) {
+  const creation = await requestCoreAgentCreation({
     displayName: draft.displayName,
     launchCode,
     idempotencyKey: draft.idempotencyKey,
     profilePictureUrl: draft.profilePictureUrl,
   });
+  if (creation.project.id !== creation.request.project_id) {
+    throw new Error("Agent creation returned inconsistent project identity.");
+  }
+  const device = hostedDeviceConfig();
+  if (!device) {
+    throw new Error("Chat initialization is unavailable right now.");
+  }
+  await hostedDeviceAuthorizeAgentBinding(device, account, {
+    project_id: creation.request.project_id,
+    creation_request_id: creation.request.id,
+  });
+  return creation;
 }
 
 async function profilePicture(

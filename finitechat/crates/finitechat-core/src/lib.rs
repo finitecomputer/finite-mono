@@ -50,8 +50,9 @@ use finitechat_proto::{
     ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
     MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES, MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES,
     MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultV1, RuntimeStateSnapshotV1, delivery_member_id_for_device, nprofile_decode,
-    npub_decode, npub_encode, nsec_decode, nsec_encode, validate_item_count, validate_string_bytes,
+    RuntimeCommandResultV1, RuntimeStateSnapshotV1, SubmitCommitRequest,
+    delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
+    nsec_encode, validate_item_count, validate_string_bytes,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -597,6 +598,29 @@ pub struct AppState {
     pub flow: AppFlowState,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppProfileChatBootstrapPreparedCommit {
+    pub request: SubmitCommitRequest,
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppProfileChatBootstrapPreparation {
+    pub state: AppState,
+    pub complete: bool,
+    pub prepared_commit: Option<AppProfileChatBootstrapPreparedCommit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppProfileChatBootstrapInput {
+    pub profile: AppProfileSummary,
+    pub display_name: String,
+    pub intended_room_id: String,
+    pub room_create_request: CreateRoomRequest,
+    pub claimed_key_package: ClaimKeyPackageResult,
+    pub persisted_prepared_commit: Option<AppProfileChatBootstrapPreparedCommit>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum AppAction {
     StartRuntime,
@@ -865,6 +889,27 @@ enum AppRuntimeCommand {
         account_id: String,
         response: mpsc::SyncSender<Result<Vec<String>, FiniteChatCoreError>>,
     },
+    ClaimProfileChatKeyPackage {
+        account_id: String,
+        response: mpsc::SyncSender<Result<Option<ClaimKeyPackageResult>, FiniteChatCoreError>>,
+    },
+    PlanProfileChatBootstrapRoom {
+        intended_room_id: String,
+        response: mpsc::SyncSender<Result<CreateRoomRequest, FiniteChatCoreError>>,
+    },
+    PrepareProfileChatBootstrap {
+        input: Box<AppProfileChatBootstrapInput>,
+        fail_after_room_server_acceptance: bool,
+        response: mpsc::SyncSender<Result<AppProfileChatBootstrapPreparation, FiniteChatCoreError>>,
+    },
+    SubmitProfileChatBootstrap {
+        agent_account_id: String,
+        display_name: String,
+        intended_room_id: String,
+        prepared_commit: Box<AppProfileChatBootstrapPreparedCommit>,
+        fail_after_device_save: bool,
+        response: mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>,
+    },
     StartTopicChatIntent {
         room_id: String,
         topic_id: String,
@@ -908,6 +953,7 @@ struct AppRuntimeState {
     bridge_seen_joined_account_ids: BTreeSet<String>,
     inbox_hint_after_seq: u64,
     requested_link_bootstrap_rooms: BTreeSet<String>,
+    profile_chat_bootstrap_preparations: BTreeMap<String, AppProfileChatBootstrapPreparedCommit>,
     /// False only while a fresh Device is using the provisional first-room
     /// selection. A device-link bootstrap may replace that provisional route
     /// once; explicit navigation and an accepted bootstrap both lock it.
@@ -1258,6 +1304,104 @@ impl FiniteChatRuntime {
             .recv()
             .map_err(|_| FiniteChatCoreError::Client {
                 reason: "runtime actor stopped before inspecting profile rooms".to_owned(),
+            })?
+    }
+
+    pub fn claim_profile_chat_key_package_and_wait(
+        &self,
+        account_id: String,
+    ) -> Result<Option<ClaimKeyPackageResult>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::ClaimProfileChatKeyPackage {
+                account_id,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while claiming a profile KeyPackage".to_owned(),
+            })?
+    }
+
+    /// Generate the exact account-Room bootstrap request without contacting
+    /// the server. The caller must durably record this request before passing
+    /// it to `prepare_profile_chat_bootstrap_and_wait`.
+    pub fn plan_profile_chat_bootstrap_room_and_wait(
+        &self,
+        intended_room_id: String,
+    ) -> Result<CreateRoomRequest, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::PlanProfileChatBootstrapRoom {
+                intended_room_id,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while planning profile chat bootstrap Room"
+                    .to_owned(),
+            })?
+    }
+
+    /// Prepare the exact Room named by a durable bootstrap intent. This does
+    /// not persist the MLS pending commit. The Room create request must already
+    /// be durable; the caller must also durably record the returned commit
+    /// request before calling `submit_profile_chat_bootstrap_and_wait`.
+    pub fn prepare_profile_chat_bootstrap_and_wait(
+        &self,
+        input: AppProfileChatBootstrapInput,
+        fail_after_room_server_acceptance: bool,
+    ) -> Result<AppProfileChatBootstrapPreparation, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::PrepareProfileChatBootstrap {
+                input: Box::new(input),
+                fail_after_room_server_acceptance,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while preparing profile chat bootstrap".to_owned(),
+            })?
+    }
+
+    pub fn submit_profile_chat_bootstrap_and_wait(
+        &self,
+        agent_account_id: String,
+        display_name: String,
+        intended_room_id: String,
+        prepared_commit: AppProfileChatBootstrapPreparedCommit,
+        fail_after_device_save: bool,
+    ) -> Result<AppState, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SubmitProfileChatBootstrap {
+                agent_account_id,
+                display_name,
+                intended_room_id,
+                prepared_commit: Box::new(prepared_commit),
+                fail_after_device_save,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while submitting profile chat bootstrap".to_owned(),
             })?
     }
 
@@ -1778,6 +1922,58 @@ fn spawn_app_runtime_worker(
                 } => {
                     let _ = response.send(Ok(state.profile_chat_room_ids(&account_id)));
                 }
+                AppRuntimeCommand::ClaimProfileChatKeyPackage {
+                    account_id,
+                    response,
+                } => {
+                    let _ = response.send(state.claim_profile_chat_key_package(account_id));
+                }
+                AppRuntimeCommand::PlanProfileChatBootstrapRoom {
+                    intended_room_id,
+                    response,
+                } => {
+                    let _ = response.send(state.plan_profile_chat_bootstrap_room(intended_room_id));
+                }
+                AppRuntimeCommand::PrepareProfileChatBootstrap {
+                    input,
+                    fail_after_room_server_acceptance,
+                    response,
+                } => {
+                    let result = state
+                        .prepare_profile_chat_bootstrap(*input, fail_after_room_server_acceptance)
+                        .map(|mut preparation| {
+                            state.bump_rev();
+                            let snapshot = state.app.clone();
+                            publish_app_update(&snapshot, &shared_state, &reconciler);
+                            preparation.state = snapshot;
+                            preparation
+                        });
+                    let _ = response.send(result);
+                }
+                AppRuntimeCommand::SubmitProfileChatBootstrap {
+                    agent_account_id,
+                    display_name,
+                    intended_room_id,
+                    prepared_commit,
+                    fail_after_device_save,
+                    response,
+                } => {
+                    let result = state
+                        .submit_profile_chat_bootstrap(
+                            agent_account_id,
+                            display_name,
+                            intended_room_id,
+                            *prepared_commit,
+                            fail_after_device_save,
+                        )
+                        .map(|()| {
+                            state.bump_rev();
+                            let snapshot = state.app.clone();
+                            publish_app_update(&snapshot, &shared_state, &reconciler);
+                            snapshot
+                        });
+                    let _ = response.send(result);
+                }
                 AppRuntimeCommand::StartTopicChatIntent {
                     room_id,
                     topic_id,
@@ -1959,6 +2155,7 @@ impl AppRuntimeState {
             bridge_seen_joined_account_ids: BTreeSet::new(),
             inbox_hint_after_seq: 0,
             requested_link_bootstrap_rooms: BTreeSet::new(),
+            profile_chat_bootstrap_preparations: BTreeMap::new(),
             selection_is_explicit_or_bootstrapped,
         };
         state.sync_chat_projection();
@@ -2889,6 +3086,18 @@ impl AppRuntimeState {
         } else {
             label.to_owned()
         };
+        let existing_room_ids = self.profile_chat_room_ids(&account_id);
+        let existing_room_id = match existing_room_ids.as_slice() {
+            [] => None,
+            [room_id] => Some(room_id.clone()),
+            _ => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "multiple direct Rooms exist for this profile; open one explicitly"
+                        .to_owned(),
+                });
+            }
+        };
+
         let mut profile = profile;
         if !profile_has_useful_name(&profile, &account_id)
             && let Some(display_name) =
@@ -2897,8 +3106,7 @@ impl AppRuntimeState {
             profile.display_name = display_name;
         }
         self.remember_profile_summary(profile)?;
-
-        if let Some(room_id) = self.existing_profile_chat_room_id(&account_id) {
+        if let Some(room_id) = existing_room_id {
             self.ensure_home_topic(&room_id)?;
             let selected_route = if self.app.selected_room_id.as_deref() == Some(room_id.as_str()) {
                 match (
@@ -2932,6 +3140,428 @@ impl AppRuntimeState {
             return Ok(());
         }
 
+        let room_id = self.core.generate_object_id("room")?;
+        self.create_profile_chat_room(account_id, display_name, room_id)
+    }
+
+    fn claim_profile_chat_key_package(
+        &mut self,
+        account_id: String,
+    ) -> Result<Option<ClaimKeyPackageResult>, FiniteChatCoreError> {
+        let mut delivery = self.core.home_delivery();
+        delivery
+            .claim_key_package_for_account(&account_id)
+            .map_err(send_delivery_error)
+    }
+
+    fn plan_profile_chat_bootstrap_room(
+        &mut self,
+        intended_room_id: String,
+    ) -> Result<CreateRoomRequest, FiniteChatCoreError> {
+        validate_string_bytes("room_id", &intended_room_id, MAX_OBJECT_ID_BYTES)
+            .map_err(client_error)?;
+        let mls_group_id = if self.core.has_room(&intended_room_id) {
+            self.core
+                .device
+                .room_mls_group_id(&intended_room_id)
+                .map_err(client_error)?
+        } else {
+            self.core.generate_object_id("mls")?
+        };
+        let request = CreateRoomRequest {
+            room_id: intended_room_id.clone(),
+            mls_group_id,
+            creator: self.core.device.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        };
+        self.validate_profile_chat_bootstrap_room_create_request(&intended_room_id, &request)?;
+        Ok(request)
+    }
+
+    fn prepare_profile_chat_bootstrap(
+        &mut self,
+        input: AppProfileChatBootstrapInput,
+        fail_after_room_server_acceptance: bool,
+    ) -> Result<AppProfileChatBootstrapPreparation, FiniteChatCoreError> {
+        let AppProfileChatBootstrapInput {
+            profile,
+            display_name,
+            intended_room_id,
+            room_create_request,
+            claimed_key_package,
+            persisted_prepared_commit,
+        } = input;
+        validate_string_bytes("room_id", &intended_room_id, MAX_OBJECT_ID_BYTES)
+            .map_err(client_error)?;
+        self.validate_profile_chat_bootstrap_room_create_request(
+            &intended_room_id,
+            &room_create_request,
+        )?;
+        let profile = normalize_profile_summary_hint(profile)?;
+        let account_id = profile.account_id.clone();
+        if account_id == self.app.identity.account_id {
+            return Err(FiniteChatCoreError::Client {
+                reason: "a profile chat cannot target the current account".to_owned(),
+            });
+        }
+        let label = display_name.trim();
+        if label.len() > MAX_PROFILE_DISPLAY_NAME_BYTES as usize {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!(
+                    "room display name must be at most {MAX_PROFILE_DISPLAY_NAME_BYTES} bytes"
+                ),
+            });
+        }
+        let display_name = if label.is_empty() {
+            format!("Chat with {}", short_account_label(&account_id))
+        } else {
+            label.to_owned()
+        };
+        if claimed_key_package.owner.account_id != account_id {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the durable bootstrap KeyPackage targets a different Agent".to_owned(),
+            });
+        }
+
+        if self.sync_and_validate_profile_chat_bootstrap_room(&account_id, &intended_room_id)? {
+            self.profile_chat_bootstrap_preparations
+                .remove(&intended_room_id);
+            self.finalize_profile_chat_bootstrap(
+                intended_room_id,
+                display_name,
+                "chat bootstrap resumed",
+            )?;
+            return Ok(AppProfileChatBootstrapPreparation {
+                state: self.app.clone(),
+                complete: true,
+                prepared_commit: None,
+            });
+        }
+
+        let mut profile = profile;
+        if !profile_has_useful_name(&profile, &account_id)
+            && let Some(display_name) =
+                profile_name_hint_from_chat_label(&display_name, &account_id)
+        {
+            profile.display_name = display_name;
+        }
+        self.remember_profile_summary(profile)?;
+
+        self.core.bootstrap_room_from_request(
+            &room_create_request,
+            Some(display_name),
+            fail_after_room_server_acceptance,
+        )?;
+        self.materialize_known_connected_rooms()?;
+
+        let prepared_commit = if self
+            .core
+            .device
+            .has_pending_commit(&intended_room_id)
+            .map_err(client_error)?
+        {
+            let prepared = persisted_prepared_commit
+                .or_else(|| {
+                    self.profile_chat_bootstrap_preparations
+                        .get(&intended_room_id)
+                        .cloned()
+                })
+                .ok_or_else(|| FiniteChatCoreError::Client {
+                    reason: "the intended bootstrap Room has pending MLS state without its durable submit request"
+                        .to_owned(),
+                })?;
+            self.validate_profile_chat_bootstrap_prepared_commit(
+                &account_id,
+                &intended_room_id,
+                &prepared,
+            )?;
+            prepared
+        } else {
+            let welcome_id = self.core.generate_object_id("welcome")?;
+            let idempotency_key = self.core.generate_object_id("direct-add")?;
+            let prepared = self
+                .core
+                .device
+                .prepare_add_member_commit(
+                    &intended_room_id,
+                    &claimed_key_package,
+                    welcome_id,
+                    idempotency_key,
+                )
+                .map_err(client_error)?;
+            AppProfileChatBootstrapPreparedCommit {
+                request: prepared.request,
+                message_id: prepared.message_id,
+            }
+        };
+        self.profile_chat_bootstrap_preparations
+            .insert(intended_room_id, prepared_commit.clone());
+        Ok(AppProfileChatBootstrapPreparation {
+            state: self.app.clone(),
+            complete: false,
+            prepared_commit: Some(prepared_commit),
+        })
+    }
+
+    fn validate_profile_chat_bootstrap_room_create_request(
+        &self,
+        intended_room_id: &str,
+        request: &CreateRoomRequest,
+    ) -> Result<(), FiniteChatCoreError> {
+        request.validate_limits().map_err(client_error)?;
+        request.protocol.validate_limits().map_err(client_error)?;
+        if request.room_id != intended_room_id
+            || request.creator != *self.core.device.device_ref()
+            || request.protocol != RoomProtocol::default()
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the durable profile chat Room create request is inconsistent".to_owned(),
+            });
+        }
+        if self.core.has_room(intended_room_id)
+            && self
+                .core
+                .device
+                .room_mls_group_id(intended_room_id)
+                .map_err(client_error)?
+                != request.mls_group_id
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason:
+                    "the durable profile chat Room create request does not match local MLS state"
+                        .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn submit_profile_chat_bootstrap(
+        &mut self,
+        agent_account_id: String,
+        display_name: String,
+        intended_room_id: String,
+        prepared_commit: AppProfileChatBootstrapPreparedCommit,
+        fail_after_device_save: bool,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.validate_profile_chat_bootstrap_prepared_commit(
+            &agent_account_id,
+            &intended_room_id,
+            &prepared_commit,
+        )?;
+        // `prepare_profile_chat_bootstrap` already synchronized and validated
+        // immediately before this command. Synchronizing again here would
+        // reload the not-yet-durable pending commit before we save it.
+        let current_room_ids = self.profile_chat_room_ids(&agent_account_id);
+        if matches!(current_room_ids.as_slice(), [room_id] if room_id == &intended_room_id) {
+            self.profile_chat_bootstrap_preparations
+                .remove(&intended_room_id);
+            return self.finalize_profile_chat_bootstrap(
+                intended_room_id,
+                display_name,
+                "chat bootstrap resumed",
+            );
+        }
+        if !current_room_ids.is_empty() {
+            return Err(FiniteChatCoreError::Client {
+                reason: "an existing direct Room prevents first-time profile chat bootstrap"
+                    .to_owned(),
+            });
+        }
+        if !self.core.has_room(&intended_room_id)
+            || self
+                .core
+                .device
+                .room_members(&intended_room_id)
+                .map_err(client_error)?
+                .iter()
+                .any(|member| member.account_id != self.app.identity.account_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the intended bootstrap Room changed before its durable submit".to_owned(),
+            });
+        }
+        if !self
+            .core
+            .device
+            .has_pending_commit(&intended_room_id)
+            .map_err(client_error)?
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the prepared bootstrap commit is not pending; it must be prepared again"
+                    .to_owned(),
+            });
+        }
+        if let Some(in_memory) = self
+            .profile_chat_bootstrap_preparations
+            .get(&intended_room_id)
+            && in_memory != &prepared_commit
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the durable bootstrap submit request does not match live MLS state"
+                    .to_owned(),
+            });
+        }
+        self.core
+            .store
+            .save_device_state(&self.core.device)
+            .map_err(store_error)?;
+        if fail_after_device_save {
+            return Err(FiniteChatCoreError::Client {
+                reason: "injected profile chat bootstrap failure after saving pending MLS state"
+                    .to_owned(),
+            });
+        }
+        let accepted = {
+            let mut delivery = self.core.home_delivery();
+            delivery
+                .submit_commit(prepared_commit.request.clone())
+                .map_err(send_delivery_error)?
+        };
+        if accepted.message_id != prepared_commit.message_id {
+            return Err(client_error(format!(
+                "commit acceptance message id {} did not match prepared message id {}",
+                accepted.message_id, prepared_commit.message_id
+            )));
+        }
+        let synced = self.core.sync_with_projection()?;
+        self.apply_projection_events(synced.events)?;
+        self.append_messages(synced.result.messages);
+        self.materialize_known_connected_rooms()?;
+        let room_ids = self.profile_chat_room_ids(&agent_account_id);
+        if !matches!(room_ids.as_slice(), [room_id] if room_id == &intended_room_id) {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the submitted bootstrap did not activate exactly its intended direct Room"
+                    .to_owned(),
+            });
+        }
+        self.profile_chat_bootstrap_preparations
+            .remove(&intended_room_id);
+        self.finalize_profile_chat_bootstrap(intended_room_id, display_name, "chat created")
+    }
+
+    /// Synchronize before deciding whether a Project bootstrap may proceed.
+    /// Returns true only when the exact intended Room is already the sole
+    /// direct Room for the Agent. A self-only intended Room is resumable;
+    /// every other existing or uninspectable Room remains fail-closed.
+    fn sync_and_validate_profile_chat_bootstrap_room(
+        &mut self,
+        agent_account_id: &str,
+        intended_room_id: &str,
+    ) -> Result<bool, FiniteChatCoreError> {
+        let synced = self.core.sync_with_projection()?;
+        self.apply_projection_events(synced.events)?;
+        self.append_messages(synced.result.messages);
+        self.materialize_known_connected_rooms()?;
+        if self
+            .app
+            .rooms
+            .iter()
+            .any(|room| room.state != AppRoomState::Connected || !self.core.has_room(&room.room_id))
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "cannot prove profile Room absence while a retained Room is unavailable on this Device"
+                    .to_owned(),
+            });
+        }
+        let existing_room_ids = self.profile_chat_room_ids(agent_account_id);
+        match existing_room_ids.as_slice() {
+            [room_id] if room_id == intended_room_id => return Ok(true),
+            [] => {}
+            _ => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "an existing direct Room prevents first-time profile chat bootstrap"
+                        .to_owned(),
+                });
+            }
+        }
+        if self.core.has_room(intended_room_id) {
+            let members = self
+                .core
+                .device
+                .room_members(intended_room_id)
+                .map_err(client_error)?;
+            if members
+                .iter()
+                .any(|member| member.account_id != self.app.identity.account_id)
+            {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "the intended bootstrap Room exists with unexpected members".to_owned(),
+                });
+            }
+        } else if self.room(intended_room_id).is_some() {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the intended bootstrap Room is retained without inspectable MLS state"
+                    .to_owned(),
+            });
+        }
+        Ok(false)
+    }
+
+    fn validate_profile_chat_bootstrap_prepared_commit(
+        &self,
+        agent_account_id: &str,
+        intended_room_id: &str,
+        prepared: &AppProfileChatBootstrapPreparedCommit,
+    ) -> Result<(), FiniteChatCoreError> {
+        prepared.request.validate_limits().map_err(client_error)?;
+        let own_device = self.core.device.device_ref();
+        let request = &prepared.request;
+        let message_id = request.envelope.message_id().map_err(client_error)?;
+        if request.room_id != intended_room_id
+            || request.sender != *own_device
+            || request.envelope.room_id != intended_room_id
+            || request.envelope.sender != *own_device
+            || request.membership_delta.commit_message_id != prepared.message_id
+            || message_id != prepared.message_id
+            || request.membership_delta.adds.len() != 1
+            || request.staged_welcomes.len() != 1
+            || request.membership_delta.adds[0].device.account_id != agent_account_id
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "the durable profile chat bootstrap submit request is inconsistent"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn finalize_profile_chat_bootstrap(
+        &mut self,
+        room_id: String,
+        display_name: String,
+        status: &str,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.app.selected_room_id = Some(room_id.clone());
+        self.upsert_room(
+            &room_id,
+            &display_name,
+            None,
+            AppRoomState::Connected,
+            "connected",
+        );
+        self.ensure_home_topic(&room_id)?;
+        if self
+            .default_chat_id_for_topic(&room_id, HOME_TOPIC_ID)
+            .is_none()
+        {
+            self.start_topic_chat(room_id.clone(), HOME_TOPIC_ID.to_owned(), None)?;
+        }
+        self.app.selected_topic_id = Some(HOME_TOPIC_ID.to_owned());
+        self.app.selected_chat_id = self.default_chat_id_for_topic(&room_id, HOME_TOPIC_ID);
+        self.persist_room_projection(&room_id)?;
+        self.persist_app_state()?;
+        self.sync_selected_room_messages();
+        self.app.status = status.to_owned();
+        self.app.toast = None;
+        Ok(())
+    }
+
+    fn create_profile_chat_room(
+        &mut self,
+        account_id: String,
+        display_name: String,
+        room_id: String,
+    ) -> Result<(), FiniteChatCoreError> {
         let claimed = {
             let mut delivery = self.core.home_delivery();
             match delivery.claim_key_package_for_account(&account_id) {
@@ -2957,7 +3587,6 @@ impl AppRuntimeState {
             }
         };
 
-        let room_id = self.core.generate_object_id("room")?;
         self.core
             .bootstrap_room(&room_id, Some(display_name.clone()))?;
 
@@ -5758,10 +6387,6 @@ impl AppRuntimeState {
             .or_else(|| topic.chats.first().map(|chat| chat.chat_id.clone()))
     }
 
-    fn existing_profile_chat_room_id(&self, account_id: &str) -> Option<String> {
-        self.profile_chat_room_ids(account_id).into_iter().next()
-    }
-
     fn profile_chat_room_ids(&self, account_id: &str) -> Vec<String> {
         let current_account_id = &self.app.identity.account_id;
         let matches_profile_chat = |room_id: &str| {
@@ -6462,6 +7087,63 @@ impl CoreState {
         Ok(BootstrapRoomResult {
             room_id: room_id.to_owned(),
             mls_group_id,
+        })
+    }
+
+    /// Apply an already-durable account-Room bootstrap request. The server
+    /// endpoint accepts an exact replay, so a crash after server acceptance
+    /// can retry this request before reconstructing the same local MLS group.
+    fn bootstrap_room_from_request(
+        &mut self,
+        request: &CreateRoomRequest,
+        display_name: Option<String>,
+        fail_after_server_acceptance: bool,
+    ) -> Result<BootstrapRoomResult, FiniteChatCoreError> {
+        request.validate_limits().map_err(client_error)?;
+        request.protocol.validate_limits().map_err(client_error)?;
+        if request.creator != *self.device.device_ref()
+            || request.protocol != RoomProtocol::default()
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "durable Room bootstrap request does not belong to this Device".to_owned(),
+            });
+        }
+        let already_local = self.has_room(&request.room_id);
+        if already_local
+            && self
+                .device
+                .room_mls_group_id(&request.room_id)
+                .map_err(client_error)?
+                != request.mls_group_id
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "durable Room bootstrap request does not match local MLS state".to_owned(),
+            });
+        }
+
+        verify_server_contract(&self.server_url)?;
+        let mut delivery = self.home_delivery();
+        delivery
+            .bootstrap_account_room(request)
+            .map_err(delivery_error)?;
+        if fail_after_server_acceptance && !already_local {
+            return Err(FiniteChatCoreError::Client {
+                reason: "injected profile chat bootstrap failure after Room server acceptance"
+                    .to_owned(),
+            });
+        }
+        if !already_local {
+            self.device
+                .create_group_state(&request.room_id, &request.mls_group_id)
+                .map_err(client_error)?;
+        }
+        let app_room = app_room_metadata(&request.room_id, display_name.as_deref());
+        self.store
+            .save_device_state_and_app_rooms(&self.device, std::slice::from_ref(&app_room))
+            .map_err(store_error)?;
+        Ok(BootstrapRoomResult {
+            room_id: request.room_id.clone(),
+            mls_group_id: request.mls_group_id.clone(),
         })
     }
 
@@ -13427,7 +14109,7 @@ mod tests {
     }
 
     #[test]
-    fn app_profile_chat_ignores_selection_and_chooses_stable_direct_room() {
+    fn app_profile_chat_rejects_ambiguous_direct_rooms_without_changing_selection() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -13465,29 +14147,220 @@ mod tests {
             .unwrap();
         add_runtime_member(&alice, &bob, &second, test_profile(&bob_account_id, "Bob"));
 
-        let mut sorted = [first, second];
-        sorted.sort();
-        let [canonical_room, selected_recovery_room] = sorted;
-        assert_ne!(selected_recovery_room, canonical_room);
+        let selected_recovery_room = second;
         alice
             .dispatch_and_wait(AppAction::OpenRoom {
                 room_id: selected_recovery_room.clone(),
             })
             .unwrap();
+        let before = alice.state().unwrap();
 
-        let opened = alice
+        let error = alice
             .dispatch_and_wait(AppAction::StartProfileChat {
-                profile: test_profile(&bob_account_id, "Bob"),
+                profile: test_profile_with_picture(
+                    &bob_account_id,
+                    "A profile mutation that must not persist",
+                    "https://example.invalid/must-not-persist.png",
+                ),
                 display_name: "Chat with Bob".to_owned(),
             })
-            .unwrap();
-        assert_eq!(opened.status, "chat opened");
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FiniteChatCoreError::Client { reason }
+                if reason == "multiple direct Rooms exist for this profile; open one explicitly"
+        ));
+        let unchanged = alice.state().unwrap();
+        assert_eq!(unchanged, before);
         assert_eq!(
-            opened.selected_room_id.as_deref(),
-            Some(canonical_room.as_str()),
-            "selection is a cursor and must not choose the direct Room identity"
+            unchanged.selected_room_id.as_deref(),
+            Some(selected_recovery_room.as_str())
         );
-        assert_eq!(opened.rooms.len(), 2);
+        assert_eq!(unchanged.rooms.len(), 2);
+    }
+
+    #[test]
+    fn profile_chat_bootstrap_resumes_only_its_intended_room_and_rejects_any_other_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("bob").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "bob-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob_account_id = bob.state().unwrap().identity.account_id;
+        bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let intended_room_id = "room-durable-bootstrap-intent".to_owned();
+
+        let created = bootstrap_profile_chat_for_test(
+            &alice,
+            test_profile(&bob_account_id, "Bob"),
+            "Chat with Bob",
+            &intended_room_id,
+        )
+        .unwrap();
+        assert_eq!(created.status, "chat created");
+        assert_eq!(
+            created.selected_room_id.as_deref(),
+            Some(intended_room_id.as_str())
+        );
+        assert_eq!(created.rooms.len(), 1);
+
+        let resumed = bootstrap_profile_chat_for_test(
+            &alice,
+            test_profile(&bob_account_id, "Bob"),
+            "Ignored retry label",
+            &intended_room_id,
+        )
+        .unwrap();
+        assert_eq!(resumed.status, "chat bootstrap resumed");
+        assert_eq!(
+            resumed.selected_room_id.as_deref(),
+            Some(intended_room_id.as_str())
+        );
+        assert_eq!(resumed.rooms.len(), 1);
+        bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let error = bootstrap_profile_chat_for_test(
+            &alice,
+            test_profile(&bob_account_id, "Bob"),
+            "Chat with Bob",
+            "room-different-bootstrap-intent",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FiniteChatCoreError::Client { reason }
+                if reason == "an existing direct Room prevents first-time profile chat bootstrap"
+        ));
+        assert_eq!(alice.state().unwrap().rooms.len(), 1);
+    }
+
+    #[test]
+    fn profile_chat_bootstrap_resumes_its_intended_self_only_room_without_creating_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("bob").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "bob-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let intended_room_id = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Durable intended Room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        let bob_account_id = bob
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id;
+
+        let completed = bootstrap_profile_chat_for_test(
+            &alice,
+            test_profile(&bob_account_id, "Bob"),
+            "Chat with Bob",
+            &intended_room_id,
+        )
+        .unwrap();
+        assert_eq!(completed.status, "chat created");
+        assert_eq!(completed.rooms.len(), 1);
+        assert_eq!(
+            completed.selected_room_id.as_deref(),
+            Some(intended_room_id.as_str())
+        );
+        assert_eq!(
+            alice.profile_chat_room_ids(bob_account_id).unwrap(),
+            vec![intended_room_id]
+        );
+    }
+
+    #[test]
+    fn profile_chat_bootstrap_fails_closed_when_retained_room_membership_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice_data = dir.path().join("alice");
+        let seeded_alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: alice_data.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        seeded_alice
+            .test_seed_room_state(
+                StoredAppRoom {
+                    room_id: "room-retained-without-mls".to_owned(),
+                    display_name: "Retained Room".to_owned(),
+                    picture: None,
+                    state: StoredAppRoomState::UnavailableOnDevice,
+                    status: LOCAL_ROOM_UNAVAILABLE_STATUS.to_owned(),
+                    local_read_seq: 0,
+                },
+                None,
+            )
+            .unwrap();
+        drop(seeded_alice);
+
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: alice_data.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("bob").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "bob-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let bob_account_id = bob.state().unwrap().identity.account_id;
+        bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let error = bootstrap_profile_chat_for_test(
+            &alice,
+            test_profile(&bob_account_id, "Bob"),
+            "Chat with Bob",
+            "room-authorized-intent",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FiniteChatCoreError::Client { reason }
+                if reason == "cannot prove profile Room absence while a retained Room is unavailable on this Device"
+        ));
+        let state = alice.state().unwrap();
+        assert_eq!(state.rooms.len(), 1);
+        assert_eq!(state.rooms[0].state, AppRoomState::UnavailableOnDevice);
     }
 
     #[test]
@@ -16606,6 +17479,44 @@ mod tests {
             stale: true,
             is_agent: false,
         }
+    }
+
+    fn bootstrap_profile_chat_for_test(
+        runtime: &Arc<FiniteChatRuntime>,
+        profile: AppProfileSummary,
+        display_name: &str,
+        intended_room_id: &str,
+    ) -> Result<AppState, FiniteChatCoreError> {
+        let claimed = runtime
+            .claim_profile_chat_key_package_and_wait(profile.account_id.clone())?
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: "test Agent has no available KeyPackage".to_owned(),
+            })?;
+        let room_create_request =
+            runtime.plan_profile_chat_bootstrap_room_and_wait(intended_room_id.to_owned())?;
+        let preparation = runtime.prepare_profile_chat_bootstrap_and_wait(
+            AppProfileChatBootstrapInput {
+                profile: profile.clone(),
+                display_name: display_name.to_owned(),
+                intended_room_id: intended_room_id.to_owned(),
+                room_create_request,
+                claimed_key_package: claimed,
+                persisted_prepared_commit: None,
+            },
+            false,
+        )?;
+        if preparation.complete {
+            return Ok(preparation.state);
+        }
+        runtime.submit_profile_chat_bootstrap_and_wait(
+            profile.account_id,
+            display_name.to_owned(),
+            intended_room_id.to_owned(),
+            preparation
+                .prepared_commit
+                .expect("prepared bootstrap commit"),
+            false,
+        )
     }
 
     fn test_profile_with_picture(

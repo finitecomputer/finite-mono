@@ -215,8 +215,22 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   separate Device whose key and store remain local.
 - A **Hosted Web Device** may decrypt its Rooms by design, so SaaS web chat is
   not described as browser E2EE even though the room server stores ciphertext.
+- A Finite Computer Project-to-Room binding is product navigation metadata
+  layered above Finite Chat. It cannot grant membership, constrain a Device's
+  sync, or be inferred from selection, display order, timestamps, or Room ids.
+- Its initial creation authority is a durable product-lifecycle fact written by
+  the authenticated Project-creation workflow, not something Finite Chat may
+  infer during load, restart, upgrade, or recovery. Before any server mutation,
+  bootstrap seals the exact Room create request, including its intended Room id
+  and MLS group id. It then seals the claimed Agent KeyPackage before Room
+  creation and the exact prepared add-member commit before submit. A crash
+  after server acceptance but before the matching local MLS group save replays
+  only that exact Room request; no retry may scan for or adopt another Room.
 - Restart or loss of one **Device** must not make it room authority or prevent
   another admitted Device from syncing and sending.
+- Restarting a **Device** reopens its durable identity, Room membership, and
+  cursors, then resumes normal protocol sync. Processing already-authorized
+  Welcomes or messages after reconnect is not legacy-state migration.
 - **Account Recovery** restores signing authority and permits a replacement
   **Device**; it does not by itself provide **History Recovery**.
 - A release promising retained chat history must cover the Room log, encrypted

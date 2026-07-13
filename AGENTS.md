@@ -29,6 +29,12 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   Recovery Authority, couple compute teardown to data purge, or claim stronger
   operator-blindness until the same Recovery Set has restored onto an empty
   target. A TEE and a Provider Durable Volume are not backups.
+- **Production repair is never speculative.** Before proposing a migration or
+  repair, gather read-only evidence, reproduce the failure, prove the change on
+  synthetic state, and name the backup and rollback boundary. Production
+  mutation requires explicit user authorization. A selected row, sort order,
+  identifier order, or other navigation state never confers authority to choose
+  or rewrite durable user state; ambiguous state fails closed without mutation.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates

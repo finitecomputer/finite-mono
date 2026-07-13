@@ -8,7 +8,9 @@ use finitechat_core::device_link::{
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
     HostedDeviceConfig, MAX_HOSTED_ATTACHMENT_BYTES, MAX_HOSTED_ATTACHMENTS_PER_MESSAGE,
-    MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app, app_with_fixed_device_link_now,
+    MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
+    app_with_final_agent_binding_persist_failures, app_with_fixed_device_link_now,
+    app_with_profile_bootstrap_room_create_failures, app_with_profile_bootstrap_submit_failures,
 };
 use finitechat_http::{
     AckLinkPayloadRequest, AckLinkPayloadResponse, ClaimLinkPayloadRequest,
@@ -23,8 +25,10 @@ use finitechat_proto::{
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
-use serde::Serialize;
+use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
+use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
 use std::convert::Infallible;
@@ -37,6 +41,8 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "hosted-device-test-token";
 const PUBLIC_SERVER_URL: &str = "https://chat.finite.computer";
+const TEST_AGENT_BINDING_KEY_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding-key.v1";
+const TEST_AGENT_BINDING_AAD_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding.v1";
 
 #[tokio::test]
 async fn state_requires_internal_authorization_and_verified_user() {
@@ -981,7 +987,7 @@ async fn hosted_device_chats_with_an_agent_and_restarts_with_the_transcript() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
+async fn unbound_existing_agent_rooms_are_not_automatically_migrated() {
     let root = TempDir::new().unwrap();
     let server_db = root.path().join("binding-server.sqlite3");
     let (server_url, _, server_task) = spawn_chat_server(&server_db, None).await;
@@ -1022,15 +1028,632 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
         hosted.clone(),
         "binding-user",
         serde_json::json!({
-            "StartProfileChat": { "profile": profile, "display_name": "First" }
+            "StartProfileChat": { "profile": profile.clone(), "display_name": "First" }
         }),
     )
     .await;
     let first_room = first["selected_room_id"].as_str().unwrap().to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let duplicate = action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({
+            "StartGroupChat": { "profiles": [profile], "display_name": "Duplicate recovery" }
+        }),
+    )
+    .await;
+    let duplicate_room = duplicate["selected_room_id"].as_str().unwrap().to_owned();
+    assert_ne!(duplicate_room, first_room);
+
+    binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-one",
+            "creation_request_id": "create-project-one"
+        }),
+    )
+    .await;
+
+    let before = state_for(hosted.clone(), "binding-user").await;
+    let response = hosted
+        .clone()
+        .oneshot(
+            Request::post("/v1/app/agent-bindings/ensure")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, "binding-user")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "project_id": "project-one",
+                        "agent_npub": agent_npub,
+                        "display_name": "Chat with Binding Agent"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&error).contains("automatic migration is disabled"),
+        "{}",
+        String::from_utf8_lossy(&error)
+    );
+    let after = state_for(hosted, "binding-user").await;
+    assert_eq!(after, before);
+    let binding_root = root
+        .path()
+        .join("binding-hosted/users")
+        .join(hex::encode(sha2::Sha256::digest(b"binding-user")))
+        .join("agent-bindings");
+    let records = fs::read_dir(binding_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].ends_with(".authorization.json"));
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_conflicting_binding_ensures_serialize_without_last_writer_wins() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("binding-race-server.sqlite3"), None).await;
+    let first_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("binding-race-identity-a")),
+        "finitechat-hosted-device-test/binding-race-a",
+    )
+    .unwrap();
+    let second_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("binding-race-identity-b")),
+        "finitechat-hosted-device-test/binding-race-b",
+    )
+    .unwrap();
+    let first_agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("binding-race-agent-a")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent-a".to_owned(),
+        account_secret_hex: Some(hex::encode(first_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let second_agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("binding-race-agent-b")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent-b".to_owned(),
+        account_secret_hex: Some(hex::encode(second_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let first_npub = npub_from_account_id(
+        first_agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    let second_npub = npub_from_account_id(
+        second_agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    assert_ne!(first_npub, second_npub);
+    let hosted = app(HostedDeviceConfig {
+        data_root: root.path().join("binding-race-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    });
+    binding_for(
+        hosted.clone(),
+        "binding-race-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-race",
+            "creation_request_id": "create-project-race"
+        }),
+    )
+    .await;
+
+    let (first, second) = tokio::join!(
+        binding_response_for(
+            hosted.clone(),
+            "binding-race-user",
+            "/v1/app/agent-bindings/ensure",
+            serde_json::json!({
+                "project_id": "project-race",
+                "agent_npub": first_npub,
+                "display_name": "First Agent"
+            }),
+        ),
+        binding_response_for(
+            hosted.clone(),
+            "binding-race-user",
+            "/v1/app/agent-bindings/ensure",
+            serde_json::json!({
+                "project_id": "project-race",
+                "agent_npub": second_npub,
+                "display_name": "Second Agent"
+            }),
+        )
+    );
+    let statuses = [first.status(), second.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::SERVICE_UNAVAILABLE)
+            .count(),
+        1
+    );
+    let state = state_for(hosted, "binding-race-user").await;
+    assert_eq!(state["rooms"].as_array().unwrap().len(), 1);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_final_binding_persist_resumes_only_the_durable_intended_room() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("binding-resume-server.sqlite3"), None).await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("binding-resume-agent-identity")),
+        "finitechat-hosted-device-test/binding-resume-agent",
+    )
+    .unwrap();
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("binding-resume-agent")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_npub = npub_from_account_id(
+        agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("binding-resume-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app_with_final_agent_binding_persist_failures(config.clone(), 1);
+    binding_for(
+        hosted.clone(),
+        "binding-resume-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-resume",
+            "creation_request_id": "create-project-resume"
+        }),
+    )
+    .await;
+    let request = serde_json::json!({
+        "project_id": "project-resume",
+        "agent_npub": agent_npub,
+        "display_name": "Resume Agent"
+    });
+    let failed = binding_response_for(
+        hosted.clone(),
+        "binding-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request.clone(),
+    )
+    .await;
+    let failed_status = failed.status();
+    let failed_body = failed.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        failed_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        String::from_utf8_lossy(&failed_body)
+    );
+    let after_failure = state_for(hosted.clone(), "binding-resume-user").await;
+    assert_eq!(after_failure["rooms"].as_array().unwrap().len(), 1);
+    let intended_room_id = after_failure["rooms"][0]["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    drop(hosted);
+    let resumed_app = app(config.clone());
+    let resumed = binding_for(
+        resumed_app.clone(),
+        "binding-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request,
+    )
+    .await;
+    assert_eq!(resumed["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        resumed["hosted_agent_binding"]["canonical_room_id"],
+        intended_room_id
+    );
+
+    drop(resumed_app);
+    let reopened = binding_for(
+        app(config),
+        "binding-resume-user",
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-resume" }),
+    )
+    .await;
+    assert_eq!(reopened["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened["selected_room_id"], intended_room_id);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_replays_exact_room_create_after_server_acceptance_before_local_save() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) = spawn_chat_server(
+        &root
+            .path()
+            .join("binding-room-create-resume-server.sqlite3"),
+        None,
+    )
+    .await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(
+            root.path()
+                .join("binding-room-create-resume-agent-identity"),
+        ),
+        "finitechat-hosted-device-test/binding-room-create-resume-agent",
+    )
+    .unwrap();
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("binding-room-create-resume-agent")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_npub = npub_from_account_id(
+        agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("binding-room-create-resume-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app_with_profile_bootstrap_room_create_failures(config.clone(), 1);
+    binding_for(
+        hosted.clone(),
+        "binding-room-create-resume-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-room-create-resume",
+            "creation_request_id": "create-project-room-create-resume"
+        }),
+    )
+    .await;
+    let request = serde_json::json!({
+        "project_id": "project-room-create-resume",
+        "agent_npub": agent_npub,
+        "display_name": "Room Create Resume Agent"
+    });
+    let failed = binding_response_for(
+        hosted.clone(),
+        "binding-room-create-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state_for(hosted.clone(), "binding-room-create-resume-user").await["rooms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    drop(hosted);
+    let resumed_app = app(config.clone());
+    let resumed = binding_for(
+        resumed_app.clone(),
+        "binding-room-create-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request,
+    )
+    .await;
+    let intended_room_id = resumed["hosted_agent_binding"]["canonical_room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(resumed["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(resumed["rooms"][0]["room_id"], intended_room_id);
+    assert_eq!(resumed["selected_room_id"], intended_room_id);
+
+    drop(resumed_app);
+    let reopened = binding_for(
+        app(config),
+        "binding-room-create-resume-user",
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-room-create-resume" }),
+    )
+    .await;
+    assert_eq!(reopened["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened["rooms"][0]["room_id"], intended_room_id);
+    assert_eq!(reopened["selected_room_id"], intended_room_id);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_resubmits_exact_journaled_add_after_pending_mls_state_was_saved() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) = spawn_chat_server(
+        &root.path().join("binding-submit-resume-server.sqlite3"),
+        None,
+    )
+    .await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("binding-submit-resume-agent-identity")),
+        "finitechat-hosted-device-test/binding-submit-resume-agent",
+    )
+    .unwrap();
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("binding-submit-resume-agent")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_npub = npub_from_account_id(
+        agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("binding-submit-resume-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app_with_profile_bootstrap_submit_failures(config.clone(), 1);
+    binding_for(
+        hosted.clone(),
+        "binding-submit-resume-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-submit-resume",
+            "creation_request_id": "create-project-submit-resume"
+        }),
+    )
+    .await;
+    let request = serde_json::json!({
+        "project_id": "project-submit-resume",
+        "agent_npub": agent_npub,
+        "display_name": "Submit Resume Agent"
+    });
+    let failed = binding_response_for(
+        hosted.clone(),
+        "binding-submit-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    let after_failure = state_for(hosted.clone(), "binding-submit-resume-user").await;
+    assert_eq!(after_failure["rooms"].as_array().unwrap().len(), 1);
+    let intended_room_id = after_failure["rooms"][0]["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    drop(hosted);
+    let resumed_app = app(config.clone());
+    let resumed = binding_for(
+        resumed_app.clone(),
+        "binding-submit-resume-user",
+        "/v1/app/agent-bindings/ensure",
+        request,
+    )
+    .await;
+    assert_eq!(resumed["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        resumed["hosted_agent_binding"]["canonical_room_id"],
+        intended_room_id
+    );
+    assert_eq!(resumed["selected_room_id"], intended_room_id);
+
+    drop(resumed_app);
+    let reopened = binding_for(
+        app(config),
+        "binding-submit-resume-user",
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-submit-resume" }),
+    )
+    .await;
+    assert_eq!(reopened["rooms"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened["selected_room_id"], intended_room_id);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_agent_binding_stays_unchanged_across_duplicate_selection_and_restart() {
+    let root = TempDir::new().unwrap();
+    let server_db = root.path().join("binding-server.sqlite3");
+    let (server_url, _, server_task) = spawn_chat_server(&server_db, None).await;
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("binding-agent").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: None,
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let agent_account_id = agent_state.identity.account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("binding-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app(config.clone());
     action_for(
         hosted.clone(),
         "binding-user",
-        serde_json::json!({ "CreateTopic": { "room_id": first_room, "title": "Retained first" } }),
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    let profile = serde_json::json!({
+        "account_id": agent_account_id,
+        "npub": agent_npub,
+        "display_name": "Binding Agent",
+        "about": null,
+        "picture": null,
+        "stale": false,
+        "is_agent": true
+    });
+
+    let unauthorized_bootstrap = binding_response_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/ensure",
+        serde_json::json!({
+            "project_id": "project-one",
+            "agent_npub": agent_npub,
+            "display_name": "Chat with Binding Agent"
+        }),
+    )
+    .await;
+    assert_eq!(
+        unauthorized_bootstrap.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(
+        state_for(hosted.clone(), "binding-user").await["rooms"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let authorization = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-one",
+            "creation_request_id": "create-project-one"
+        }),
+    )
+    .await;
+    assert_eq!(authorization["status"], "authorized");
+    let repeated_authorization = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-one",
+            "creation_request_id": "create-project-one"
+        }),
+    )
+    .await;
+    assert_eq!(repeated_authorization["status"], "already_authorized");
+    let conflicting_authorization = binding_response_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-one",
+            "creation_request_id": "different-project-creation"
+        }),
+    )
+    .await;
+    assert_eq!(
+        conflicting_authorization.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let ensured = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/ensure",
+        serde_json::json!({
+            "project_id": "project-one",
+            "agent_npub": agent_npub,
+            "display_name": "Chat with Binding Agent"
+        }),
+    )
+    .await;
+    let canonical_room = ensured["hosted_agent_binding"]["canonical_room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        ensured["hosted_agent_binding"]["associated_room_ids"],
+        serde_json::json!([])
+    );
+    let binding_path = fs::read_dir(
+        root.path()
+            .join("binding-hosted/users")
+            .join(hex::encode(sha2::Sha256::digest(b"binding-user")))
+            .join("agent-bindings"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({ "CreateTopic": { "room_id": canonical_room, "title": "Retained first" } }),
     )
     .await;
 
@@ -1044,7 +1667,7 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
     )
     .await;
     let duplicate_room = duplicate["selected_room_id"].as_str().unwrap().to_owned();
-    assert_ne!(duplicate_room, first_room);
+    assert_ne!(duplicate_room, canonical_room);
     action_for(
         hosted.clone(),
         "binding-user",
@@ -1052,30 +1675,40 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
     )
     .await;
 
-    let ensured = binding_for(
+    rewrite_associated_room_ids(
+        &config.data_root,
+        "binding-user",
+        "project-one",
+        &binding_path,
+        std::slice::from_ref(&duplicate_room),
+    );
+    let original_sealed_binding = fs::read(&binding_path).unwrap();
+
+    let opened_after_duplicate = binding_for(
         hosted.clone(),
         "binding-user",
-        "/v1/app/agent-bindings/ensure",
-        serde_json::json!({
-            "project_id": "project-one",
-            "agent_npub": agent_npub,
-            "display_name": "Chat with Binding Agent"
-        }),
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-one" }),
     )
     .await;
-    let mut expected = [first_room.clone(), duplicate_room.clone()];
-    expected.sort();
     assert_eq!(
-        ensured["hosted_agent_binding"]["canonical_room_id"],
-        expected[0]
+        opened_after_duplicate["hosted_agent_binding"]["canonical_room_id"],
+        canonical_room
     );
-    assert_eq!(ensured["rooms"].as_array().unwrap().len(), 2);
-    assert_eq!(ensured["topics"].as_array().unwrap().len(), 4);
-    let canonical_home_before = ensured["topics"]
+    assert_eq!(
+        opened_after_duplicate["hosted_agent_binding"]["associated_room_ids"],
+        serde_json::json!([duplicate_room])
+    );
+    assert_eq!(opened_after_duplicate["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        opened_after_duplicate["topics"].as_array().unwrap().len(),
+        4
+    );
+    let canonical_home_before = opened_after_duplicate["topics"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|topic| topic["room_id"] == expected[0] && topic["topic_id"] == "home")
+        .find(|topic| topic["room_id"] == canonical_room && topic["topic_id"] == "home")
         .unwrap()["chats"]
         .as_array()
         .unwrap()
@@ -1090,7 +1723,7 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "project_id": "project-one",
-                        "room_id": expected[1],
+                        "room_id": duplicate_room,
                         "topic_id": "home",
                         "reason": null,
                         "intent_key": "legacy-browser-new-chat"
@@ -1104,7 +1737,7 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
     assert_eq!(legacy_new_chat.status(), StatusCode::CONFLICT);
     let new_chat = serde_json::json!({
         "project_id": "project-one",
-        "room_id": expected[0],
+        "room_id": canonical_room,
         "topic_id": "home",
         "reason": null,
         "intent_key": "browser-new-chat-1"
@@ -1126,33 +1759,22 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|topic| topic["room_id"] == expected[0] && topic["topic_id"] == "home")
+        .find(|topic| topic["room_id"] == canonical_room && topic["topic_id"] == "home")
         .unwrap()["chats"]
         .as_array()
         .unwrap()
         .len();
     assert_eq!(canonical_home_after, canonical_home_before + 1);
-    let binding_path = fs::read_dir(
-        root.path()
-            .join("binding-hosted/users")
-            .join(hex::encode(sha2::Sha256::digest(b"binding-user")))
-            .join("agent-bindings"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    let sealed_binding = fs::read_to_string(binding_path).unwrap();
+    let sealed_binding = fs::read_to_string(&binding_path).unwrap();
     assert!(!sealed_binding.contains("project-one"));
     assert!(!sealed_binding.contains(&agent_account_id));
-    assert!(!sealed_binding.contains(&first_room));
+    assert!(!sealed_binding.contains(&canonical_room));
     assert!(!sealed_binding.contains(&duplicate_room));
     let failed_claim = runtime_command_for(
         hosted.clone(),
         "binding-user",
         serde_json::json!({
-            "room_id": expected[0],
+            "room_id": canonical_room,
             "target_account_id": agent_account_id,
             "command": "agent.owner.claim",
             "resource_key": "agent.connections",
@@ -1173,11 +1795,15 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
     .await;
     assert_eq!(after_failed_claim["rooms"].as_array().unwrap().len(), 2);
     assert_eq!(after_failed_claim["topics"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        after_failed_claim["hosted_agent_binding"]["associated_room_ids"],
+        serde_json::json!([duplicate_room])
+    );
 
     action_for(
         hosted.clone(),
         "binding-user",
-        serde_json::json!({ "OpenRoom": { "room_id": expected[1] } }),
+        serde_json::json!({ "OpenRoom": { "room_id": duplicate_room } }),
     )
     .await;
     drop(hosted);
@@ -1189,9 +1815,14 @@ async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
         serde_json::json!({ "project_id": "project-one" }),
     )
     .await;
-    assert_eq!(reopened["selected_room_id"], expected[0]);
+    assert_eq!(reopened["selected_room_id"], canonical_room);
     assert_eq!(reopened["rooms"].as_array().unwrap().len(), 2);
     assert_eq!(reopened["topics"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        reopened["hosted_agent_binding"]["associated_room_ids"],
+        serde_json::json!([duplicate_room])
+    );
+    assert_eq!(fs::read(binding_path).unwrap(), original_sealed_binding);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1451,17 +2082,7 @@ async fn runtime_command_for(
 }
 
 async fn binding_for(app: axum::Router, user_id: &str, path: &str, body: Value) -> Value {
-    let response = app
-        .oneshot(
-            Request::post(path)
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .header(WORKOS_USER_HEADER, user_id)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = binding_response_for(app, user_id, path, body).await;
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(
@@ -1471,6 +2092,92 @@ async fn binding_for(app: axum::Router, user_id: &str, path: &str, body: Value) 
         String::from_utf8_lossy(&bytes)
     );
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn binding_response_for(
+    app: axum::Router,
+    user_id: &str,
+    path: &str,
+    body: Value,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::post(path)
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, user_id)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[derive(Serialize, Deserialize)]
+struct TestSealedAgentBinding {
+    version: u16,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+fn rewrite_associated_room_ids(
+    hosted_root: &Path,
+    user_id: &str,
+    project_id: &str,
+    binding_path: &Path,
+    associated_room_ids: &[String],
+) {
+    let user_storage_id = hex::encode(sha2::Sha256::digest(user_id.as_bytes()));
+    let identity = FiniteIdentity::load(&IdentityPaths::with_finite_home(
+        hosted_root
+            .join("users")
+            .join(&user_storage_id)
+            .join("finite-home"),
+    ))
+    .unwrap();
+    let mut key_hasher = sha2::Sha256::new();
+    key_hasher.update(TEST_AGENT_BINDING_KEY_DOMAIN);
+    key_hasher.update(identity.expose_secret_bytes());
+    let key: [u8; 32] = key_hasher.finalize().into();
+    let mut aad = TEST_AGENT_BINDING_AAD_DOMAIN.to_vec();
+    aad.extend_from_slice(user_storage_id.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(project_id.as_bytes());
+    let provider = OpenMlsRustCrypto::default();
+    let sealed: TestSealedAgentBinding =
+        serde_json::from_slice(&fs::read(binding_path).unwrap()).unwrap();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            &key,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &aad,
+        )
+        .unwrap();
+    let mut binding: Value = serde_json::from_slice(&plaintext).unwrap();
+    binding["associated_room_ids"] = serde_json::json!(associated_room_ids);
+    let nonce: [u8; 12] = provider.rand().random_array().unwrap();
+    let ciphertext = provider
+        .crypto()
+        .aead_encrypt(
+            AeadType::Aes256Gcm,
+            &key,
+            &serde_json::to_vec(&binding).unwrap(),
+            &nonce,
+            &aad,
+        )
+        .unwrap();
+    fs::write(
+        binding_path,
+        serde_json::to_vec(&TestSealedAgentBinding {
+            version: 1,
+            nonce: nonce.to_vec(),
+            ciphertext,
+        })
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 struct MultipartFile {

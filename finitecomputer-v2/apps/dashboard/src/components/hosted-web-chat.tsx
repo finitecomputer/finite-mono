@@ -35,10 +35,12 @@ import {
 } from "lucide-react";
 
 import {
-  CHAT_INVALID_UPDATE_MESSAGE,
-  CHAT_UNAVAILABLE_MESSAGE,
   CHAT_WAITING_FOR_AGENT_MESSAGE,
 } from "@/lib/chat-product-copy";
+import {
+  hostedChatErrorMessage,
+  useHostedChat,
+} from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -57,18 +59,6 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
-import {
-  initialHostedChatSnapshotSource,
-  nextHostedChatSnapshotGeneration,
-  recordHostedChatSnapshot,
-  shouldApplyHttpHostedChatSnapshot,
-  shouldApplyStreamHostedChatSnapshot,
-} from "@/lib/hosted-web-chat-snapshots";
-import {
-  runInitialHostedChatRetries,
-  shouldRetryHostedChatRequest,
-  type HostedChatRetryAttempt,
-} from "@/lib/hosted-web-chat-retry";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
   beginPendingChatTurn,
@@ -82,7 +72,6 @@ import {
   type PendingChatTurn,
 } from "@finite/chat-ui";
 
-const STREAM_RECONNECT_DELAY_MS = 1_000;
 const TYPING_IDLE_MS = 2_200;
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
@@ -110,14 +99,25 @@ export function HostedWebChat({
   machineId: string;
   machineLabel: string;
 }) {
-  const apiBase = `/api/chat/machines/${encodeURIComponent(machineId)}/hosted-device`;
-  const [state, setState] = useState<HostedChatState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    apiBase,
+    state,
+    transportError,
+    claimError,
+    bindingRecoveryRequired,
+    streamConnected,
+    ownerClaimed,
+    load,
+    claimOwner,
+    recoverBinding,
+    dispatch,
+    dispatchQuiet,
+    uploadAttachments,
+  } = useHostedChat();
+  const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  const [streamConnected, setStreamConnected] = useState(false);
-  const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -134,180 +134,23 @@ export function HostedWebChat({
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const markedReadSeqRef = useRef(new Map<string, number>());
-  const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
-  const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
-  const lastLoadErrorRef = useRef<string | null>(null);
-  const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
-  const hasState = state !== null;
-
-  const applyHttpSnapshot = useCallback((next: HostedChatState, requestGeneration: number) => {
-    const source = snapshotSourceRef.current;
-    if (!shouldApplyHttpHostedChatSnapshot(source, requestGeneration, next.rev)) {
-      return false;
-    }
-    snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
-    setState((current) => ({
-      ...next,
-      hosted_agent_binding: next.hosted_agent_binding ?? current?.hosted_agent_binding ?? null,
-    }));
-    return true;
-  }, []);
-
-  const load = useCallback((showError = true) => {
-    if (stateLoadRef.current) return stateLoadRef.current;
-    const requestGeneration = snapshotSourceRef.current.generation;
-    const pending = (async (): Promise<HostedChatRetryAttempt> => {
-      try {
-        const next = await chatRequest<HostedChatState>(`${apiBase}/state`);
-        applyHttpSnapshot(next, requestGeneration);
-        setError(null);
-        return "succeeded";
-      } catch (caught) {
-        const message = errorMessage(caught);
-        lastLoadErrorRef.current = message;
-        if (showError) setError(message);
-        const status = caught instanceof HostedChatHttpError ? caught.status : null;
-        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
-      }
-    })();
-    stateLoadRef.current = pending;
-    void pending.finally(() => {
-      if (stateLoadRef.current === pending) stateLoadRef.current = null;
-    });
-    return pending;
-  }, [apiBase, applyHttpSnapshot]);
-
-  const claimOwner = useCallback(() => {
-    if (ownerClaimRef.current) return ownerClaimRef.current;
-    const pending = (async (): Promise<HostedChatRetryAttempt> => {
-      try {
-        await chatRequest<{ claimed: true }>(`${apiBase}/claim`, { method: "POST" });
-        setOwnerClaimed(true);
-        setError(null);
-        return "succeeded";
-      } catch (caught) {
-        setError(errorMessage(caught));
-        const status = caught instanceof HostedChatHttpError ? caught.status : null;
-        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
-      }
-    })();
-    ownerClaimRef.current = pending;
-    void pending.finally(() => {
-      if (ownerClaimRef.current === pending) ownerClaimRef.current = null;
-    });
-    return pending;
-  }, [apiBase]);
-
-  const dispatch = useCallback(
-    async (action: HostedChatAction) => {
-      const requestGeneration = snapshotSourceRef.current.generation;
-      const next = await chatRequest<HostedChatState>(`${apiBase}/actions`, {
-        method: "POST",
-        body: JSON.stringify(action),
-      });
-      applyHttpSnapshot(next, requestGeneration);
-      return next;
-    },
-    [apiBase, applyHttpSnapshot]
-  );
-
-  const dispatchQuiet = useCallback(
-    async (action: HostedChatAction) => {
-      try {
-        return await dispatch(action);
-      } catch {
-        return null;
-      }
-    },
-    [dispatch]
-  );
-
-  useEffect(() => {
-    if (hasState) return;
-    const controller = new AbortController();
-    void runInitialHostedChatRetries(() => load(false), controller.signal).then((result) => {
-      if (result === "stop" && !controller.signal.aborted) {
-        setError(lastLoadErrorRef.current ?? CHAT_UNAVAILABLE_MESSAGE);
-      }
-    });
-    return () => controller.abort();
-  }, [hasState, load]);
-
-  useEffect(() => {
-    if (!hasState || ownerClaimed) return;
-    const controller = new AbortController();
-    void runInitialHostedChatRetries(claimOwner, controller.signal);
-    return () => controller.abort();
-  }, [claimOwner, hasState, ownerClaimed]);
-
-  useEffect(() => {
-    if (!hasState) {
-      return;
-    }
-    let disposed = false;
-    let events: EventSource | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const connect = () => {
-      if (disposed) {
-        return;
-      }
-      const nextEvents = new EventSource(`${apiBase}/updates`);
-      events = nextEvents;
-      snapshotSourceRef.current = nextHostedChatSnapshotGeneration(snapshotSourceRef.current);
-      const onState = (event: MessageEvent<string>) => {
-        try {
-          const next = JSON.parse(event.data) as HostedChatState;
-          if (events !== nextEvents) {
-            return;
-          }
-          const source = snapshotSourceRef.current;
-          if (!shouldApplyStreamHostedChatSnapshot(source, next.rev)) {
-            return;
-          }
-          snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
-          setState((current) => ({
-            ...next,
-            hosted_agent_binding: next.hosted_agent_binding ?? current?.hosted_agent_binding ?? null,
-          }));
-          setError(null);
-          setStreamConnected(true);
-        } catch {
-          setError(CHAT_INVALID_UPDATE_MESSAGE);
-        }
-      };
-      nextEvents.addEventListener("open", () => setStreamConnected(true));
-      nextEvents.addEventListener("state", onState as EventListener);
-      nextEvents.addEventListener("error", () => {
-        if (disposed || events !== nextEvents) {
-          return;
-        }
-        nextEvents.close();
-        events = null;
-        setStreamConnected(false);
-        setError((current) => current ?? "Reconnecting…");
-        reconnectTimer = setTimeout(connect, STREAM_RECONNECT_DELAY_MS);
-      });
-    };
-
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-      }
-      events?.close();
-    };
-  }, [apiBase, hasState]);
+  const allowedRoomIds = useMemo(() => {
+    const binding = state?.hosted_agent_binding;
+    if (!binding) return new Set<string>();
+    return new Set([binding.canonical_room_id, ...binding.associated_room_ids]);
+  }, [state?.hosted_agent_binding]);
 
   const selectedRoom = useMemo(
     () =>
-      state?.rooms.find((room) => room.room_id === state.selected_room_id)
-      ?? state?.rooms.find((room) => room.is_agent_chat)
-      ?? state?.rooms[0]
+      state?.rooms.find(
+        (room) => room.room_id === state.selected_room_id && allowedRoomIds.has(room.room_id)
+      )
+      ?? state?.rooms.find(
+        (room) => room.room_id === state.hosted_agent_binding?.canonical_room_id
+      )
       ?? null,
-    [state]
+    [allowedRoomIds, state]
   );
   const roomTopics = useMemo(
     () =>
@@ -501,11 +344,11 @@ export function HostedWebChat({
     const text = draft.trim();
     if ((!text && attachments.length === 0) || !selectedRoom || sending) return;
     if (attachments.length > 0 && selectedTopic && !selectedChat) {
-      setError("Start a chat in this topic before attaching files.");
+      setActionError("Start a chat in this topic before attaching files.");
       return;
     }
     setSending(true);
-    setError(null);
+    setActionError(null);
     stopTyping(selectedRoom.room_id);
     const pendingTurn = beginPendingChatTurn(selectedChatSelection, messages);
     if (pendingTurn) {
@@ -523,12 +366,7 @@ export function HostedWebChat({
         if (selectedChat) formData.set("chat_id", selectedChat.chat_id);
         formData.set("caption", text);
         for (const attachment of attachments) formData.append("files", attachment.file);
-        const requestGeneration = snapshotSourceRef.current.generation;
-        next = await chatRequest<HostedChatState>(`${apiBase}/attachments`, {
-          method: "POST",
-          body: formData,
-        });
-        applyHttpSnapshot(next, requestGeneration);
+        next = await uploadAttachments(formData);
         const uploadError = attachmentSendError(next);
         if (uploadError) throw new Error(uploadError);
       } else {
@@ -544,7 +382,7 @@ export function HostedWebChat({
       if (pendingTurn) {
         setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
       }
-      setError(errorMessage(caught));
+      setActionError(hostedChatErrorMessage(caught));
     } finally {
       setSending(false);
     }
@@ -555,7 +393,7 @@ export function HostedWebChat({
     const accepted = incoming.filter((file) => file.size <= MAX_ATTACHMENT_BYTES);
     const oversized = incoming.find((file) => file.size > MAX_ATTACHMENT_BYTES);
     if (oversized) {
-      setError(`${oversized.name} is larger than ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+      setActionError(`${oversized.name} is larger than ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
     }
     setAttachments((current) => {
       const remaining = Math.max(0, MAX_ATTACHMENTS - current.length);
@@ -571,9 +409,9 @@ export function HostedWebChat({
         return true;
       });
       if (incoming.length > remaining) {
-        setError(`You can attach up to ${MAX_ATTACHMENTS} files at a time.`);
+        setActionError(`You can attach up to ${MAX_ATTACHMENTS} files at a time.`);
       } else if (selected.length < accepted.slice(0, remaining).length) {
-        setError(`Attachments can total up to ${formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)}.`);
+        setActionError(`Attachments can total up to ${formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)}.`);
       }
       return [
         ...current,
@@ -608,7 +446,7 @@ export function HostedWebChat({
       });
       setRenameOpen(false);
     } catch (caught) {
-      setError(errorMessage(caught));
+      setActionError(hostedChatErrorMessage(caught));
     }
   }
 
@@ -680,7 +518,7 @@ export function HostedWebChat({
                   setShowLatest(!shouldFollowScrollRef.current);
                 }}
               >
-                {!state && !error ? <ChatLoading label="Opening your chat…" /> : null}
+                {!state && !transportError ? <ChatLoading label="Opening your chat…" /> : null}
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
@@ -738,18 +576,32 @@ export function HostedWebChat({
                 </button>
               ) : null}
 
-              {error ? (
+              {transportError || claimError || actionError ? (
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
-                  <span>{error}</span>
+                  <span>{transportError ?? claimError ?? actionError}</span>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load(true))}
+                    onClick={() => {
+                      if (transportError) {
+                        void (bindingRecoveryRequired ? recoverBinding() : load(true));
+                      } else if (claimError) {
+                        void claimOwner();
+                      } else {
+                        setActionError(null);
+                      }
+                    }}
                   >
-                    <RotateCcwIcon />
-                    {hasState && !ownerClaimed ? "Retry claim" : "Retry load"}
+                    {transportError || claimError ? <RotateCcwIcon /> : null}
+                    {transportError
+                      ? bindingRecoveryRequired
+                        ? "Finish chat setup"
+                        : "Retry load"
+                      : claimError
+                        ? "Retry claim"
+                        : "Dismiss"}
                   </Button>
                 </div>
               ) : null}
@@ -1185,39 +1037,4 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-async function chatRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (typeof init.body === "string") headers.set("content-type", "application/json");
-  const response = await fetch(url, { ...init, cache: "no-store", headers });
-  if (!response.ok) {
-    const text = await response.text();
-    try {
-      const parsed = JSON.parse(text) as { error?: string };
-      throw new HostedChatHttpError(
-        parsed.error || text || `Chat returned ${response.status}`,
-        response.status
-      );
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        throw new HostedChatHttpError(text || `Chat returned ${response.status}`, response.status);
-      }
-      throw error;
-    }
-  }
-  return response.json() as Promise<T>;
-}
-
-class HostedChatHttpError extends Error {
-  constructor(
-    message: string,
-    readonly status: number
-  ) {
-    super(message);
-  }
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : CHAT_UNAVAILABLE_MESSAGE;
 }
