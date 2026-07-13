@@ -1579,10 +1579,10 @@ fn audio_canary_request() -> ChatCompletionRequest {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
     wav.extend_from_slice(&pcm);
-    request_with_media_parts(vec![
+    let mut request = request_with_media_parts(vec![
         json!({
             "type": "text",
-            "text": "Is this audio silent or does it contain a tone? Reply with exactly SILENCE or TONE."
+            "text": "Describe the sound in this short audio clip. Mention whether you hear a tone."
         }),
         json!({
             "type": "input_audio",
@@ -1591,7 +1591,9 @@ fn audio_canary_request() -> ChatCompletionRequest {
                 "format": "wav"
             }
         }),
-    ])
+    ]);
+    request.max_tokens = Some(96);
+    request
 }
 
 async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionRequest, WorkerError> {
@@ -2371,6 +2373,20 @@ mod tests {
                 "input_audio": { "data": "UklGRg==", "format": "wav" }
             })
         );
+    }
+
+    #[test]
+    fn audio_canary_uses_descriptive_semantic_prompt_with_output_headroom() {
+        let request = audio_canary_request();
+        let ChatContent::Parts(parts) = &request.messages[0].content else {
+            panic!("audio canary must use multipart content");
+        };
+
+        assert_eq!(
+            parts[0]["text"],
+            "Describe the sound in this short audio clip. Mention whether you hear a tone."
+        );
+        assert_eq!(request.max_tokens, Some(96));
     }
 
     #[tokio::test]
