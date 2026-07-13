@@ -9,8 +9,9 @@
 - Feature branch: `feature/finitebrain-settings-vault-ui`
 - Human owner: Austin
 - Started: 2026-07-12
-- Current status: all AFK tickets and post-review fixes are committed; final
-  local verification and existing-PR refresh are in progress
+- Current status: all AFK tickets and post-review fixes are committed; local
+  verification is complete with recorded environment limits and the existing
+  PR refresh is pending
 - Skill setup status: present (`finite-brain/AGENTS.md` and
   `finite-brain/docs/agents/`)
 
@@ -100,6 +101,23 @@ undefined.
 Testing seams are the same agent-verifiable seams used for the immediately
 preceding remediation: deterministic Product Client contracts plus an isolated
 Rust-served `/client` browser flow with disposable local identities.
+
+## Final Verification Notes
+
+- Passed: Product Client deterministic seams, JavaScript syntax, focused and
+  full `finite-brain-server` tests, FiniteBrain app build, Rust formatting,
+  workspace clippy, skills/search static checks, and runtime-image contract.
+- Passed: dashboard install, lint, unit test suite, and production build.
+- The rebuilt local Product Client at `http://127.0.0.1:4039/client` serves
+  the current Graph markup: no `graphFilterInput`, and only the real zoom,
+  reset-zoom, and full-screen controls.
+- Two `cargo test --workspace --locked` runs failed only in unrelated,
+  parallel `finite-saas-runner` Kata fake-process tests; the failing tests
+  passed individually. No FiniteBrain test failed.
+- Visual browser automation could not run because neither `agent-browser` nor
+  the Chrome/Chromium application bundle is installed on this machine. The
+  dashboard browser suite has the same explicit missing-Chrome failure; no
+  unpinned browser download was installed outside the Nix environment.
 
 ## Escalations
 
