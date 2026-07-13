@@ -1,25 +1,101 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-builder="${FINITE_NIX_X86_BUILDER:-finite-lat-2}"
-store="ssh-ng://${builder}"
-target="nixosConfigurations.finite-lat-1.config.system.build.toplevel"
+builder="ubuntu@finite-lat-2"
+system_target="nixosConfigurations.finite-lat-1.config.system.build.toplevel"
+disko_target="nixosConfigurations.finite-lat-1.config.system.build.diskoScript"
 
-if [[ $# -ne 0 ]]; then
-  echo "usage: $0" >&2
+if [[ $# -ne 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: $0 <exact-40-hex-mono-rev>" >&2
   exit 64
 fi
+rev="$1"
 
-# A plain `nix build` inherits the operator's global builders file, which is
-# unrelated to finite-mono and may name personal machines. Fail against the
-# repository's x86 builder before evaluating a large system closure.
-nix store info --store "$store" >/dev/null
+# The Mac runs no Nix command at all: it cannot inherit /etc/nix/machines or a
+# personal builders setting. Evaluation and realization both happen on lat2,
+# with remote builders explicitly disabled. Per-revision system and disko
+# out-links are GC roots and are the handoff points used by the runbooks.
+system_path="$(ssh -o BatchMode=yes "$builder" \
+  bash -s -- "$rev" "$system_target" "$disko_target" <<'REMOTE'
+set -euo pipefail
 
-archive_json="$(nix flake archive --json --to "$store" "$repo_root")"
-remote_source="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["path"])' <<<"$archive_json")"
+rev="$1"
+system_target="$2"
+disko_target="$3"
 
-# Evaluate and build on lat2 itself. Evaluating locally against a remote store
-# turns thousands of store queries into SSH round trips and is needlessly slow.
-exec ssh -o BatchMode=yes "$builder" \
-  nix build --no-link "path:${remote_source}#${target}"
+if [[ "$(hostname -s)" != "finite-lat-2" ]]; then
+  echo "refusing to build on $(hostname -f): expected finite-lat-2" >&2
+  exit 69
+fi
+
+current_system="$(nix eval --option builders '' --impure --raw --expr builtins.currentSystem)"
+if [[ "$current_system" != "x86_64-linux" ]]; then
+  echo "refusing to build on system ${current_system}: expected x86_64-linux" >&2
+  exit 69
+fi
+
+root_dir="$HOME/.local/state/finite-mono/lat1-closures"
+gc_root="${root_dir}/${rev}"
+disko_root_dir="$HOME/.local/state/finite-mono/lat1-disko-scripts"
+disko_gc_root="${disko_root_dir}/${rev}"
+install -d -m 0700 "$root_dir" "$disko_root_dir"
+for root in "$gc_root" "$disko_gc_root"; do
+  if [[ -e "$root" && ! -L "$root" ]]; then
+    echo "refusing to replace non-symlink GC root: ${root}" >&2
+    exit 73
+  fi
+done
+
+out_path="$(nix build \
+  --option builders '' \
+  --option max-jobs auto \
+  --out-link "$gc_root" \
+  --print-out-paths \
+  "github:finitecomputer/finite-mono/${rev}#${system_target}")"
+
+if [[ ! "$out_path" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]]; then
+  echo "unexpected system output path: ${out_path}" >&2
+  exit 70
+fi
+if [[ ! -x "$out_path/bin/switch-to-configuration" ]]; then
+  echo "system output lacks switch-to-configuration: ${out_path}" >&2
+  exit 70
+fi
+if [[ "$(readlink -f "$gc_root")" != "$out_path" ]]; then
+  echo "GC root ${gc_root} does not resolve to ${out_path}" >&2
+  exit 70
+fi
+
+# nixos-anywhere's --store-paths mode also needs the matching disko script.
+# Root it under the same immutable revision without adding a second stdout
+# value; reinstall runbooks recover it from this documented root.
+disko_path="$(nix build \
+  --option builders '' \
+  --option max-jobs auto \
+  --out-link "$disko_gc_root" \
+  --print-out-paths \
+  "github:finitecomputer/finite-mono/${rev}#${disko_target}")"
+if [[ ! "$disko_path" =~ ^/nix/store/[0-9a-z]{32}-[^/[:space:]]+$ ]]; then
+  echo "unexpected disko output path: ${disko_path}" >&2
+  exit 70
+fi
+if [[ ! -x "$disko_path" ]]; then
+  echo "disko output is not executable: ${disko_path}" >&2
+  exit 70
+fi
+if [[ "$(readlink -f "$disko_gc_root")" != "$disko_path" ]]; then
+  echo "GC root ${disko_gc_root} does not resolve to ${disko_path}" >&2
+  exit 70
+fi
+
+printf '%s\n' "$out_path"
+REMOTE
+)"
+
+# Keep stdout machine-readable even if the remote account later gains a login
+# banner or another unexpected stdout producer.
+if [[ ! "$system_path" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-1-[^/[:space:]]+$ ]]; then
+  echo "unexpected remote system output path: ${system_path}" >&2
+  exit 70
+fi
+printf '%s\n' "$system_path"
