@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use crate::AgentdError;
 use crate::config::{
     AeonSpecializationDesiredStateV1, ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1,
+    VISION_CONFIG_PATH,
 };
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
@@ -43,6 +44,9 @@ const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
+const AEON_RED_FIXTURE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAEAQMAAACTPww9AAAAA1BMVEX/AAAZ4gk3AAAAC0lEQVQI12NggAAAAAgAAS8g3TEAAAAASUVORK5CYII=";
+const AEON_RED_PROMPT: &str =
+    "What is the dominant color of this image? Reply with one uppercase color word.";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -235,6 +239,91 @@ fn prepare_agent_runtime(config: &DaemonConfig) -> Result<(), AgentdError> {
     }
 }
 
+async fn probe_aeon_specialization(
+    current: &Value,
+    desired: &AeonSpecializationDesiredStateV1,
+) -> Result<(), AgentdError> {
+    let base_url = current
+        .get("base_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AgentdError::Config("AEON worker base URL is missing".to_owned()))?;
+    let api_key = current
+        .get("api_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AgentdError::Config("AEON worker credential is missing".to_owned()))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    let response = client
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": desired.model_alias,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": AEON_RED_PROMPT },
+                    { "type": "image_url", "image_url": { "url": AEON_RED_FIXTURE } },
+                ],
+            }],
+            "max_tokens": 16,
+            "finite_specialization": {
+                "capabilities": desired.capabilities,
+                "prompt_versions": desired.prompt_versions,
+                "normalization_limits": desired.normalization_limits,
+            },
+        }))
+        .send()
+        .await?;
+    let status = response.status();
+    let body: Value = response.json().await.map_err(|_| {
+        AgentdError::Transport("AEON semantic probe returned unreadable JSON".to_owned())
+    })?;
+
+    if !desired.capabilities.image {
+        if status.as_u16() == 503
+            && body.pointer("/error/code").and_then(Value::as_str) == Some("capability_unavailable")
+        {
+            return Ok(());
+        }
+        return Err(AgentdError::Config(
+            "AEON disabled-image probe did not fail closed with capability_unavailable".to_owned(),
+        ));
+    }
+    if !status.is_success() {
+        return Err(AgentdError::Transport(format!(
+            "AEON semantic probe failed with HTTP {}",
+            status.as_u16()
+        )));
+    }
+
+    let text = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str);
+    let result = body.get("specialization_result");
+    let normalized = result.is_some_and(|result| {
+        result.get("capability").and_then(Value::as_str) == Some("image")
+            && result.get("text").and_then(Value::as_str) == Some("RED")
+            && result.get("model").and_then(Value::as_str) == Some(desired.model_alias.as_str())
+            && result
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            && result.get("duration_ms").is_some_and(Value::is_number)
+    });
+    if text != Some("RED") || !normalized {
+        return Err(AgentdError::Config(
+            "AEON semantic probe did not return exact RED with the normalized result envelope"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct CommandExecutor {
     identity: DeviceRef,
@@ -247,6 +336,47 @@ struct CommandExecutor {
 }
 
 impl CommandExecutor {
+    async fn rollback_aeon_specialization(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<(), AgentdError> {
+        let rollback = HermesConfigRollbackV1 {
+            proposal_id: desired.proposal_id.clone(),
+        };
+        let manager = self.config_manager.clone();
+        let hermes_home = self.hermes_home.clone();
+        tokio::task::spawn_blocking(move || {
+            manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
+        })
+        .await
+        .map_err(|error| {
+            AgentdError::Config(format!("specialization rollback failed: {error}"))
+        })??;
+        self.supervisor.restart_hermes().await
+    }
+
+    async fn verify_aeon_specialization(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<(), AgentdError> {
+        let manager = self.config_manager.clone();
+        let hermes_home = self.hermes_home.clone();
+        let desired_for_readback = desired.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            validate_hermes_config(&hermes_home)?;
+            if !manager.aeon_specialization_matches(&desired_for_readback)? {
+                return Err(AgentdError::Config(
+                    "Hermes specialization read-back did not match desired state".to_owned(),
+                ));
+            }
+            manager.current_value(VISION_CONFIG_PATH)
+        })
+        .await
+        .map_err(|error| AgentdError::Config(error.to_string()))??;
+
+        probe_aeon_specialization(&current, desired).await
+    }
+
     async fn handle_delivery(&self, delivery: RuntimeCommandDeliveryV1) -> Result<(), AgentdError> {
         let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
             self.bridge.acknowledge(&delivery).await?;
@@ -354,54 +484,29 @@ impl CommandExecutor {
                 })
                 .await
                 .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if result.applied
-                    && let Err(error) = self.supervisor.restart_hermes().await
-                {
-                    let rollback = HermesConfigRollbackV1 {
-                        proposal_id: desired.proposal_id.clone(),
-                    };
-                    let manager = self.config_manager.clone();
-                    let hermes_home = self.hermes_home.clone();
-                    tokio::task::spawn_blocking(move || {
-                        manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-                    })
-                    .await
-                    .map_err(|rollback_error| {
-                        AgentdError::Config(format!(
-                            "Hermes reload and specialization rollback failed: {rollback_error}"
-                        ))
-                    })??;
-                    if let Err(restore_error) = self.supervisor.restart_hermes().await {
-                        return Err(AgentdError::Supervisor(format!(
-                            "Hermes specialization activation failed ({error}); previous configuration was restored on disk but could not be reactivated ({restore_error})"
-                        )));
+                if let Err(error) = self.supervisor.restart_hermes().await {
+                    if result.applied {
+                        self.rollback_aeon_specialization(&desired).await.map_err(
+                            |restore_error| {
+                                AgentdError::Supervisor(format!(
+                                    "Hermes specialization activation failed ({error}); previous configuration could not be reactivated ({restore_error})"
+                                ))
+                            },
+                        )?;
                     }
                     return Err(error);
                 }
-                let hermes_home = self.hermes_home.clone();
-                tokio::task::spawn_blocking(move || validate_hermes_config(&hermes_home))
-                    .await
-                    .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if !self.config_manager.aeon_specialization_matches(&desired)? {
-                    let rollback = HermesConfigRollbackV1 {
-                        proposal_id: desired.proposal_id.clone(),
-                    };
-                    let manager = self.config_manager.clone();
-                    let hermes_home = self.hermes_home.clone();
-                    tokio::task::spawn_blocking(move || {
-                        manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-                    })
-                    .await
-                    .map_err(|rollback_error| {
-                        AgentdError::Config(format!(
-                            "specialization read-back and rollback failed: {rollback_error}"
-                        ))
-                    })??;
-                    self.supervisor.restart_hermes().await?;
-                    return Err(AgentdError::Config(
-                        "Hermes specialization read-back did not match desired state; previous configuration was restored"
-                            .to_owned(),
-                    ));
+                if let Err(error) = self.verify_aeon_specialization(&desired).await {
+                    if result.applied {
+                        self.rollback_aeon_specialization(&desired).await.map_err(
+                            |restore_error| {
+                                AgentdError::Config(format!(
+                                    "Hermes specialization verification failed ({error}); previous configuration could not be reactivated ({restore_error})"
+                                ))
+                            },
+                        )?;
+                    }
+                    return Err(error);
                 }
                 result.effective_matches_desired = true;
                 Ok(serde_json::to_value(result)?)
@@ -746,9 +851,98 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use axum::{Json, Router, http::HeaderMap, routing::post};
     use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
+    use tokio::net::TcpListener;
 
     use super::*;
+
+    #[tokio::test]
+    async fn aeon_reconciliation_probe_is_authenticated_and_semantically_grounded() {
+        let observed = Arc::new(Mutex::new(None));
+        let observed_by_handler = Arc::clone(&observed);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let observed = Arc::clone(&observed_by_handler);
+                async move {
+                    *observed.lock().unwrap() = Some((headers, body));
+                    Json(json!({
+                        "choices": [{ "message": { "content": "RED" } }],
+                        "specialization_result": {
+                            "capability": "image",
+                            "text": "RED",
+                            "model": "aeon-gemma-4-12b-k4-nvfp4-unified-fast",
+                            "request_id": "resp_probe",
+                            "duration_ms": 12,
+                        },
+                    }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("probe-aeon");
+        desired.worker_base_url = format!("http://{address}/v1");
+        let current = json!({
+            "base_url": desired.worker_base_url,
+            "api_key": "worker-secret",
+        });
+
+        probe_aeon_specialization(&current, &desired).await.unwrap();
+        let (headers, body) = observed.lock().unwrap().take().unwrap();
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            "Bearer worker-secret"
+        );
+        assert_eq!(
+            body.pointer("/messages/0/content/1/image_url/url")
+                .and_then(Value::as_str),
+            Some(AEON_RED_FIXTURE)
+        );
+        assert_eq!(
+            body.pointer("/finite_specialization/prompt_versions/image")
+                .and_then(Value::as_str),
+            Some("aeon-image-analysis-v1")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn aeon_reconciliation_probe_rejects_semantically_wrong_output() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "choices": [{ "message": { "content": "BLUE" } }],
+                    "specialization_result": {
+                        "capability": "image",
+                        "text": "BLUE",
+                        "model": "aeon-gemma-4-12b-k4-nvfp4-unified-fast",
+                        "request_id": "resp_wrong",
+                        "duration_ms": 12,
+                    },
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("probe-aeon-wrong");
+        desired.worker_base_url = format!("http://{address}/v1");
+        let current = json!({
+            "base_url": desired.worker_base_url,
+            "api_key": "worker-secret",
+        });
+
+        let error = probe_aeon_specialization(&current, &desired)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::Config(_)));
+        server.abort();
+    }
 
     fn delivery(message_id: &str, seq: u64) -> RuntimeCommandDeliveryV1 {
         RuntimeCommandDeliveryV1 {
