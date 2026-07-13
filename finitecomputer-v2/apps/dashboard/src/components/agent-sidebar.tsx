@@ -62,15 +62,16 @@ export function AgentSidebar({
   }, [apiBase]);
 
   useEffect(() => {
-    let disposed = false;
-    void (async () => {
-      try {
-        await fetch(`${apiBase}/claim`, { method: "POST" });
-      } finally {
-        if (!disposed) void load();
-      }
-    })();
-    return () => { disposed = true; };
+    const controller = new AbortController();
+    void load();
+    void fetch(`${apiBase}/claim`, {
+      method: "POST",
+      signal: controller.signal,
+    }).catch(() => {
+      // Read-only topic history remains available while the owner claim retries
+      // through the chat/Connections command paths.
+    });
+    return () => controller.abort();
   }, [apiBase, load]);
 
   useEffect(() => {
