@@ -37,7 +37,9 @@ passes.
    host path is `/var/lib/finitecomputer/backups/rsync-net`; the ignored
    off-host passphrase copy is already at
    `../finitecomputer/workspaces/trf/secrets/rsync-net-borg-passphrase`. Do not
-   print or commit any value.
+   print or commit any value. The ignored off-host export for this repository's
+   encrypted repokey is
+   `../finitecomputer/workspaces/trf/secrets/rsync-net-borg-finite-lat-1-key`.
 2. Copy the bundle unchanged to the same root-owned path on finite-lat-1, with
    each file mode `0600` beneath a mode `0700` directory:
 

@@ -119,7 +119,9 @@ Work top-down.
   `ghcr.io/finitecomputer/finite-saas-dashboard@sha256:1880f742aa93cac12bc1dcd65c5aebab685359b0d9b1fce74209b83ec51bfa60`.
 - The finitecomputer rsync.net credential bundle was copied byte-for-byte to
   finite-lat-1 without entering Git. Snapshot and offsite age checks pass;
-  application services and public health endpoints are healthy.
+  application services and public health endpoints are healthy. The new
+  repository's encrypted repokey was exported to the ignored off-host
+  finitecomputer secrets directory and its temporary on-host export removed.
 - Selected archive:
   `finite-lat-1-hosted-web-chat-2026-07-13T15:00:05` in the dedicated
   `finitecomputer/finite-lat-1` repository. Its pre-create manifest check and
