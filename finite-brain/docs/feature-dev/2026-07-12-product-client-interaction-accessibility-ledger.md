@@ -36,7 +36,9 @@ undefined.
   audits completed before specification
 - Review packets: scoped standards/spec and independent post-review audits
   completed; worthy P2 findings were fixed
-- Local CodeRabbit report: pending final branch review
+- Local CodeRabbit report:
+  `2026-07-12-product-client-interaction-accessibility-local-coderabbit-round.md`
+  (three silent free-allowance attempts; independent fallback review completed)
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/16
 
 ## Commands
