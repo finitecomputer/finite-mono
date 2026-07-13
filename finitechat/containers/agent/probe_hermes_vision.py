@@ -6,7 +6,6 @@ import json
 
 from tools.vision_tools import vision_analyze_tool
 
-
 MARKER = "FINITE_AEON_HERMES_PROBE "
 RED_FIXTURE = (
     "data:image/png;base64,"

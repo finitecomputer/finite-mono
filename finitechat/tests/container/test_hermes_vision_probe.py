@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE = REPO_ROOT / "containers/agent/probe_hermes_vision.py"
 MARKER = "FINITE_AEON_HERMES_PROBE "
