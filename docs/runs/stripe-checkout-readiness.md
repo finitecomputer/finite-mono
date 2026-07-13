@@ -1,7 +1,12 @@
 # Stripe Checkout Readiness
 
-Status: PAUSED (2026-07-13 — Paul explicitly directed Hosted Web Chat
-Continuity/Borg work next; resume this as the sole ACTIVE run afterward)
+Status: ACTIVE
+
+Sequence note: On 2026-07-13, Paul explicitly accepted the shipped Hosted Web
+Chat product-continuity outcome, directed that run closed and deleted, and
+moved its remaining empty-target recovery proof into the no-authority proposed
+run [Hosted Web Chat Disaster Recovery](hosted-web-chat-disaster-recovery.md).
+This run therefore resumes as the sole ACTIVE run.
 
 Owner: Paul
 
