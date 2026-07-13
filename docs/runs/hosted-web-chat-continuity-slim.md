@@ -122,18 +122,18 @@ Work top-down.
   Root cause was a split target assembled by the global New chat button: the
   canonical Room id plus the selected legacy Topic id. The dashboard checked
   only the Room, and `/v1/app/new-chat` trusted both identifiers.
-- Candidate revision `3857559` makes the global button choose only from
+- Source revision `3857559` makes the global button choose only from
   canonical Topics, makes the dashboard reject a Topic outside the bound
   canonical Room, and makes `finitechat-hosted-device` reopen and validate the
   encrypted Project binding before creation. Unit, hosted-device HTTP, and
   browser regressions cover the exact Previous-conversation selection case;
-  a legacy-room request fails with HTTP 409. Production deploy and Paul's
-  fresh-turn check are still required.
+  a legacy-room request fails with HTTP 409. It is deployed in revision
+  `a350b42`; Paul's fresh-turn check is still required.
 
-- Deployed revision: `7d58aa1`; Nix system closure:
-  `/nix/store/jziqmdsyas39bamhglg1a9fk5vsymnl8-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
+- Deployed revision: `a350b42`; Nix system closure:
+  `/nix/store/kg0wdxilbjqh4wb5bx9gfmyzr4sam5fd-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
 - Dashboard image:
-  `ghcr.io/finitecomputer/finite-saas-dashboard@sha256:f4995d1cdb784ea5ffc2e368578bbc43eef68cecc2a1e57475e4164c1f43b7a8`.
+  `ghcr.io/finitecomputer/finite-saas-dashboard@sha256:e8195f83980c3b8d75bef6aa1c6832522408c9d724eee2c8de9f8a126b271e51`.
 - The finitecomputer rsync.net credential bundle was copied byte-for-byte to
   finite-lat-1 without entering Git. Snapshot and offsite age checks pass;
   application services and public health endpoints are healthy. The new
@@ -150,7 +150,7 @@ Work top-down.
 
 ## Acceptance Request — blocked on retained queue prerequisites
 
-- **Revision:** `7d58aa1`; dashboard digest and Nix closure above.
+- **Revision:** `a350b42`; dashboard digest and Nix closure above.
 - **Where:** `https://finite.computer`, `https://chat.finite.computer`,
   finite-lat-1, the dedicated synthetic account, and an empty isolated restore
   target. Secrets remain only at the paths named in the recovery runbook.
