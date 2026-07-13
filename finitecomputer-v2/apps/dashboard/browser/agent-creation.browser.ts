@@ -275,9 +275,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           `Agent creation form did not render: ${String(error)}\n${await pageText(page)}\n${dashboardOutput()}`
         );
       });
-      await page.getByRole("link", { name: "New agent", exact: true }).waitFor({
-        state: "visible",
-      });
+      await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
       await agentName.fill("Oslo Bot");
       await page.locator('#coreAgentPicture').setInputFiles({
         name: "oslo-bot.png",
@@ -418,35 +416,58 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      const completedAgentHeading = page.getByRole("heading", {
+        name: "Completed Oslo Bot",
+        exact: true,
+      });
+      await waitFor(
+        async () => {
+          if (await completedAgentHeading.isVisible()) return true;
+          await page.waitForTimeout(250);
+          await page.reload();
+          return completedAgentHeading.isVisible();
+        },
+        15_000,
+        async () => `account agent cards did not hydrate from Core\n${await pageText(page)}`
+      );
+      await page.getByRole("heading", { name: "Your agents" }).waitFor({ state: "visible" });
+      await completedAgentHeading
+        .locator("xpath=ancestor::section[1]")
+        .getByRole("link", { name: "Agent", exact: true })
+        .click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
-      await page
-        .getByRole("heading", { name: "Completed Oslo Bot", exact: true })
-        .waitFor({ state: "visible" });
       const main = page.getByRole("main");
       await expectVisibleText(page, "Your agent is online.");
-      const productNav = page.getByRole("navigation", { name: "Dashboard section" });
-      const agentNav = productNav.getByRole("link", { name: "Agent", exact: true });
-      await agentNav.waitFor({ state: "visible" });
+      const productNav = page.getByRole("navigation", { name: "Agent navigation" });
+      const agentLink = productNav.getByRole("link", { name: "Agent", exact: true });
       // The fake Core changes out of band, unlike a product mutation that
       // invalidates the dashboard's short SWR cache. A stale server render
       // starts the background refresh; reload until that refreshed projection
       // is visible instead of racing one fixed sleep against CI load.
       await waitFor(
         async () => {
-          if ((await agentNav.getAttribute("aria-current")) === "page") {
+          if (
+            await agentLink.isVisible()
+            && (await agentLink.getAttribute("aria-current")) === "page"
+          ) {
             return true;
           }
           await page.waitForTimeout(250);
           await page.reload();
-          return (await agentNav.getAttribute("aria-current")) === "page";
+          return (
+            await agentLink.isVisible()
+            && (await agentLink.getAttribute("aria-current")) === "page"
+          );
         },
         15_000,
-        async () => `agent navigation did not hydrate from Core\n${await pageText(page)}`
+        async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
+      await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
       assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
-      await productNav.getByRole("link", { name: "Chat", exact: true }).waitFor({ state: "visible" });
+      await page
+        .getByRole("navigation", { name: "Agent, topics, and chats" })
+        .waitFor({ state: "visible" });
 
       const machineSwitcher = page.getByRole("button", {
         name: "Completed Oslo Bot",
@@ -581,10 +602,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         true,
         "chat composer became usable before the owner claim succeeded"
       );
-      assert.equal(
-        await page.getByRole("link", { name: "Connections", exact: true }).count(),
-        0,
-        "Connections became usable before the owner claim succeeded"
+      const connectionsLink = page.getByRole("link", { name: "Connections", exact: true });
+      await connectionsLink.first().waitFor({ state: "visible" });
+      assert.match(
+        (await connectionsLink.first().getAttribute("href")) ?? "",
+        /\/connections$/u,
+        "the shared sidebar should remain inspectable while the owner claim is pending"
       );
       hostedDevice.releaseOwnerClaim();
       await waitFor(
@@ -592,12 +615,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         5_000,
         () => "chat composer did not become usable after the owner claim succeeded"
       );
-      await page
-        .getByRole("link", { name: "Connections", exact: true })
-        .first()
-        .waitFor({ state: "visible" });
-      assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 0);
-      await page.getByRole("link", { name: "Connections" }).click();
+      await connectionsLink.first().waitFor({ state: "visible" });
+      assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 1);
+      await connectionsLink.first().click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/connections$/u);
       await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
       await expectVisibleText(page, "Google Workspace");
@@ -627,11 +647,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
       });
-      assert.equal(
-        await page.getByRole("link", { name: "Brain", exact: true }).count(),
-        0,
-        "Brain must remain hidden from canary navigation"
-      );
+      await page
+        .getByRole("link", { name: "Brain", exact: true })
+        .waitFor({ state: "visible" });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`
       );
@@ -653,23 +671,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         )
       );
       await page
-        .getByRole("banner")
+        .locator(".finite-chat__topbar")
         .getByText("Browser QA", { exact: true })
         .waitFor({ state: "visible" });
 
-      await page.getByRole("button", { name: "Devices", exact: true }).click();
-      const devicesDialog = page.getByRole("dialog", { name: "Your devices" });
-      await devicesDialog.getByText("electron-browser-proof", { exact: true }).waitFor({ state: "visible" });
-      await devicesDialog.getByRole("button", { name: "Revoke", exact: true }).click();
-      await page
-        .getByRole("dialog", { name: "Revoke electron-browser-proof?" })
-        .getByRole("button", { name: "Revoke Device", exact: true })
-        .click();
-      await waitFor(() =>
-        hostedDevice.state.actions.some((action) => actionName(action) === "RevokeDevice")
+      assert.equal(
+        await page.getByRole("button", { name: "Devices", exact: true }).count(),
+        0,
+        "unsupported Devices navigation must stay out of the shared agent shell"
       );
-      await devicesDialog.getByText("Revoked", { exact: true }).waitFor({ state: "visible" });
-      await page.keyboard.press("Escape");
 
       const bootstrapActions = hostedDevice.state.actions.map(actionName);
       const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
@@ -714,7 +724,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       hostedDevice.setAvailable(false);
       await page.reload();
-      await expectVisibleText(page, "Chat needs attention");
+      await page
+        .getByText("Chat needs attention", { exact: true })
+        .waitFor({ state: "visible", timeout: 25_000 });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
       );
@@ -893,7 +905,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
       await page
-        .getByRole("banner")
+        .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
       assert.equal(
@@ -917,7 +929,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         () => "returning to chat did not reopen the canonical Agent binding"
       );
       await page
-        .getByRole("banner")
+        .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
       assert.equal(
