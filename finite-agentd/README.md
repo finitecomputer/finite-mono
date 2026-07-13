@@ -52,6 +52,12 @@ Finite-applied values carry a durable pre-image and ownership hash; validation
 failure restores the exact previous bytes, and later user/Hermes drift blocks
 automatic rollback. Remote commands fail closed unless the sending Finite Chat
 Principal is in the durable authorization ledger.
+
+An AEON image reconciliation becomes effective only after Hermes restarts and
+its installed `vision_analyze_tool` returns exact semantic output for a fixed
+image through `auxiliary.vision`. The packaged probe uses the same
+`HERMES_HOME` as the resident process and emits only a bounded pass/fail result;
+it does not expose the worker credential or provider response.
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill
 an empty ledger; later claims and every other unauthorized command fail
