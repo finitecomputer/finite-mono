@@ -17,6 +17,7 @@ const FiniteBrainProductClient = (() => {
     keyring: null,
     lastError: null,
     clientActionFeedback: null,
+    clientActionFeedbackGeneration: 0,
     preparedWrite: null,
     preparedWriteTarget: null,
     projection: createClientProjection(),
@@ -69,6 +70,7 @@ const FiniteBrainProductClient = (() => {
   const handledAccessFailures = new WeakSet();
   const handledSessionLockFailures = new WeakSet();
   let pendingInviteNavigation = null;
+  let clientActionFeedbackTimer = null;
 
   const $ = (id) => document.getElementById(id);
   let lastErrorValue = state.lastError;
@@ -80,7 +82,7 @@ const FiniteBrainProductClient = (() => {
     },
     set(value) {
       const nextError = value || null;
-      if (nextError) state.clientActionFeedback = null;
+      if (nextError) clearClientActionFeedback({ render: false });
       lastErrorValue = nextError;
       renderClientActionFeedback();
     },
@@ -106,11 +108,16 @@ const FiniteBrainProductClient = (() => {
     "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
   const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
   const CLIENT_ACTION_FEEDBACK = Object.freeze({
-    copyFailure: "Could not copy to clipboard. Try again.",
-    copySuccess: "Copied to clipboard.",
+    inviteLinkCopyFailure: "Could not copy client-only invite link. Try again.",
+    inviteLinkCopySuccess: "Client-only invite link copied.",
+    folderIdCopyFailure: "Could not copy Folder ID. Try again.",
+    folderIdCopySuccess: "Folder ID copied.",
+    pageIdCopyFailure: "Could not copy Page ID. Try again.",
+    pageIdCopySuccess: "Page ID copied.",
     failure:
       "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session.",
   });
+  const CLIENT_ACTION_FEEDBACK_DURATION_MS = 5000;
   const SESSION_PLAINTEXT_INPUT_IDS = [
     "accessAddPersonInput",
     "accessShareExpiresAtInput",
@@ -578,9 +585,40 @@ const FiniteBrainProductClient = (() => {
     else delete feedback.dataset.tone;
   }
 
-  function setClientActionFeedback(tone, message) {
+  function clearClientActionFeedbackTimer() {
+    if (clientActionFeedbackTimer === null) return;
+    if (typeof window.clearTimeout === "function") {
+      window.clearTimeout(clientActionFeedbackTimer);
+    }
+    clientActionFeedbackTimer = null;
+  }
+
+  function clearClientActionFeedback(options = {}) {
+    clearClientActionFeedbackTimer();
+    state.clientActionFeedbackGeneration += 1;
+    state.clientActionFeedback = null;
+    if (options.render !== false) renderClientActionFeedback();
+    return state.clientActionFeedbackGeneration;
+  }
+
+  function setClientActionFeedback(tone, message, options = {}) {
+    const generation = options.generation ?? state.clientActionFeedbackGeneration + 1;
+    if (options.generation !== undefined && generation !== state.clientActionFeedbackGeneration) {
+      return false;
+    }
+    clearClientActionFeedbackTimer();
+    state.clientActionFeedbackGeneration = generation;
     state.clientActionFeedback = { message, tone };
+    if (options.expires !== false && typeof window.setTimeout === "function") {
+      clientActionFeedbackTimer = window.setTimeout(() => {
+        if (state.clientActionFeedbackGeneration !== generation) return;
+        state.clientActionFeedback = null;
+        clientActionFeedbackTimer = null;
+        renderClientActionFeedback();
+      }, CLIENT_ACTION_FEEDBACK_DURATION_MS);
+    }
     renderClientActionFeedback();
+    return true;
   }
 
   function reportClientActionFailure(error) {
@@ -790,10 +828,20 @@ const FiniteBrainProductClient = (() => {
     return state.metadata?.name || activeVaultOption()?.name || state.activeVaultId || "Personal vault";
   }
 
-  function resetVaultSessionState() {
+  function nestedManageVaultsReturnToken() {
+    if (!state.manageVaultsModalOpen || !state.manageVaultsReturnToSettings) return null;
+    // This only carries a Settings section and a DOM focus target. It is not
+    // session content, so a nested Manage Vaults reset can return safely.
+    return state.manageVaultsReturnToSettings;
+  }
+
+  function resetVaultSessionState(options = {}) {
+    const returnToSettings =
+      options.preserveManageVaultsReturnToSettings === false ? null : nestedManageVaultsReturnToken();
     state.sessionEpoch += 1;
     pendingInviteNavigation = null;
     clearSessionSecretsAndPlaintext(state);
+    if (returnToSettings) state.manageVaultsReturnToSettings = returnToSettings;
     clearSessionOwnedDom();
   }
 
@@ -846,7 +894,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function lockSession() {
-    resetVaultSessionState();
+    resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
     render();
     log("Locked Product Client session.", { status: state.sessionStatus });
   }
@@ -859,7 +907,7 @@ const FiniteBrainProductClient = (() => {
       return false;
     }
     markSessionLockFailureHandled(error);
-    resetVaultSessionState();
+    resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
     state.sessionNotice = VAULT_ACCESS_CHANGED_NOTICE;
     render();
     log("Locked Product Client session after Vault access changed.", {
@@ -1023,7 +1071,7 @@ const FiniteBrainProductClient = (() => {
       const signed = await provider.signEvent.call(provider, event);
       requireCurrentSessionEpoch(sessionEpoch);
       if (signedEventMatchesPinnedIdentity(expectedPubkeyHex, signed)) return signed;
-      resetVaultSessionState();
+      resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
       state.pubkeyHex = null;
       state.signerStatus = deriveSignerState(window.nostr).status;
       setText("signerDetail", "Signer identity changed. The previous session was locked.");
@@ -1873,7 +1921,12 @@ const FiniteBrainProductClient = (() => {
     target.projection = createClientProjection();
     target.preparedWrite = null;
     target.preparedWriteTarget = null;
-    target.clientActionFeedback = null;
+    if (target === state) {
+      clearClientActionFeedback({ render: false });
+    } else {
+      target.clientActionFeedbackGeneration = (target.clientActionFeedbackGeneration || 0) + 1;
+      target.clientActionFeedback = null;
+    }
     target.lastError = null;
     target.accessResult = null;
     target.lastShareLinkId = null;
@@ -1953,6 +2006,17 @@ const FiniteBrainProductClient = (() => {
     return SETTINGS_SECTIONS.includes(section) ? section : "session";
   }
 
+  function isSequentiallyFocusable(element) {
+    const tabIndex = Number(element?.tabIndex);
+    if (Number.isFinite(tabIndex)) return tabIndex >= 0;
+    const tabIndexAttribute = element?.getAttribute?.("tabindex");
+    return tabIndexAttribute === null || tabIndexAttribute === undefined || Number(tabIndexAttribute) >= 0;
+  }
+
+  function isVisibleSequentiallyFocusable(element) {
+    return !element.hidden && !element.closest?.("[hidden]") && isSequentiallyFocusable(element);
+  }
+
   function settingsModalFocusableElements() {
     const modal = $("settingsModal");
     if (!modal) return [];
@@ -1960,7 +2024,7 @@ const FiniteBrainProductClient = (() => {
       modal.querySelectorAll(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
       )
-    ).filter((element) => !element.hidden && !element.closest?.("[hidden]"));
+    ).filter(isVisibleSequentiallyFocusable);
   }
 
   function mountAccessPanelInSettings() {
@@ -2038,7 +2102,7 @@ const FiniteBrainProductClient = (() => {
       overlay.querySelectorAll?.(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
       ) || []
-    ).filter((element) => !element.hidden && !element.closest?.("[hidden]"));
+    ).filter(isVisibleSequentiallyFocusable);
   }
 
   function vaultSwitcherFocusableElements() {
@@ -2052,8 +2116,7 @@ const FiniteBrainProductClient = (() => {
       ) || []
     ).filter(
       (element) =>
-        !element.hidden &&
-        !element.closest?.("[hidden]") &&
+        isVisibleSequentiallyFocusable(element) &&
         !excludedContainer?.contains?.(element)
     );
   }
@@ -5730,17 +5793,53 @@ const FiniteBrainProductClient = (() => {
     if (options.restoreFocus) previousFocus?.focus?.();
   }
 
-  function closeCommandPalette() {
+  function commandPaletteFocusableElements() {
+    return overlayFocusableElements("commandPalette");
+  }
+
+  function closeCommandPalette(options = {}) {
     state.commandPaletteOpen = false;
     state.commandPaletteSelectedIndex = 0;
     const palette = $("commandPalette");
-    if (!palette) return;
-    palette.hidden = true;
-    const input = $("commandPaletteInput");
-    input?.setAttribute("aria-expanded", "false");
-    input?.removeAttribute("aria-activedescendant");
-    setPressed("ribbonCommandButton", false);
-    $("ribbonCommandButton").className = "ribbon-button";
+    if (palette) {
+      palette.hidden = true;
+      const input = $("commandPaletteInput");
+      input?.setAttribute("aria-expanded", "false");
+      input?.removeAttribute("aria-activedescendant");
+      setPressed("ribbonCommandButton", false);
+      $("ribbonCommandButton").className = "ribbon-button";
+    }
+    if (options.restoreFocus) $("ribbonCommandButton")?.focus?.();
+  }
+
+  function handleCommandPaletteKeydown(event) {
+    if (!state.commandPaletteOpen) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandPalette({ restoreFocus: true });
+      return true;
+    }
+    if (event.key === "Tab") {
+      const focusable = commandPaletteFocusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        return true;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return true;
+    }
+    if ((event.metaKey || event.ctrlKey) && ["p", "s"].includes(event.key.toLowerCase())) {
+      event.preventDefault();
+    }
+    return true;
   }
 
   function runCommandPaletteRow(row) {
@@ -5850,30 +5949,81 @@ const FiniteBrainProductClient = (() => {
     menu.style.top = `${Math.min(Math.max(8, y), maxTop)}px`;
   }
 
-  async function copyToClipboard(text) {
+  function clipboardFeedbackFor(kind) {
+    if (kind === "folder-id") {
+      return {
+        failure: CLIENT_ACTION_FEEDBACK.folderIdCopyFailure,
+        success: CLIENT_ACTION_FEEDBACK.folderIdCopySuccess,
+      };
+    }
+    if (kind === "invite-link") {
+      return {
+        failure: CLIENT_ACTION_FEEDBACK.inviteLinkCopyFailure,
+        success: CLIENT_ACTION_FEEDBACK.inviteLinkCopySuccess,
+      };
+    }
+    return {
+      failure: CLIENT_ACTION_FEEDBACK.pageIdCopyFailure,
+      success: CLIENT_ACTION_FEEDBACK.pageIdCopySuccess,
+    };
+  }
+
+  function clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration) {
+    return (
+      state.sessionEpoch === sessionEpoch &&
+      state.sessionStatus === SESSION_STATUS.UNLOCKED &&
+      state.clientActionFeedbackGeneration === feedbackGeneration
+    );
+  }
+
+  async function copyToClipboard(text, kind = "page-id") {
+    const feedback = clipboardFeedbackFor(kind);
+    const sessionEpoch = state.sessionEpoch;
+    const feedbackGeneration = clearClientActionFeedback();
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return false;
     try {
       if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
         throw new Error("Clipboard unavailable");
       }
       await navigator.clipboard.writeText(text);
-      setClientActionFeedback("success", CLIENT_ACTION_FEEDBACK.copySuccess);
+      if (clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration)) {
+        setClientActionFeedback("success", feedback.success, { generation: feedbackGeneration });
+      }
       return true;
     } catch (_) {
-      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.copyFailure);
+      if (clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration)) {
+        setClientActionFeedback("error", feedback.failure, { generation: feedbackGeneration });
+      }
       return false;
     }
   }
 
   async function copyVaultInviteUrl() {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.lastEmailInviteUrl) {
-      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.copyFailure);
+      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.inviteLinkCopyFailure);
       return false;
     }
-    return copyToClipboard(state.lastEmailInviteUrl);
+    return copyToClipboard(state.lastEmailInviteUrl, "invite-link");
   }
 
   function handleContextMenuAction(item, target) {
     if (item.disabled) return;
+    const accessRoute = accessActionRoute(item.action, target);
+    if (accessRoute) {
+      closeContextMenu({ restoreFocus: true });
+      state.accessResult = null;
+      state.activeAccessFolderId = accessRoute.folderId;
+      state.activeAccessIntent = accessRoute.intent;
+      state.selectedFolderId = accessRoute.folderId;
+      state.expandedFolderIds.add(accessRoute.folderId);
+      $("pageFolderIdInput").value = accessRoute.folderId;
+      openSettingsModal(accessRoute.settingsSection);
+      log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
+        folderId: accessRoute.folderId,
+        intent: accessRoute.intent,
+      });
+      return;
+    }
     closeContextMenu();
     if (item.action === "open-folder") {
       selectReaderFolder(target.folderId);
@@ -5900,11 +6050,11 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     if (item.action === "copy-page-id") {
-      void copyToClipboard(target.objectId);
+      void copyToClipboard(target.objectId, "page-id");
       return;
     }
     if (item.action === "copy-folder-id") {
-      void copyToClipboard(target.folderId);
+      void copyToClipboard(target.folderId, "folder-id");
       return;
     }
     if (item.action === "delete-page") {
@@ -5912,21 +6062,6 @@ const FiniteBrainProductClient = (() => {
         state.lastError = error.message;
         log("Failed to delete Page.", { error: error.message });
         render();
-      });
-      return;
-    }
-    const accessRoute = accessActionRoute(item.action, target);
-    if (accessRoute) {
-      state.accessResult = null;
-      state.activeAccessFolderId = accessRoute.folderId;
-      state.activeAccessIntent = accessRoute.intent;
-      state.selectedFolderId = accessRoute.folderId;
-      state.expandedFolderIds.add(accessRoute.folderId);
-      $("pageFolderIdInput").value = accessRoute.folderId;
-      openSettingsModal(accessRoute.settingsSection);
-      log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
-        folderId: accessRoute.folderId,
-        intent: accessRoute.intent,
       });
       return;
     }
@@ -7691,7 +7826,7 @@ const FiniteBrainProductClient = (() => {
     }
     const identityChanged = signerIdentityChanged(state.pubkeyHex, pubkey);
     if (identityChanged) {
-      resetVaultSessionState();
+      resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
     state.pubkeyHex = pubkey;
@@ -10291,6 +10426,7 @@ const FiniteBrainProductClient = (() => {
         }
         return;
       }
+      if (handleCommandPaletteKeydown(event)) return;
       if (handleContextMenuKeydown(event)) return;
       if (state.settingsModalOpen) {
         if (event.key === "Escape") {

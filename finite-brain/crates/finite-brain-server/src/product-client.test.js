@@ -4,13 +4,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function element() {
+function element(ownerDocument = null) {
   const attributes = new Map();
   return {
     className: "",
     disabled: false,
     hidden: false,
     open: false,
+    ownerDocument,
     checked: false,
     dataset: {},
     style: {},
@@ -32,7 +33,9 @@ function element() {
     contains() {
       return false;
     },
-    focus() {},
+    focus() {
+      if (this.ownerDocument) this.ownerDocument.activeElement = this;
+    },
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
@@ -66,13 +69,16 @@ const context = {
   console,
   crypto: crypto.webcrypto,
   document: {
+    activeElement: null,
     addEventListener() {},
-    createElement: element,
+    createElement() {
+      return element(this);
+    },
     createTextNode(value) {
       return textNode(value);
     },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, element());
+      if (!elements.has(id)) elements.set(id, element(this));
       return elements.get(id);
     },
     querySelector() {
@@ -162,7 +168,7 @@ function invitationPanelTestSeams() {
   return { context: testContext, elements: testElements, seams };
 }
 
-function clipboardInvitationFeedbackTestSeams(navigatorValue) {
+function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   const testElements = new Map();
   const testContext = {
     ...context,
@@ -170,17 +176,19 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue) {
     document: {
       ...context.document,
       getElementById(id) {
-        if (!testElements.has(id)) testElements.set(id, element());
+        if (!testElements.has(id)) testElements.set(id, element(this));
         return testElements.get(id);
       },
     },
     window: {
       ...context.window,
       __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      clearTimeout: options.clearTimeout,
       nostr: {
         getPublicKey() {},
         signEvent() {},
       },
+      setTimeout: options.setTimeout,
     },
   };
   testContext.globalThis = testContext;
@@ -190,7 +198,7 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue) {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, copyToClipboard, copyVaultInviteUrl, handleContextMenuAction, lockSession, renderVaultInvitationPanel });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyVaultInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageVaultsModal, closeManageVaultsModal, overlayFocusableElements, renderVaultInvitationPanel, resetVaultSessionState, setActiveVaultId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(
     seamSource,
@@ -607,8 +615,8 @@ assert.match(
 );
 assert.match(
   source,
-  /async function copyToClipboard\(text\)/,
-  "Copy actions must use one safe asynchronous feedback path"
+  /async function copyToClipboard\(text, kind = "page-id"\)/,
+  "Copy actions must use one safe asynchronous, kind-aware feedback path"
 );
 assert.match(
   source,
@@ -1053,10 +1061,11 @@ async function assertClipboardInvitationFeedbackContracts() {
   const clipboardFeedbackState = clipboardFeedback.seams.state;
   const clipboardFeedbackElement = clipboardFeedback.context.document.getElementById("clientActionFeedback");
   const copiedPageId = "page-id-fixture-sentinel";
+  clipboardFeedbackState.sessionStatus = "unlocked";
   assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
   assert.deepEqual(copiedValues, [copiedPageId]);
   assert.equal(clipboardFeedbackElement.hidden, false);
-  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.equal(clipboardFeedbackElement.textContent, "Page ID copied.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /page-id-fixture-sentinel/);
 
   clipboardFeedbackState.lastError = "later-action-failure-detail-sentinel";
@@ -1067,7 +1076,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   );
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /later-action-failure-detail-sentinel/);
   assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
-  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.equal(clipboardFeedbackElement.textContent, "Page ID copied.");
 
   clipboardFeedback.seams.handleContextMenuAction(
     { action: "copy-page-id" },
@@ -1077,14 +1086,15 @@ async function assertClipboardInvitationFeedbackContracts() {
     { action: "copy-folder-id" },
     { folderId: "context-folder-id-sentinel" }
   );
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(copiedValues, [
     copiedPageId,
     copiedPageId,
     "context-page-id-sentinel",
     "context-folder-id-sentinel",
   ]);
-  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.equal(clipboardFeedbackState.clientActionFeedback?.message, "Folder ID copied.");
+  assert.equal(clipboardFeedbackElement.textContent, "Folder ID copied.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /context-(page|folder)-id-sentinel/);
 
   clipboardFeedbackState.sessionStatus = "unlocked";
@@ -1104,7 +1114,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(copyInviteUrlButton.disabled, false);
   assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), true);
   assert.equal(copiedValues.at(-1), clipboardFeedbackState.lastEmailInviteUrl);
-  assert.equal(clipboardFeedbackElement.textContent, "Copied to clipboard.");
+  assert.equal(clipboardFeedbackElement.textContent, "Client-only invite link copied.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
 
   clipboardFeedback.seams.lockSession();
@@ -1115,7 +1125,15 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(inviteUrlInput.value, "");
   assert.equal(inviteUrlOutput.hidden, true);
   assert.equal(copyInviteUrlButton.disabled, true);
+  const copiedBeforeLockedPageAttempt = copiedValues.length;
+  assert.equal(
+    await clipboardFeedback.seams.copyToClipboard("locked-page-id-sentinel", "page-id"),
+    false
+  );
+  assert.equal(copiedValues.length, copiedBeforeLockedPageAttempt);
   assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), false);
+  assert.equal(clipboardFeedbackElement.textContent, "Could not copy client-only invite link. Try again.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
   assert.equal(
     copiedValues.includes("https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel"),
     true
@@ -1128,25 +1146,337 @@ async function assertClipboardInvitationFeedbackContracts() {
       },
     },
   });
+  rejectedClipboardFeedback.seams.state.sessionStatus = "unlocked";
   assert.equal(
     await rejectedClipboardFeedback.seams.copyToClipboard("rejected-copy-value-sentinel"),
     false
   );
   const rejectedFeedbackElement = rejectedClipboardFeedback.elements.get("clientActionFeedback");
   assert.equal(rejectedFeedbackElement.hidden, false);
-  assert.equal(rejectedFeedbackElement.textContent, "Could not copy to clipboard. Try again.");
+  assert.equal(rejectedFeedbackElement.textContent, "Could not copy Page ID. Try again.");
   assert.doesNotMatch(rejectedFeedbackElement.textContent, /rejected-copy-value-sentinel/);
   assert.doesNotMatch(rejectedFeedbackElement.textContent, /clipboard-rejection-detail-sentinel/);
 
   const unavailableClipboardFeedback = clipboardInvitationFeedbackTestSeams({});
+  unavailableClipboardFeedback.seams.state.sessionStatus = "unlocked";
   assert.equal(
-    await unavailableClipboardFeedback.seams.copyToClipboard("missing-clipboard-value-sentinel"),
+    await unavailableClipboardFeedback.seams.copyToClipboard("missing-clipboard-value-sentinel", "folder-id"),
     false
   );
   const unavailableFeedbackElement = unavailableClipboardFeedback.elements.get("clientActionFeedback");
   assert.equal(unavailableFeedbackElement.hidden, false);
-  assert.equal(unavailableFeedbackElement.textContent, "Could not copy to clipboard. Try again.");
+  assert.equal(unavailableFeedbackElement.textContent, "Could not copy Folder ID. Try again.");
   assert.doesNotMatch(unavailableFeedbackElement.textContent, /missing-clipboard-value-sentinel/);
+
+  const scheduledCallbacks = new Map();
+  let nextTimerId = 1;
+  const expiringClipboardFeedback = clipboardInvitationFeedbackTestSeams(
+    {
+      clipboard: {
+        writeText: async () => {},
+      },
+    },
+    {
+      clearTimeout() {},
+      setTimeout(callback) {
+        const timerId = nextTimerId;
+        nextTimerId += 1;
+        scheduledCallbacks.set(timerId, callback);
+        return timerId;
+      },
+    }
+  );
+  const expiringState = expiringClipboardFeedback.seams.state;
+  const expiringElement = expiringClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  expiringState.sessionStatus = "unlocked";
+  await expiringClipboardFeedback.seams.copyToClipboard("first-copy-sentinel", "page-id");
+  const staleTimerId = nextTimerId - 1;
+  await expiringClipboardFeedback.seams.copyToClipboard("second-copy-sentinel", "folder-id");
+  const currentTimerId = nextTimerId - 1;
+  scheduledCallbacks.get(staleTimerId)?.();
+  assert.equal(expiringElement.textContent, "Folder ID copied.");
+  scheduledCallbacks.get(currentTimerId)?.();
+  assert.equal(expiringElement.hidden, true);
+  assert.equal(expiringElement.textContent, "");
+
+  let resolveLockedClipboardWrite;
+  const lockRaceClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: () => new Promise((resolve) => {
+        resolveLockedClipboardWrite = resolve;
+      }),
+    },
+  });
+  const lockRaceState = lockRaceClipboardFeedback.seams.state;
+  const lockRaceElement = lockRaceClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  lockRaceState.sessionStatus = "unlocked";
+  const copyBeforeLock = lockRaceClipboardFeedback.seams.copyToClipboard(
+    "copy-before-lock-sentinel",
+    "page-id"
+  );
+  lockRaceClipboardFeedback.seams.lockSession();
+  resolveLockedClipboardWrite();
+  assert.equal(await copyBeforeLock, true);
+  assert.equal(lockRaceState.sessionStatus, "locked");
+  assert.equal(lockRaceElement.hidden, true);
+  assert.equal(lockRaceElement.textContent, "");
+
+  let resolveEarlierClipboardWrite;
+  const newerCopyClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText(value) {
+        if (value === "earlier-copy-sentinel") {
+          return new Promise((resolve) => {
+            resolveEarlierClipboardWrite = resolve;
+          });
+        }
+        return Promise.resolve();
+      },
+    },
+  });
+  const newerCopyState = newerCopyClipboardFeedback.seams.state;
+  const newerCopyElement = newerCopyClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  newerCopyState.sessionStatus = "unlocked";
+  const earlierCopy = newerCopyClipboardFeedback.seams.copyToClipboard("earlier-copy-sentinel", "page-id");
+  assert.equal(
+    await newerCopyClipboardFeedback.seams.copyToClipboard("later-copy-sentinel", "folder-id"),
+    true
+  );
+  resolveEarlierClipboardWrite();
+  assert.equal(await earlierCopy, true);
+  assert.equal(newerCopyElement.textContent, "Folder ID copied.");
+  assert.doesNotMatch(newerCopyElement.textContent, /(?:earlier|later)-copy-sentinel/);
+
+  let resolveActionRaceClipboardWrite;
+  const newerActionClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: () => new Promise((resolve) => {
+        resolveActionRaceClipboardWrite = resolve;
+      }),
+    },
+  });
+  const newerActionState = newerActionClipboardFeedback.seams.state;
+  const newerActionElement = newerActionClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  newerActionState.sessionStatus = "unlocked";
+  const copyBeforeNewerAction = newerActionClipboardFeedback.seams.copyToClipboard(
+    "copy-before-newer-action-sentinel",
+    "page-id"
+  );
+  newerActionState.lastError = "newer-action-detail-sentinel";
+  resolveActionRaceClipboardWrite();
+  assert.equal(await copyBeforeNewerAction, true);
+  assert.equal(
+    newerActionElement.textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
+}
+
+function assertNestedManageVaultReturnContract() {
+  const nestedManage = clipboardInvitationFeedbackTestSeams({});
+  const nestedState = nestedManage.seams.state;
+  const settingsTrigger = nestedManage.context.document.getElementById("sessionSettingsButton");
+  const manageButton = nestedManage.context.document.getElementById("settingsManageVaultsButton");
+  nestedManage.context.document.activeElement = settingsTrigger;
+  nestedState.activeVaultId = "personal";
+  nestedState.settingsModalOpen = true;
+  nestedState.settingsSection = "vault";
+  nestedState.settingsModalPreviousFocus = settingsTrigger;
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  assert.equal(nestedState.settingsModalOpen, false);
+  assert.equal(nestedState.manageVaultsModalOpen, true);
+  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
+
+  nestedManage.seams.setActiveVaultId("organization-fixture");
+  assert.equal(nestedState.sessionStatus, "locked");
+  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
+  nestedManage.seams.closeManageVaultsModal();
+  assert.equal(nestedState.settingsModalOpen, true);
+  assert.equal(nestedState.settingsSection, "vault");
+  assert.equal(nestedManage.context.document.activeElement, manageButton);
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.resetVaultSessionState();
+  assert.equal(
+    nestedState.manageVaultsReturnToSettings?.section,
+    "vault",
+    "An unlock/reset failure started from nested Manage Vaults must retain its non-secret return token"
+  );
+  nestedManage.seams.closeManageVaultsModal();
+  assert.equal(nestedState.settingsModalOpen, true);
+  assert.equal(nestedState.settingsSection, "vault");
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.lockSession();
+  assert.equal(
+    nestedState.manageVaultsReturnToSettings,
+    null,
+    "A real Session Lock must discard the nested Manage return token"
+  );
+}
+
+function assertModalFocusAndContextRouteContracts() {
+  const modalFocus = clipboardInvitationFeedbackTestSeams({});
+  const modalState = modalFocus.seams.state;
+  const modalDocument = modalFocus.context.document;
+  const commandPalette = modalDocument.getElementById("commandPalette");
+  const closeButton = modalDocument.getElementById("closeCommandPaletteButton");
+  const paletteInput = modalDocument.getElementById("commandPaletteInput");
+  const rovingPaletteOption = element(modalDocument);
+  const settingsModal = modalDocument.getElementById("settingsModal");
+  const settingsButton = modalDocument.getElementById("settingsNavSession");
+  const rovingFolderOption = element(modalDocument);
+  closeButton.tabIndex = 0;
+  paletteInput.tabIndex = 0;
+  settingsButton.tabIndex = 0;
+  rovingPaletteOption.tabIndex = -1;
+  rovingFolderOption.tabIndex = -1;
+  commandPalette.querySelectorAll = () => [closeButton, paletteInput, rovingPaletteOption];
+  settingsModal.querySelectorAll = () => [settingsButton, rovingFolderOption];
+  modalDocument.querySelectorAll = () => [settingsButton, rovingFolderOption];
+
+  const paletteFocusables = modalFocus.seams.commandPaletteFocusableElements();
+  assert.equal(paletteFocusables.length, 2, "Quick Switcher must keep only sequential controls in its trap");
+  assert.equal(paletteFocusables[0], closeButton);
+  assert.equal(paletteFocusables[1], paletteInput);
+  const settingsFocusables = modalFocus.seams.settingsModalFocusableElements();
+  assert.equal(settingsFocusables.length, 1, "Settings modal focus trapping must ignore roving Folder options");
+  assert.equal(settingsFocusables[0], settingsButton);
+  const documentFocusables = modalFocus.seams.documentFocusableElements();
+  assert.equal(documentFocusables.length, 1, "Directional Vault switcher focus must ignore non-sequential roving options");
+  assert.equal(documentFocusables[0], settingsButton);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let tabPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Tab",
+      preventDefault() {
+        tabPrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(tabPrevented, true);
+  assert.equal(modalDocument.activeElement, closeButton);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = closeButton;
+  let reverseTabPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Tab",
+      preventDefault() {
+        reverseTabPrevented = true;
+      },
+      shiftKey: true,
+    }),
+    true
+  );
+  assert.equal(reverseTabPrevented, true);
+  assert.equal(modalDocument.activeElement, paletteInput);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = closeButton;
+  let forwardInteriorTabPrevented = false;
+  modalFocus.seams.handleCommandPaletteKeydown({
+    key: "Tab",
+    preventDefault() {
+      forwardInteriorTabPrevented = true;
+    },
+    shiftKey: false,
+  });
+  assert.equal(
+    forwardInteriorTabPrevented,
+    false,
+    "Quick Switcher must allow native forward Tab between interior controls"
+  );
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let reverseInteriorTabPrevented = false;
+  modalFocus.seams.handleCommandPaletteKeydown({
+    key: "Tab",
+    preventDefault() {
+      reverseInteriorTabPrevented = true;
+    },
+    shiftKey: true,
+  });
+  assert.equal(
+    reverseInteriorTabPrevented,
+    false,
+    "Quick Switcher must allow native reverse Tab between interior controls"
+  );
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let escapePrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Escape",
+      preventDefault() {
+        escapePrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(escapePrevented, true);
+  assert.equal(modalState.commandPaletteOpen, false);
+  assert.equal(modalDocument.activeElement, modalDocument.getElementById("ribbonCommandButton"));
+
+  modalState.commandPaletteOpen = true;
+  let savePrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      ctrlKey: true,
+      key: "s",
+      metaKey: false,
+      preventDefault() {
+        savePrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true,
+    "The open Quick Switcher must absorb unrelated document shortcuts"
+  );
+  assert.equal(savePrevented, true, "The open Quick Switcher must suppress the browser Save shortcut too");
+
+  let paletteShortcutPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      ctrlKey: true,
+      key: "p",
+      metaKey: false,
+      preventDefault() {
+        paletteShortcutPrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(paletteShortcutPrevented, true, "The open Quick Switcher must suppress its own global shortcut too");
+
+  const contextRoute = clipboardInvitationFeedbackTestSeams({});
+  const contextState = contextRoute.seams.state;
+  const invokingControl = contextRoute.context.document.getElementById("invokingContextControl");
+  const detachedMenuItem = contextRoute.context.document.getElementById("detachedContextMenuItem");
+  contextState.contextMenuPreviousFocus = invokingControl;
+  contextRoute.context.document.activeElement = detachedMenuItem;
+  contextRoute.seams.handleContextMenuAction(
+    { action: "manage-access" },
+    { folderId: "restricted-fixture" }
+  );
+  assert.equal(contextState.settingsModalOpen, true);
+  assert.equal(contextState.settingsSection, "access");
+  assert.equal(
+    contextState.settingsModalPreviousFocus,
+    invokingControl,
+    "Settings opened from a context route must restore the invoking control, not a removed menuitem"
+  );
 }
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
@@ -1569,6 +1899,8 @@ assert.doesNotMatch(
 
 (async () => {
   await assertClipboardInvitationFeedbackContracts();
+  assertNestedManageVaultReturnContract();
+  assertModalFocusAndContextRouteContracts();
 
   const event = await client.buildAuthEventTemplate(
     "post",
