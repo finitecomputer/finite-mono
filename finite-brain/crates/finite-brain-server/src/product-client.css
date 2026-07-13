@@ -90,6 +90,7 @@
   --surface-strong: #30302f;
   --surface-soft: #262625;
   --surface-raised: #323231;
+  --surface-popover: #171615;
   --surface-hover: rgba(255, 255, 255, 0.055);
   --surface-active: #2f2f2f;
   --input-bg: #252524;
@@ -100,19 +101,23 @@
   --soft: #817d78;
   --icon: #bfbfbf;
   --blue: #8ab4ff;
-  --blue-strong: #a9c8ff;
+  --blue-strong: var(--blue);
   --blue-soft: rgba(138, 180, 255, 0.14);
-  --action-primary-bg: #3f67a7;
-  --action-primary-bg-hover: #426aa8;
-  --action-primary-text: #fff;
-  --focus: rgba(138, 180, 255, 0.72);
+  --selection-bg: var(--surface-active);
+  --selection-fg: var(--text);
+  --selection-ring: color-mix(in srgb, var(--text) 12%, transparent);
+  --action-primary-bg: var(--text);
+  --action-primary-bg-hover: color-mix(in srgb, var(--text) 86%, var(--bg));
+  --action-primary-text: var(--bg);
+  --focus: color-mix(in srgb, var(--text) 42%, transparent);
+  --focus-soft: color-mix(in srgb, var(--text) 14%, transparent);
   --green: #39d98a;
   --amber: #e6a23c;
   --red: #f3b3b3;
 
   --status-success: var(--green);
-  --status-success-bg: rgba(31, 198, 141, 0.16);
-  --status-success-border: rgba(57, 217, 138, 0.34);
+  --status-success-bg: rgba(31, 198, 141, 0.18);
+  --status-success-border: color-mix(in srgb, var(--green) 40%, transparent);
   --status-warning: #e8c28d;
   --status-warning-bg: rgba(245, 158, 11, 0.075);
   --status-warning-border: rgba(245, 158, 11, 0.24);
@@ -174,7 +179,7 @@
     0 18px 44px rgba(0, 0, 0, 0.42);
   --shadow-focus:
     0 0 0 1px var(--focus),
-    0 0 0 3px rgba(138, 180, 255, 0.16);
+    0 0 0 3px var(--focus-soft);
 
   /* Compatibility aliases keep deeper surfaces on the shared token layer. */
   --obsi-accent: var(--blue);
@@ -197,6 +202,7 @@
     --surface-strong: #f1efeb;
     --surface-soft: #f0eee9;
     --surface-raised: #fffdf9;
+    --surface-popover: #fffdfa;
     --surface-hover: rgba(20, 20, 20, 0.055);
     --surface-active: #e3e0db;
     --input-bg: #fffdf9;
@@ -207,17 +213,13 @@
     --soft: #7d766f;
     --icon: #5d5954;
     --blue: #315fbd;
-    --blue-strong: #244b9c;
+    --blue-strong: var(--blue);
     --blue-soft: rgba(49, 95, 189, 0.1);
-    --action-primary-bg: #315fbd;
-    --action-primary-bg-hover: #244b9c;
-    --action-primary-text: #fff;
-    --focus: rgba(49, 95, 189, 0.7);
     --green: #167a52;
     --amber: #d97706;
     --red: #81112f;
-    --status-success-bg: rgba(22, 122, 82, 0.13);
-    --status-success-border: rgba(22, 122, 82, 0.3);
+    --status-success-bg: rgba(22, 122, 82, 0.18);
+    --status-success-border: color-mix(in srgb, var(--green) 40%, transparent);
     --status-warning: #73390f;
     --status-warning-bg: rgba(217, 119, 6, 0.08);
     --status-warning-border: rgba(217, 119, 6, 0.28);
@@ -248,7 +250,7 @@
       0 18px 44px rgba(20, 20, 20, 0.14);
     --shadow-focus:
       0 0 0 1px var(--focus),
-      0 0 0 3px rgba(49, 95, 189, 0.14);
+      0 0 0 3px var(--focus-soft);
   }
 }
 
@@ -555,9 +557,9 @@ label,
   width: min(280px, calc(100vw - 16px));
   max-height: 278px;
   overflow: auto;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius-popover);
-  background: var(--surface-raised);
+  background: var(--surface-popover);
   box-shadow: var(--shadow-popover);
   padding: 6px;
 }
@@ -602,11 +604,11 @@ label,
   white-space: nowrap;
 }
 
-.editor-slash-row:hover,
-.editor-slash-row:focus-visible,
-.editor-slash-row.active {
-  background: var(--blue-soft);
-  color: var(--blue-strong);
+button.editor-slash-row:hover:not(:disabled),
+button.editor-slash-row:focus-visible,
+button.editor-slash-row.active {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 .editor-slash-row:active {
@@ -685,16 +687,16 @@ label,
 
 .primary-action {
   border-color: transparent;
-  background: var(--blue);
+  background: var(--action-primary-bg);
   box-shadow: var(--shadow-control);
-  color: #f6f8ff;
+  color: var(--action-primary-text);
 }
 
-.primary-action:hover {
+.primary-action:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--blue-strong);
+  background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
-  color: #ffffff;
+  color: var(--action-primary-text);
 }
 
 .secondary-action {
@@ -994,16 +996,17 @@ pre {
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
-.ribbon-button:hover,
-.ribbon-button.active {
+button.ribbon-button:hover:not(:disabled),
+button.ribbon-button.active {
   background: var(--surface-active);
   box-shadow: var(--shadow-control);
   color: var(--text);
 }
 
-.ribbon-button.utility-active {
-  background: var(--blue-soft);
-  color: var(--blue);
+button.ribbon-button.utility-active,
+button.ribbon-button.utility-active:hover:not(:disabled) {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 .icon {
@@ -1171,16 +1174,16 @@ pre {
 
 .obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled) {
   border-color: transparent;
-  background: var(--blue-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 28%, transparent);
-  color: var(--blue-strong);
+  background: var(--action-primary-bg);
+  box-shadow: var(--shadow-control);
+  color: var(--action-primary-text);
 }
 
 .obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled):hover {
   border-color: transparent;
-  background: color-mix(in srgb, var(--blue-soft) 70%, var(--blue));
+  background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
-  color: var(--blue-strong);
+  color: var(--action-primary-text);
 }
 
 .vault-create-row {
@@ -1276,11 +1279,11 @@ pre {
   text-align: left;
 }
 
-.vault-connect-button:hover {
+button.vault-connect-button:hover:not(:disabled) {
   border-color: transparent;
-  background: var(--blue-soft);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 32%, transparent);
-  color: var(--blue);
+  background: var(--surface-hover);
+  box-shadow: var(--shadow-control-hover);
+  color: var(--text);
 }
 
 .vault-connect-button .icon {
@@ -1480,9 +1483,9 @@ pre {
   min-height: 30px;
   border-color: transparent;
   border-radius: 7px;
-  background: color-mix(in srgb, var(--blue-soft) 82%, var(--surface-raised));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 28%, transparent);
-  color: var(--blue-strong);
+  background: var(--action-primary-bg);
+  box-shadow: var(--shadow-control);
+  color: var(--action-primary-text);
   font-size: 12px;
   font-weight: 600;
   padding: 0 10px;
@@ -1585,9 +1588,9 @@ pre {
   max-width: min(320px, calc(100% - 16px));
   max-height: min(420px, calc(100vh - 32px));
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--line);
   border-radius: var(--radius-popover);
-  background: var(--surface-raised);
+  background: var(--surface-popover);
   box-shadow: var(--shadow-obsi-popover);
   padding: 8px;
 }
@@ -1823,9 +1826,9 @@ pre {
   max-height: min(720px, calc(100vh - 48px));
   min-height: min(480px, calc(100vh - 48px));
   overflow: hidden;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius-popover);
-  background: var(--surface-raised);
+  background: var(--surface-popover);
   box-shadow: var(--shadow-obsi-popover);
 }
 
@@ -1998,15 +2001,15 @@ pre {
   text-align: left;
 }
 
-.settings-nav-item:hover,
-.settings-nav-item.active {
+button.settings-nav-item:hover:not(:disabled),
+button.settings-nav-item.active {
   border-color: transparent;
   background: var(--surface-active);
   color: var(--text);
 }
 
 .settings-nav-item.active {
-  border-left-color: var(--blue);
+  border-left-color: transparent;
 }
 
 .settings-nav-item > span:last-child {
@@ -2044,7 +2047,7 @@ pre {
 }
 
 .settings-nav-item.active .settings-nav-icon {
-  color: var(--blue);
+  color: var(--text);
 }
 
 .settings-modal-content {
@@ -2376,14 +2379,14 @@ pre {
   min-width: 148px;
   min-height: 40px;
   border-color: transparent;
-  background: var(--blue-soft);
-  color: var(--blue-strong);
+  background: var(--action-primary-bg);
+  color: var(--action-primary-text);
 }
 
 .settings-primary-action:hover:not(:disabled) {
   border-color: transparent;
-  background: color-mix(in srgb, var(--blue-soft) 72%, var(--blue));
-  color: var(--blue-strong);
+  background: var(--action-primary-bg-hover);
+  color: var(--action-primary-text);
 }
 
 .settings-primary-action .icon {
@@ -2427,9 +2430,9 @@ pre {
 
 .session-security-status button:not(:disabled):hover {
   border-color: transparent;
-  background: color-mix(in srgb, var(--blue-soft) 70%, var(--blue));
+  background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
-  color: var(--blue-strong);
+  color: var(--action-primary-text);
 }
 
 .session-security-status button:not(:disabled):active {
@@ -3117,7 +3120,7 @@ pre {
   outline: none;
   box-shadow:
     inset 0 0 0 1px var(--focus),
-    0 0 0 3px var(--access-accent-soft);
+    0 0 0 3px var(--focus-soft);
 }
 
 .access-add-button {
@@ -3145,7 +3148,7 @@ pre {
   transform: scale(0.96);
 }
 
-.access-add-button:hover {
+.access-add-button:hover:not(:disabled) {
   background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
 }
@@ -3639,19 +3642,19 @@ pre {
   content: "□";
 }
 
-.obsidian-folder-button:hover,
-.obsidian-folder-button.active,
-.obsidian-page-button:hover,
-.obsidian-page-button.active {
+button.obsidian-folder-button:hover:not(:disabled),
+button.obsidian-folder-button.active,
+button.obsidian-page-button:hover:not(:disabled),
+button.obsidian-page-button.active {
   background: var(--surface-hover);
   color: var(--text);
 }
 
-.obsidian-folder-button.active,
-.obsidian-page-button.active {
-  background: var(--blue-soft);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 24%, transparent);
-  color: var(--blue-strong);
+button.obsidian-folder-button.active,
+button.obsidian-page-button.active {
+  background: var(--selection-bg);
+  box-shadow: 0 0 0 1px var(--selection-ring);
+  color: var(--selection-fg);
 }
 
 .obsidian-folder-button.locked,
@@ -3728,9 +3731,9 @@ pre {
   display: grid;
   min-width: 220px;
   max-width: min(280px, calc(100vw - 16px));
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius-popover);
-  background: var(--surface-raised);
+  background: var(--surface-popover);
   box-shadow: var(--shadow-obsi-popover);
   padding: 6px;
 }
@@ -3791,9 +3794,9 @@ pre {
   width: min(600px, 100%);
   max-height: min(620px, 78vh);
   overflow: hidden;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius-popover);
-  background: var(--surface-raised);
+  background: var(--surface-popover);
   box-shadow: var(--shadow-obsi-popover);
 }
 
@@ -3855,10 +3858,10 @@ pre {
   min-width: 0;
 }
 
-.command-palette-row:hover,
-.command-palette-row.active {
-  background: var(--blue-soft);
-  color: var(--blue-strong);
+button.command-palette-row:hover:not(:disabled),
+button.command-palette-row.active {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
 }
 
 .command-palette-row-title,
@@ -4000,8 +4003,8 @@ pre {
   min-height: 28px;
   border-radius: var(--radius-control);
   border-color: transparent;
-  background: var(--blue-soft);
-  color: var(--blue-strong);
+  background: var(--action-primary-bg);
+  color: var(--action-primary-text);
   font-size: 12px;
   font-weight: 700;
   padding: 4px 8px;
@@ -4009,8 +4012,8 @@ pre {
 
 .page-save-button:hover:not(:disabled) {
   border-color: transparent;
-  background: color-mix(in srgb, var(--blue-soft) 72%, var(--blue));
-  color: var(--blue-strong);
+  background: var(--action-primary-bg-hover);
+  color: var(--action-primary-text);
 }
 
 .note-content {
@@ -4370,9 +4373,9 @@ pre {
 }
 
 .graph-floating-controls button[aria-pressed="true"] {
-  background: var(--blue-soft);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--blue) 34%, transparent);
-  color: var(--blue-strong);
+  background: var(--selection-bg);
+  box-shadow: 0 0 0 1px var(--selection-ring);
+  color: var(--selection-fg);
 }
 
 .graph-floating-controls button:active:not(:disabled) {

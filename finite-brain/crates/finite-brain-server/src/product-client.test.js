@@ -18,6 +18,9 @@ function element(ownerDocument = null) {
     textContent: "",
     value: "",
     children: [],
+    get childNodes() {
+      return this.children;
+    },
     classList: {
       add() {},
       remove() {},
@@ -216,7 +219,7 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyVaultInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageVaultsModal, closeManageVaultsModal, overlayFocusableElements, renderVaultInvitationPanel, resetVaultSessionState, setActiveVaultId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyVaultInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageVaultsModal, closeManageVaultsModal, overlayFocusableElements, renderVaultInvitationPanel, resetVaultSessionState, saveActivePage, setActiveVaultId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(
     seamSource,
@@ -1583,6 +1586,15 @@ assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
 assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
 assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(htmlSource, /<meta name="color-scheme" content="dark light"\s*\/>/);
+assert.match(
+  htmlSource,
+  /<meta name="theme-color" media="\(prefers-color-scheme: dark\)" content="#212121"\s*\/>/
+);
+assert.match(
+  htmlSource,
+  /<meta name="theme-color" media="\(prefers-color-scheme: light\)" content="#f7f6f3"\s*\/>/
+);
 assert.match(
   htmlSource,
   /id="savePageButton"[^>]*aria-keyshortcuts="Control\+S Meta\+S"[^>]*>Save Page</,
@@ -1716,7 +1728,28 @@ assert.match(source, /closeSettingsModal\(\)/);
 assert.match(cssSource, /\.settings-modal-backdrop\s*\{/);
 assert.match(
   cssSource,
-  /\.settings-modal-panel\s*\{[^}]*border:\s*1px solid var\(--line-strong\);[^}]*border-radius:\s*var\(--radius-popover\);[^}]*background:\s*var\(--surface-raised\);[^}]*box-shadow:\s*var\(--shadow-obsi-popover\);/s,
+  /\.settings-modal-panel\s*\{[^}]*border:\s*1px solid var\(--line\);[^}]*border-radius:\s*var\(--radius-popover\);[^}]*background:\s*var\(--surface-popover\);[^}]*box-shadow:\s*var\(--shadow-obsi-popover\);/s,
+  "Settings must use the shared Dashboard-style popover surface without moving the modal"
+);
+assert.match(
+  cssSource,
+  /--selection-bg:\s*var\(--surface-active\);[\s\S]*?--action-primary-bg:\s*var\(--text\);[\s\S]*?--action-primary-text:\s*var\(--bg\);[\s\S]*?--focus:\s*color-mix\(in srgb, var\(--text\) 42%, transparent\);/s,
+  "Ordinary selection, actions, and focus must derive from the dashboard neutral text hierarchy"
+);
+assert.match(
+  cssSource,
+  /button\.obsidian-folder-button\.active,\s*button\.obsidian-page-button\.active\s*\{[^}]*background:\s*var\(--selection-bg\);[^}]*color:\s*var\(--selection-fg\);/s,
+  "File-tree selection must be neutral rather than blue"
+);
+assert.match(
+  cssSource,
+  /button\.obsidian-folder-button:hover:not\(:disabled\),[\s\S]*?button\.command-palette-row:hover:not\(:disabled\)/s,
+  "Neutral hover states must outrank the generic button hover surface"
+);
+assert.match(
+  cssSource,
+  /\.page-save-button\s*\{[^}]*background:\s*var\(--action-primary-bg\);[^}]*color:\s*var\(--action-primary-text\);/s,
+  "Primary actions must retain strong neutral contrast"
 );
 assert.match(
   cssSource,
@@ -3640,6 +3673,293 @@ assert.doesNotMatch(
   assert.equal(pageMenu.some((item) => item.action === "open-graph"), true);
   assert.equal(pageMenu.some((item) => item.action === "edit-page"), false);
   assert.equal(pageMenu.find((item) => item.action === "delete-page").disabled, false);
+  assert.equal(
+    client.pageDeletionDisposition({ localDraft: true, revision: 0 }),
+    "discard-local",
+    "A revision-zero Page draft must be discarded locally instead of requiring a signed tombstone"
+  );
+  assert.equal(
+    client.pageDeletionDisposition({ localDraft: true, revision: 2 }),
+    "tombstone",
+    "An unsaved edit of a persisted Page must retain the signed tombstone path"
+  );
+  const localDraftProjection = client.createClientProjection();
+  const localDraftKey = "restricted/obj_new_page_draft";
+  localDraftProjection.localDrafts.set(localDraftKey, {
+    baseRevision: 0,
+    path: "obj_new_page_draft.md",
+    text: "# New Page",
+  });
+  assert.equal(
+    client.discardLocalPageDraft(localDraftProjection, {
+      folderId: "restricted",
+      key: localDraftKey,
+      localDraft: true,
+      objectId: "obj_new_page_draft",
+      revision: 0,
+    }),
+    true,
+    "Discarding an unsaved Page must remove only its local draft projection"
+  );
+  assert.equal(localDraftProjection.localDrafts.has(localDraftKey), false);
+  assert.equal(
+    client.discardLocalPageDraft(localDraftProjection, {
+      folderId: "restricted",
+      localDraft: true,
+      objectId: "obj_saved_page",
+      revision: 1,
+    }),
+    false,
+    "A persisted Page must not be discarded locally"
+  );
+  const localDraftMenu = client.contextMenuItemsForTarget({
+    type: "page",
+    folderId: "restricted",
+    localDraft: true,
+    objectId: "obj_new_page_draft",
+    revision: 0,
+  });
+  assert.equal(
+    localDraftMenu.find((item) => item.action === "delete-page").label,
+    "Discard unsaved Page",
+    "The Page menu must describe a local draft discard accurately"
+  );
+  const renderSearchPanelSource = source.slice(
+    source.indexOf("function renderSearchPanel()"),
+    source.indexOf("function renderAccessResultPanel()")
+  );
+  assert.match(
+    renderSearchPanelSource,
+    /localDraft:\s*Boolean\(row\.localDraft\),[\s\S]{0,180}revision:\s*row\.revision,/,
+    "Search context menus must retain draft state so they use the same truthful Page action"
+  );
+
+  const draftDelete = clipboardInvitationFeedbackTestSeams({});
+  const draftDeleteState = draftDelete.seams.state;
+  const draftDeleteKey = "restricted/obj_context_draft";
+  let draftDeleteFetches = 0;
+  draftDelete.context.fetch = async () => {
+    draftDeleteFetches += 1;
+    throw new Error("A local draft discard must not make a protected request");
+  };
+  draftDelete.context.window.confirm = () => true;
+  draftDeleteState.activeVaultId = "personal";
+  draftDeleteState.selectedFolderId = "restricted";
+  draftDeleteState.selectedPageKey = draftDeleteKey;
+  draftDeleteState.sessionStatus = "unlocked";
+  draftDeleteState.projection.pages.set("restricted/obj_context_fallback", {
+    folderId: "restricted",
+    objectId: "obj_context_fallback",
+    path: "obj_context_fallback.md",
+    revision: 1,
+    status: "ready",
+    text: "# Fallback Page",
+    title: "Fallback Page",
+  });
+  draftDeleteState.projection.localDrafts.set(draftDeleteKey, {
+    baseRevision: 0,
+    path: "obj_context_draft.md",
+    text: "# New Page",
+  });
+  draftDelete.seams.handleContextMenuAction(
+    { action: "delete-page" },
+    {
+      type: "page",
+      folderId: "restricted",
+      localDraft: true,
+      objectId: "obj_context_draft",
+      pageKey: draftDeleteKey,
+      revision: 0,
+      title: "New Page",
+    }
+  );
+  await Promise.resolve();
+  assert.equal(
+    draftDeleteState.projection.localDrafts.has(draftDeleteKey),
+    false,
+    "The real context-menu delete path must discard a revision-zero draft locally"
+  );
+  assert.equal(draftDeleteFetches, 0, "Discarding a local draft must not create a signed DELETE request");
+  assert.equal(draftDeleteState.lastError, null, "A local draft discard must not surface a generic action failure");
+  assert.equal(
+    draftDelete.context.document.getElementById("pageObjectIdInput").value,
+    "obj_context_fallback",
+    "Discarding the selected draft must rebind editor state to the fallback Page"
+  );
+  assert.equal(draftDelete.context.document.getElementById("pageBaseRevisionInput").value, "1");
+  assert.equal(draftDelete.context.document.getElementById("pageDraftInput").value, "# Fallback Page");
+
+  const persistedDelete = clipboardInvitationFeedbackTestSeams({});
+  const persistedDeleteState = persistedDelete.seams.state;
+  const persistedDeleteKey = "getting-started/obj_context_saved";
+  const persistedDeletePubkey = "11".repeat(32);
+  const persistedDeleteFetch = new Promise((resolve) => {
+    persistedDelete.context.fetch = async (route, options) => {
+      resolve({ route, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ revision: 2, sequence: 2 }),
+      };
+    };
+  });
+  persistedDelete.context.window.confirm = () => true;
+  persistedDelete.context.window.nostr = {
+    getPublicKey() {},
+    signEvent: async (event) => ({ ...event, id: "signed-event", pubkey: persistedDeletePubkey, sig: "signature" }),
+  };
+  persistedDeleteState.activeVaultId = "personal";
+  persistedDeleteState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+  persistedDeleteState.pubkeyHex = persistedDeletePubkey;
+  persistedDeleteState.selectedFolderId = "getting-started";
+  persistedDeleteState.selectedPageKey = persistedDeleteKey;
+  persistedDeleteState.sessionStatus = "unlocked";
+  persistedDeleteState.signerStatus = "connected";
+  persistedDeleteState.projection.pages.set(persistedDeleteKey, {
+    folderId: "getting-started",
+    objectId: "obj_context_saved",
+    path: "obj_context_saved.md",
+    revision: 1,
+    status: "ready",
+    text: "# Saved Page",
+    title: "Saved Page",
+  });
+  persistedDeleteState.projection.pages.set("getting-started/obj_context_fallback", {
+    folderId: "getting-started",
+    objectId: "obj_context_fallback",
+    path: "obj_context_fallback.md",
+    revision: 2,
+    status: "ready",
+    text: "# Persisted Fallback",
+    title: "Persisted Fallback",
+  });
+  persistedDelete.seams.handleContextMenuAction(
+    { action: "delete-page" },
+    {
+      type: "page",
+      folderId: "getting-started",
+      localDraft: false,
+      objectId: "obj_context_saved",
+      pageKey: persistedDeleteKey,
+      revision: 1,
+      title: "Saved Page",
+    }
+  );
+  const persistedDeleteRequest = await persistedDeleteFetch;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(persistedDeleteRequest.options.method, "DELETE");
+  assert.match(persistedDeleteRequest.route, /\/folders\/getting-started\/objects\/obj_context_saved$/);
+  assert.equal(
+    persistedDeleteState.projection.pages.has(persistedDeleteKey),
+    false,
+    "A persisted Page must retain the signed tombstone delete path"
+  );
+  assert.equal(persistedDeleteState.lastError, null);
+  assert.equal(
+    persistedDelete.context.document.getElementById("pageObjectIdInput").value,
+    "obj_context_fallback",
+    "Deleting the selected saved Page must rebind editor state to the fallback Page"
+  );
+  assert.equal(persistedDelete.context.document.getElementById("pageBaseRevisionInput").value, "2");
+  assert.equal(persistedDelete.context.document.getElementById("pageDraftInput").value, "# Persisted Fallback");
+
+  const saveRace = clipboardInvitationFeedbackTestSeams({});
+  const saveRaceState = saveRace.seams.state;
+  const saveRacePubkey = "22".repeat(32);
+  const saveRaceKey = "getting-started/obj_save_race";
+  let saveRaceSignature = 0;
+  saveRace.context.window.nostr = {
+    getPublicKey: async () => saveRacePubkey,
+    signEvent: async (event) => ({
+      ...event,
+      id: `save-race-signature-${++saveRaceSignature}`,
+      pubkey: saveRacePubkey,
+      sig: "save-race-signature",
+    }),
+  };
+  const makeDeferred = () => {
+    let resolve;
+    const promise = new Promise((nextResolve) => {
+      resolve = nextResolve;
+    });
+    return { promise, resolve };
+  };
+  const firstSaveResponse = makeDeferred();
+  const secondSaveResponse = makeDeferred();
+  const firstSaveStarted = makeDeferred();
+  const secondSaveStarted = makeDeferred();
+  let saveRequestCount = 0;
+  saveRace.context.fetch = async () => {
+    saveRequestCount += 1;
+    if (saveRequestCount === 1) {
+      firstSaveStarted.resolve();
+      return firstSaveResponse.promise;
+    }
+    if (saveRequestCount === 2) {
+      secondSaveStarted.resolve();
+      return secondSaveResponse.promise;
+    }
+    throw new Error("The save guard must block a third overlapping Page save");
+  };
+  const configureSaveRaceSession = async (markdown) => {
+    const rawKey = new Uint8Array(32).fill(7);
+    const cryptoKey = await saveRace.context.crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, [
+      "encrypt",
+      "decrypt",
+    ]);
+    saveRaceState.activeVaultId = "personal";
+    saveRaceState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+    saveRaceState.keyring = {
+      keys: new Map([
+        [
+          "personal:getting-started:1",
+          { cryptoKey, folderId: "getting-started", keyVersion: 1, rawKey, vaultId: "personal" },
+        ],
+      ]),
+      openedGrants: [],
+    };
+    saveRaceState.pubkeyHex = saveRacePubkey;
+    saveRaceState.selectedFolderId = "getting-started";
+    saveRaceState.selectedPageKey = saveRaceKey;
+    saveRaceState.sessionStatus = "unlocked";
+    saveRaceState.signerStatus = "connected";
+    saveRaceState.projection.localDrafts.set(saveRaceKey, {
+      baseRevision: 0,
+      path: "obj_save_race.md",
+      text: markdown,
+    });
+    saveRace.context.document.getElementById("pageFolderIdInput").value = "getting-started";
+    saveRace.context.document.getElementById("pageObjectIdInput").value = "obj_save_race";
+    saveRace.context.document.getElementById("pageBaseRevisionInput").value = "";
+    saveRace.context.document.getElementById("pageDraftInput").value = markdown;
+  };
+  const successfulSaveResponse = () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ revision: 1, sequence: 1 }),
+  });
+  await configureSaveRaceSession("# First save");
+  const firstSave = saveRace.seams.saveActivePage();
+  await firstSaveStarted.promise;
+  saveRace.seams.lockSession();
+  await configureSaveRaceSession("# Reopened save");
+  const secondSave = saveRace.seams.saveActivePage();
+  await secondSaveStarted.promise;
+  firstSaveResponse.resolve(successfulSaveResponse());
+  await assert.rejects(firstSave, /Session changed while protected client work was in progress/);
+  assert.equal(
+    saveRaceState.pageSaveInFlight?.key,
+    saveRaceKey,
+    "A stale save completion must not clear the reopened session's same-Page save guard"
+  );
+  await assert.rejects(
+    saveRace.seams.saveActivePage(),
+    /A Page save is already in progress/,
+    "The reopened save guard must still block a third overlapping save"
+  );
+  secondSaveResponse.resolve(successfulSaveResponse());
+  await secondSave;
+  assert.equal(saveRaceState.pageSaveInFlight, null, "The active save must clear its own guard after completion");
   const readerPages = client.readerPageRows("general", openedSync.objects);
   assert.equal(readerPages[0].label, "Hello");
   assert.equal(readerPages[0].detail, "obj_000000000001.md");
@@ -3718,6 +4038,57 @@ assert.doesNotMatch(
   assert.equal(merged.conflicts[0].status, "conflict");
   assert.equal(merged.localDrafts.has("general/obj_000000000001"), true);
   assert.equal(merged.pages.has("general/obj_000000000001"), false);
+
+  const deletedProjection = client.createClientProjection();
+  deletedProjection.pages.set("general/obj_deleted_page", {
+    folderId: "general",
+    objectId: "obj_deleted_page",
+    revision: 1,
+    status: "ready",
+    text: "# Deleted Page",
+  });
+  const mergedTombstone = client.mergeSyncProjection(deletedProjection, {
+    objects: [
+      {
+        deleted: true,
+        folderId: "general",
+        objectId: "obj_deleted_page",
+        revision: 2,
+      },
+    ],
+  });
+  assert.equal(
+    mergedTombstone.pages.has("general/obj_deleted_page"),
+    false,
+    "A bootstrap tombstone must remove a previously cached Page rather than rendering a locked row"
+  );
+  assert.equal(
+    client.projectionPagesFromProjection(mergedTombstone).some((page) => page.objectId === "obj_deleted_page"),
+    false,
+    "Deleted Pages must stay absent after a full sync bootstrap"
+  );
+  const localEditBeforeDeletion = client.createClientProjection();
+  localEditBeforeDeletion.localDrafts.set("general/obj_deleted_conflict", {
+    baseRevision: 1,
+    path: "obj_deleted_conflict.md",
+    text: "# Unsynced local edit",
+  });
+  const mergedTombstoneConflict = client.mergeSyncProjection(localEditBeforeDeletion, {
+    objects: [
+      {
+        deleted: true,
+        folderId: "general",
+        objectId: "obj_deleted_conflict",
+        revision: 2,
+      },
+    ],
+  });
+  assert.equal(
+    mergedTombstoneConflict.conflicts.length,
+    1,
+    "A newer remote tombstone must retain the existing local-edit conflict safeguard"
+  );
+  assert.equal(mergedTombstoneConflict.localDrafts.has("general/obj_deleted_conflict"), true);
 
   assert.deepEqual(
     Array.from(client.extractPageLinks("[[Roadmap]] [Spec](Specs/OKF.md) [Web](https://example.com)")),

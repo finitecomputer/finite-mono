@@ -20,6 +20,7 @@ const FiniteBrainProductClient = (() => {
     clientActionFeedbackGeneration: 0,
     preparedWrite: null,
     preparedWriteTarget: null,
+    pageSaveInFlight: null,
     projection: createClientProjection(),
     readerBusy: false,
     selectedFolderId: null,
@@ -1923,6 +1924,7 @@ const FiniteBrainProductClient = (() => {
     target.projection = createClientProjection();
     target.preparedWrite = null;
     target.preparedWriteTarget = null;
+    target.pageSaveInFlight = null;
     if (target === state) {
       clearClientActionFeedback({ render: false });
     } else {
@@ -3093,6 +3095,11 @@ const FiniteBrainProductClient = (() => {
           serverRevision: object.revision,
           status: "conflict",
         });
+        continue;
+      }
+      if (object.deleted) {
+        next.pages.delete(key);
+        next.localDrafts.delete(key);
         continue;
       }
       next.pages.set(key, object);
@@ -4311,6 +4318,15 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function syncReaderInputsFromSelectedPage() {
+    const page = selectedReaderPage();
+    $("pageFolderIdInput").value = page?.folderId || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    $("pageObjectIdInput").value = page?.objectId || "";
+    $("pageBaseRevisionInput").value = page ? String(page.revision || "") : "";
+    setEditorDraftText(page && pageTextIsPresent(page) ? page.text : "");
+    return page;
+  }
+
   function clearSearchHighlight() {
     state.searchHighlight = null;
     state.searchHighlightShouldScroll = false;
@@ -4447,6 +4463,9 @@ const FiniteBrainProductClient = (() => {
   function contextMenuItemsForTarget(target) {
     if (!target) return [];
     if (target.type === "page") {
+      const discardLocalDraft = pageDeletionDisposition(target) === "discard-local";
+      const pageKeyValue = target.pageKey || pageKey(target.folderId, target.objectId);
+      const saveInFlight = state.pageSaveInFlight?.key === pageKeyValue;
       return [
         { action: "open-page", label: "Open Page" },
         { action: "new-page", label: "New Page in Folder" },
@@ -4455,7 +4474,12 @@ const FiniteBrainProductClient = (() => {
         { action: "copy-page-id", label: "Copy Page ID" },
         { action: "copy-folder-id", label: "Copy Folder ID" },
         { separator: true },
-        { action: "delete-page", label: "Delete Page", disabled: false, danger: true },
+        {
+          action: "delete-page",
+          label: saveInFlight ? "Saving Page…" : discardLocalDraft ? "Discard unsaved Page" : "Delete Page",
+          disabled: saveInFlight,
+          danger: true,
+        },
       ];
     }
     return [
@@ -4559,15 +4583,65 @@ const FiniteBrainProductClient = (() => {
     return projectionPages().find((page) => page.key === key) || null;
   }
 
+  function pageDeletionDisposition(page) {
+    const revision = Number(page?.revision || 0);
+    return page?.localDraft && (!Number.isInteger(revision) || revision < 1)
+      ? "discard-local"
+      : "tombstone";
+  }
+
+  function discardLocalPageDraft(projection, page) {
+    if (pageDeletionDisposition(page) !== "discard-local") return false;
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    return projection?.localDrafts?.delete(key) || false;
+  }
+
+  function pageSaveIsInFlight(page) {
+    if (!page) return false;
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    return state.pageSaveInFlight?.key === key;
+  }
+
   async function deletePageFromContextTarget(target) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const page = pageFromContextTarget(target);
     if (!page || !isReadablePage(page)) throw new Error("Select a readable Page before deleting");
+    if (pageSaveIsInFlight(page)) {
+      setClientActionFeedback("error", "Page is still saving. Wait for it to finish, then delete it.");
+      render();
+      return;
+    }
+    const title = pageTitleForPage(page);
+    const disposition = pageDeletionDisposition(page);
+    if (
+      window.confirm &&
+      !window.confirm(
+        disposition === "discard-local"
+          ? `Discard unsaved "${title}"? This only removes the local draft.`
+          : `Delete "${title}"? This writes a signed tombstone.`
+      )
+    ) {
+      return;
+    }
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    if (disposition === "discard-local") {
+      discardLocalPageDraft(state.projection, page);
+      if (state.preparedWriteTarget && pageKey(state.preparedWriteTarget.folderId, state.preparedWriteTarget.objectId) === key) {
+        state.preparedWrite = null;
+        state.preparedWriteTarget = null;
+      }
+      if (state.selectedPageKey === key) state.selectedPageKey = null;
+      selectDefaultReaderTargets();
+      log("Discarded unsaved local Page draft.", {
+        folderId: page.folderId,
+        objectId: page.objectId,
+      });
+      render();
+      return;
+    }
     if (!page.revision) throw new Error("Page delete requires a saved revision");
     if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer before deleting");
-    const title = pageTitleForPage(page);
-    if (window.confirm && !window.confirm(`Delete "${title}"? This writes a signed tombstone.`)) return;
     const body = await buildPageDeleteRequest({
       authorNpub: currentActorNpub(),
       baseRevision: page.revision,
@@ -4585,7 +4659,6 @@ const FiniteBrainProductClient = (() => {
       body: JSON.stringify(body),
     });
     requireCurrentSessionEpoch(sessionEpoch);
-    const key = page.key || pageKey(page.folderId, page.objectId);
     state.projection.pages.delete(key);
     state.projection.localDrafts.delete(key);
     if (state.selectedPageKey === key) state.selectedPageKey = null;
@@ -4657,11 +4730,8 @@ const FiniteBrainProductClient = (() => {
     if (page) {
       state.selectedFolderId = page.folderId;
       state.expandedFolderIds.add(page.folderId);
-      $("pageFolderIdInput").value = page.folderId;
-      $("pageObjectIdInput").value = page.objectId;
-      $("pageBaseRevisionInput").value = String(page.revision || "");
-      if (pageTextIsPresent(page)) setEditorDraftText(page.text);
     }
+    syncReaderInputsFromSelectedPage();
     render();
   }
 
@@ -5271,7 +5341,9 @@ const FiniteBrainProductClient = (() => {
   }
 
   function canSaveActiveDraft() {
-    return Boolean(state.signerStatus === "connected" && state.keyring && activeLocalDraft());
+    return Boolean(
+      !state.pageSaveInFlight && state.signerStatus === "connected" && state.keyring && activeLocalDraft()
+    );
   }
 
   function updateSaveControls() {
@@ -6277,8 +6349,10 @@ const FiniteBrainProductClient = (() => {
             contextTarget: {
               type: "page",
               folderId: row.folderId,
+              localDraft: Boolean(row.localDraft),
               objectId: row.objectId,
               pageKey: row.key,
+              revision: row.revision,
               title: row.title,
             },
             highlightQuery: query,
@@ -7379,6 +7453,7 @@ const FiniteBrainProductClient = (() => {
 
   function renderReader() {
     selectDefaultReaderTargets();
+    const page = syncReaderInputsFromSelectedPage();
     const folderRows = readerFolderRows(state.metadata);
 
     setList("readerFolderList", folderRows, "Load a Vault to browse folders", (item, row) => {
@@ -7414,8 +7489,10 @@ const FiniteBrainProductClient = (() => {
               contextTarget: {
                 type: "page",
                 folderId: pageRow.folderId,
+                localDraft: Boolean(pageRow.localDraft),
                 objectId: pageRow.objectId,
                 pageKey: pageRow.key,
+                revision: pageRow.revision,
                 title: pageRow.title,
               },
             }
@@ -7427,7 +7504,6 @@ const FiniteBrainProductClient = (() => {
       }
     });
 
-    const page = selectedReaderPage();
     if (!page) {
       const sessionLocked = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
       setText(
@@ -10032,8 +10108,18 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function saveActivePage() {
-    await prepareDraftWrite({ renderAfter: false });
-    await savePreparedPage();
+    const { key } = activePageKeyFromInputs();
+    if (state.pageSaveInFlight) throw new Error("A Page save is already in progress");
+    const operation = { key, sessionEpoch: state.sessionEpoch };
+    state.pageSaveInFlight = operation;
+    updateSaveControls();
+    try {
+      await prepareDraftWrite({ renderAfter: false });
+      await savePreparedPage();
+    } finally {
+      if (state.pageSaveInFlight === operation) state.pageSaveInFlight = null;
+      updateSaveControls();
+    }
   }
 
   async function pullSyncBootstrap() {
@@ -10657,6 +10743,7 @@ const FiniteBrainProductClient = (() => {
     createLocalNip07ProviderFromSecret,
     createSessionKeyring,
     deriveSignerState,
+    discardLocalPageDraft,
     defaultVaultBootstrapFolderIds,
     defaultVaultPages,
     defaultVaultPagesFolderId,
@@ -10710,6 +10797,7 @@ const FiniteBrainProductClient = (() => {
     openFolderObject,
     openSyncObjects,
     parseOkfBundle,
+    pageDeletionDisposition,
     pageKeyForReference,
     pageLinkContext,
     pageReferencesForPage,

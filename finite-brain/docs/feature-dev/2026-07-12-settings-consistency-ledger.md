@@ -148,3 +148,54 @@ server implementation details; the no-backend-change boundary remains intact.
 ## Escalations
 
 - None.
+
+## 2026-07-13 Continuation: Local Page Discard and Dashboard Token Alignment
+
+### Scope and boundary
+
+- Continue the existing Product Client PR (#16) against `main`; this is a
+  focused consistency and reliability slice, not a new product capability.
+- Fix the immediate-create then delete path without changing server-side
+  authorization, Folder access, Vault policy, or signed tombstone semantics.
+- Align foundational Product Client color roles with the finitecomputer
+  dashboard while preserving the existing information architecture, layout,
+  and interaction model.
+
+### Implemented behavior
+
+- A revision-zero local Page draft is now explicitly labelled and handled as
+  **Discard unsaved Page**. Discarding it is local only and never sends a
+  tombstone request or requires a signer.
+- A persisted Page still uses the existing signed DELETE/tombstone flow. A
+  Page with an initial save in flight cannot be deleted until that save settles.
+- Reader inputs now follow the fallback Page after either discard or persisted
+  deletion, preventing the next edit from reusing the removed Page identity.
+- Sync bootstrap removes confirmed deleted objects from the visible projection;
+  an actual local-vs-remote conflict remains preserved for conflict handling.
+- The basic dark/light surface, neutral selection, action, focus, and popover
+  roles use the dashboard-oriented token palette. Blue remains reserved for
+  semantic links and search/graph meaning rather than generic selection.
+
+### Verification plan and evidence
+
+- Deterministic Product Client checks cover local discard without a network
+  DELETE, persisted signed deletion, fallback input rebinding, sync removal,
+  local conflict preservation, and a lock/reopen save race.
+- Browser smoke uses a disposable local SQLite database and an opt-in local
+  signer only. It verified discard and signed-delete behavior, fresh reload,
+  no console errors, light/dark rendering, and a 390px-wide modal layout.
+- Final scoped commands passed: Product Client syntax and deterministic suite,
+  40 finite-brain-server tests, clippy with warnings denied, workspace fmt,
+  `git diff --check`, and `cargo build -p finite-brain-app --locked`.
+- The rebuilt main local server is listening at `http://127.0.0.1:4039/client`.
+  The browser verification ran separately on a disposable port and database.
+
+### Review record
+
+- Independent final diff review found no remaining actionable concern. It
+  specifically rechecked fallback input rebinding for both deletion paths and
+  the lock/reopen stale-save guard.
+- CodeRabbit's third local uncommitted-review attempt connected through its
+  free CLI allowance and reached its summarizing phase, but returned no review
+  report or findings. The independent review and the scoped test/browser
+  evidence remain the review fallback for this local-only run.
