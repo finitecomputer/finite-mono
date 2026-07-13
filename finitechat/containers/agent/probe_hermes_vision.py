@@ -13,7 +13,7 @@ RED_FIXTURE = (
     "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAEAQMAAACTPww9AAAAA1BMVEX/AAAZ4gk3"
     "AAAAC0lEQVQI12NggAAAAAgAAS8g3TEAAAAASUVORK5CYII="
 )
-RED_PROMPT = "What is the dominant color of this image? " "Reply with one uppercase color word."
+RED_PROMPT = "What is the dominant color of this image? Reply with one uppercase color word."
 
 
 async def probe() -> int:
