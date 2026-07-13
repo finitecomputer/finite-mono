@@ -22,10 +22,14 @@ Paid admission is blocked unless all of these are true, regardless of Stripe:
   synthetic account. A green timer or successful `borg check` is insufficient.
 
 The host definition selects the destination, Borg 1.2 executable, and the same
-credential paths used by `../finitecomputer`. Copying that existing bundle,
-verifying its destination restriction, deploying the Nix change, initializing
-the repository, running a drill, or changing production traffic remains
-operator work and is not implied by this repository change.
+credential paths used by `../finitecomputer`. On 2026-07-13 the existing bundle
+was copied byte-for-byte to finite-lat-1, revision `3f26292` was deployed, and
+the dedicated repository was initialized with a verified first archive. The
+reused SSH credential also accepted an arbitrary read-only remote command, so
+server-enforced append-only protection is **not** present. Paid admission stays
+blocked until rsync.net restricts the archival credential without breaking the
+separate administrative retention credential, and until the empty-target drill
+passes.
 
 ## One-time Borg activation
 
@@ -43,11 +47,11 @@ operator work and is not implied by this repository change.
    /var/lib/finitecomputer/backups/rsync-net/borg-passphrase
    ```
 
-3. Verify how the existing SSH key is restricted at rsync.net. The current
-   finitecomputer job prunes archives, so credential reuse alone is not
-   evidence of append-only enforcement. If the credential can delete or alter
-   older archives, record the continuity gate as unmet until the destination
-   restriction is corrected; do not invent a second local passphrase.
+3. Verify how the existing SSH key is restricted at rsync.net. The 2026-07-13
+   activation proved that it can run an arbitrary remote command, so the
+   archival credential is not append-only. This continuity gate remains unmet;
+   do not treat the no-prune host job as destination enforcement and do not
+   invent a second local passphrase.
 4. Deploy an exact committed revision under the normal Nix deployment
    authority, start `finite-hosted-web-chat-snapshot.service`, then start
    `borgbackup-job-finite-hosted-web-chat-offsite.service`. The job initializes
