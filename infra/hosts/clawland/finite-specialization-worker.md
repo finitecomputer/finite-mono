@@ -1,6 +1,6 @@
 # AEON specialization worker deployment
 
-This directory owns the first-party worker manifest deployed to the legacy
+This host directory owns the first-party worker manifest deployed to the legacy
 clawland k3s cluster. The host remains outside the general finite-mono deploy
 plane; this narrow exception replaces the legacy worker source with a
 digest-pinned finite-mono image.
@@ -9,7 +9,7 @@ digest-pinned finite-mono image.
 
 - Back up `/var/lib/rancher/k3s/server/manifests/fc-specializations.yaml`.
 - Confirm the current worker is ready and an authenticated image smoke passes.
-- Apply `finite-specialization-worker.yaml` with `kubectl apply --server-side`.
+- Apply `finite-specialization-worker.yaml` with `kubectl apply`.
 - Wait for the deployment rollout before changing any Hermes configuration.
 - Do not mount the old relay/Core token. Reconciliation belongs to
   `finite-agentd`, not this request worker.

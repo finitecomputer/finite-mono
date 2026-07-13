@@ -21,7 +21,6 @@ use tokio::sync::mpsc;
 use crate::AgentdError;
 use crate::config::{
     AeonSpecializationDesiredStateV1, ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1,
-    VISION_CONFIG_PATH,
 };
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
@@ -348,7 +347,7 @@ impl CommandExecutor {
                 let manager = self.config_manager.clone();
                 let hermes_home = self.hermes_home.clone();
                 let desired_for_apply = desired.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let mut result = tokio::task::spawn_blocking(move || {
                     manager.reconcile_aeon_specialization(&desired_for_apply, || {
                         validate_hermes_config(&hermes_home)
                     })
@@ -379,12 +378,11 @@ impl CommandExecutor {
                     }
                     return Err(error);
                 }
-                let effective = self.config_manager.current_value(VISION_CONFIG_PATH)?;
-                if effective.get("model").and_then(Value::as_str)
-                    != Some(desired.model_alias.as_str())
-                    || effective.get("base_url").and_then(Value::as_str)
-                        != Some(desired.worker_base_url.as_str())
-                {
+                let hermes_home = self.hermes_home.clone();
+                tokio::task::spawn_blocking(move || validate_hermes_config(&hermes_home))
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                if !self.config_manager.aeon_specialization_matches(&desired)? {
                     let rollback = HermesConfigRollbackV1 {
                         proposal_id: desired.proposal_id.clone(),
                     };
@@ -405,6 +403,7 @@ impl CommandExecutor {
                             .to_owned(),
                     ));
                 }
+                result.effective_matches_desired = true;
                 Ok(serde_json::to_value(result)?)
             }
             "agent.telegram.connect" => {

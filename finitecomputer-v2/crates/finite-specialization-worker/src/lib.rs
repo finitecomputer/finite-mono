@@ -20,6 +20,8 @@ pub const DEFAULT_VISION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
 const IMAGE_CAPABILITY_PROMPT: &str = "Interpret the supplied image faithfully. Follow the user's instruction, distinguish visible facts from uncertainty, and do not invoke tools.";
 const DEFAULT_MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_INLINE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_MAX_OUTPUT_CHARS: usize = 32 * 1024;
 const DEFAULT_MAX_IMAGES: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -31,7 +33,10 @@ pub struct WorkerConfig {
     pub spark_bearer_token: Option<String>,
     pub vision_model: String,
     pub max_image_bytes: u64,
+    pub max_inline_image_bytes: u64,
+    pub max_output_chars: usize,
     pub image_download_timeout_seconds: u64,
+    pub request_deadline_seconds: u64,
     pub allowed_attachment_hosts: Vec<String>,
     pub image_canary_interval_seconds: Option<u64>,
 }
@@ -51,12 +56,26 @@ impl WorkerConfig {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
                 .clamp(1024, DEFAULT_MAX_IMAGE_BYTES),
+            max_inline_image_bytes: non_empty_env("FINITE_SPECIALIZATION_MAX_INLINE_IMAGE_BYTES")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_MAX_INLINE_IMAGE_BYTES)
+                .clamp(1024, DEFAULT_MAX_INLINE_IMAGE_BYTES),
+            max_output_chars: non_empty_env("FINITE_SPECIALIZATION_MAX_OUTPUT_CHARS")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS)
+                .clamp(256, DEFAULT_MAX_OUTPUT_CHARS),
             image_download_timeout_seconds: non_empty_env(
                 "FINITE_SPECIALIZATION_IMAGE_DOWNLOAD_TIMEOUT_SECONDS",
             )
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30)
             .clamp(1, 120),
+            request_deadline_seconds: non_empty_env(
+                "FINITE_SPECIALIZATION_REQUEST_DEADLINE_SECONDS",
+            )
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120)
+            .clamp(1, 300),
             allowed_attachment_hosts: non_empty_env("FINITE_SPECIALIZATION_ATTACHMENT_HOSTS")
                 .map(|value| {
                     value
@@ -204,6 +223,37 @@ pub struct ChatCompletionRequest {
     pub max_completion_tokens: Option<u64>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub finite_specialization: Option<InvocationSpecializationState>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct InvocationSpecializationState {
+    pub capabilities: InvocationCapabilities,
+    pub prompt_versions: InvocationPromptVersions,
+    pub normalization_limits: InvocationNormalizationLimits,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct InvocationCapabilities {
+    pub image: bool,
+    pub audio: bool,
+    pub video: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct InvocationPromptVersions {
+    pub image: String,
+    pub audio: String,
+    pub video: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+pub struct InvocationNormalizationLimits {
+    pub max_images: usize,
+    pub max_inline_bytes: u64,
+    pub max_download_bytes: u64,
+    pub max_output_chars: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -288,7 +338,16 @@ async fn chat_completions(
     Json(input): Json<ChatCompletionRequest>,
 ) -> Result<Json<Value>, WorkerError> {
     authenticate_worker_request(&state.config, &headers)?;
-    let result = analyze_image(&state, &input).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(state.config.request_deadline_seconds),
+        analyze_image(&state, &input),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(WorkerError::request_timeout(
+            "image analysis deadline expired",
+        ))
+    });
     state
         .metrics
         .observe_request(result.as_ref().err().map(|error| error.code));
@@ -300,12 +359,13 @@ async fn analyze_image(
     input: &ChatCompletionRequest,
 ) -> Result<Value, WorkerError> {
     let started = Instant::now();
+    let limits = effective_image_limits(&state.config, input)?;
     let spark_token = state
         .config
         .spark_bearer_token
         .as_deref()
         .ok_or_else(|| WorkerError::unavailable("Spark gateway token is not configured"))?;
-    let normalized_input = normalize_image_inputs(state, input).await?;
+    let normalized_input = normalize_image_inputs(state, input, limits).await?;
     let upstream_request =
         responses_request_from_chat(&normalized_input, &state.config.vision_model)?;
     let response = state
@@ -339,7 +399,11 @@ async fn analyze_image(
     let upstream: Value = serde_json::from_str(&body)
         .map_err(|_| WorkerError::bad_gateway("Spark vision response was not valid JSON"))?;
     let mut output = chat_completion_response_from_responses(&upstream, &state.config.vision_model);
-    let text = extract_response_text(&upstream).unwrap_or_default();
+    let text = truncate_chars(
+        extract_response_text(&upstream).unwrap_or_default(),
+        limits.max_output_chars,
+    );
+    output["choices"][0]["message"]["content"] = json!(text);
     let request_id = upstream
         .get("id")
         .and_then(Value::as_str)
@@ -354,6 +418,60 @@ async fn analyze_image(
     Ok(output)
 }
 
+fn effective_image_limits(
+    config: &WorkerConfig,
+    input: &ChatCompletionRequest,
+) -> Result<InvocationNormalizationLimits, WorkerError> {
+    let requested = input
+        .finite_specialization
+        .as_ref()
+        .map(|state| {
+            if !state.capabilities.image {
+                return Err(WorkerError::unavailable("image capability is disabled"));
+            }
+            if state.capabilities.audio || state.capabilities.video {
+                return Err(WorkerError::bad_request_with_code(
+                    "audio and video capability activation is not supported by this worker",
+                    "unsupported_media_format",
+                ));
+            }
+            if state.prompt_versions.image != IMAGE_PROMPT_VERSION {
+                return Err(WorkerError::bad_request_with_code(
+                    "image prompt version is not supported",
+                    "unsupported_media_format",
+                ));
+            }
+            Ok(state.normalization_limits)
+        })
+        .transpose()?
+        .unwrap_or(InvocationNormalizationLimits {
+            max_images: DEFAULT_MAX_IMAGES,
+            max_inline_bytes: config.max_inline_image_bytes,
+            max_download_bytes: config.max_image_bytes,
+            max_output_chars: config.max_output_chars,
+        });
+    Ok(InvocationNormalizationLimits {
+        max_images: requested.max_images.clamp(1, DEFAULT_MAX_IMAGES),
+        max_inline_bytes: requested
+            .max_inline_bytes
+            .clamp(1024, config.max_inline_image_bytes),
+        max_download_bytes: requested
+            .max_download_bytes
+            .clamp(1024, config.max_image_bytes),
+        max_output_chars: requested
+            .max_output_chars
+            .clamp(256, config.max_output_chars),
+    })
+}
+
+fn truncate_chars(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value
+    } else {
+        value.chars().take(max_chars).collect()
+    }
+}
+
 async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
     loop {
@@ -366,7 +484,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
                 content: ChatContent::Parts(vec![
                     json!({
                         "type": "text",
-                        "text": "Reply with the exact marker FINITE_IMAGE_CANARY_PASS after confirming that an image is present."
+                        "text": "What is the dominant color of this image? Reply with one uppercase color word."
                     }),
                     json!({
                         "type": "image_url",
@@ -378,6 +496,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
             max_tokens: Some(32),
             max_completion_tokens: None,
             stream: Some(false),
+            finite_specialization: None,
         };
         let passed = analyze_image(&state, &request)
             .await
@@ -385,7 +504,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
             .and_then(|value| {
                 value["specialization_result"]["text"]
                     .as_str()
-                    .map(|text| text.contains("FINITE_IMAGE_CANARY_PASS"))
+                    .map(|text| text.trim().eq_ignore_ascii_case("red"))
             })
             .unwrap_or(false);
         state.metrics.observe_canary(
@@ -444,6 +563,7 @@ pub fn responses_request_from_chat(
 async fn normalize_image_inputs(
     state: &WorkerState,
     input: &ChatCompletionRequest,
+    limits: InvocationNormalizationLimits,
 ) -> Result<ChatCompletionRequest, WorkerError> {
     let mut normalized = input.clone();
     let mut image_count = 0usize;
@@ -457,7 +577,7 @@ async fn normalize_image_inputs(
                 continue;
             }
             image_count += 1;
-            if image_count > DEFAULT_MAX_IMAGES {
+            if image_count > limits.max_images {
                 return Err(WorkerError::payload_too_large(
                     "image count exceeds the specialization limit",
                 ));
@@ -468,7 +588,7 @@ async fn normalize_image_inputs(
                     "media_fetch_failed",
                 )
             })?;
-            let data_uri = retrieve_and_validate_image(state, &source).await?;
+            let data_uri = retrieve_and_validate_image(state, &source, limits).await?;
             *part = json!({
                 "type": "image_url",
                 "image_url": { "url": data_uri },
@@ -503,11 +623,12 @@ fn image_source(part: &Value) -> Option<String> {
 async fn retrieve_and_validate_image(
     state: &WorkerState,
     source: &str,
+    limits: InvocationNormalizationLimits,
 ) -> Result<String, WorkerError> {
     let (declared_mime, bytes) = if source.starts_with("data:") {
-        decode_image_data_uri(source, state.config.max_image_bytes)?
+        decode_image_data_uri(source, limits.max_inline_bytes)?
     } else {
-        fetch_image(state, source).await?
+        fetch_image(state, source, limits.max_download_bytes).await?
     };
     let detected_mime = detect_image_mime(&bytes).ok_or_else(|| {
         WorkerError::bad_request_with_code(
@@ -585,6 +706,7 @@ fn media_decode_error() -> WorkerError {
 async fn fetch_image(
     state: &WorkerState,
     source: &str,
+    max_download_bytes: u64,
 ) -> Result<(Option<&'static str>, Vec<u8>), WorkerError> {
     let mut url = reqwest::Url::parse(source).map_err(|_| {
         WorkerError::bad_request_with_code("image URL is invalid", "media_fetch_failed")
@@ -633,7 +755,7 @@ async fn fetch_image(
         }
         if response
             .content_length()
-            .is_some_and(|length| length > state.config.max_image_bytes)
+            .is_some_and(|length| length > max_download_bytes)
         {
             return Err(WorkerError::payload_too_large(
                 "downloaded image exceeds the specialization limit",
@@ -645,7 +767,7 @@ async fn fetch_image(
             let chunk = chunk.map_err(|_| {
                 WorkerError::bad_request_with_code("image retrieval failed", "media_fetch_failed")
             })?;
-            if bytes.len().saturating_add(chunk.len()) as u64 > state.config.max_image_bytes {
+            if bytes.len().saturating_add(chunk.len()) as u64 > max_download_bytes {
                 return Err(WorkerError::payload_too_large(
                     "downloaded image exceeds the specialization limit",
                 ));
@@ -1066,6 +1188,7 @@ mod tests {
             max_tokens: Some(100),
             max_completion_tokens: None,
             stream: None,
+            finite_specialization: None,
         };
 
         let converted = responses_request_from_chat(&request, "qwopus-test").unwrap();
@@ -1194,6 +1317,74 @@ mod tests {
         assert_eq!(captured.1["input"][1]["content"][1]["type"], "input_image");
     }
 
+    #[test]
+    fn desired_state_limits_are_enforced_by_the_worker() {
+        let config = test_config("http://127.0.0.1:9");
+        let mut request = empty_request();
+        request.finite_specialization = Some(test_desired_state());
+
+        let limits = effective_image_limits(&config, &request).unwrap();
+
+        assert_eq!(limits.max_images, 2);
+        assert_eq!(limits.max_inline_bytes, 2048);
+        assert_eq!(limits.max_download_bytes, 4096);
+        assert_eq!(limits.max_output_chars, 512);
+        assert_eq!(truncate_chars("abcdef".to_owned(), 3), "abc");
+    }
+
+    #[test]
+    fn disabled_image_capability_fails_closed() {
+        let config = test_config("http://127.0.0.1:9");
+        let mut request = empty_request();
+        let mut desired = test_desired_state();
+        desired.capabilities.image = false;
+        request.finite_specialization = Some(desired);
+
+        let error = effective_image_limits(&config, &request).unwrap_err();
+
+        assert_eq!(error.code, "capability_unavailable");
+    }
+
+    #[tokio::test]
+    async fn request_deadline_covers_the_complete_image_operation() {
+        let app = Router::new().route(
+            "/responses",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Json(json!({ "id": "late", "output_text": "late" }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut config = test_config(&format!("http://{addr}"));
+        config.request_deadline_seconds = 1;
+        let worker = spawn_worker(config).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/chat/completions"))
+            .bearer_auth("worker-secret")
+            .json(&json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
+                    }]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["error"]["code"], "request_timeout");
+    }
+
     #[tokio::test]
     async fn malformed_inline_image_returns_typed_openai_error() {
         let worker = spawn_worker(test_config("http://127.0.0.1:9")).await;
@@ -1226,10 +1417,13 @@ mod tests {
         let state = test_state(test_config("http://127.0.0.1:9"));
         let truncated = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n");
 
-        let error =
-            retrieve_and_validate_image(&state, &format!("data:image/png;base64,{truncated}"))
-                .await
-                .unwrap_err();
+        let error = retrieve_and_validate_image(
+            &state,
+            &format!("data:image/png;base64,{truncated}"),
+            test_limits(),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code, "media_decode_failed");
     }
@@ -1238,9 +1432,13 @@ mod tests {
     async fn public_media_url_resolving_to_private_address_is_rejected() {
         let state = test_state(test_config("http://127.0.0.1:9"));
 
-        let error = fetch_image(&state, "https://127.0.0.1/image.png")
-            .await
-            .unwrap_err();
+        let error = fetch_image(
+            &state,
+            "https://127.0.0.1/image.png",
+            DEFAULT_MAX_IMAGE_BYTES,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code, "media_fetch_failed");
         assert!(error.message.contains("non-public"));
@@ -1266,9 +1464,13 @@ mod tests {
         config.allowed_attachment_hosts = vec!["127.0.0.1".to_owned()];
         let state = test_state(config);
 
-        let error = fetch_image(&state, &format!("http://{addr}/attachment.png"))
-            .await
-            .unwrap_err();
+        let error = fetch_image(
+            &state,
+            &format!("http://{addr}/attachment.png"),
+            DEFAULT_MAX_IMAGE_BYTES,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code, "media_fetch_failed");
     }
@@ -1382,9 +1584,54 @@ mod tests {
             spark_bearer_token: Some("spark-secret".to_string()),
             vision_model: "qwopus-test".to_string(),
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_inline_image_bytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
+            max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
             image_download_timeout_seconds: 5,
+            request_deadline_seconds: 120,
             allowed_attachment_hosts: Vec::new(),
             image_canary_interval_seconds: None,
+        }
+    }
+
+    fn empty_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: None,
+            messages: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            stream: None,
+            finite_specialization: None,
+        }
+    }
+
+    fn test_desired_state() -> InvocationSpecializationState {
+        InvocationSpecializationState {
+            capabilities: InvocationCapabilities {
+                image: true,
+                audio: false,
+                video: false,
+            },
+            prompt_versions: InvocationPromptVersions {
+                image: IMAGE_PROMPT_VERSION.to_owned(),
+                audio: "aeon-audio-understanding-v1".to_owned(),
+                video: "aeon-video-understanding-v1".to_owned(),
+            },
+            normalization_limits: InvocationNormalizationLimits {
+                max_images: 2,
+                max_inline_bytes: 2048,
+                max_download_bytes: 4096,
+                max_output_chars: 512,
+            },
+        }
+    }
+
+    fn test_limits() -> InvocationNormalizationLimits {
+        InvocationNormalizationLimits {
+            max_images: DEFAULT_MAX_IMAGES,
+            max_inline_bytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
+            max_download_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
         }
     }
 

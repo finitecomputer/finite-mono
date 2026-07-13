@@ -359,7 +359,7 @@ impl ConfigManager {
             proposal_id: desired.proposal_id.clone(),
             applied: current != target,
             already_applied: current == target,
-            effective_matches_desired: true,
+            effective_matches_desired: false,
             model_alias: desired.model_alias.clone(),
             worker_base_url: desired.worker_base_url.clone(),
             capabilities: desired.capabilities.clone(),
@@ -410,6 +410,32 @@ impl ConfigManager {
             return Err(error);
         }
         Ok(result())
+    }
+
+    pub fn aeon_specialization_matches(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<bool, AgentdError> {
+        validate_aeon_desired_state(desired)?;
+        let current = self.current_value(VISION_CONFIG_PATH)?;
+        let expected_state = json!({
+            "capabilities": desired.capabilities,
+            "prompt_versions": desired.prompt_versions,
+            "normalization_limits": desired.normalization_limits,
+        });
+        Ok(
+            current.get("provider").and_then(Value::as_str) == Some("custom")
+                && current.get("model").and_then(Value::as_str)
+                    == Some(desired.model_alias.as_str())
+                && current.get("base_url").and_then(Value::as_str)
+                    == Some(desired.worker_base_url.as_str())
+                && current.get("api_mode").and_then(Value::as_str) == Some("chat_completions")
+                && current
+                    .get("api_key")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                && current.pointer("/extra_body/finite_specialization") == Some(&expected_state),
+        )
     }
 
     fn load_document(&self) -> Result<(Vec<u8>, Value), AgentdError> {
@@ -465,12 +491,13 @@ fn validate_aeon_desired_state(
         ));
     }
     let canonical = AeonSpecializationDesiredStateV1::canonical(&desired.proposal_id);
-    if desired.capabilities != canonical.capabilities
+    if desired.capabilities.audio
+        || desired.capabilities.video
         || desired.prompt_versions != canonical.prompt_versions
         || desired.normalization_limits != canonical.normalization_limits
     {
         return Err(AgentdError::InvalidPayload(
-            "AEON capability activation, prompt versions, or normalization limits are not canonical"
+            "unfinished AEON capabilities, prompt versions, or normalization limits are not canonical"
                 .to_owned(),
         ));
     }
@@ -876,7 +903,8 @@ mod tests {
             .unwrap();
 
         assert!(result.applied);
-        assert!(result.effective_matches_desired);
+        assert!(!result.effective_matches_desired);
+        assert!(manager.aeon_specialization_matches(&desired).unwrap());
         assert!(result.capabilities.image);
         assert!(!result.capabilities.audio);
         assert!(!result.capabilities.video);
@@ -907,6 +935,29 @@ mod tests {
         assert!(repeated.already_applied);
         assert_eq!(fs::read(manager.path()).unwrap(), after_first_apply);
         drop(directory);
+    }
+
+    #[test]
+    fn aeon_image_capability_can_be_disabled_independently() {
+        let (_directory, manager) = manager();
+        fs::write(
+            manager.path(),
+            "auxiliary:\n  vision:\n    provider: custom\n    api_key: worker-secret\n",
+        )
+        .unwrap();
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("aeon-image-disabled");
+        desired.capabilities.image = false;
+
+        manager
+            .reconcile_aeon_specialization(&desired, || Ok(()))
+            .unwrap();
+
+        assert!(manager.aeon_specialization_matches(&desired).unwrap());
+        let effective = manager.current_value(VISION_CONFIG_PATH).unwrap();
+        assert_eq!(
+            effective.pointer("/extra_body/finite_specialization/capabilities/image"),
+            Some(&Value::Bool(false))
+        );
     }
 
     #[test]
