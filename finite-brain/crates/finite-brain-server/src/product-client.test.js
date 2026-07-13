@@ -4,19 +4,23 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function element() {
+function element(ownerDocument = null) {
   const attributes = new Map();
   return {
     className: "",
     disabled: false,
     hidden: false,
     open: false,
+    ownerDocument,
     checked: false,
     dataset: {},
     style: {},
     textContent: "",
     value: "",
     children: [],
+    get childNodes() {
+      return this.children;
+    },
     classList: {
       add() {},
       remove() {},
@@ -32,7 +36,9 @@ function element() {
     contains() {
       return false;
     },
-    focus() {},
+    focus() {
+      if (this.ownerDocument) this.ownerDocument.activeElement = this;
+    },
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
@@ -66,13 +72,16 @@ const context = {
   console,
   crypto: crypto.webcrypto,
   document: {
+    activeElement: null,
     addEventListener() {},
-    createElement: element,
+    createElement() {
+      return element(this);
+    },
     createTextNode(value) {
       return textNode(value);
     },
     getElementById(id) {
-      if (!elements.has(id)) elements.set(id, element());
+      if (!elements.has(id)) elements.set(id, element(this));
       return elements.get(id);
     },
     querySelector() {
@@ -95,6 +104,557 @@ const cssSource = fs.readFileSync(path.join(__dirname, "product-client.css"), "u
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
+
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("locked")),
+  JSON.stringify(["session"]),
+  "A locked Settings modal must expose only the safe Session section"
+);
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("resuming")),
+  JSON.stringify(["session"]),
+  "Settings must keep access controls hidden while encrypted grants are reopening"
+);
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("unlocked")),
+  JSON.stringify(["session", "vault", "access", "invitations"])
+);
+assert.equal(client.normalizeSettingsSection("access", "locked"), "session");
+assert.equal(client.normalizeSettingsSection("invitations", "resuming"), "session");
+assert.equal(client.normalizeSettingsSection("access", "unlocked"), "access");
+
+function accessFailureTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element());
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, lockSessionForVaultAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(seamSource, source, "The access-failure test must capture the Product Client's real closure seams");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-access-failure.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured access-failure seams to this deterministic test");
+  return { context: testContext, elements: testElements, seams };
+}
+
+function invitationPanelTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element());
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      nostr: {
+        getPublicKey() {},
+        signEvent() {},
+      },
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleVaultInvitationInput, renderVaultInvitationPanel, revokeVaultInvitationById });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured invitation panel seams to this deterministic test");
+  return { context: testContext, elements: testElements, seams };
+}
+
+function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    navigator: navigatorValue,
+    document: {
+      ...context.document,
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      clearTimeout: options.clearTimeout,
+      nostr: {
+        getPublicKey() {},
+        signEvent() {},
+      },
+      setTimeout: options.setTimeout,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyVaultInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageVaultsModal, closeManageVaultsModal, overlayFocusableElements, renderVaultInvitationPanel, resetVaultSessionState, saveActivePage, setActiveVaultId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The clipboard test must capture the Product Client's real feedback and session seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-clipboard-invitation-feedback.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured clipboard and invitation seams");
+  return { context: testContext, elements: testElements, seams };
+}
+
+function keyboardNavigationTestSeams() {
+  const testContext = {
+    ...context,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_KEYBOARD_NAVIGATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_KEYBOARD_NAVIGATION_TEST_SEAMS__?.({ commandPaletteSelectionIndex, keyboardListNavigationIndex, primaryFormActionForInput, shouldRunPrimaryFormAction });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The keyboard test must capture the Product Client's real navigation seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-keyboard-navigation.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured keyboard-navigation seams");
+  return seams;
+}
+
+const keyboardNavigation = keyboardNavigationTestSeams();
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 0, 4), 1);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 3, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowUp", 0, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", -1, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowUp", -1, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("Home", 2, 4), 0);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("End", 1, 4), 3);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("Enter", 1, 4), null);
+assert.equal(keyboardNavigation.keyboardListNavigationIndex("ArrowDown", 0, 0), null);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex([], 4), -1);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex(["one", "two"], 4), 1);
+assert.equal(keyboardNavigation.commandPaletteSelectionIndex(["one", "two"], -4), 0);
+
+for (const [inputId, buttonId] of [
+  ["accessShareTargetInput", "createShareLinkButton"],
+  ["accessShareExpiresAtInput", "createShareLinkButton"],
+  ["accessShareLinkInput", "acceptShareLinkButton"],
+  ["vaultInviteTargetNpubInput", "createVaultInvitationButton"],
+  ["vaultInviteFoldersInput", "createVaultInvitationButton"],
+  ["vaultInviteExpiresAtInput", "createVaultInvitationButton"],
+  ["vaultInviteCodeInput", "getVaultInvitationButton"],
+  ["vaultInviteEmailInput", "getEmailInviteInstructionsButton"],
+  ["vaultInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
+  ["vaultInviteSecretInput", "getEmailInviteInstructionsButton"],
+]) {
+  assert.equal(
+    keyboardNavigation.primaryFormActionForInput(inputId),
+    buttonId,
+    `${inputId} must submit only its non-destructive primary action`
+  );
+}
+for (const inputId of ["acceptVaultInvitationButton", "revokeVaultInvitationButton", "not-an-input"]) {
+  assert.equal(
+    keyboardNavigation.primaryFormActionForInput(inputId),
+    null,
+    `${inputId} must never receive an Enter shortcut`
+  );
+}
+
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  true
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: true, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: true } },
+    { disabled: false }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Enter", currentTarget: { disabled: false } },
+    { disabled: true }
+  ),
+  false
+);
+assert.equal(
+  keyboardNavigation.shouldRunPrimaryFormAction(
+    { isComposing: false, key: "Space", currentTarget: { disabled: false } },
+    { disabled: false }
+  ),
+  false
+);
+
+function keyboardMenuElement(documentRef, tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const node = {
+    tagName: tagName.toUpperCase(),
+    children: [],
+    className: "",
+    dataset: {},
+    disabled: false,
+    hidden: false,
+    parentElement: null,
+    style: {},
+    textContent: "",
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      return child;
+    },
+    addEventListener(type, listener) {
+      const handlers = listeners.get(type) || [];
+      handlers.push(listener);
+      listeners.set(type, handlers);
+    },
+    click() {
+      for (const listener of listeners.get("click") || []) {
+        listener({ currentTarget: this, target: this });
+      }
+    },
+    contains(target) {
+      return target === this || this.children.some((child) => child.contains?.(target));
+    },
+    focus() {
+      documentRef.activeElement = this;
+    },
+    getAttribute(name) {
+      return attributes.get(name) ?? null;
+    },
+    querySelectorAll(selector) {
+      const descendants = [];
+      const visit = (child) => {
+        descendants.push(child);
+        for (const grandchild of child.children || []) visit(grandchild);
+      };
+      for (const child of this.children) visit(child);
+      if (selector === 'button[role="menuitem"]:not([disabled])') {
+        return descendants.filter(
+          (child) =>
+            child.tagName === "BUTTON" &&
+            child.getAttribute("role") === "menuitem" &&
+            !child.disabled
+        );
+      }
+      return [];
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
+    replaceChildren(...children) {
+      this.children = [];
+      for (const child of children) this.appendChild(child);
+    },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+    },
+  };
+  return node;
+}
+
+function contextMenuKeyboardFocusTestSeams() {
+  const elements = new Map();
+  const document = {
+    activeElement: null,
+    addEventListener() {},
+    createElement(tagName) {
+      return keyboardMenuElement(document, tagName);
+    },
+    createTextNode(value) {
+      return { nodeType: 3, textContent: value };
+    },
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, keyboardMenuElement(document));
+      return elements.get(id);
+    },
+    querySelector() {
+      return keyboardMenuElement(document);
+    },
+    querySelectorAll() {
+      return [];
+    },
+    title: "FiniteBrain",
+  };
+  const testContext = {
+    ...context,
+    document,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      innerHeight: 800,
+      innerWidth: 1200,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_CONTEXT_MENU_KEYBOARD_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_CONTEXT_MENU_KEYBOARD_TEST_SEAMS__?.({ handleContextMenuKeydown, openContextMenu });\n\n  return {\n    accessActionRoute,"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-context-menu-keyboard-focus.test.js",
+  });
+  assert.ok(seams, "The context-menu focus test must capture Product Client keyboard behavior");
+  return { document, elements, seams };
+}
+
+const contextMenuKeyboard = contextMenuKeyboardFocusTestSeams();
+const contextMenuTrigger = keyboardMenuElement(contextMenuKeyboard.document, "button");
+contextMenuKeyboard.document.activeElement = contextMenuTrigger;
+contextMenuKeyboard.seams.openContextMenu(
+  { folderId: "folder-fixture", type: "folder" },
+  24,
+  24,
+  contextMenuTrigger
+);
+const keyboardContextMenu = contextMenuKeyboard.elements.get("contextMenu");
+const keyboardContextMenuItems = keyboardContextMenu.querySelectorAll(
+  'button[role="menuitem"]:not([disabled])'
+);
+assert.equal(keyboardContextMenu.hidden, false);
+assert.equal(contextMenuKeyboard.document.activeElement, keyboardContextMenuItems[0]);
+keyboardContextMenuItems[1].disabled = true;
+let contextMenuPrevented = false;
+assert.equal(
+  contextMenuKeyboard.seams.handleContextMenuKeydown({
+    isComposing: false,
+    key: "ArrowDown",
+    keyCode: 0,
+    preventDefault() {
+      contextMenuPrevented = true;
+    },
+  }),
+  true
+);
+assert.equal(contextMenuPrevented, true);
+assert.equal(
+  contextMenuKeyboard.document.activeElement,
+  keyboardContextMenuItems[2],
+  "Context-menu arrows must skip unavailable menuitems"
+);
+assert.equal(
+  contextMenuKeyboard.seams.handleContextMenuKeydown({
+    isComposing: false,
+    key: "Escape",
+    keyCode: 0,
+    preventDefault() {},
+  }),
+  true
+);
+assert.equal(keyboardContextMenu.hidden, true);
+assert.equal(
+  contextMenuKeyboard.document.activeElement,
+  contextMenuTrigger,
+  "Escape must restore focus to the context-menu trigger"
+);
+
+const prepareDraftWriteSource = source.slice(
+  source.indexOf("async function prepareDraftWrite(options = {})"),
+  source.indexOf("async function savePreparedPage()")
+);
+assert.match(
+  prepareDraftWriteSource,
+  /signEvent:\s*requireNip07SignEvent\(\),/,
+  "Save must sign its Page revision through the session-aware NIP-07 adapter"
+);
+
+const deletePageFromContextTargetSource = source.slice(
+  source.indexOf("async function deletePageFromContextTarget(target)"),
+  source.indexOf("function selectReaderFolder(folderId, options = {})")
+);
+assert.match(
+  deletePageFromContextTargetSource,
+  /signEvent:\s*requireNip07SignEvent\(\),/,
+  "Delete Page must sign its tombstone through the session-aware NIP-07 adapter"
+);
+
+const reportClientActionFailureSource = source.slice(
+  source.indexOf("function reportClientActionFailure(error)"),
+  source.indexOf("function markAccessFailureHandled(error)")
+);
+const failAccessOperationSource = source.slice(
+  source.indexOf("function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message)"),
+  source.indexOf("function finishAccessOperation(sessionEpoch)")
+);
+const createVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function createVaultInvitationFromPanel()"),
+  source.indexOf("async function inspectVaultInvitationFromPanel()")
+);
+const successfulVaultInvitationResultSource = createVaultInvitationFromPanelSource.slice(
+  createVaultInvitationFromPanelSource.indexOf('setAccessResult("ready", "Invitation created"'),
+  createVaultInvitationFromPanelSource.indexOf('log("Created Vault invitation."')
+);
+const inspectVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function inspectVaultInvitationFromPanel()"),
+  source.indexOf("async function loadEmailInviteInstructionsFromPanel()")
+);
+const loadEmailInviteInstructionsFromPanelSource = source.slice(
+  source.indexOf("async function loadEmailInviteInstructionsFromPanel()"),
+  source.indexOf("async function acceptVaultInvitationFromPanel()")
+);
+const acceptVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function acceptVaultInvitationFromPanel()"),
+  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)")
+);
+const claimEmailVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)"),
+  source.indexOf("async function revokeVaultInvitationFromPanel()")
+);
+const revokeVaultInvitationFromPanelSource = source.slice(
+  source.indexOf("async function revokeVaultInvitationFromPanel()"),
+  source.indexOf("async function prepareDraftWrite(options = {})")
+);
+const revokeVaultInvitationByIdSource = source.slice(
+  source.indexOf("async function revokeVaultInvitationById(invitationId)"),
+  source.indexOf("async function revokeShareLinkById(shareLinkId)")
+);
+const protectedRequestSource = source.slice(
+  source.indexOf("async function protectedRequest(path, options = {})"),
+  source.indexOf("async function loadVisibleVaults()")
+);
+const createFolderFromToolbarSource = source.slice(
+  source.indexOf("async function createFolderFromToolbar("),
+  source.indexOf("function shareExpiryIso()")
+);
+const handleContextMenuActionSource = source.slice(
+  source.indexOf("function handleContextMenuAction(item, target)"),
+  source.indexOf("function openContextMenu(target, x, y)")
+);
+const updateActiveTaskDraftSource = source.slice(
+  source.indexOf("function updateActiveTaskDraft(taskCheckbox)"),
+  source.indexOf("function setEditorMode(mode)")
+);
+const drawGraphSource = source.slice(
+  source.indexOf("function drawGraph(graph, options = {})"),
+  source.indexOf("function setGraphHover(svg, graph, nodeId)")
+);
+assert.match(
+  reportClientActionFailureSource,
+  /handledAccessFailures\.has\(error\)\) return;/,
+  "A failure already shown by the access panel must not also show global feedback"
+);
+assert.match(
+  failAccessOperationSource,
+  /markAccessFailureHandled\(error\);\s*if \(!sessionOperationIsCurrent\(state\.sessionEpoch, sessionEpoch, state\.sessionStatus\)\) return;\s*setAccessResult\("error", title, detail\(error\)\);/s,
+  "Access failures must stay in the existing access result and be suppressed before stale requests return"
+);
+assert.match(
+  createVaultInvitationFromPanelSource,
+  /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
+  "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
+);
+for (const invitationAcceptanceSource of [
+  acceptVaultInvitationFromPanelSource,
+  claimEmailVaultInvitationFromPanelSource,
+]) {
+  assert.match(
+    invitationAcceptanceSource,
+    /setActiveVaultId\(\w+\.vaultId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
+    "Accepting an invitation must render the newly locked Session and its safe unlock notice"
+  );
+}
+assert.match(
+  protectedRequestSource,
+  /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForVaultAccessChange\(error, sessionEpoch\);\s*throw error;/s,
+  "Confirmed active-Vault authorization loss must lock before protected work can continue"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteUrlOutput"[^>]*hidden/,
+  "The client-only invite URL output must stay hidden until an unlocked session creates it"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+  "A generated client-only invite URL must be readable local output rather than a masked field"
+);
+assert.match(
+  htmlSource,
+  /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
+  "The generated invite URL must have an explicitly named copy action"
+);
+assert.match(
+  htmlSource,
+  /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+  "Manually entered Invite Secrets must remain masked"
+);
+assert.match(
+  source,
+  /async function copyToClipboard\(text, kind = "page-id"\)/,
+  "Copy actions must use one safe asynchronous, kind-aware feedback path"
+);
+assert.match(
+  source,
+  /async function copyVaultInviteUrl\(\)/,
+  "The client-only invite URL must have a session-gated copy action"
+);
+assert.doesNotMatch(
+  handleContextMenuActionSource,
+  /log\("Copied (?:Page|Folder) ID\./,
+  "Copy actions must not write copied identifiers into client logs"
+);
+assert.doesNotMatch(
+  successfulVaultInvitationResultSource,
+  /(?:inviteUrl|lastEmailInviteUrl)/,
+  "Invitation result metadata must not repeat the client-only invite URL"
+);
 
 function objectIdCandidateBaseForTest(value) {
   return `obj_${String(value || "page")
@@ -188,11 +748,11 @@ assert.deepEqual(
 );
 assert.equal(
   JSON.stringify(client.accessActionRoute("share-folder", { folderId: "restricted" })),
-  JSON.stringify({ folderId: "restricted", intent: "links", sidebarMode: "access" })
+  JSON.stringify({ folderId: "restricted", intent: "links", settingsSection: "access" })
 );
 assert.equal(
   JSON.stringify(client.accessActionRoute("manage-access", { folderId: "restricted" })),
-  JSON.stringify({ folderId: "restricted", intent: "people", sidebarMode: "access" })
+  JSON.stringify({ folderId: "restricted", intent: "people", settingsSection: "access" })
 );
 assert.equal(client.accessActionRoute("delete-folder", { folderId: "restricted" }), null);
 assert.equal(client.accessIntentValue("share"), "links");
@@ -217,10 +777,40 @@ assert.match(htmlSource, /id="accessFolderButton"/);
 assert.equal((htmlSource.match(/id="accessFolderButton"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderDropdown"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderList"/g) || []).length, 1);
+// Public Product Client shell seam: Settings exposes one Access surface and
+// delegates Vault selection/management to the dedicated Manage Vaults dialog.
+for (const legacyMarker of [
+  "accessVaultViewButton",
+  "accessVaultPanel",
+  "accessFolderViewButton",
+  "vaultSwitchList",
+  "accessConnectSignerButton",
+  "accessLoadVaultButton",
+  "accessCreateOrganizationPanel",
+  "accessOrganizationVaultNameInput",
+  "folderKeyInput",
+  "okfDestinationFolderInput",
+  "okfConflictModeInput",
+  "okfBundleInput",
+  "encryptDraftButton",
+]) {
+  assert.doesNotMatch(htmlSource, new RegExp(`id="${legacyMarker}"`));
+}
+assert.match(htmlSource, /id="settingsManageVaultsButton"/);
+assert.match(htmlSource, />\s*Manage Vaults\s*</);
+const vaultAccessCommand = client.commandPaletteCommands().find((command) => command.id === "access");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(vaultAccessCommand)),
+  {
+    id: "access",
+    kind: "command",
+    label: "Vault access",
+    detail: "Settings",
+    target: "access",
+  }
+);
 assert.match(htmlSource, /id="accessAddPersonPanel"[\s\S]*class="access-folder-selector"[\s\S]*id="accessAddPersonForm"/);
 assert.doesNotMatch(htmlSource, /class="access-folder-selector"[\s\S]*id="accessInspector"/);
-assert.match(htmlSource, /id="loadVaultButton"[^>]*>\s*Load\s*<\/button>/s);
-assert.doesNotMatch(htmlSource, /id="loadVaultButton"[^>]*compact-icon-button/);
 assert.match(htmlSource, /id="accessWhoHasList"/);
 assert.match(htmlSource, /class="access-action-stack"/);
 assert.match(htmlSource, /class="access-state-stack"/);
@@ -232,33 +822,32 @@ assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
 assert.match(htmlSource, /id="accessShareHint"/);
 assert.match(htmlSource, /id="accessShareMountHint"/);
-assert.match(htmlSource, />\s*Show in recipient's Vault\s*</);
+assert.match(htmlSource, />\s*Add a shortcut to their Personal Vault\s*</);
+assert.match(
+  htmlSource,
+  /adds a shortcut to the shared Folder in their Personal Vault\. It does not copy data or change Folder access\./
+);
 assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
 assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
 assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
-assert.match(htmlSource, /placeholder="name@example\.com"/);
-assert.doesNotMatch(htmlSource, /placeholder="[^"]*(npub|hex|NIP-05)/);
-assert.match(htmlSource, /role="tablist"/);
-assert.match(htmlSource, /id="accessFolderViewButton"/);
-assert.match(htmlSource, /id="accessVaultViewButton"/);
-assert.match(htmlSource, />\s*Vaults\s*</);
-assert.match(htmlSource, />\s*Access\s*</);
+assert.match(htmlSource, /placeholder="npub… or name@domain"/);
+assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeholder="name@example\.com"/);
 assert.match(htmlSource, /id="accessFolderPanel"/);
-assert.match(htmlSource, /id="accessVaultPanel"/);
-assert.match(htmlSource, /id="vaultSwitchList"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
 assert.match(htmlSource, /class="vault-access-action-grid"/);
-assert.match(htmlSource, />\s*Give Vault access\s*</);
-assert.match(htmlSource, />\s*Invite, add, promote\s*</);
-assert.match(htmlSource, />\s*Vault Member Identities\s*</);
-assert.match(htmlSource, />\s*Invite by email\s*</);
+assert.match(htmlSource, />\s*Manage members\s*</);
+assert.match(htmlSource, />\s*Add or promote existing identities\s*</);
+assert.match(htmlSource, />\s*Invite someone\s*</);
+assert.match(htmlSource, />\s*Email or Member Identity\s*</);
+assert.match(htmlSource, />\s*Folder access plan\s*</);
 assert.match(htmlSource, />\s*Add member now\s*</);
 assert.match(htmlSource, />\s*Make admin\s*</);
-assert.match(htmlSource, />\s*Join with invite\s*</);
-assert.match(htmlSource, />\s*Accept invite code\s*</);
+assert.match(htmlSource, />\s*Join a Vault\s*</);
+assert.match(htmlSource, />\s*Verify email and load access\s*</);
+assert.match(htmlSource, />\s*Join Vault\s*</);
 assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
 assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
@@ -270,18 +859,21 @@ assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
-assert.match(htmlSource, /id="accessCreateOrganizationPanel"/);
-assert.match(htmlSource, /id="vaultCreateDetails"/);
+assert.match(htmlSource, /id="manageVaultCreateDetails"/);
+assert.doesNotMatch(htmlSource, /id="vaultControlDetails"/);
+assert.doesNotMatch(htmlSource, /id="vaultSelect"/);
+assert.doesNotMatch(htmlSource, /id="connectSignerButton"/);
 assert.match(htmlSource, /id="accessShareTargetInput"/);
 assert.match(htmlSource, /id="addVaultMemberButton"/);
 assert.match(htmlSource, /id="addVaultAdminButton"/);
 assert.match(htmlSource, /id="vaultInvitationPanel" class="access-vault-admin"/);
+assert.match(htmlSource, /id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary settings-invitation-create"/);
 assert.doesNotMatch(htmlSource, /id="vaultInvitationPanel"[^>]*open/);
 assert.doesNotMatch(htmlSource, /id="accessChangeMode"/);
 assert.doesNotMatch(htmlSource, /id="accessManageToggle"/);
 assert.doesNotMatch(htmlSource, /id="accessManageSection"/);
 assert.match(cssSource, /\[hidden\]\s*\{[^}]*display: none !important;/s);
-assert.match(cssSource, /\.access-view-switch/);
+assert.doesNotMatch(cssSource, /\.access-view-switch/);
 assert.match(cssSource, /\.access-action-stack\s*\{[^}]*gap:\s*8px;/s);
 assert.match(cssSource, /\.access-state-stack\s*\{[^}]*gap:\s*12px;/s);
 assert.match(cssSource, /\.access-advanced-summary,\s*\.access-admin-summary\s*\{[^}]*grid-template-areas:/s);
@@ -292,30 +884,26 @@ assert.match(cssSource, /\.access-checkbox-hint\s*\{[^}]*margin:\s*-6px 0 0 23px
 assert.match(cssSource, /\.vault-management-section/);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*10px;/s);
-assert.match(cssSource, /\.access-mode-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
+assert.match(cssSource, /\.access-content-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /\.access-who-has-list\s+li\s*\{[^}]*flex-wrap:\s*wrap;/s);
 assert.match(cssSource, /\.access-button-row\s*\{[^}]*display:\s*grid;/s);
 assert.doesNotMatch(cssSource, /\.vault-person-action\s*\{[^}]*min-width:\s*max-content/s);
 assert.match(cssSource, /\.vault-management-section\s+\.access-who-has-list\s+li\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
 assert.match(cssSource, /\.vault-access-action-grid\s*\{[^}]*gap:\s*10px;/s);
-assert.match(cssSource, /\.vault-access-option\.primary\s*\{[^}]*rgba\(124,\s*108,\s*255,\s*0\.055\)/s);
 assert.match(cssSource, /#vaultPeopleActionPanel\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
 assert.match(cssSource, /#vaultPeopleSection\s+\.access-person-name\s*\{[^}]*white-space:\s*normal;/s);
 assert.match(cssSource, /#vaultInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
 assert.match(cssSource, /\.vault-switch-list/);
 assert.match(cssSource, /\.vault-switch-button/);
-assert.match(cssSource, /\.access-vault-create/);
+assert.doesNotMatch(cssSource, /\.access-vault-create/);
 assert.match(cssSource, /\.vault-picker\s+\.vault-load-button/);
-assert.match(cssSource, /\.vault-control-strip\s*>\s*summary::before/);
-assert.doesNotMatch(cssSource, /\.vault-control-strip\s+summary::before/);
+assert.doesNotMatch(cssSource, /\.file-sidebar:has\(> \.vault-control-strip/);
+assert.match(cssSource, /\.file-sidebar\s*>\s*#accessSidebarPanel\s*\{[^}]*display:\s*none;/s);
 assert.doesNotMatch(cssSource, /inset\s+2px\s+0/);
 assert.doesNotMatch(cssSource, /\.ribbon-button\.active::before/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown\s*\{[^}]*position:\s*absolute/s);
 assert.match(cssSource, /\.folder-option-button/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown-list\s+\.obsidian-folder-button/);
-assert.equal(client.normalizeAccessView("vault"), "vault");
-assert.equal(client.normalizeAccessView("folder"), "folder");
-assert.equal(client.normalizeAccessView("other"), "folder");
 assert.equal(client.hasOrganizationVaultControls({ kind: "personal" }), false);
 assert.equal(client.hasOrganizationVaultControls({ kind: "organization" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "personal" }), true);
@@ -453,6 +1041,7 @@ sessionProjection.localDrafts.set("general/draft", {
 sessionProjection.conflicts.push({ plaintext: "conflict-plaintext-sentinel" });
 const sessionState = {
   accessResult: { detail: "member-access-sentinel" },
+  clientActionFeedback: { message: "Copied to clipboard.", tone: "success" },
   folderShareLinks: [{ id: "share-link-sentinel" }],
   identityByNpub: new Map([["npub-member", { display: "member@example.com" }]]),
   keyring: sessionKeyring,
@@ -460,7 +1049,6 @@ const sessionState = {
   lastEmailInviteSecret: "invite-secret-sentinel",
   lastEmailInviteUrl: "https://finite.test/#inviteSecret=invite-secret-sentinel",
   metadata: { name: "private-vault-sentinel" },
-  okfPlan: { entries: [{ markdown: "okf-plaintext-sentinel" }] },
   preparedWrite: { envelopeJson: "encrypted-write", plaintext: "prepared-plaintext-sentinel" },
   preparedWriteTarget: { folderId: "general", objectId: "draft" },
   projection: sessionProjection,
@@ -480,19 +1068,462 @@ assert.equal(sessionState.projection.localDrafts.size, 0);
 assert.equal(sessionState.projection.conflicts.length, 0);
 assert.equal(sessionState.preparedWrite, null);
 assert.equal(sessionState.preparedWriteTarget, null);
-assert.equal(sessionState.okfPlan, null);
 assert.equal(sessionState.identityByNpub.size, 0);
 assert.equal(sessionState.accessResult, null);
+assert.equal(sessionState.clientActionFeedback, null);
 assert.equal(sessionState.vaultInvitations, null);
 assert.equal(sessionState.folderShareLinks, null);
 assert.equal(sessionState.lastEmailInviteSecret, null);
 assert.equal(sessionState.lastEmailInviteUrl, null);
 assert.equal(sessionState.lastEmailInvitePostProof, null);
+
+async function assertClipboardInvitationFeedbackContracts() {
+  const copiedValues = [];
+  const clipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: async (value) => {
+        copiedValues.push(value);
+      },
+    },
+  });
+  const clipboardFeedbackState = clipboardFeedback.seams.state;
+  const clipboardFeedbackElement = clipboardFeedback.context.document.getElementById("clientActionFeedback");
+  const copiedPageId = "page-id-fixture-sentinel";
+  clipboardFeedbackState.sessionStatus = "unlocked";
+  assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
+  assert.deepEqual(copiedValues, [copiedPageId]);
+  assert.equal(clipboardFeedbackElement.hidden, false);
+  assert.equal(clipboardFeedbackElement.textContent, "Page ID copied.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /page-id-fixture-sentinel/);
+
+  clipboardFeedbackState.lastError = "later-action-failure-detail-sentinel";
+  assert.equal(clipboardFeedbackState.clientActionFeedback, null);
+  assert.equal(
+    clipboardFeedbackElement.textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /later-action-failure-detail-sentinel/);
+  assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
+  assert.equal(clipboardFeedbackElement.textContent, "Page ID copied.");
+
+  clipboardFeedback.seams.handleContextMenuAction(
+    { action: "copy-page-id" },
+    { objectId: "context-page-id-sentinel" }
+  );
+  clipboardFeedback.seams.handleContextMenuAction(
+    { action: "copy-folder-id" },
+    { folderId: "context-folder-id-sentinel" }
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(copiedValues, [
+    copiedPageId,
+    copiedPageId,
+    "context-page-id-sentinel",
+    "context-folder-id-sentinel",
+  ]);
+  assert.equal(clipboardFeedbackState.clientActionFeedback?.message, "Folder ID copied.");
+  assert.equal(clipboardFeedbackElement.textContent, "Folder ID copied.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /context-(page|folder)-id-sentinel/);
+
+  clipboardFeedbackState.sessionStatus = "unlocked";
+  clipboardFeedbackState.metadata = { kind: "organization" };
+  clipboardFeedbackState.signerStatus = "connected";
+  clipboardFeedbackState.lastEmailInviteSecret = "invite-secret-fixture-sentinel";
+  clipboardFeedbackState.lastEmailInviteUrl =
+    "https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel";
+  const inviteUrlInput = clipboardFeedback.context.document.getElementById("vaultInviteUrlInput");
+  const inviteUrlOutput = clipboardFeedback.context.document.getElementById("vaultInviteUrlOutput");
+  const copyInviteUrlButton = clipboardFeedback.context.document.getElementById("copyVaultInviteUrlButton");
+  const inviteSecretInput = clipboardFeedback.context.document.getElementById("vaultInviteSecretInput");
+  inviteSecretInput.value = "invite-secret-fixture-sentinel";
+  clipboardFeedback.seams.renderVaultInvitationPanel();
+  assert.equal(inviteUrlOutput.hidden, false);
+  assert.equal(inviteUrlInput.value, clipboardFeedbackState.lastEmailInviteUrl);
+  assert.equal(copyInviteUrlButton.disabled, false);
+  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), true);
+  assert.equal(copiedValues.at(-1), clipboardFeedbackState.lastEmailInviteUrl);
+  assert.equal(clipboardFeedbackElement.textContent, "Private invite link copied.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
+
+  clipboardFeedback.seams.lockSession();
+  assert.equal(clipboardFeedbackState.sessionStatus, "locked");
+  assert.equal(clipboardFeedbackState.lastEmailInviteSecret, null);
+  assert.equal(clipboardFeedbackState.lastEmailInviteUrl, null);
+  assert.equal(inviteSecretInput.value, "");
+  assert.equal(inviteUrlInput.value, "");
+  assert.equal(inviteUrlOutput.hidden, true);
+  assert.equal(copyInviteUrlButton.disabled, true);
+  const copiedBeforeLockedPageAttempt = copiedValues.length;
+  assert.equal(
+    await clipboardFeedback.seams.copyToClipboard("locked-page-id-sentinel", "page-id"),
+    false
+  );
+  assert.equal(copiedValues.length, copiedBeforeLockedPageAttempt);
+  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), false);
+  assert.equal(clipboardFeedbackElement.textContent, "Could not copy private invite link. Try again.");
+  assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
+  assert.equal(
+    copiedValues.includes("https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel"),
+    true
+  );
+
+  const rejectedClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: async () => {
+        throw new Error("clipboard-rejection-detail-sentinel");
+      },
+    },
+  });
+  rejectedClipboardFeedback.seams.state.sessionStatus = "unlocked";
+  assert.equal(
+    await rejectedClipboardFeedback.seams.copyToClipboard("rejected-copy-value-sentinel"),
+    false
+  );
+  const rejectedFeedbackElement = rejectedClipboardFeedback.elements.get("clientActionFeedback");
+  assert.equal(rejectedFeedbackElement.hidden, false);
+  assert.equal(rejectedFeedbackElement.textContent, "Could not copy Page ID. Try again.");
+  assert.doesNotMatch(rejectedFeedbackElement.textContent, /rejected-copy-value-sentinel/);
+  assert.doesNotMatch(rejectedFeedbackElement.textContent, /clipboard-rejection-detail-sentinel/);
+
+  const unavailableClipboardFeedback = clipboardInvitationFeedbackTestSeams({});
+  unavailableClipboardFeedback.seams.state.sessionStatus = "unlocked";
+  assert.equal(
+    await unavailableClipboardFeedback.seams.copyToClipboard("missing-clipboard-value-sentinel", "folder-id"),
+    false
+  );
+  const unavailableFeedbackElement = unavailableClipboardFeedback.elements.get("clientActionFeedback");
+  assert.equal(unavailableFeedbackElement.hidden, false);
+  assert.equal(unavailableFeedbackElement.textContent, "Could not copy Folder ID. Try again.");
+  assert.doesNotMatch(unavailableFeedbackElement.textContent, /missing-clipboard-value-sentinel/);
+
+  const scheduledCallbacks = new Map();
+  let nextTimerId = 1;
+  const expiringClipboardFeedback = clipboardInvitationFeedbackTestSeams(
+    {
+      clipboard: {
+        writeText: async () => {},
+      },
+    },
+    {
+      clearTimeout() {},
+      setTimeout(callback) {
+        const timerId = nextTimerId;
+        nextTimerId += 1;
+        scheduledCallbacks.set(timerId, callback);
+        return timerId;
+      },
+    }
+  );
+  const expiringState = expiringClipboardFeedback.seams.state;
+  const expiringElement = expiringClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  expiringState.sessionStatus = "unlocked";
+  expiringState.lastError = "older-client-error-sentinel";
+  await expiringClipboardFeedback.seams.copyToClipboard("first-copy-sentinel", "page-id");
+  assert.equal(expiringState.lastError, null, "A newer successful client action must supersede an older generic error");
+  const staleTimerId = nextTimerId - 1;
+  await expiringClipboardFeedback.seams.copyToClipboard("second-copy-sentinel", "folder-id");
+  const currentTimerId = nextTimerId - 1;
+  scheduledCallbacks.get(staleTimerId)?.();
+  assert.equal(expiringElement.textContent, "Folder ID copied.");
+  scheduledCallbacks.get(currentTimerId)?.();
+  assert.equal(expiringElement.hidden, true);
+  assert.equal(expiringElement.textContent, "");
+
+  let resolveLockedClipboardWrite;
+  const lockRaceClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: () => new Promise((resolve) => {
+        resolveLockedClipboardWrite = resolve;
+      }),
+    },
+  });
+  const lockRaceState = lockRaceClipboardFeedback.seams.state;
+  const lockRaceElement = lockRaceClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  lockRaceState.sessionStatus = "unlocked";
+  const copyBeforeLock = lockRaceClipboardFeedback.seams.copyToClipboard(
+    "copy-before-lock-sentinel",
+    "page-id"
+  );
+  lockRaceClipboardFeedback.seams.lockSession();
+  resolveLockedClipboardWrite();
+  assert.equal(await copyBeforeLock, true);
+  assert.equal(lockRaceState.sessionStatus, "locked");
+  assert.equal(lockRaceElement.hidden, true);
+  assert.equal(lockRaceElement.textContent, "");
+
+  let resolveEarlierClipboardWrite;
+  const newerCopyClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText(value) {
+        if (value === "earlier-copy-sentinel") {
+          return new Promise((resolve) => {
+            resolveEarlierClipboardWrite = resolve;
+          });
+        }
+        return Promise.resolve();
+      },
+    },
+  });
+  const newerCopyState = newerCopyClipboardFeedback.seams.state;
+  const newerCopyElement = newerCopyClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  newerCopyState.sessionStatus = "unlocked";
+  const earlierCopy = newerCopyClipboardFeedback.seams.copyToClipboard("earlier-copy-sentinel", "page-id");
+  assert.equal(
+    await newerCopyClipboardFeedback.seams.copyToClipboard("later-copy-sentinel", "folder-id"),
+    true
+  );
+  resolveEarlierClipboardWrite();
+  assert.equal(await earlierCopy, true);
+  assert.equal(newerCopyElement.textContent, "Folder ID copied.");
+  assert.doesNotMatch(newerCopyElement.textContent, /(?:earlier|later)-copy-sentinel/);
+
+  let resolveActionRaceClipboardWrite;
+  const newerActionClipboardFeedback = clipboardInvitationFeedbackTestSeams({
+    clipboard: {
+      writeText: () => new Promise((resolve) => {
+        resolveActionRaceClipboardWrite = resolve;
+      }),
+    },
+  });
+  const newerActionState = newerActionClipboardFeedback.seams.state;
+  const newerActionElement = newerActionClipboardFeedback.context.document.getElementById("clientActionFeedback");
+  newerActionState.sessionStatus = "unlocked";
+  const copyBeforeNewerAction = newerActionClipboardFeedback.seams.copyToClipboard(
+    "copy-before-newer-action-sentinel",
+    "page-id"
+  );
+  newerActionState.lastError = "newer-action-detail-sentinel";
+  resolveActionRaceClipboardWrite();
+  assert.equal(await copyBeforeNewerAction, true);
+  assert.equal(
+    newerActionElement.textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
+}
+
+function assertNestedManageVaultReturnContract() {
+  const nestedManage = clipboardInvitationFeedbackTestSeams({});
+  const nestedState = nestedManage.seams.state;
+  const settingsTrigger = nestedManage.context.document.getElementById("sessionSettingsButton");
+  const closeSettingsButton = nestedManage.context.document.getElementById("closeSettingsButton");
+  const resumeButton = nestedManage.context.document.getElementById("resumeSessionButton");
+  nestedManage.context.document.activeElement = settingsTrigger;
+  nestedState.activeVaultId = "personal";
+  nestedState.settingsModalOpen = true;
+  nestedState.settingsSection = "vault";
+  nestedState.settingsModalPreviousFocus = settingsTrigger;
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  assert.equal(nestedState.settingsModalOpen, false);
+  assert.equal(nestedState.manageVaultsModalOpen, true);
+  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
+
+  nestedManage.seams.setActiveVaultId("organization-fixture");
+  assert.equal(nestedState.sessionStatus, "locked");
+  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
+  nestedManage.seams.closeManageVaultsModal();
+  assert.equal(nestedState.settingsModalOpen, true);
+  assert.equal(
+    nestedState.settingsSection,
+    "session",
+    "A nested Manage Vaults return after Session Lock must reopen only the safe Session section"
+  );
+  assert.equal(
+    nestedManage.context.document.activeElement,
+    closeSettingsButton,
+    "A locked nested return without an available signer must focus the visible Settings close action rather than hidden Vault controls"
+  );
+  assert.equal(resumeButton.disabled, true);
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.resetVaultSessionState();
+  assert.equal(
+    nestedState.manageVaultsReturnToSettings?.section,
+    "vault",
+    "An unlock/reset failure started from nested Manage Vaults must retain its non-secret return token"
+  );
+  nestedManage.seams.closeManageVaultsModal();
+  assert.equal(nestedState.settingsModalOpen, true);
+  assert.equal(nestedState.settingsSection, "session");
+
+  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.lockSession();
+  assert.equal(
+    nestedState.manageVaultsReturnToSettings,
+    null,
+    "A real Session Lock must discard the nested Manage return token"
+  );
+}
+
+function assertModalFocusAndContextRouteContracts() {
+  const modalFocus = clipboardInvitationFeedbackTestSeams({});
+  const modalState = modalFocus.seams.state;
+  const modalDocument = modalFocus.context.document;
+  const commandPalette = modalDocument.getElementById("commandPalette");
+  const closeButton = modalDocument.getElementById("closeCommandPaletteButton");
+  const paletteInput = modalDocument.getElementById("commandPaletteInput");
+  const rovingPaletteOption = element(modalDocument);
+  const settingsModal = modalDocument.getElementById("settingsModal");
+  const settingsButton = modalDocument.getElementById("settingsNavSession");
+  const rovingFolderOption = element(modalDocument);
+  closeButton.tabIndex = 0;
+  paletteInput.tabIndex = 0;
+  settingsButton.tabIndex = 0;
+  rovingPaletteOption.tabIndex = -1;
+  rovingFolderOption.tabIndex = -1;
+  commandPalette.querySelectorAll = () => [closeButton, paletteInput, rovingPaletteOption];
+  settingsModal.querySelectorAll = () => [settingsButton, rovingFolderOption];
+  modalDocument.querySelectorAll = () => [settingsButton, rovingFolderOption];
+
+  const paletteFocusables = modalFocus.seams.commandPaletteFocusableElements();
+  assert.equal(paletteFocusables.length, 2, "Quick Switcher must keep only sequential controls in its trap");
+  assert.equal(paletteFocusables[0], closeButton);
+  assert.equal(paletteFocusables[1], paletteInput);
+  const settingsFocusables = modalFocus.seams.settingsModalFocusableElements();
+  assert.equal(settingsFocusables.length, 1, "Settings modal focus trapping must ignore roving Folder options");
+  assert.equal(settingsFocusables[0], settingsButton);
+  const documentFocusables = modalFocus.seams.documentFocusableElements();
+  assert.equal(documentFocusables.length, 1, "Directional Vault switcher focus must ignore non-sequential roving options");
+  assert.equal(documentFocusables[0], settingsButton);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let tabPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Tab",
+      preventDefault() {
+        tabPrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(tabPrevented, true);
+  assert.equal(modalDocument.activeElement, closeButton);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = closeButton;
+  let reverseTabPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Tab",
+      preventDefault() {
+        reverseTabPrevented = true;
+      },
+      shiftKey: true,
+    }),
+    true
+  );
+  assert.equal(reverseTabPrevented, true);
+  assert.equal(modalDocument.activeElement, paletteInput);
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = closeButton;
+  let forwardInteriorTabPrevented = false;
+  modalFocus.seams.handleCommandPaletteKeydown({
+    key: "Tab",
+    preventDefault() {
+      forwardInteriorTabPrevented = true;
+    },
+    shiftKey: false,
+  });
+  assert.equal(
+    forwardInteriorTabPrevented,
+    false,
+    "Quick Switcher must allow native forward Tab between interior controls"
+  );
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let reverseInteriorTabPrevented = false;
+  modalFocus.seams.handleCommandPaletteKeydown({
+    key: "Tab",
+    preventDefault() {
+      reverseInteriorTabPrevented = true;
+    },
+    shiftKey: true,
+  });
+  assert.equal(
+    reverseInteriorTabPrevented,
+    false,
+    "Quick Switcher must allow native reverse Tab between interior controls"
+  );
+
+  modalState.commandPaletteOpen = true;
+  modalDocument.activeElement = paletteInput;
+  let escapePrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      key: "Escape",
+      preventDefault() {
+        escapePrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(escapePrevented, true);
+  assert.equal(modalState.commandPaletteOpen, false);
+  assert.equal(modalDocument.activeElement, modalDocument.getElementById("ribbonCommandButton"));
+
+  modalState.commandPaletteOpen = true;
+  let savePrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      ctrlKey: true,
+      key: "s",
+      metaKey: false,
+      preventDefault() {
+        savePrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true,
+    "The open Quick Switcher must absorb unrelated document shortcuts"
+  );
+  assert.equal(savePrevented, true, "The open Quick Switcher must suppress the browser Save shortcut too");
+
+  let paletteShortcutPrevented = false;
+  assert.equal(
+    modalFocus.seams.handleCommandPaletteKeydown({
+      ctrlKey: true,
+      key: "p",
+      metaKey: false,
+      preventDefault() {
+        paletteShortcutPrevented = true;
+      },
+      shiftKey: false,
+    }),
+    true
+  );
+  assert.equal(paletteShortcutPrevented, true, "The open Quick Switcher must suppress its own global shortcut too");
+
+  const contextRoute = clipboardInvitationFeedbackTestSeams({});
+  const contextState = contextRoute.seams.state;
+  const invokingControl = contextRoute.context.document.getElementById("invokingContextControl");
+  const detachedMenuItem = contextRoute.context.document.getElementById("detachedContextMenuItem");
+  contextState.sessionStatus = "unlocked";
+  contextState.contextMenuPreviousFocus = invokingControl;
+  contextRoute.context.document.activeElement = detachedMenuItem;
+  contextRoute.seams.handleContextMenuAction(
+    { action: "manage-access" },
+    { folderId: "restricted-fixture" }
+  );
+  assert.equal(contextState.settingsModalOpen, true);
+  assert.equal(contextState.settingsSection, "access");
+  assert.equal(
+    contextState.settingsModalPreviousFocus,
+    invokingControl,
+    "Settings opened from a context route must restore the invoking control, not a removed menuitem"
+  );
+}
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
   JSON.stringify({
-    action: "Resume session",
-    detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+    action: "Unlock session",
+    detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
     locked: true,
     title: "Session locked",
   })
@@ -512,14 +1543,276 @@ assert.equal(
     action: "Lock session",
     detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
     locked: false,
-    title: "Resuming session",
+    title: "Unlocking session",
   })
 );
+const activeVaultAccessLoss = client.protectedRequestError(
+  "/_admin/vaults/acme/metadata",
+  403,
+  { error: "vault access required" }
+);
+assert.equal(activeVaultAccessLoss.status, 403);
+assert.equal(activeVaultAccessLoss.reason, "vault access required");
+assert.equal(activeVaultAccessLoss.path, "/_admin/vaults/acme/metadata");
+for (const path of [
+  "/_admin/vaults/acme/metadata",
+  "/_admin/vaults/acme/export",
+  "/_admin/vaults/acme/sync/bootstrap",
+]) {
+  assert.equal(
+    client.isActiveVaultAuthorizationLoss(
+      client.protectedRequestError(path, 403, { error: "vault access required" }),
+      "acme"
+    ),
+    true,
+    `A confirmed membership loss must lock for the active Vault state read ${path}`
+  );
+}
+for (const [status, reason, path] of [
+  [401, "vault access required", "/_admin/vaults/acme/metadata"],
+  [403, "replayed Nostr authorization event", "/_admin/vaults/acme/metadata"],
+  [403, "stale Nostr event timestamp", "/_admin/vaults/acme/metadata"],
+  [403, "vault admin access required", "/_admin/vaults/acme/invitations"],
+  [403, "folder access required", "/_admin/vaults/acme/folders/restricted/objects/page"],
+  [403, "vault access required", "/_admin/vaults/other/metadata"],
+]) {
+  assert.equal(
+    client.isActiveVaultAuthorizationLoss(client.protectedRequestError(path, status, { error: reason }), "acme"),
+    false,
+    `Only a confirmed active-Vault membership loss may lock the session (${status} ${reason} ${path})`
+  );
+}
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
 assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
-assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Resume session</);
+assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
 assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
-assert.match(htmlSource, /<span class="pill ready">email invite<\/span>/);
+assert.match(htmlSource, /<meta name="color-scheme" content="dark light"\s*\/>/);
+assert.match(
+  htmlSource,
+  /<meta name="theme-color" media="\(prefers-color-scheme: dark\)" content="#212121"\s*\/>/
+);
+assert.match(
+  htmlSource,
+  /<meta name="theme-color" media="\(prefers-color-scheme: light\)" content="#f7f6f3"\s*\/>/
+);
+assert.match(
+  htmlSource,
+  /id="savePageButton"[^>]*aria-keyshortcuts="Control\+S Meta\+S"[^>]*>Save Page</,
+  "A visible Save Page action must advertise the existing platform shortcut"
+);
+assert.match(htmlSource, />Edit Markdown</, "The one raw Markdown editor must be named clearly");
+assert.doesNotMatch(htmlSource, /readerModeButton/, "The duplicate reader Reading/Source control must be absent");
+assert.doesNotMatch(htmlSource, />\s*Markdown source\s*</, "Reader UI must not overload the Source Note term");
+assert.doesNotMatch(source, /readerMode/, "Reader source-mode state must be removed with its control");
+assert.doesNotMatch(cssSource, /\.reader-mode-button\b/, "Reader source-mode styling must be removed");
+assert.match(
+  source,
+  /savePageButton[\s\S]{0,420}saveActivePage\(\)\.catch/,
+  "The visible Save Page action must use the existing signed save workflow"
+);
+assert.match(
+  htmlSource,
+  /id="clientActionFeedback"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/
+);
+assert.match(cssSource, /\.client-action-feedback\[hidden\]\s*\{\s*display:\s*none;/);
+assert.match(
+  cssSource,
+  /@media \(max-width: 1180px\) \{[\s\S]*?\.obsidian-shell,\s*\.obsidian-shell\[data-workspace-view="graph"\]\s*\{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\) auto;/,
+  "The compact page and Graph View shells must retain the status-feedback row"
+);
+assert.match(
+  htmlSource,
+  /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">[\s\S]*?id="ribbonFilesButton"[\s\S]*?id="ribbonGraphButton"[\s\S]*?id="ribbonSearchButton"[\s\S]*?id="ribbonCommandButton"[\s\S]*?id="ribbonAccessButton"[\s\S]*?<\/nav>/,
+  "Primary navigation must live with the File sidebar heading"
+);
+assert.doesNotMatch(htmlSource, /app-ribbon/, "The Product Client must not retain a second left navigation rail");
+assert.match(cssSource, /\.sidebar-primary-nav\s*\{[\s\S]*?display:\s*flex;/);
+assert.doesNotMatch(cssSource, /\.app-ribbon\s*\{/, "The Product Client CSS must remove the legacy rail");
+assert.doesNotMatch(source, /window\.alert/);
+assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-haspopup="menu"/);
+assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-controls="vaultSwitcherMenu"/);
+assert.match(htmlSource, /id="vaultSwitcherMenu"[^>]*role="menu"/);
+assert.match(htmlSource, /id="vaultSwitcherList"/);
+assert.match(htmlSource, /id="manageVaultsButton"/);
+assert.match(source, /sessionAccountVaultButton[\s\S]{0,120}openVaultSwitcher\(\)/);
+assert.doesNotMatch(source, /sessionAccountVaultButton[\s\S]{0,180}openSettingsModal\("vault"\)/);
+assert.match(htmlSource, /id="manageVaultsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
+assert.match(htmlSource, /id="manageVaultsList"/);
+assert.match(htmlSource, /id="manageVaultsLoadButton"/);
+assert.match(htmlSource, /id="manageVaultsLoadButton"[^>]*>Unlock Vault</);
+assert.doesNotMatch(htmlSource, /id="accessLoadVaultButton"/);
+assert.match(htmlSource, /id="manageVaultsConnectSignerButton"/);
+assert.match(htmlSource, /id="manageCreateOrganizationVaultButton"/);
+assert.match(source, /manageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\)/);
+assert.match(source, /manageVaultsLoadButton[\s\S]{0,120}manageVaultsLoadAction\(\)/);
+assert.doesNotMatch(source, /accessLoadVaultButton/);
+assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
+assert.match(
+  htmlSource,
+  /id="sessionSettingsButton"[\s\S]{0,900}<circle cx="12" cy="12" r="3"\s*\/>[\s\S]{0,900}M19\.4 15a1\.65 1\.65/,
+);
+assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
+assert.match(htmlSource, /id="settingsModalLayout"/);
+assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
+assert.match(htmlSource, /id="settingsNavVault"[^>]*role="tab"/);
+assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
+assert.match(htmlSource, /id="settingsNavInvitations"[^>]*role="tab"[^>]*aria-controls="settingsInvitationsPanel"/);
+assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsSessionTitle"/);
+assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Session and signer</);
+assert.match(htmlSource, /id="settingsVaultPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsAccessPanelMount"/);
+assert.match(htmlSource, /id="settingsInvitationsPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsInvitationsPanelMount"/);
+const settingsModalMarkup = htmlSource.slice(
+  htmlSource.indexOf('id="settingsModal"'),
+  htmlSource.indexOf('id="manageVaultsModal"')
+);
+const accessSidebarMarkup = htmlSource.slice(
+  htmlSource.indexOf('id="accessSidebarPanel"'),
+  htmlSource.indexOf('id="contextMenu"')
+);
+assert.match(
+  settingsModalMarkup,
+  /id="settingsSharedFeedback"[\s\S]{0,420}id="accessResultPanel"[\s\S]{0,240}id="accessBusyStatus"/,
+  "Settings feedback must remain visible above every Settings section"
+);
+assert.doesNotMatch(
+  accessSidebarMarkup,
+  /id="accessResultPanel"/,
+  "Invitation feedback must not be stranded inside the hidden Access section"
+);
+assert.match(htmlSource, /id="settingsConnectSignerButton"/);
+assert.match(htmlSource, /id="settingsSignerTitle"/);
+assert.match(htmlSource, /id="settingsSignerDetail"/);
+assert.match(
+  htmlSource,
+  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Vault as durable only after a separate recovery path has reopened it on a replacement client\./,
+  "Settings must disclose the current recovery limitation without inventing a recovery control"
+);
+assert.match(htmlSource, /id="settingsManageVaultsButton"/);
+assert.doesNotMatch(
+  htmlSource.slice(htmlSource.indexOf('id="settingsVaultPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
+  /id="settingsConnectSignerButton"/,
+  "Signer connection must live in Session rather than a duplicate Vault action"
+);
+assert.match(source, /openSettingsModal\("session"\)/);
+assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
+assert.match(source, /settingsNavInvitations[\s\S]{0,120}setSettingsSection\("invitations"\)/);
+assert.match(source, /mountAccessPanelInSettings\(\)/);
+assert.match(source, /mountInvitationPanelInSettings\(\)/);
+assert.match(source, /mount\.appendChild\(panel\)/);
+assert.match(source, /for \(const node of invitationNodes\) \{[\s\S]{0,160}mount\.appendChild\(node\)/);
+assert.match(source, /start\(\) \{[\s\S]{0,180}mountAccessPanelInSettings\(\);[\s\S]{0,120}mountInvitationPanelInSettings\(\);/);
+assert.match(source, /state\.settingsSection = "invitations"/);
+assert.match(source, /function settingsSectionsForSession\(sessionStatus = state\.sessionStatus\) \{\s*return sessionStatus === SESSION_STATUS\.UNLOCKED \? SETTINGS_SECTIONS : \["session"\];/s);
+assert.match(source, /settingsNav\.hidden = sessionOnly;/);
+assert.match(source, /panel\.hidden = false;[\s\S]{0,120}panel\.open = true;/);
+assert.match(
+  createVaultInvitationFromPanelSource,
+  /They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email\.[\s\S]{0,260}They can join with this one-time invite; grant any required Folder Keys after they join\./s,
+  "Invitation creation must distinguish email grant claim from direct Member Identity membership"
+);
+assert.match(
+  acceptVaultInvitationFromPanelSource,
+  /An admin must grant any required Folder Keys before encrypted content can open\./,
+  "Direct invitation acceptance must not promise Folder Keys"
+);
+assert.match(
+  loadEmailInviteInstructionsFromPanelSource,
+  /Email verified[\s\S]{0,220}can claim encrypted Folder Key Grants/,
+  "Email invitation flow must keep the grant claim explicit"
+);
+assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"\)/);
+assert.match(source, /row\.target === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
+assert.match(
+  source,
+  /settingsManageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\{ returnToSettings: true \}\)/
+);
+assert.match(source, /closeManageVaultsModal\(\)[\s\S]{0,500}state\.settingsModalOpen = true;/);
+assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "access"/);
+assert.match(source, /state\.settingsModalOpen && state\.settingsSection === "access"[\s\S]{0,100}refreshAccessManagementListsInBackground\(\)/);
+assert.match(source, /closeSettingsModal\(\)/);
+assert.match(cssSource, /\.settings-modal-backdrop\s*\{/);
+assert.match(
+  cssSource,
+  /\.settings-modal-panel\s*\{[^}]*border:\s*1px solid var\(--line\);[^}]*border-radius:\s*var\(--radius-popover\);[^}]*background:\s*var\(--surface-popover\);[^}]*box-shadow:\s*var\(--shadow-obsi-popover\);/s,
+  "Settings must use the shared Dashboard-style popover surface without moving the modal"
+);
+assert.match(
+  cssSource,
+  /--selection-bg:\s*var\(--surface-active\);[\s\S]*?--action-primary-bg:\s*var\(--text\);[\s\S]*?--action-primary-text:\s*var\(--bg\);[\s\S]*?--focus:\s*color-mix\(in srgb, var\(--text\) 42%, transparent\);/s,
+  "Ordinary selection, actions, and focus must derive from the dashboard neutral text hierarchy"
+);
+assert.match(
+  cssSource,
+  /button\.obsidian-folder-button\.active,\s*button\.obsidian-page-button\.active\s*\{[^}]*background:\s*var\(--selection-bg\);[^}]*color:\s*var\(--selection-fg\);/s,
+  "File-tree selection must be neutral rather than blue"
+);
+assert.match(
+  cssSource,
+  /button\.obsidian-folder-button:hover:not\(:disabled\),[\s\S]*?button\.command-palette-row:hover:not\(:disabled\)/s,
+  "Neutral hover states must outrank the generic button hover surface"
+);
+assert.match(
+  cssSource,
+  /\.page-save-button\s*\{[^}]*background:\s*var\(--action-primary-bg\);[^}]*color:\s*var\(--action-primary-text\);/s,
+  "Primary actions must retain strong neutral contrast"
+);
+assert.match(
+  cssSource,
+  /\.command-palette-backdrop\s*\{[^}]*display:\s*grid;[^}]*align-items:\s*start;[^}]*justify-items:\s*center;[^}]*padding:\s*max\(24px, calc\(\(100vh - 480px\) \/ 2\)\) 24px 24px;/s,
+);
+assert.match(
+  cssSource,
+  /\.graph-topbar #graphStats\s*\{[^}]*font-variant-numeric:\s*tabular-nums;[^}]*padding:\s*2px 8px;/s,
+);
+assert.match(htmlSource, /id="zoomInGraphButton"[^>]*title="Zoom in"/);
+assert.match(htmlSource, /id="zoomOutGraphButton"[^>]*title="Zoom out"/);
+assert.doesNotMatch(htmlSource, /id="zoomInGraphButton"[\s\S]{0,180}<circle/);
+assert.doesNotMatch(htmlSource, /id="zoomOutGraphButton"[\s\S]{0,180}<circle/);
+assert.match(htmlSource, /id="fitGraphButton"[^>]*title="Reset zoom"/);
+assert.match(htmlSource, /id="fullscreenGraphButton"[^>]*title="Enter full screen"/);
+assert.doesNotMatch(htmlSource, /id="resetGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="renderGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="replayGraphButton"/);
+assert.doesNotMatch(htmlSource, /id="toggleGraphHistoryButton"/);
+assert.doesNotMatch(htmlSource, /id="replayList"/);
+assert.doesNotMatch(htmlSource, /id="graphFilterInput"/);
+assert.doesNotMatch(htmlSource, /aria-label="Filter graph"/);
+assert.match(source, /requestFullscreen\(\)/);
+assert.match(source, /document\.addEventListener\("fullscreenchange", updateGraphFullscreenControl\)/);
+assert.match(source, /zoomGraphView\(1\)/);
+assert.match(source, /zoomGraphView\(-1\)/);
+assert.match(cssSource, /\.graph-floating-controls button\s*\{[\s\S]*?width:\s*40px;[\s\S]*?min-height:\s*40px;/);
+assert.match(cssSource, /\.graph-floating-controls button:active:not\(:disabled\)\s*\{[\s\S]*?transform:\s*scale\(0\.96\);/);
+assert.doesNotMatch(cssSource, /\.graph-icon-button\b/);
+assert.doesNotMatch(cssSource, /\.graph-controls\b/);
+assert.doesNotMatch(source, /graphFilterInput/);
+for (const [, rule] of cssSource.matchAll(/\.graph-canvas \.node\s*\{([^}]*)\}/g)) {
+  assert.doesNotMatch(rule, /cursor:\s*pointer/);
+}
+assert.doesNotMatch(
+  drawGraphSource,
+  /addEventListener\("click"/,
+  "Graph nodes must not gain a click activation before that behavior exists"
+);
+assert.match(
+  cssSource,
+  /\.page-surface\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/s,
+  "The Page header needs its own grid row so the explicit Save action is visible"
+);
+assert.doesNotMatch(
+  cssSource,
+  /\.page-header\s*\{[^}]*display:\s*none;/s,
+  "The Page header must not hide the visible Save Page action"
+);
+assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*grid-template-columns:/s);
+assert.match(cssSource, /\.settings-invitations-section\s*\{/);
+assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
+assert.match(cssSource, /@media \(max-width: 640px\)/);
+assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*display:\s*flex;/s);
+assert.match(htmlSource, /<span class="pill ready">email or npub<\/span>/);
 assert.doesNotMatch(htmlSource, /<span class="pill ready">new Member Identity<\/span>/);
 assert.match(source, /clearSessionSecretsAndPlaintext\(state\)/);
 assert.equal(client.sessionGrantOpeningAllowed("locked"), false);
@@ -561,16 +1854,15 @@ assert.equal(
   ),
   null
 );
-assert.deepEqual(
-  Array.from(
-    client.withActiveVaultOption(
-      [{ vaultId: "personal-a", kind: "personal", name: "Personal vault", role: "owner" }],
-      "org-acme",
-      { vaultId: "org-acme", kind: "organization", name: "Acme", role: "admin" }
-    ),
-    (vault) => vault.vaultId
+assert.equal(
+  client.missingVisibleVaultFallback(
+    "resuming",
+    "personal-aaaaaaaaaaaaaaaa",
+    [{ vaultId: "org-testr-mr9bmjs", kind: "organization" }],
+    "aa".repeat(32),
+    "personal"
   ),
-  ["personal-a", "org-acme"]
+  "org-testr-mr9bmjs"
 );
 assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
@@ -645,9 +1937,9 @@ assert.match(source, /window\.addEventListener\?\.\("pagehide", handlePageHide\)
 assert.match(source, /window\.addEventListener\?\.\("pageshow", handlePageShow\)/);
 assert.match(source, /openFolderKeyGrants\(keyring, exported, expectedRecipient, \{[\s\S]{0,120}assertCurrent/);
 assert.match(source, /state\.sessionStatus = SESSION_STATUS\.UNLOCKED;[\s\S]{0,160}applyPendingInviteNavigation\(\)/);
-assert.match(
+assert.doesNotMatch(
   source,
-  /setOptionalDisabled\("loadVaultButton", state\.sessionStatus !== SESSION_STATUS\.UNLOCKED \|\| !canLoadVault\(\)\)/
+  /\b(?:accessManageToggle|connectSignerButton|loadVaultButton|createOrganizationVaultButton|organizationVaultNameInput)\b/
 );
 for (const [surface, pattern] of [
   ["localStorage", /\blocalStorage\b/],
@@ -667,13 +1959,84 @@ assert.match(historyReplacements[0], /replaceState\(null, "", fallbackUrl\)/);
 assert.equal((source.match(/console\.(?:debug|info|log|warn|error)\(/g) || []).length, 1);
 assert.match(source, /console\.debug\(`\[FiniteBrain\] \$\{message\}`\);/);
 assert.match(source, /SESSION_PLAINTEXT_INPUT_IDS/);
-assert.match(source, /"folderKeyInput"/);
-assert.match(source, /"okfBundleInput"/);
+assert.doesNotMatch(source, /"folderKeyInput"/);
+assert.doesNotMatch(source, /"okfBundleInput"/);
 assert.match(source, /"pageDraftInput"/);
 assert.match(source, /"vaultInviteSecretInput"/);
+assert.match(
+  htmlSource,
+  /id="commandPaletteInput"[\s\S]{0,260}role="combobox"[\s\S]{0,260}aria-controls="commandPaletteList"[\s\S]{0,260}aria-expanded="false"/,
+  "Quick Switcher input must expose its visible result list as a combobox"
+);
+assert.match(htmlSource, /id="commandPaletteList"[^>]*role="listbox"/);
+assert.match(htmlSource, /id="accessFolderButton"[^>]*aria-controls="accessFolderList"/);
+assert.match(htmlSource, /id="accessFolderList"[^>]*role="listbox"/);
+const renderCommandPaletteSource = source.slice(
+  source.indexOf("function renderCommandPalette()"),
+  source.indexOf("function openCommandPalette(")
+);
+assert.match(
+  renderCommandPaletteSource,
+  /button\.tabIndex = -1;[\s\S]{0,160}button\.setAttribute\("role", "option"\);[\s\S]{0,160}button\.setAttribute\("aria-selected", String\(index === selectedIndex\)\);/,
+  "Quick Switcher rows must remain click targets while combobox focus stays on the input"
+);
+assert.match(
+  renderCommandPaletteSource,
+  /input\.setAttribute\("aria-activedescendant", `commandPaletteOption-\$\{selectedIndex\}`\);/,
+  "Quick Switcher must expose its tracked selected row through aria-activedescendant"
+);
+const contextMenuKeyboardSource = source.slice(
+  source.indexOf("function contextMenuFocusableElements()"),
+  source.indexOf("function closeCommandPalette()")
+);
+assert.match(contextMenuKeyboardSource, /button\[role="menuitem"\]:not\(\[disabled\]\)/);
+assert.match(contextMenuKeyboardSource, /closeContextMenu\(\{ restoreFocus: true \}\)/);
+assert.match(source, /button\.setAttribute\("role", "menuitem"\);/);
+assert.match(source, /separator\.setAttribute\("role", "separator"\);/);
+assert.match(source, /event\.key !== "ContextMenu"/);
+const folderSelectorKeyboardSource = source.slice(
+  source.indexOf("function bindAccessFolderSelector()"),
+  source.indexOf("function renderFolderSelector(")
+);
+assert.match(folderSelectorKeyboardSource, /list\.addEventListener\("keydown"/);
+assert.match(folderSelectorKeyboardSource, /event\.stopPropagation\(\);/);
+assert.match(folderSelectorKeyboardSource, /closeAccessFolderDropdown\(\{ focusTrigger: true \}\)/);
+const selectAccessFolderOptionSource = source.slice(
+  source.indexOf("function selectAccessFolderOption(option)"),
+  source.indexOf("function bindAccessFolderSelector()")
+);
+assert.match(
+  selectAccessFolderOptionSource,
+  /closeAccessFolderDropdown\(\);\s*selectAccessFolder\(folderId\);\s*\$\("accessFolderButton"\)\?\.focus\?\.\(\);/,
+  "Selecting a Folder must return focus to the selector trigger after its list rerenders"
+);
+const vaultSwitcherKeyboardSource = source.slice(
+  source.lastIndexOf("if (state.vaultSwitcherOpen) {"),
+  source.indexOf("if (state.settingsModalOpen) {", source.lastIndexOf("if (state.vaultSwitcherOpen) {"))
+);
+assert.doesNotMatch(vaultSwitcherKeyboardSource, /event\.key === "Escape" \|\| event\.key === "Tab"/);
+assert.match(
+  vaultSwitcherKeyboardSource,
+  /if \(event\.key === "Tab"\) \{\s*event\.preventDefault\(\);\s*moveVaultSwitcherFocusOut\(\{ backwards: event\.shiftKey \}\);/s,
+  "Vault switcher Tab must leave in its direction instead of behaving like Escape"
+);
+assert.doesNotMatch(
+  source.slice(source.indexOf("function primaryFormActionForInput"), source.indexOf("function shouldRunPrimaryFormAction")),
+  /(?:acceptVaultInvitationButton|revokeVaultInvitationButton)/,
+  "Invitation acceptance and revocation must remain explicit actions"
+);
 
 (async () => {
+  await assertClipboardInvitationFeedbackContracts();
+  assertNestedManageVaultReturnContract();
+  assertModalFocusAndContextRouteContracts();
+
   const event = await client.buildAuthEventTemplate(
+    "post",
+    "http://finite.test/_admin/vaults/smoke/metadata",
+    "{\"name\":\"Smoke\"}"
+  );
+  const repeatedEvent = await client.buildAuthEventTemplate(
     "post",
     "http://finite.test/_admin/vaults/smoke/metadata",
     "{\"name\":\"Smoke\"}"
@@ -684,8 +2047,11 @@ assert.match(source, /"vaultInviteSecretInput"/);
     "http://finite.test/_admin/vaults/smoke/metadata",
   ]);
   assert.deepEqual(Array.from(event.tags[1]), ["method", "POST"]);
-  assert.equal(event.tags[2][0], "payload");
-  assert.equal(event.tags[2][1].length, 64);
+  assert.equal(event.tags[2][0], "nonce");
+  assert.match(event.tags[2][1], /^[0-9a-f]{32}$/);
+  assert.notEqual(event.tags[2][1], repeatedEvent.tags[2][1]);
+  assert.equal(event.tags[3][0], "payload");
+  assert.equal(event.tags[3][1].length, 64);
 
   const keyring = client.createSessionKeyring();
   const folderKey = Buffer.alloc(32, 7).toString("base64");
@@ -940,6 +2306,153 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.match(htmlSource, /id="vaultInviteSecretInput"/);
   assert.match(htmlSource, /id="vaultInviteConnectSignerButton"/);
   assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
+
+  const lockedInvitationControls = client.vaultInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "manual-invite-secret",
+    organizationVault: true,
+    sessionStatus: "locked",
+    signerCanConnect: true,
+    signerStatus: "unavailable",
+  });
+  assert.match(lockedInvitationControls.hint, /Unlock the session/);
+  assert.equal(lockedInvitationControls.connectDisabled, false);
+  assert.equal(lockedInvitationControls.createDisabled, true);
+  assert.equal(lockedInvitationControls.inspectDisabled, true);
+  assert.equal(lockedInvitationControls.emailScopeDisabled, true);
+  assert.equal(lockedInvitationControls.acceptDisabled, true);
+  assert.equal(lockedInvitationControls.revokeDisabled, true);
+
+  const unlockedInvitationControls = client.vaultInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "manual-invite-secret",
+    organizationVault: true,
+    sessionStatus: "unlocked",
+    signerCanConnect: true,
+    signerStatus: "connected",
+  });
+  assert.equal(unlockedInvitationControls.createDisabled, false);
+  assert.equal(unlockedInvitationControls.inspectDisabled, false);
+  assert.equal(unlockedInvitationControls.emailScopeDisabled, false);
+  assert.equal(unlockedInvitationControls.acceptDisabled, false);
+  assert.equal(unlockedInvitationControls.revokeDisabled, false);
+
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invitation-explicit",
+        invitations: [],
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-explicit", vaultId: "vault-admin" })
+  );
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invite-just-created",
+        lastVaultInvitationCode: "invite-just-created",
+        lastVaultInvitationId: "invitation-just-created",
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-just-created", vaultId: "vault-admin" })
+  );
+  assert.equal(
+    JSON.stringify(
+      client.vaultInvitationRevokeTarget({
+        activeVaultId: "vault-admin",
+        input: "invite-pending-row",
+        invitations: [{ id: "invitation-pending-row", inviteCode: "invite-pending-row", status: "pending" }],
+      })
+    ),
+    JSON.stringify({ invitationId: "invitation-pending-row", vaultId: "vault-admin" })
+  );
+  assert.throws(
+    () => client.vaultInvitationRevokeTarget({ activeVaultId: "vault-admin", input: "invite-unknown" }),
+    /created by this Vault admin|pending invitation list/
+  );
+
+  for (const actionSource of [
+    createVaultInvitationFromPanelSource,
+    inspectVaultInvitationFromPanelSource,
+    loadEmailInviteInstructionsFromPanelSource,
+    acceptVaultInvitationFromPanelSource,
+    revokeVaultInvitationFromPanelSource,
+    revokeVaultInvitationByIdSource,
+  ]) {
+    assert.match(
+      actionSource,
+      /\{\s*requireUnlockedVaultInvitationAction\(/,
+      "Protected invitation actions must fail closed before capturing a session epoch"
+    );
+  }
+  assert.match(revokeVaultInvitationFromPanelSource, /vaultInvitationRevokeTarget\(/);
+  assert.doesNotMatch(
+    revokeVaultInvitationFromPanelSource,
+    /vaultInvitationLinkPath/,
+    "Admin revocation must not inspect a recipient-only invitation link"
+  );
+  assert.match(
+    source,
+    /for \(const inputId of \[\s*"vaultInviteCodeInput",\s*"vaultInviteEmailInput",\s*"vaultInviteEmailProofCreatedAtInput",\s*"vaultInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleVaultInvitationInput\(inputId\)/,
+    "Invitation inputs must update the panel as the Member changes code, email proof, or Invite Secret"
+  );
+
+  const invitationPanel = invitationPanelTestSeams();
+  const invitationState = invitationPanel.seams.state;
+  const invitationElement = (id) => invitationPanel.context.document.getElementById(id);
+  invitationState.accessBusy = false;
+  invitationState.metadata = { kind: "organization" };
+  invitationState.sessionStatus = "locked";
+  invitationState.signerStatus = "unavailable";
+  invitationElement("vaultInviteCodeInput").value = "invite-old";
+  invitationElement("vaultInviteEmailInput").value = "member@example.com";
+  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.renderVaultInvitationPanel();
+  assert.equal(invitationElement("vaultInviteConnectSignerButton").disabled, false);
+  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
+  assert.match(invitationElement("vaultInvitationHint").textContent, /Unlock the session/);
+
+  invitationState.sessionStatus = "unlocked";
+  invitationState.signerStatus = "connected";
+  invitationState.lastVaultInvitationCode = "invite-old";
+  invitationState.lastVaultInvitationId = "invitation-old";
+  invitationState.lastEmailInviteSecret = "stored-invite-secret-sentinel";
+  invitationState.lastEmailInviteUrl = "https://finite.test/#inviteSecret=stored-invite-secret-sentinel";
+  invitationState.lastEmailInvitePostProof = { inviteCode: "invite-old" };
+  invitationElement("vaultInviteCodeInput").value = "invite-new";
+  invitationElement("vaultInviteSecretInput").value = "stored-invite-secret-sentinel";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
+  assert.equal(invitationState.lastVaultInvitationCode, "invite-new");
+  assert.equal(invitationState.lastVaultInvitationId, null);
+  assert.equal(invitationState.lastEmailInvitePostProof, null);
+  assert.equal(invitationState.lastEmailInviteSecret, null);
+  assert.equal(invitationState.lastEmailInviteUrl, null);
+  assert.equal(invitationElement("vaultInviteSecretInput").value, "");
+
+  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteSecretInput");
+  assert.equal(invitationState.lastEmailInviteSecret, null, "Manual Invite Secrets must stay out of client state");
+  assert.equal(invitationElement("getEmailInviteInstructionsButton").disabled, false);
+
+  invitationElement("vaultInviteCodeInput").value = "";
+  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
+  assert.equal(invitationState.lastVaultInvitationCode, null);
+  assert.equal(invitationState.lastVaultInvitationId, null);
+  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
+  invitationPanel.seams.renderVaultInvitationPanel();
+  assert.equal(invitationElement("vaultInviteCodeInput").value, "");
+
+  invitationState.sessionStatus = "locked";
+  await assert.rejects(
+    () => invitationPanel.seams.revokeVaultInvitationById("invitation-pending-row"),
+    /Session is locked\. Unlock the session before revoking an invitation/
+  );
 
   const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
   assert.equal(
@@ -1386,7 +2899,7 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
   assert.match(htmlSource, /id="pageFolderIdInput" value="getting-started"/);
-  assert.match(htmlSource, /id="okfDestinationFolderInput" value="getting-started"/);
+  assert.doesNotMatch(htmlSource, /id="okfDestinationFolderInput"/);
   const defaultPages = client.defaultVaultPages("organization");
   assert.equal(
     JSON.stringify(defaultPages.slice(0, 5).map((page) => [page.folderId, page.objectId, page.path])),
@@ -1775,7 +3288,6 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(openedAsset.text, undefined);
   assert.equal(client.buildGraphProjection([openedAsset]).nodes.length, 0);
   assert.equal(client.searchPageRows("source", [openedAsset]).length, 0);
-  assert.equal(client.buildReplayFrames([{ sequence: 1, page: openedAsset }])[0].nodeCount, 0);
   assert.equal(client.readerPageRows("general", [openedAsset]).length, 0);
   await assert.rejects(
     () =>
@@ -1990,23 +3502,12 @@ assert.match(source, /"vaultInviteSecretInput"/);
     client.graphEmptyStateCopy({ readablePageCount: 3 }).copy,
     "Readable pages are open, but none link to another page yet."
   );
-  assert.equal(
-    client.graphEmptyStateCopy({ filterText: "folder key", readablePageCount: 3 }).title,
-    "No matching Pages"
-  );
-  assert.equal(
-    client.graphEmptyStateCopy({ filterText: "folder key", readablePageCount: 0 }).title,
-    "No graph yet"
-  );
+  assert.equal(client.graphEmptyStateCopy({ readablePageCount: 3 }).title, "No links yet");
   assert.equal(client.normalizeSidebarMode("search"), "search");
-  assert.equal(client.normalizeSidebarMode("access"), "access");
+  assert.equal(client.normalizeSidebarMode("access"), "files");
   assert.equal(client.normalizeSidebarMode("bogus"), "files");
   assert.equal(client.sidebarModeLabel("search"), "Search");
   assert.equal(client.sidebarModeLabel("bogus"), "Files");
-  assert.equal(client.globalVaultControlState("files").hidden, false);
-  assert.equal(client.globalVaultControlState("search").hidden, false);
-  assert.equal(client.globalVaultControlState("access").hidden, true);
-  assert.equal(client.globalVaultControlState("bogus").hidden, false);
   assert.equal(
     JSON.stringify(client.commandPaletteCommands().map((row) => row.id)),
     JSON.stringify(["files", "search", "access", "graph", "new-page", "refresh"])
@@ -2031,6 +3532,50 @@ assert.match(source, /"vaultInviteSecretInput"/);
   ]);
   assert.equal(searchRows.length, 1);
   assert.equal(searchRows[0].detail, "crypto/folder-keys.md");
+  assert.equal(searchRows[0].matchSnippet, "# Folder Keys Readable key material stays client-side.");
+  assert.equal(
+    JSON.stringify(client.searchHighlightSegments("Testing test TEST", "test")),
+    JSON.stringify([
+      { match: true, text: "Test" },
+      { match: false, text: "ing " },
+      { match: true, text: "test" },
+      { match: false, text: " " },
+      { match: true, text: "TEST" },
+    ])
+  );
+  assert.equal(
+    JSON.stringify(client.searchHighlightSegments("a+b and A+B", "a+b")),
+    JSON.stringify([
+      { match: true, text: "a+b" },
+      { match: false, text: " and " },
+      { match: true, text: "A+B" },
+    ])
+  );
+  assert.equal(
+    client.searchResultSnippet(
+      { path: "notes.md", text: "A focused keyword appears in this sentence.", title: "Notes" },
+      "keyword"
+    ),
+    "A focused keyword appears in this sentence."
+  );
+  assert.equal(
+    client.readerSearchHighlightForPage("crypto/page-a", {
+      pageKey: "crypto/page-a",
+      query: " folder key ",
+    }),
+    "folder key"
+  );
+  assert.equal(
+    client.readerSearchHighlightForPage("crypto/page-b", {
+      pageKey: "crypto/page-a",
+      query: "folder key",
+    }),
+    ""
+  );
+  assert.match(source, /selectReaderPage\(row\.key, \{ searchQuery: query \}\)/);
+  assert.match(source, /highlightReaderSearchMatches\(content, searchQuery\)/);
+  assert.match(source, /scrollIntoView\?\.\(\{ behavior, block: "center", inline: "nearest" \}\)/);
+  assert.match(cssSource, /\.reader-search-match\s*\{[\s\S]*?scroll-margin-block: 28px;/);
   const paletteRows = client.commandPaletteRows("folder", [
     {
       folderId: "crypto",
@@ -2060,7 +3605,74 @@ assert.match(source, /"vaultInviteSecretInput"/);
   const folderMenu = client.contextMenuItemsForTarget({ type: "folder", folderId: "crypto" });
   assert.equal(folderMenu.some((item) => item.action === "new-page"), true);
   assert.equal(folderMenu.some((item) => item.action === "share-folder"), true);
-  assert.equal(folderMenu.find((item) => item.action === "delete-folder").disabled, true);
+  assert.equal(
+    folderMenu.some((item) => item.action === "delete-folder" || item.label === "Delete Folder"),
+    false,
+    "Folder context menus must not advertise deletion before the server contract exists"
+  );
+  const restrictedParent = client.folderCreationParent("restricted", [
+    {
+      access: "restricted",
+      accessUserIds: ["npub-restricted-member"],
+      id: "restricted",
+      path: "Private Work",
+    },
+  ]);
+  assert.equal(restrictedParent.access, "restricted");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.folderCreationHierarchy(null, "Notes", "notes"))),
+    { parentFolderId: null, path: "notes" }
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.folderCreationHierarchy(restrictedParent, "Nested Notes", "nested-notes"))),
+    { parentFolderId: "restricted", path: "Private Work/Nested Notes" }
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        client.folderCreationHierarchy(
+          { id: "nested-notes", path: "Private Work/Nested Notes" },
+          "Research",
+          "research"
+        )
+      )
+    ),
+    { parentFolderId: "nested-notes", path: "Private Work/Nested Notes/Research" }
+  );
+  assert.throws(
+    () => client.folderCreationParent("removed-parent", [{ id: "restricted", path: "Private Work" }]),
+    /no longer available/
+  );
+  assert.match(
+    handleContextMenuActionSource,
+    /if \(item\.action === "new-folder"\) \{\s*createFolderFromToolbar\(target\.folderId\)/s,
+    "New Folder Inside must pass its context Folder as the hierarchy parent"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const parentFolder = folderCreationParent\(parentFolderId, state\.metadata\?\.folders \|\| \[\]\);/,
+    "Folder creation must resolve the context parent from current Vault metadata"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const access = state\.metadata\.kind === "personal" \? "owner" : "all_members";\s*const accessUserIds = \[\];/s,
+    "A Child Folder must keep the normal independent access defaults instead of inheriting parent recipients"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /const rawKey = randomFolderKeyBytes\(\);\s*const recipients = folderRecipientsForAccess\(access, accessUserIds\);/s,
+    "A Child Folder must generate its own Folder Key from the normal creation flow"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /await buildFolderKeyGrantRequest\(\{\s*createdAtUnix,\s*folderId,\s*keyVersion: 1,\s*rawKey,/s,
+    "A Child Folder must create fresh grants for its independent Folder Key"
+  );
+  assert.match(
+    createFolderFromToolbarSource,
+    /parentFolderId: hierarchy\.parentFolderId,\s*path: hierarchy\.path,/s,
+    "Folder creation must submit the resolved hierarchy metadata"
+  );
   const pageMenu = client.contextMenuItemsForTarget({
     type: "page",
     folderId: "crypto",
@@ -2069,6 +3681,293 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(pageMenu.some((item) => item.action === "open-graph"), true);
   assert.equal(pageMenu.some((item) => item.action === "edit-page"), false);
   assert.equal(pageMenu.find((item) => item.action === "delete-page").disabled, false);
+  assert.equal(
+    client.pageDeletionDisposition({ localDraft: true, revision: 0 }),
+    "discard-local",
+    "A revision-zero Page draft must be discarded locally instead of requiring a signed tombstone"
+  );
+  assert.equal(
+    client.pageDeletionDisposition({ localDraft: true, revision: 2 }),
+    "tombstone",
+    "An unsaved edit of a persisted Page must retain the signed tombstone path"
+  );
+  const localDraftProjection = client.createClientProjection();
+  const localDraftKey = "restricted/obj_new_page_draft";
+  localDraftProjection.localDrafts.set(localDraftKey, {
+    baseRevision: 0,
+    path: "obj_new_page_draft.md",
+    text: "# New Page",
+  });
+  assert.equal(
+    client.discardLocalPageDraft(localDraftProjection, {
+      folderId: "restricted",
+      key: localDraftKey,
+      localDraft: true,
+      objectId: "obj_new_page_draft",
+      revision: 0,
+    }),
+    true,
+    "Discarding an unsaved Page must remove only its local draft projection"
+  );
+  assert.equal(localDraftProjection.localDrafts.has(localDraftKey), false);
+  assert.equal(
+    client.discardLocalPageDraft(localDraftProjection, {
+      folderId: "restricted",
+      localDraft: true,
+      objectId: "obj_saved_page",
+      revision: 1,
+    }),
+    false,
+    "A persisted Page must not be discarded locally"
+  );
+  const localDraftMenu = client.contextMenuItemsForTarget({
+    type: "page",
+    folderId: "restricted",
+    localDraft: true,
+    objectId: "obj_new_page_draft",
+    revision: 0,
+  });
+  assert.equal(
+    localDraftMenu.find((item) => item.action === "delete-page").label,
+    "Discard unsaved Page",
+    "The Page menu must describe a local draft discard accurately"
+  );
+  const renderSearchPanelSource = source.slice(
+    source.indexOf("function renderSearchPanel()"),
+    source.indexOf("function renderAccessResultPanel()")
+  );
+  assert.match(
+    renderSearchPanelSource,
+    /localDraft:\s*Boolean\(row\.localDraft\),[\s\S]{0,180}revision:\s*row\.revision,/,
+    "Search context menus must retain draft state so they use the same truthful Page action"
+  );
+
+  const draftDelete = clipboardInvitationFeedbackTestSeams({});
+  const draftDeleteState = draftDelete.seams.state;
+  const draftDeleteKey = "restricted/obj_context_draft";
+  let draftDeleteFetches = 0;
+  draftDelete.context.fetch = async () => {
+    draftDeleteFetches += 1;
+    throw new Error("A local draft discard must not make a protected request");
+  };
+  draftDelete.context.window.confirm = () => true;
+  draftDeleteState.activeVaultId = "personal";
+  draftDeleteState.selectedFolderId = "restricted";
+  draftDeleteState.selectedPageKey = draftDeleteKey;
+  draftDeleteState.sessionStatus = "unlocked";
+  draftDeleteState.projection.pages.set("restricted/obj_context_fallback", {
+    folderId: "restricted",
+    objectId: "obj_context_fallback",
+    path: "obj_context_fallback.md",
+    revision: 1,
+    status: "ready",
+    text: "# Fallback Page",
+    title: "Fallback Page",
+  });
+  draftDeleteState.projection.localDrafts.set(draftDeleteKey, {
+    baseRevision: 0,
+    path: "obj_context_draft.md",
+    text: "# New Page",
+  });
+  draftDelete.seams.handleContextMenuAction(
+    { action: "delete-page" },
+    {
+      type: "page",
+      folderId: "restricted",
+      localDraft: true,
+      objectId: "obj_context_draft",
+      pageKey: draftDeleteKey,
+      revision: 0,
+      title: "New Page",
+    }
+  );
+  await Promise.resolve();
+  assert.equal(
+    draftDeleteState.projection.localDrafts.has(draftDeleteKey),
+    false,
+    "The real context-menu delete path must discard a revision-zero draft locally"
+  );
+  assert.equal(draftDeleteFetches, 0, "Discarding a local draft must not create a signed DELETE request");
+  assert.equal(draftDeleteState.lastError, null, "A local draft discard must not surface a generic action failure");
+  assert.equal(
+    draftDelete.context.document.getElementById("pageObjectIdInput").value,
+    "obj_context_fallback",
+    "Discarding the selected draft must rebind editor state to the fallback Page"
+  );
+  assert.equal(draftDelete.context.document.getElementById("pageBaseRevisionInput").value, "1");
+  assert.equal(draftDelete.context.document.getElementById("pageDraftInput").value, "# Fallback Page");
+
+  const persistedDelete = clipboardInvitationFeedbackTestSeams({});
+  const persistedDeleteState = persistedDelete.seams.state;
+  const persistedDeleteKey = "getting-started/obj_context_saved";
+  const persistedDeletePubkey = "11".repeat(32);
+  const persistedDeleteFetch = new Promise((resolve) => {
+    persistedDelete.context.fetch = async (route, options) => {
+      resolve({ route, options });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ revision: 2, sequence: 2 }),
+      };
+    };
+  });
+  persistedDelete.context.window.confirm = () => true;
+  persistedDelete.context.window.nostr = {
+    getPublicKey() {},
+    signEvent: async (event) => ({ ...event, id: "signed-event", pubkey: persistedDeletePubkey, sig: "signature" }),
+  };
+  persistedDeleteState.activeVaultId = "personal";
+  persistedDeleteState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+  persistedDeleteState.pubkeyHex = persistedDeletePubkey;
+  persistedDeleteState.selectedFolderId = "getting-started";
+  persistedDeleteState.selectedPageKey = persistedDeleteKey;
+  persistedDeleteState.sessionStatus = "unlocked";
+  persistedDeleteState.signerStatus = "connected";
+  persistedDeleteState.projection.pages.set(persistedDeleteKey, {
+    folderId: "getting-started",
+    objectId: "obj_context_saved",
+    path: "obj_context_saved.md",
+    revision: 1,
+    status: "ready",
+    text: "# Saved Page",
+    title: "Saved Page",
+  });
+  persistedDeleteState.projection.pages.set("getting-started/obj_context_fallback", {
+    folderId: "getting-started",
+    objectId: "obj_context_fallback",
+    path: "obj_context_fallback.md",
+    revision: 2,
+    status: "ready",
+    text: "# Persisted Fallback",
+    title: "Persisted Fallback",
+  });
+  persistedDelete.seams.handleContextMenuAction(
+    { action: "delete-page" },
+    {
+      type: "page",
+      folderId: "getting-started",
+      localDraft: false,
+      objectId: "obj_context_saved",
+      pageKey: persistedDeleteKey,
+      revision: 1,
+      title: "Saved Page",
+    }
+  );
+  const persistedDeleteRequest = await persistedDeleteFetch;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(persistedDeleteRequest.options.method, "DELETE");
+  assert.match(persistedDeleteRequest.route, /\/folders\/getting-started\/objects\/obj_context_saved$/);
+  assert.equal(
+    persistedDeleteState.projection.pages.has(persistedDeleteKey),
+    false,
+    "A persisted Page must retain the signed tombstone delete path"
+  );
+  assert.equal(persistedDeleteState.lastError, null);
+  assert.equal(
+    persistedDelete.context.document.getElementById("pageObjectIdInput").value,
+    "obj_context_fallback",
+    "Deleting the selected saved Page must rebind editor state to the fallback Page"
+  );
+  assert.equal(persistedDelete.context.document.getElementById("pageBaseRevisionInput").value, "2");
+  assert.equal(persistedDelete.context.document.getElementById("pageDraftInput").value, "# Persisted Fallback");
+
+  const saveRace = clipboardInvitationFeedbackTestSeams({});
+  const saveRaceState = saveRace.seams.state;
+  const saveRacePubkey = "22".repeat(32);
+  const saveRaceKey = "getting-started/obj_save_race";
+  let saveRaceSignature = 0;
+  saveRace.context.window.nostr = {
+    getPublicKey: async () => saveRacePubkey,
+    signEvent: async (event) => ({
+      ...event,
+      id: `save-race-signature-${++saveRaceSignature}`,
+      pubkey: saveRacePubkey,
+      sig: "save-race-signature",
+    }),
+  };
+  const makeDeferred = () => {
+    let resolve;
+    const promise = new Promise((nextResolve) => {
+      resolve = nextResolve;
+    });
+    return { promise, resolve };
+  };
+  const firstSaveResponse = makeDeferred();
+  const secondSaveResponse = makeDeferred();
+  const firstSaveStarted = makeDeferred();
+  const secondSaveStarted = makeDeferred();
+  let saveRequestCount = 0;
+  saveRace.context.fetch = async () => {
+    saveRequestCount += 1;
+    if (saveRequestCount === 1) {
+      firstSaveStarted.resolve();
+      return firstSaveResponse.promise;
+    }
+    if (saveRequestCount === 2) {
+      secondSaveStarted.resolve();
+      return secondSaveResponse.promise;
+    }
+    throw new Error("The save guard must block a third overlapping Page save");
+  };
+  const configureSaveRaceSession = async (markdown) => {
+    const rawKey = new Uint8Array(32).fill(7);
+    const cryptoKey = await saveRace.context.crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, [
+      "encrypt",
+      "decrypt",
+    ]);
+    saveRaceState.activeVaultId = "personal";
+    saveRaceState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+    saveRaceState.keyring = {
+      keys: new Map([
+        [
+          "personal:getting-started:1",
+          { cryptoKey, folderId: "getting-started", keyVersion: 1, rawKey, vaultId: "personal" },
+        ],
+      ]),
+      openedGrants: [],
+    };
+    saveRaceState.pubkeyHex = saveRacePubkey;
+    saveRaceState.selectedFolderId = "getting-started";
+    saveRaceState.selectedPageKey = saveRaceKey;
+    saveRaceState.sessionStatus = "unlocked";
+    saveRaceState.signerStatus = "connected";
+    saveRaceState.projection.localDrafts.set(saveRaceKey, {
+      baseRevision: 0,
+      path: "obj_save_race.md",
+      text: markdown,
+    });
+    saveRace.context.document.getElementById("pageFolderIdInput").value = "getting-started";
+    saveRace.context.document.getElementById("pageObjectIdInput").value = "obj_save_race";
+    saveRace.context.document.getElementById("pageBaseRevisionInput").value = "";
+    saveRace.context.document.getElementById("pageDraftInput").value = markdown;
+  };
+  const successfulSaveResponse = () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ revision: 1, sequence: 1 }),
+  });
+  await configureSaveRaceSession("# First save");
+  const firstSave = saveRace.seams.saveActivePage();
+  await firstSaveStarted.promise;
+  saveRace.seams.lockSession();
+  await configureSaveRaceSession("# Reopened save");
+  const secondSave = saveRace.seams.saveActivePage();
+  await secondSaveStarted.promise;
+  firstSaveResponse.resolve(successfulSaveResponse());
+  await assert.rejects(firstSave, /Session changed while protected client work was in progress/);
+  assert.equal(
+    saveRaceState.pageSaveInFlight?.key,
+    saveRaceKey,
+    "A stale save completion must not clear the reopened session's same-Page save guard"
+  );
+  await assert.rejects(
+    saveRace.seams.saveActivePage(),
+    /A Page save is already in progress/,
+    "The reopened save guard must still block a third overlapping save"
+  );
+  secondSaveResponse.resolve(successfulSaveResponse());
+  await secondSave;
+  assert.equal(saveRaceState.pageSaveInFlight, null, "The active save must clear its own guard after completion");
   const readerPages = client.readerPageRows("general", openedSync.objects);
   assert.equal(readerPages[0].label, "Hello");
   assert.equal(readerPages[0].detail, "obj_000000000001.md");
@@ -2147,6 +4046,57 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(merged.conflicts[0].status, "conflict");
   assert.equal(merged.localDrafts.has("general/obj_000000000001"), true);
   assert.equal(merged.pages.has("general/obj_000000000001"), false);
+
+  const deletedProjection = client.createClientProjection();
+  deletedProjection.pages.set("general/obj_deleted_page", {
+    folderId: "general",
+    objectId: "obj_deleted_page",
+    revision: 1,
+    status: "ready",
+    text: "# Deleted Page",
+  });
+  const mergedTombstone = client.mergeSyncProjection(deletedProjection, {
+    objects: [
+      {
+        deleted: true,
+        folderId: "general",
+        objectId: "obj_deleted_page",
+        revision: 2,
+      },
+    ],
+  });
+  assert.equal(
+    mergedTombstone.pages.has("general/obj_deleted_page"),
+    false,
+    "A bootstrap tombstone must remove a previously cached Page rather than rendering a locked row"
+  );
+  assert.equal(
+    client.projectionPagesFromProjection(mergedTombstone).some((page) => page.objectId === "obj_deleted_page"),
+    false,
+    "Deleted Pages must stay absent after a full sync bootstrap"
+  );
+  const localEditBeforeDeletion = client.createClientProjection();
+  localEditBeforeDeletion.localDrafts.set("general/obj_deleted_conflict", {
+    baseRevision: 1,
+    path: "obj_deleted_conflict.md",
+    text: "# Unsynced local edit",
+  });
+  const mergedTombstoneConflict = client.mergeSyncProjection(localEditBeforeDeletion, {
+    objects: [
+      {
+        deleted: true,
+        folderId: "general",
+        objectId: "obj_deleted_conflict",
+        revision: 2,
+      },
+    ],
+  });
+  assert.equal(
+    mergedTombstoneConflict.conflicts.length,
+    1,
+    "A newer remote tombstone must retain the existing local-edit conflict safeguard"
+  );
+  assert.equal(mergedTombstoneConflict.localDrafts.has("general/obj_deleted_conflict"), true);
 
   assert.deepEqual(
     Array.from(client.extractPageLinks("[[Roadmap]] [Spec](Specs/OKF.md) [Web](https://example.com)")),
@@ -2313,6 +4263,77 @@ assert.match(source, /"vaultInviteSecretInput"/);
       "| Name | Status |\n| --- | --- |\n| Brain | **ready** |",
       "---",
     ].join("\n\n")
+  );
+  assert.equal(
+    client.toggleMarkdownTask(
+      [
+        "# Tasks",
+        "",
+        "- [ ] Preserve this task",
+        "- [x] Keep this task checked",
+        "- Plain list item",
+      ].join("\n"),
+      0,
+      true
+    ),
+    [
+      "# Tasks",
+      "",
+      "- [x] Preserve this task",
+      "- [x] Keep this task checked",
+      "- Plain list item",
+    ].join("\n")
+  );
+  assert.equal(
+    client.toggleMarkdownTask("- [x] First\r\n- [ ] Second", 1, true),
+    "- [x] First\r\n- [x] Second",
+    "A task toggle must preserve the normal draft's line ending style"
+  );
+  assert.equal(
+    client.toggleMarkdownTask(
+      [
+        "```md",
+        "- [ ] Example code, not a visual task",
+        "```",
+        "",
+        "- [ ] The visible task",
+      ].join("\n"),
+      0,
+      true
+    ),
+    [
+      "```md",
+      "- [ ] Example code, not a visual task",
+      "```",
+      "",
+      "- [x] The visible task",
+    ].join("\n"),
+    "A visual task toggle must not change task-looking source inside a fenced code block"
+  );
+  assert.equal(
+    client.taskCheckboxAriaLabel("Ship the explicit draft", false),
+    "Mark task complete: Ship the explicit draft",
+    "An unchecked visual task must announce the action as well as its task text"
+  );
+  assert.equal(
+    client.taskCheckboxAriaLabel("Ship the explicit draft", true),
+    "Mark task incomplete: Ship the explicit draft",
+    "A checked visual task must announce the inverse action"
+  );
+  assert.match(
+    source,
+    /readerPageContent"\)\.addEventListener\("change",[\s\S]{0,220}updateActiveTaskDraft\(event\.target\)/,
+    "Visual task changes must update the active Page draft"
+  );
+  assert.match(
+    updateActiveTaskDraftSource,
+    /rememberActiveDraft\(markdown\);/,
+    "A task toggle must remain a normal local Page draft until Save"
+  );
+  assert.doesNotMatch(
+    updateActiveTaskDraftSource,
+    /protectedRequest|saveActivePage/,
+    "A task toggle must not trigger a background encrypted write"
   );
   assert.equal(JSON.stringify(client.pageStatsForText("# Title\n\nSee [[Roadmap]] and words.")), JSON.stringify({
     links: 1,
@@ -2698,17 +4719,17 @@ assert.match(source, /"vaultInviteSecretInput"/);
   );
   assert.equal(graph.edges.length, 2);
   assert.equal(graph.edges.some((edge) => edge.id.includes("page-hidden")), false);
-  const graphMetrics = client.graphStats(graph, 3);
+  const graphMetrics = client.graphStats(graph);
   assert.equal(graphMetrics.edgeCount, 2);
-  assert.equal(graphMetrics.filteredOutCount, 1);
   assert.equal(graphMetrics.nodeCount, 2);
+  assert.equal("filteredOutCount" in graphMetrics, false);
   assert.deepEqual(
     Array.from(client.graphNeighborIds(graph, "general/page-a")).sort(),
     ["general/page-a", "general/page-b"]
   );
   assert.deepEqual(Array.from(client.graphNeighborIds(graph, null)), []);
 
-  const filteredGraph = client.buildGraphProjection(
+  const fullGraph = client.buildGraphProjection(
     [
       {
         folderId: "general",
@@ -2722,12 +4743,17 @@ assert.match(source, /"vaultInviteSecretInput"/);
         status: "ready",
         text: "# Beta",
       },
-    ],
-    "beta"
+      {
+        folderId: "general",
+        objectId: "page-c",
+        status: "ready",
+        text: "# Gamma",
+      },
+    ]
   );
   assert.deepEqual(
-    Array.from(filteredGraph.nodes.map((node) => node.title).sort()),
-    ["Alpha", "Beta"]
+    Array.from(fullGraph.nodes.map((node) => node.title).sort()),
+    ["Alpha", "Beta", "Gamma"]
   );
   const layout = client.graphLayout(graph, { height: 260, margin: 40, width: 320 });
   assert.equal(layout.size, 2);
@@ -2753,47 +4779,15 @@ assert.match(source, /"vaultInviteSecretInput"/);
   ]);
   const hubLayout = client.graphLayout(hubGraph, { height: 300, margin: 60, width: 400 });
   assert.equal(JSON.stringify(hubLayout.get("general/hub")), JSON.stringify({ x: 200, y: 150 }));
-
-  const replay = client.buildReplayFrames([
-    {
-      sequence: 2,
-      recordEventId: "event-b",
-      page: {
-        folderId: "general",
-        objectId: "page-b",
-        status: "ready",
-        text: "# Beta",
-      },
-    },
-    {
-      sequence: 1,
-      recordEventId: "event-a",
-      page: {
-        folderId: "general",
-        objectId: "page-a",
-        status: "ready",
-        text: "# Alpha\n\n[[Beta]]",
-      },
-    },
-    {
-      sequence: 2,
-      recordEventId: "event-b",
-      page: {
-        folderId: "general",
-        objectId: "page-b",
-        status: "ready",
-        text: "# Duplicate",
-      },
-    },
-  ]);
-  assert.equal(replay.length, 2);
-  assert.deepEqual(
-    Array.from(replay.map((frame) => frame.sequence)),
-    [1, 2]
+  assert.equal(
+    JSON.stringify(client.graphViewBoxForZoom(1)),
+    JSON.stringify({ height: 560, width: 900, x: 0, y: 0, zoom: 1 })
   );
-  assert.equal(replay[0].nodeCount, 1);
-  assert.equal(replay[1].nodeCount, 2);
-  assert.equal(replay[1].edgeCount, 1);
+  assert.equal(
+    JSON.stringify(client.graphViewBoxForZoom(99)),
+    JSON.stringify({ height: 224, width: 360, x: 270, y: 168, zoom: 2.5 })
+  );
+  assert.equal(client.graphViewBoxForZoom(0).zoom, 0.5);
 
   const invitationRows = client.vaultInvitationRows([
     {
@@ -2899,52 +4893,126 @@ assert.match(source, /"vaultInviteSecretInput"/);
   assert.equal(outgoingConnectionRow.acceptable, false);
   assert.equal(client.sharedFolderRelationshipRows(null, null).length, 0);
 
-  const guideAllTodo = client.vaultGuideStepRows("missing", null, false);
-  assert.deepEqual(
-    Array.from(guideAllTodo.map((step) => step.done)),
-    [false, false, false]
+  const accessFailure = accessFailureTestSeams();
+  const handledAccessError = new Error("handled-access-error-sentinel");
+  accessFailure.seams.state.sessionEpoch = 41;
+  accessFailure.seams.state.sessionStatus = "unlocked";
+  accessFailure.seams.state.lastError = null;
+  const accessFeedback = accessFailure.elements.get("clientActionFeedback");
+  accessFailure.seams.failAccessOperation(41, "Add member failed", handledAccessError);
+  assert.equal(accessFailure.seams.state.accessResult?.tone, "error");
+  assert.equal(accessFailure.seams.state.accessResult?.title, "Add member failed");
+  assert.equal(accessFailure.seams.state.accessResult?.detail, "handled-access-error-sentinel");
+  accessFailure.seams.reportClientActionFailure(handledAccessError);
+  assert.equal(accessFeedback.hidden, true);
+  assert.equal(accessFeedback.textContent, "");
+
+  const inFlightSessionEpoch = accessFailure.seams.state.sessionEpoch;
+  const staleAccessError = new Error("stale-access-error-sentinel");
+  accessFailure.seams.lockSession();
+  assert.equal(accessFeedback.hidden, true);
+  accessFailure.seams.failAccessOperation(inFlightSessionEpoch, "Add member failed", staleAccessError);
+  accessFailure.seams.reportClientActionFailure(staleAccessError);
+  assert.equal(accessFeedback.hidden, true);
+  assert.equal(accessFeedback.textContent, "");
+
+  const accessLoss = accessFailureTestSeams();
+  accessLoss.context.window.nostr = {
+    signEvent: async (event) => ({ ...event, id: "auth-event", pubkey: "00".repeat(32), sig: "signature" }),
+  };
+  accessLoss.context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    text: async () => JSON.stringify({ error: "vault access required" }),
+  });
+  const accessLossState = accessLoss.seams.state;
+  accessLossState.activeVaultId = "acme";
+  accessLossState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+  accessLossState.keyring = accessLoss.context.window.FiniteBrainProductClient.createSessionKeyring();
+  accessLossState.keyring.keys.set("acme/general@1", { rawKey: "folder-key-sentinel" });
+  accessLossState.keyring.openedGrants.push({ folderId: "general", keyVersion: 1, vaultId: "acme" });
+  accessLossState.metadata = { name: "Acme private metadata" };
+  accessLossState.projection.pages.set("general/page", {
+    folderId: "general",
+    objectId: "page",
+    text: "decrypted-page-sentinel",
+  });
+  accessLossState.readerBusy = true;
+  accessLossState.sessionEpoch = 52;
+  accessLossState.sessionStatus = "unlocked";
+  accessLoss.context.document.getElementById("pageDraftInput").value = "plaintext-draft-sentinel";
+  let capturedAccessLoss = null;
+  await assert.rejects(
+    () => accessLoss.seams.protectedRequest("/_admin/vaults/acme/metadata"),
+    (error) => {
+      capturedAccessLoss = error;
+      assert.equal(error.status, 403);
+      assert.equal(error.reason, "vault access required");
+      assert.equal(error.path, "/_admin/vaults/acme/metadata");
+      return true;
+    }
   );
-  const guideAdminReady = client.vaultGuideStepRows(
-    "connected",
-    { kind: "organization" },
-    true
+  assert.equal(accessLossState.sessionEpoch, 53);
+  assert.equal(accessLossState.sessionStatus, "locked");
+  assert.equal(
+    accessLossState.sessionNotice,
+    "Vault access changed. This session was locked. Select a Vault you can open, then unlock again."
   );
-  assert.deepEqual(
-    Array.from(guideAdminReady.map((step) => step.done)),
-    [true, true, true]
+  assert.equal(accessLossState.keyring, null);
+  assert.equal(accessLossState.metadata, null);
+  assert.equal(accessLossState.projection.pages.size, 0);
+  assert.equal(accessLossState.readerBusy, false);
+  assert.equal(accessLoss.context.document.getElementById("pageDraftInput").value, "");
+  accessLoss.seams.reportClientActionFailure(capturedAccessLoss);
+  const accessLossFeedback = accessLoss.elements.get("clientActionFeedback");
+  assert.equal(accessLossFeedback.hidden, true);
+  assert.equal(accessLossFeedback.textContent, "");
+
+  const staleAccessLoss = accessFailureTestSeams();
+  staleAccessLoss.seams.state.activeVaultId = "acme";
+  staleAccessLoss.seams.state.sessionEpoch = 81;
+  staleAccessLoss.seams.state.sessionStatus = "unlocked";
+  assert.equal(
+    staleAccessLoss.seams.lockSessionForVaultAccessChange(activeVaultAccessLoss, 80),
+    false,
+    "A stale request must not lock or overwrite a newer session"
   );
-  const guidePersonalVault = client.vaultGuideStepRows(
-    "connected",
-    { kind: "personal" },
-    true
-  );
-  assert.deepEqual(
-    Array.from(guidePersonalVault.map((step) => step.done)),
-    [true, false, false]
-  );
+  assert.equal(staleAccessLoss.seams.state.sessionEpoch, 81);
+  assert.equal(staleAccessLoss.seams.state.sessionStatus, "unlocked");
 
   context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
-  context.document.getElementById("folderKeyInput").value = "runtime-folder-key-sentinel";
-  context.document.getElementById("okfBundleInput").value = "runtime-okf-sentinel";
   context.document.getElementById("vaultInviteSecretInput").value = "runtime-invite-secret-sentinel";
   context.document.getElementById("graphStats").textContent = "12 nodes / 18 links";
   context.document.getElementById("obsidianNewPageButton");
   context.document.getElementById("obsidianNewFolderButton");
+  context.window.location = {
+    hash: "#inviteSecret=invite-secret-sentinel&inviteEmail=not-an-email",
+    href: "http://localhost/client#inviteSecret=invite-secret-sentinel&inviteEmail=not-an-email",
+    pathname: "/client",
+    search: "",
+  };
+  context.window.history = { replaceState() {} };
+  assert.equal(client.populateInviteFromHash(), false);
+  assert.equal(elements.get("clientActionFeedback").hidden, false);
+  assert.equal(
+    elements.get("clientActionFeedback").textContent,
+    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+  );
+  assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
-  assert.equal(elements.get("folderKeyInput").value, "");
-  assert.equal(elements.get("okfBundleInput").value, "");
   assert.equal(elements.get("vaultInviteSecretInput").value, "");
   assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
   assert.equal(
     elements.get("readerPageContent").textContent,
-    "Session locked. Resume to reopen encrypted Folder Key Grants."
+    "Session locked. Unlock to reopen encrypted Folder Key Grants."
   );
   assert.equal(elements.get("graphCanvas").children.length, 0);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");
-  assert.equal(elements.get("replayList").children.length, 0);
   assert.equal(elements.get("obsidianNewPageButton").disabled, true);
   assert.equal(elements.get("obsidianNewFolderButton").disabled, true);
+  assert.equal(elements.get("clientActionFeedback").hidden, true);
+  assert.equal(elements.get("clientActionFeedback").textContent, "");
 
   console.log("product-client deterministic seams ok");
 })().catch((error) => {

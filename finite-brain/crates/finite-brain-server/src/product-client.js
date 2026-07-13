@@ -16,17 +16,29 @@ const FiniteBrainProductClient = (() => {
     metadata: null,
     keyring: null,
     lastError: null,
+    clientActionFeedback: null,
+    clientActionFeedbackGeneration: 0,
     preparedWrite: null,
     preparedWriteTarget: null,
-    okfPlan: null,
+    pageSaveInFlight: null,
     projection: createClientProjection(),
     readerBusy: false,
     selectedFolderId: null,
     selectedPageKey: null,
+    graphZoom: 1,
+    searchHighlight: null,
+    searchHighlightShouldScroll: false,
     activeWorkspaceView: "page",
     activeSidebarMode: "files",
+    settingsModalOpen: false,
+    settingsSection: "session",
+    settingsModalPreviousFocus: null,
+    vaultSwitcherOpen: false,
+    vaultSwitcherPreviousFocus: null,
+    manageVaultsModalOpen: false,
+    manageVaultsModalPreviousFocus: null,
+    manageVaultsReturnToSettings: null,
     activeAccessFolderId: null,
-    activeAccessView: "vault",
     activeAccessIntent: "overview",
     accessBusy: false,
     accessResult: null,
@@ -42,21 +54,40 @@ const FiniteBrainProductClient = (() => {
     folderShareLinksFolderId: null,
     sharedFolderInvitations: null,
     sharedFolderConnections: null,
-    readerMode: "reading",
     editorMode: "visual",
-    vaultControlsCollapsedAfterLoad: false,
     expandedFolderIds: new Set(),
     contextMenuTarget: null,
+    contextMenuPreviousFocus: null,
     commandPaletteOpen: false,
+    commandPaletteSelectedIndex: 0,
     editorSlashOpen: false,
     editorSlashQuery: "",
     editorSlashRange: null,
     editorSlashSelectedIndex: 0,
+    accessFolderDropdownOpen: false,
+    accessFolderFocusedIndex: 0,
     accessFolderDropdownListenerBound: false,
   };
+  const handledAccessFailures = new WeakSet();
+  const handledSessionLockFailures = new WeakSet();
   let pendingInviteNavigation = null;
+  let clientActionFeedbackTimer = null;
 
   const $ = (id) => document.getElementById(id);
+  let lastErrorValue = state.lastError;
+  Object.defineProperty(state, "lastError", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return lastErrorValue;
+    },
+    set(value) {
+      const nextError = value || null;
+      if (nextError) clearClientActionFeedback({ render: false });
+      lastErrorValue = nextError;
+      renderClientActionFeedback();
+    },
+  });
   const setOptionalDisabled = (id, disabled) => {
     const element = $(id);
     if (element) element.disabled = disabled;
@@ -74,20 +105,28 @@ const FiniteBrainProductClient = (() => {
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
   const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
+  const VAULT_ACCESS_CHANGED_NOTICE =
+    "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
+  const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
+  const CLIENT_ACTION_FEEDBACK = Object.freeze({
+    inviteLinkCopyFailure: "Could not copy private invite link. Try again.",
+    inviteLinkCopySuccess: "Private invite link copied.",
+    folderIdCopyFailure: "Could not copy Folder ID. Try again.",
+    folderIdCopySuccess: "Folder ID copied.",
+    pageIdCopyFailure: "Could not copy Page ID. Try again.",
+    pageIdCopySuccess: "Page ID copied.",
+    failure:
+      "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session.",
+  });
+  const CLIENT_ACTION_FEEDBACK_DURATION_MS = 5000;
   const SESSION_PLAINTEXT_INPUT_IDS = [
     "accessAddPersonInput",
-    "accessOrganizationVaultNameInput",
     "accessShareExpiresAtInput",
     "accessShareLinkInput",
     "accessShareMountInput",
     "accessShareTargetInput",
-    "accessTargetNpubInput",
     "commandPaletteInput",
-    "folderKeyInput",
-    "graphFilterInput",
-    "okfBundleInput",
-    "okfDestinationFolderInput",
-    "organizationVaultNameInput",
+    "manageOrganizationVaultNameInput",
     "pageBaseRevisionInput",
     "pageDraftInput",
     "pageFolderIdInput",
@@ -512,6 +551,9 @@ const FiniteBrainProductClient = (() => {
   ]);
   const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
   const graphViewport = { height: 560, width: 900 };
+  const GRAPH_ZOOM_MAX = 2.5;
+  const GRAPH_ZOOM_MIN = 0.5;
+  const GRAPH_ZOOM_STEP = 1.25;
   const EDITOR_SLASH_COMMANDS = [
     { id: "paragraph", label: "Paragraph", detail: "Normal text", aliases: ["p", "text"] },
     { id: "heading1", label: "Heading 1", detail: "Large section title", aliases: ["h1", "title"] },
@@ -530,6 +572,71 @@ const FiniteBrainProductClient = (() => {
     if (!value) return "-";
     if (value.length <= 18) return value;
     return `${value.slice(0, 10)}...${value.slice(-8)}`;
+  }
+
+  function renderClientActionFeedback() {
+    const feedback = $("clientActionFeedback");
+    if (!feedback) return;
+    const feedbackState = state.clientActionFeedback ||
+      (lastErrorValue ? { message: CLIENT_ACTION_FEEDBACK.failure, tone: "error" } : null);
+    const visible = Boolean(feedbackState);
+    feedback.hidden = !visible;
+    feedback.textContent = feedbackState?.message || "";
+    if (feedbackState) feedback.dataset.tone = feedbackState.tone;
+    else delete feedback.dataset.tone;
+  }
+
+  function clearClientActionFeedbackTimer() {
+    if (clientActionFeedbackTimer === null) return;
+    if (typeof window.clearTimeout === "function") {
+      window.clearTimeout(clientActionFeedbackTimer);
+    }
+    clientActionFeedbackTimer = null;
+  }
+
+  function clearClientActionFeedback(options = {}) {
+    clearClientActionFeedbackTimer();
+    state.clientActionFeedbackGeneration += 1;
+    state.clientActionFeedback = null;
+    if (options.render !== false) renderClientActionFeedback();
+    return state.clientActionFeedbackGeneration;
+  }
+
+  function setClientActionFeedback(tone, message, options = {}) {
+    const generation = options.generation ?? state.clientActionFeedbackGeneration + 1;
+    if (options.generation !== undefined && generation !== state.clientActionFeedbackGeneration) {
+      return false;
+    }
+    // The newest successful client action supersedes an older generic error.
+    // Otherwise that error would reappear when this short-lived notice expires.
+    if (tone === "success") lastErrorValue = null;
+    clearClientActionFeedbackTimer();
+    state.clientActionFeedbackGeneration = generation;
+    state.clientActionFeedback = { message, tone };
+    if (options.expires !== false && typeof window.setTimeout === "function") {
+      clientActionFeedbackTimer = window.setTimeout(() => {
+        if (state.clientActionFeedbackGeneration !== generation) return;
+        state.clientActionFeedback = null;
+        clientActionFeedbackTimer = null;
+        renderClientActionFeedback();
+      }, CLIENT_ACTION_FEEDBACK_DURATION_MS);
+    }
+    renderClientActionFeedback();
+    return true;
+  }
+
+  function reportClientActionFailure(error) {
+    if (error && typeof error === "object" && handledAccessFailures.has(error)) return;
+    if (error && typeof error === "object" && handledSessionLockFailures.has(error)) return;
+    state.lastError = error instanceof Error ? error.message : String(error || "Action failed");
+  }
+
+  function markAccessFailureHandled(error) {
+    if (error && typeof error === "object") handledAccessFailures.add(error);
+  }
+
+  function markSessionLockFailureHandled(error) {
+    if (error && typeof error === "object") handledSessionLockFailures.add(error);
   }
 
   function publicKeyIdentityFromInput(input) {
@@ -725,10 +832,20 @@ const FiniteBrainProductClient = (() => {
     return state.metadata?.name || activeVaultOption()?.name || state.activeVaultId || "Personal vault";
   }
 
-  function resetVaultSessionState() {
+  function nestedManageVaultsReturnToken() {
+    if (!state.manageVaultsModalOpen || !state.manageVaultsReturnToSettings) return null;
+    // This only carries a Settings section and a DOM focus target. It is not
+    // session content, so a nested Manage Vaults reset can return safely.
+    return state.manageVaultsReturnToSettings;
+  }
+
+  function resetVaultSessionState(options = {}) {
+    const returnToSettings =
+      options.preserveManageVaultsReturnToSettings === false ? null : nestedManageVaultsReturnToken();
     state.sessionEpoch += 1;
     pendingInviteNavigation = null;
     clearSessionSecretsAndPlaintext(state);
+    if (returnToSettings) state.manageVaultsReturnToSettings = returnToSettings;
     clearSessionOwnedDom();
   }
 
@@ -749,26 +866,27 @@ const FiniteBrainProductClient = (() => {
       "folderShareLinkList",
       "graphCanvas",
       "readerFolderList",
-      "replayList",
       "sharedFolderList",
       "sidebarSearchResults",
       "vaultInvitationList",
       "vaultPeopleList",
-      "vaultSwitchList",
+      "vaultSwitcherList",
+      "manageVaultsList",
     ]) {
       $(id)?.replaceChildren?.();
     }
     setText("readerPageTitle", "Session locked");
-    setText("readerPagePath", "Resume the session to reopen encrypted Folder Key Grants");
+    setText("readerPagePath", "Unlock the session to reopen encrypted Folder Key Grants");
     const readerContent = $("readerPageContent");
     if (readerContent) {
       readerContent.replaceChildren?.();
-      readerContent.textContent = "Session locked. Resume to reopen encrypted Folder Key Grants.";
+      readerContent.textContent = "Session locked. Unlock to reopen encrypted Folder Key Grants.";
     }
     if (typeof document.title === "string") document.title = "FiniteBrain";
     setPill("graphStats", "0 nodes / 0 links", "muted");
     setText("graphEmptyTitle", "No graph yet");
-    setText("graphEmptyCopy", "Resume the session to rebuild the local graph.");
+    setText("graphEmptyCopy", "Unlock the session to rebuild the local graph.");
+    setText("graphZoomValue", "100%");
     const graphEmptyState = $("graphEmptyState");
     if (graphEmptyState) graphEmptyState.hidden = false;
     const editorDrawer = $("editorDrawer");
@@ -780,9 +898,26 @@ const FiniteBrainProductClient = (() => {
   }
 
   function lockSession() {
-    resetVaultSessionState();
+    resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
     render();
     log("Locked Product Client session.", { status: state.sessionStatus });
+  }
+
+  function lockSessionForVaultAccessChange(error, requestEpoch) {
+    if (
+      !sessionOperationIsCurrent(state.sessionEpoch, requestEpoch, state.sessionStatus) ||
+      !isActiveVaultAuthorizationLoss(error, state.activeVaultId)
+    ) {
+      return false;
+    }
+    markSessionLockFailureHandled(error);
+    resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
+    state.sessionNotice = VAULT_ACCESS_CHANGED_NOTICE;
+    render();
+    log("Locked Product Client session after Vault access changed.", {
+      status: state.sessionStatus,
+    });
+    return true;
   }
 
   function handlePageHide() {
@@ -803,7 +938,6 @@ const FiniteBrainProductClient = (() => {
         target.metadata ||
         target.preparedWrite ||
         target.preparedWriteTarget ||
-        target.okfPlan ||
         target.lastEmailInviteSecret ||
         target.lastEmailInviteUrl ||
         target.lastEmailInvitePostProof ||
@@ -830,22 +964,14 @@ const FiniteBrainProductClient = (() => {
       clearSessionSecretsAndPlaintext(state);
       clearSessionOwnedDom();
     }
-    throw new Error("Session changed while protected client work was in progress; resume again");
+    throw new Error("Session changed while protected client work was in progress; unlock again");
   }
 
   function setActiveVaultId(vaultId, options = {}) {
     const nextVaultId = vaultId || state.activeVaultId || personalVaultIdForPubkey(state.pubkeyHex);
     const changed = nextVaultId !== state.activeVaultId;
     state.activeVaultId = nextVaultId;
-    const input = $("vaultIdInput");
-    if (input) input.value = nextVaultId;
-    const select = $("vaultSelect");
-    if (select) select.value = nextVaultId;
     if (changed && options.reset !== false) resetVaultSessionState();
-  }
-
-  function selectedVaultIdFromControls() {
-    return $("vaultSelect")?.value || $("vaultIdInput")?.value || state.activeVaultId;
   }
 
   function lockedVaultSelection(status, activeVaultId, visibleVaults) {
@@ -874,78 +1000,8 @@ const FiniteBrainProductClient = (() => {
     const normalized = visibleVaults.map(normalizeVisibleVault).filter(Boolean);
     if (normalized.some((vault) => vault.vaultId === activeVaultId)) return null;
     const personal = normalized.find((vault) => vault.kind === "personal");
-    const fallbackVaultId = personal?.vaultId || personalVaultIdForPubkey(pubkeyHex);
+    const fallbackVaultId = personal?.vaultId || normalized[0]?.vaultId || personalVaultIdForPubkey(pubkeyHex);
     return fallbackVaultId && fallbackVaultId !== activeVaultId ? fallbackVaultId : null;
-  }
-
-  function withActiveVaultOption(options, activeVaultId, metadata) {
-    if (
-      !activeVaultId ||
-      activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID ||
-      options.some((vault) => vault.vaultId === activeVaultId)
-    ) {
-      return options;
-    }
-    const currentMetadata = metadata?.vaultId === activeVaultId ? metadata : null;
-    const kind = currentMetadata?.kind === "personal" ? "personal" : "organization";
-    return [
-      ...options,
-      {
-        vaultId: activeVaultId,
-        kind,
-        name: currentMetadata?.name || activeVaultId,
-        role: currentMetadata?.role || (kind === "personal" ? "owner" : "member"),
-      },
-    ];
-  }
-
-  function renderVaultSelect() {
-    const select = $("vaultSelect");
-    if (!select) return;
-    const lockedSelection = lockedVaultSelection(
-      state.sessionStatus,
-      state.activeVaultId,
-      state.visibleVaults
-    );
-    if (lockedSelection) {
-      const option = document.createElement("option");
-      option.value = lockedSelection.value;
-      option.textContent = lockedSelection.label;
-      select.replaceChildren(option);
-      select.value = lockedSelection.value;
-      const input = $("vaultIdInput");
-      if (input) input.value = lockedSelection.value;
-      return;
-    }
-    const options = withActiveVaultOption(
-      visibleVaultOptions(),
-      state.activeVaultId,
-      state.metadata
-    );
-    const personalOptions = options.filter((vault) => vault.kind === "personal");
-    const organizationOptions = options.filter((vault) => vault.kind === "organization");
-    const groups = [
-      ["Personal", personalOptions],
-      ["Organizations", organizationOptions],
-    ];
-    const nodes = [];
-    for (const [label, vaults] of groups) {
-      if (!vaults.length) continue;
-      const group = document.createElement("optgroup");
-      group.label = label;
-      for (const vault of vaults) {
-        const option = document.createElement("option");
-        option.value = vault.vaultId;
-        option.textContent =
-          vault.kind === "personal" ? vault.name : `${vault.name} - ${vault.role}`;
-        group.appendChild(option);
-      }
-      nodes.push(group);
-    }
-    select.replaceChildren(...nodes);
-    select.value = state.activeVaultId;
-    const input = $("vaultIdInput");
-    if (input) input.value = state.activeVaultId;
   }
 
   function vaultIdFromName(prefix, name) {
@@ -1015,14 +1071,13 @@ const FiniteBrainProductClient = (() => {
       const sessionEpoch = state.sessionEpoch;
       const expectedPubkeyHex = state.pubkeyHex;
       requireCurrentSessionEpoch(sessionEpoch);
-      if (!expectedPubkeyHex) throw new Error("Connect and Resume the signer identity before signing");
+      if (!expectedPubkeyHex) throw new Error("Connect a signer, then unlock the session before signing");
       const signed = await provider.signEvent.call(provider, event);
       requireCurrentSessionEpoch(sessionEpoch);
       if (signedEventMatchesPinnedIdentity(expectedPubkeyHex, signed)) return signed;
-      resetVaultSessionState();
+      resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
       state.pubkeyHex = null;
       state.signerStatus = deriveSignerState(window.nostr).status;
-      setText("signerDetail", "Signer identity changed. The previous session was locked.");
       render();
       throw new Error("Signer identity changed while signing; the session was locked");
     };
@@ -1132,13 +1187,13 @@ const FiniteBrainProductClient = (() => {
   function accessActionRoute(action, target) {
     if (!target?.folderId) return null;
     if (action === "share-folder") {
-      return { folderId: target.folderId, intent: "links", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "links", settingsSection: "access" };
     }
     if (action === "manage-access") {
-      return { folderId: target.folderId, intent: "people", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "people", settingsSection: "access" };
     }
     if (action === "inspect-access") {
-      return { folderId: target.folderId, intent: "overview", sidebarMode: "access" };
+      return { folderId: target.folderId, intent: "overview", settingsSection: "access" };
     }
     return null;
   }
@@ -1149,27 +1204,14 @@ const FiniteBrainProductClient = (() => {
     return "overview";
   }
 
-  function normalizeAccessView(view) {
-    return view === "vault" ? "vault" : "folder";
-  }
-
-  function setAccessView(view) {
-    state.activeAccessView = normalizeAccessView(view);
-    state.accessResult = null;
-    render();
-    if (state.activeAccessView === "vault" && state.vaultInvitations === null) {
-      refreshAccessManagementListsInBackground();
-    }
-  }
-
-  // Vaults/Access tabs share one sidebar panel; intent (overview/people/links) only
-  // affects the Access tab chrome such as expanded share links or the add-person form.
+  // Intent only affects the Settings Access chrome such as expanded share links
+  // or the add-person form. Vault selection lives in the footer and Manage Vaults.
   function applyAccessIntentChrome(row) {
     const intent = accessIntentValue(state.activeAccessIntent);
     const advancedSection = $("accessAdvancedSection");
     const addPanel = $("accessAddPersonPanel");
     const addForm = $("accessAddPersonForm");
-    if (!row || normalizeAccessView(state.activeAccessView) !== "folder") return;
+    if (!row) return;
 
     if (intent === "links" && advancedSection) {
       advancedSection.open = true;
@@ -1882,7 +1924,13 @@ const FiniteBrainProductClient = (() => {
     target.projection = createClientProjection();
     target.preparedWrite = null;
     target.preparedWriteTarget = null;
-    target.okfPlan = null;
+    target.pageSaveInFlight = null;
+    if (target === state) {
+      clearClientActionFeedback({ render: false });
+    } else {
+      target.clientActionFeedbackGeneration = (target.clientActionFeedbackGeneration || 0) + 1;
+      target.clientActionFeedback = null;
+    }
     target.lastError = null;
     target.accessResult = null;
     target.lastShareLinkId = null;
@@ -1898,22 +1946,27 @@ const FiniteBrainProductClient = (() => {
     target.sharedFolderConnections = null;
     target.selectedFolderId = null;
     target.selectedPageKey = null;
+    target.graphZoom = 1;
+    target.searchHighlight = null;
+    target.searchHighlightShouldScroll = false;
     target.activeWorkspaceView = "page";
     target.activeSidebarMode = "files";
     target.activeAccessFolderId = null;
-    target.activeAccessView = "vault";
     target.activeAccessIntent = "overview";
-    target.readerMode = "reading";
     target.editorMode = "visual";
-    target.vaultControlsCollapsedAfterLoad = false;
     target.expandedFolderIds = new Set();
     target.contextMenuTarget = null;
+    target.contextMenuPreviousFocus = null;
     target.commandPaletteOpen = false;
+    target.commandPaletteSelectedIndex = 0;
     target.editorSlashOpen = false;
     target.editorSlashQuery = "";
     target.editorSlashRange = null;
+    target.accessFolderDropdownOpen = false;
+    target.accessFolderFocusedIndex = 0;
     target.readerBusy = false;
     target.accessBusy = false;
+    target.manageVaultsReturnToSettings = null;
     return target;
   }
 
@@ -1931,15 +1984,454 @@ const FiniteBrainProductClient = (() => {
         action: "Lock session",
         detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
         locked: false,
-        title: "Resuming session",
+        title: "Unlocking session",
       };
     }
     return {
-      action: "Resume session",
-      detail: "Folder Keys and temporary plaintext are cleared. Resume to reopen encrypted grants.",
+      action: "Unlock session",
+      detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
       locked: true,
       title: "Session locked",
     };
+  }
+
+  function sessionIdentityLabel() {
+    if (state.signerStatus === "connected" && state.pubkeyHex) {
+      return shortKey(npubFromHex(state.pubkeyHex));
+    }
+    if (state.signerStatus === "ready") return "Signer ready";
+    if (state.signerStatus === "checking") return "Checking signer";
+    return "Signer unavailable";
+  }
+
+  const SETTINGS_SECTIONS = Object.freeze(["session", "vault", "access", "invitations"]);
+
+  function settingsSectionsForSession(sessionStatus = state.sessionStatus) {
+    return sessionStatus === SESSION_STATUS.UNLOCKED ? SETTINGS_SECTIONS : ["session"];
+  }
+
+  function normalizeSettingsSection(section, sessionStatus = state.sessionStatus) {
+    return settingsSectionsForSession(sessionStatus).includes(section) ? section : "session";
+  }
+
+  function settingsSignerView() {
+    const signer = deriveSignerState(window.nostr);
+    if (state.signerStatus === "connected" && state.pubkeyHex) {
+      return {
+        canConnect: false,
+        detail: `Connected as ${sessionIdentityLabel()}. Signed Vault requests use this Member Identity.`,
+        title: "Signer connected",
+      };
+    }
+    if (state.signerStatus === "checking") {
+      return {
+        canConnect: false,
+        detail: "Looking for a NIP-07 signer in this browser.",
+        title: "Checking signer",
+      };
+    }
+    return {
+      canConnect: signer.canConnect,
+      detail: signer.detail,
+      title: signer.canConnect ? "Signer ready" : "Signer unavailable",
+    };
+  }
+
+  function isSequentiallyFocusable(element) {
+    const tabIndex = Number(element?.tabIndex);
+    if (Number.isFinite(tabIndex)) return tabIndex >= 0;
+    const tabIndexAttribute = element?.getAttribute?.("tabindex");
+    return tabIndexAttribute === null || tabIndexAttribute === undefined || Number(tabIndexAttribute) >= 0;
+  }
+
+  function isVisibleSequentiallyFocusable(element) {
+    return !element.hidden && !element.closest?.("[hidden]") && isSequentiallyFocusable(element);
+  }
+
+  function settingsModalFocusableElements() {
+    const modal = $("settingsModal");
+    if (!modal) return [];
+    return Array.from(
+      modal.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter(isVisibleSequentiallyFocusable);
+  }
+
+  function mountAccessPanelInSettings() {
+    const panel = $("accessSidebarPanel");
+    const mount = $("settingsAccessPanelMount");
+    if (!panel || !mount || panel.parentElement === mount) return;
+    mount.appendChild(panel);
+    panel.classList.remove("sidebar-mode-panel", "sidebar-tool-panel");
+    panel.hidden = false;
+    panel.removeAttribute("aria-hidden");
+  }
+
+  function mountInvitationPanelInSettings() {
+    const mount = $("settingsInvitationsPanelMount");
+    if (!mount) return;
+    const invitationNodes = [
+      $("vaultInvitationActionSection"),
+      $("vaultInvitationPanel"),
+      $("vaultInvitationListSection"),
+      $("sharedFolderSection"),
+    ].filter(Boolean);
+    for (const node of invitationNodes) {
+      if (node.parentElement !== mount) mount.appendChild(node);
+    }
+  }
+
+  function focusSettingsSection(section = state.settingsSection) {
+    const sessionOnly = settingsSectionsForSession().length === 1;
+    const resumeButton = $("resumeSessionButton");
+    const navButton = sessionOnly
+      ? null
+      : $(
+          section === "vault"
+            ? "settingsNavVault"
+            : section === "access"
+              ? "settingsNavAccess"
+              : section === "invitations"
+                ? "settingsNavInvitations"
+                : "settingsNavSession"
+        );
+    const focusTarget = sessionOnly
+      ? (resumeButton && !resumeButton.disabled ? resumeButton : $("closeSettingsButton"))
+      : navButton;
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => focusTarget?.focus?.());
+    } else {
+      focusTarget?.focus?.();
+    }
+  }
+
+  function openSettingsModal(section = state.settingsSection) {
+    const modal = $("settingsModal");
+    if (!modal) return;
+    if (state.vaultSwitcherOpen) closeVaultSwitcher({ restoreFocus: false });
+    if (state.manageVaultsModalOpen) closeManageVaultsModal();
+    if (!state.settingsModalOpen) {
+      state.settingsModalPreviousFocus = document.activeElement || null;
+    }
+    state.settingsSection = normalizeSettingsSection(section);
+    state.settingsModalOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    focusSettingsSection(state.settingsSection);
+  }
+
+  function closeSettingsModal(options = {}) {
+    if (!state.settingsModalOpen) return;
+    state.settingsModalOpen = false;
+    closeAccessFolderDropdown();
+    const previousFocus = state.settingsModalPreviousFocus;
+    state.settingsModalPreviousFocus = null;
+    render();
+    if (options.restoreFocus !== false) previousFocus?.focus?.();
+  }
+
+  function overlayFocusableElements(id) {
+    const overlay = $(id);
+    if (!overlay) return [];
+    return Array.from(
+      overlay.querySelectorAll?.(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || []
+    ).filter(isVisibleSequentiallyFocusable);
+  }
+
+  function vaultSwitcherFocusableElements() {
+    return overlayFocusableElements("vaultSwitcherMenu");
+  }
+
+  function documentFocusableElements(excludedContainer = null) {
+    return Array.from(
+      document.querySelectorAll?.(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ) || []
+    ).filter(
+      (element) =>
+        isVisibleSequentiallyFocusable(element) &&
+        !excludedContainer?.contains?.(element)
+    );
+  }
+
+  function moveVaultSwitcherFocusOut(options = {}) {
+    const menu = $("vaultSwitcherMenu");
+    const trigger = $("sessionAccountVaultButton");
+    const focusable = documentFocusableElements(menu);
+    const triggerIndex = focusable.indexOf(trigger);
+    const direction = options.backwards ? -1 : 1;
+    const nextTarget = triggerIndex >= 0 ? focusable[triggerIndex + direction] : null;
+    closeVaultSwitcher({ restoreFocus: false });
+    nextTarget?.focus?.();
+  }
+
+  function focusVaultSwitcherItem(index = 0) {
+    const items = vaultSwitcherFocusableElements();
+    if (!items.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), items.length - 1);
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => items[nextIndex]?.focus?.());
+    } else {
+      items[nextIndex]?.focus?.();
+    }
+  }
+
+  function openVaultSwitcher() {
+    if (state.vaultSwitcherOpen) {
+      closeVaultSwitcher();
+      return;
+    }
+    if (state.settingsModalOpen) closeSettingsModal();
+    if (state.manageVaultsModalOpen) closeManageVaultsModal();
+    state.vaultSwitcherPreviousFocus = document.activeElement || null;
+    state.vaultSwitcherOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    focusVaultSwitcherItem(0);
+  }
+
+  function closeVaultSwitcher(options = {}) {
+    if (!state.vaultSwitcherOpen) return;
+    state.vaultSwitcherOpen = false;
+    const previousFocus = state.vaultSwitcherPreviousFocus;
+    state.vaultSwitcherPreviousFocus = null;
+    render();
+    if (options.restoreFocus !== false) previousFocus?.focus?.();
+  }
+
+  function manageVaultsModalFocusableElements() {
+    return overlayFocusableElements("manageVaultsModal");
+  }
+
+  function focusManageVaultsReturnTarget() {
+    if (state.settingsSection !== "vault") {
+      focusSettingsSection(state.settingsSection);
+      return;
+    }
+    const target = $("settingsManageVaultsButton");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => target?.focus?.());
+    } else {
+      target?.focus?.();
+    }
+  }
+
+  function openManageVaultsModal(options = {}) {
+    if (state.manageVaultsModalOpen) return;
+    const menuFocus = state.vaultSwitcherPreviousFocus;
+    const returnToSettings = Boolean(options.returnToSettings && state.settingsModalOpen);
+    state.manageVaultsReturnToSettings = returnToSettings
+      ? {
+          previousFocus: state.settingsModalPreviousFocus,
+          section: "vault",
+        }
+      : null;
+    state.manageVaultsModalPreviousFocus = returnToSettings
+      ? null
+      : menuFocus || document.activeElement || null;
+    closeVaultSwitcher({ restoreFocus: false });
+    if (state.settingsModalOpen) {
+      closeSettingsModal({ restoreFocus: false });
+    }
+    state.manageVaultsModalOpen = true;
+    closeContextMenu();
+    closeCommandPalette();
+    closeEditorSlashMenu();
+    render();
+    const focusTarget = $("closeManageVaultsButton");
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => focusTarget?.focus?.());
+    } else {
+      focusTarget?.focus?.();
+    }
+  }
+
+  function closeManageVaultsModal() {
+    if (!state.manageVaultsModalOpen) return;
+    state.manageVaultsModalOpen = false;
+    const returnToSettings = state.manageVaultsReturnToSettings;
+    state.manageVaultsReturnToSettings = null;
+    const previousFocus = state.manageVaultsModalPreviousFocus;
+    state.manageVaultsModalPreviousFocus = null;
+    if (returnToSettings) {
+      state.settingsSection = returnToSettings.section;
+      state.settingsModalPreviousFocus = returnToSettings.previousFocus;
+      state.settingsModalOpen = true;
+      render();
+      focusManageVaultsReturnTarget();
+      return;
+    }
+    render();
+    previousFocus?.focus?.();
+  }
+
+  function manageVaultsLoadAction() {
+    const operation = state.sessionStatus === SESSION_STATUS.LOCKED
+      ? resumeSession()
+      : loadVaultReader();
+    operation.catch((error) => {
+      reportClientActionFailure(error);
+      log("Failed to load Vault from Manage Vaults.", { error: error.message });
+      state.readerBusy = false;
+      render();
+    });
+  }
+
+  function setSettingsSection(section) {
+    state.settingsSection = normalizeSettingsSection(section);
+    render();
+    focusSettingsSection(state.settingsSection);
+  }
+
+  function renderSettingsModal() {
+    const modal = $("settingsModal");
+    if (!modal) return;
+    modal.hidden = !state.settingsModalOpen;
+    modal.setAttribute("aria-hidden", String(!state.settingsModalOpen));
+    const shell = document.querySelector?.(".obsidian-shell");
+    if (shell) shell.dataset.settingsOpen = state.settingsModalOpen ? "true" : "false";
+    const availableSections = settingsSectionsForSession(state.sessionStatus);
+    const sessionOnly = availableSections.length === 1;
+    const forcedSessionSection = !availableSections.includes(state.settingsSection);
+    state.settingsSection = normalizeSettingsSection(state.settingsSection);
+    const settingsNav = $("settingsNav");
+    if (settingsNav) {
+      settingsNav.hidden = sessionOnly;
+      settingsNav.setAttribute("aria-hidden", String(sessionOnly));
+    }
+    $("settingsModalLayout")?.classList?.toggle("settings-session-only", sessionOnly);
+    const sessionNav = $("settingsNavSession");
+    const vaultNav = $("settingsNavVault");
+    const accessNav = $("settingsNavAccess");
+    const invitationsNav = $("settingsNavInvitations");
+    const sessionPanel = $("settingsSessionPanel");
+    const vaultPanel = $("settingsVaultPanel");
+    const accessPanel = $("settingsAccessPanel");
+    const invitationsPanel = $("settingsInvitationsPanel");
+    const sessionActive = state.settingsSection === "session";
+    const vaultActive = state.settingsSection === "vault";
+    const accessActive = state.settingsSection === "access";
+    const invitationsActive = state.settingsSection === "invitations";
+    if (sessionNav) {
+      sessionNav.hidden = false;
+      sessionNav.className = `settings-nav-item${sessionActive ? " active" : ""}`;
+      sessionNav.setAttribute("aria-selected", String(sessionActive));
+      sessionNav.tabIndex = sessionActive ? 0 : -1;
+    }
+    if (vaultNav) {
+      vaultNav.hidden = sessionOnly;
+      vaultNav.className = `settings-nav-item${vaultActive ? " active" : ""}`;
+      vaultNav.setAttribute("aria-selected", String(vaultActive));
+      vaultNav.tabIndex = vaultActive ? 0 : -1;
+    }
+    if (accessNav) {
+      accessNav.hidden = sessionOnly;
+      accessNav.className = `settings-nav-item${accessActive ? " active" : ""}`;
+      accessNav.setAttribute("aria-selected", String(accessActive));
+      accessNav.tabIndex = accessActive ? 0 : -1;
+    }
+    if (invitationsNav) {
+      invitationsNav.hidden = sessionOnly;
+      invitationsNav.className = `settings-nav-item${invitationsActive ? " active" : ""}`;
+      invitationsNav.setAttribute("aria-selected", String(invitationsActive));
+      invitationsNav.tabIndex = invitationsActive ? 0 : -1;
+    }
+    if (sessionPanel) {
+      sessionPanel.hidden = !sessionActive;
+      sessionPanel.setAttribute("aria-hidden", String(!sessionActive));
+    }
+    if (vaultPanel) {
+      vaultPanel.hidden = !vaultActive;
+      vaultPanel.setAttribute("aria-hidden", String(!vaultActive));
+    }
+    if (accessPanel) {
+      accessPanel.hidden = !accessActive;
+      accessPanel.setAttribute("aria-hidden", String(!accessActive));
+    }
+    if (invitationsPanel) {
+      invitationsPanel.hidden = !invitationsActive;
+      invitationsPanel.setAttribute("aria-hidden", String(!invitationsActive));
+    }
+    setText("settingsVaultName", activeVaultLabel());
+    setText("settingsVaultIdentity", sessionIdentityLabel());
+    setText("settingsVaultStatus", sessionStatusView(state.sessionStatus).title);
+    const signer = settingsSignerView();
+    setText("settingsSignerTitle", signer.title);
+    setText("settingsSignerDetail", signer.detail);
+    safeSetHidden("settingsConnectSignerButton", !signer.canConnect);
+    setOptionalDisabled(
+      "settingsConnectSignerButton",
+      !signer.canConnect
+    );
+    if (state.settingsModalOpen && forcedSessionSection) focusSettingsSection("session");
+  }
+
+  function renderVaultSwitcher() {
+    const menu = $("vaultSwitcherMenu");
+    const trigger = $("sessionAccountVaultButton");
+    if (!menu || !trigger) return;
+    menu.hidden = !state.vaultSwitcherOpen;
+    trigger.setAttribute("aria-expanded", String(state.vaultSwitcherOpen));
+    setText("vaultSwitcherCount", `${visibleVaultOptions().length}`);
+    const rows = visibleVaultOptions();
+    const emptyText = state.signerStatus === "connected"
+      ? "No Vaults available."
+      : "Connect a signer to list Vaults.";
+    setList("vaultSwitcherList", rows, emptyText, (item, vault) => {
+      const button = vaultSwitchButton(vault, "switcher");
+      button.setAttribute("role", "menuitem");
+      item.appendChild(button);
+    });
+  }
+
+  function renderManageVaultsModal() {
+    const modal = $("manageVaultsModal");
+    if (!modal) return;
+    modal.hidden = !state.manageVaultsModalOpen;
+    modal.setAttribute("aria-hidden", String(!state.manageVaultsModalOpen));
+    const shell = document.querySelector?.(".obsidian-shell");
+    if (shell) shell.dataset.manageVaultsOpen = state.manageVaultsModalOpen ? "true" : "false";
+    setText("manageVaultsCurrentName", activeVaultLabel());
+    const status = sessionStatusView(state.sessionStatus);
+    setText(
+      "manageVaultsCurrentDetail",
+      state.metadata
+        ? `${status.title}. ${vaultManagementSummary(state.metadata)}`
+        : `${status.title}. Select a Vault, then ${status.locked ? "unlock it" : "load it"} to open encrypted content.`
+    );
+    const signerConnected = state.signerStatus === "connected";
+    safeSetHidden("manageVaultsConnectSignerButton", signerConnected);
+    setOptionalDisabled(
+      "manageVaultsConnectSignerButton",
+      !deriveSignerState(window.nostr).canConnect
+    );
+    const action = state.sessionStatus === SESSION_STATUS.LOCKED
+      ? "Unlock Vault"
+      : state.sessionStatus === SESSION_STATUS.RESUMING
+        ? "Unlocking…"
+        : "Load";
+    setText("manageVaultsLoadButton", action);
+    setOptionalDisabled(
+      "manageVaultsLoadButton",
+      state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadVault()
+    );
+    safeSetHidden("manageVaultCreateDetails", !showsCreateOrganizationControl(state.metadata));
+    setOptionalDisabled(
+      "manageCreateOrganizationVaultButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
+    );
+    const rows = visibleVaultOptions();
+    const emptyText = signerConnected ? "No Vaults available." : "Connect a signer to list Vaults.";
+    setList("manageVaultsList", rows, emptyText, (item, vault) => {
+      item.appendChild(vaultSwitchButton(vault, "manage"));
+    });
   }
 
   function sessionGrantOpeningAllowed(status) {
@@ -2605,6 +3097,11 @@ const FiniteBrainProductClient = (() => {
         });
         continue;
       }
+      if (object.deleted) {
+        next.pages.delete(key);
+        next.localDrafts.delete(key);
+        continue;
+      }
       next.pages.set(key, object);
     }
     return next;
@@ -2828,7 +3325,7 @@ const FiniteBrainProductClient = (() => {
     return lines.join("\n");
   }
 
-  function markdownPreviewBlocks(markdown) {
+  function markdownPreviewBlocks(markdown, options = {}) {
     const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
     const blocks = [];
     let paragraph = [];
@@ -2899,10 +3396,12 @@ const FiniteBrainProductClient = (() => {
           const item = parseMarkdownListItem(lines[index]);
           if (!item || item.ordered !== ordered) break;
           if (start === null) start = item.start;
-          items.push({
+          const itemRecord = {
             checked: item.checked,
             text: item.text,
-          });
+          };
+          if (options.includeSourcePositions) itemRecord.sourceLineIndex = index;
+          items.push(itemRecord);
           index += 1;
         }
         index -= 1;
@@ -3414,8 +3913,7 @@ const FiniteBrainProductClient = (() => {
     return { skipped, writes };
   }
 
-  function buildGraphProjection(pages, filterText = "") {
-    const filter = normalizePageReference(filterText);
+  function buildGraphProjection(pages) {
     const visiblePages = [...pages].filter(isReadablePage);
     const nodes = visiblePages.map((page) => {
       const id = pageKey(page.folderId, page.objectId);
@@ -3429,11 +3927,6 @@ const FiniteBrainProductClient = (() => {
       };
     });
     const titleToNode = new Map(nodes.map((node) => [node.normalizedTitle, node]));
-    const includedNodeIds = new Set(
-      nodes
-        .filter((node) => !filter || node.normalizedTitle.includes(filter))
-        .map((node) => node.id)
-    );
     const edges = [];
     for (const page of visiblePages) {
       const source = nodes.find((node) => node.id === pageKey(page.folderId, page.objectId));
@@ -3441,9 +3934,6 @@ const FiniteBrainProductClient = (() => {
       for (const targetRef of extractPageLinks(page.text)) {
         const target = titleToNode.get(targetRef);
         if (!target) continue;
-        if (filter && !includedNodeIds.has(source.id) && !includedNodeIds.has(target.id)) continue;
-        includedNodeIds.add(source.id);
-        includedNodeIds.add(target.id);
         edges.push({
           id: `${source.id}->${target.id}`,
           source: source.id,
@@ -3452,15 +3942,14 @@ const FiniteBrainProductClient = (() => {
       }
     }
     return {
-      nodes: nodes.filter((node) => includedNodeIds.has(node.id)),
+      nodes,
       edges,
     };
   }
 
-  function graphStats(graph, readablePageCount = graph.nodes.length) {
+  function graphStats(graph) {
     return {
       edgeCount: graph.edges.length,
-      filteredOutCount: Math.max(0, readablePageCount - graph.nodes.length),
       nodeCount: graph.nodes.length,
     };
   }
@@ -3631,32 +4120,6 @@ const FiniteBrainProductClient = (() => {
       });
     }
     return positions;
-  }
-
-  function buildReplayFrames(changes) {
-    const ordered = [...changes].sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
-    const seen = new Set();
-    const pages = new Map();
-    const frames = [];
-    for (const change of ordered) {
-      if (change.recordEventId && seen.has(change.recordEventId)) continue;
-      if (change.recordEventId) seen.add(change.recordEventId);
-      if (change.deleted) {
-        pages.delete(pageKey(change.folderId, change.objectId));
-      } else if (change.page?.status === "ready") {
-        pages.set(pageKey(change.page.folderId, change.page.objectId), change.page);
-      }
-      const graph = buildGraphProjection(pages.values());
-      frames.push({
-        sequence: change.sequence || frames.length + 1,
-        action: change.deleted ? "delete" : "upsert",
-        edgeCount: graph.edges.length,
-        graph,
-        nodeCount: graph.nodes.length,
-        recordEventId: change.recordEventId || null,
-      });
-    }
-    return frames;
   }
 
   function decryptedPagesForGraph() {
@@ -3855,6 +4318,20 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function syncReaderInputsFromSelectedPage() {
+    const page = selectedReaderPage();
+    $("pageFolderIdInput").value = page?.folderId || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    $("pageObjectIdInput").value = page?.objectId || "";
+    $("pageBaseRevisionInput").value = page ? String(page.revision || "") : "";
+    setEditorDraftText(page && pageTextIsPresent(page) ? page.text : "");
+    return page;
+  }
+
+  function clearSearchHighlight() {
+    state.searchHighlight = null;
+    state.searchHighlightShouldScroll = false;
+  }
+
   function selectedReaderPage() {
     if (!state.selectedPageKey) return null;
     return projectionPages().find((page) => page.key === state.selectedPageKey) || null;
@@ -3867,7 +4344,6 @@ const FiniteBrainProductClient = (() => {
   function sidebarModeLabel(mode) {
     return (
       {
-        access: "Access",
         files: "Files",
         search: "Search",
       }[normalizeSidebarMode(mode)] || "Files"
@@ -3875,20 +4351,14 @@ const FiniteBrainProductClient = (() => {
   }
 
   function normalizeSidebarMode(mode) {
-    return ["files", "search", "access"].includes(mode) ? mode : "files";
-  }
-
-  function globalVaultControlState(sidebarMode) {
-    return {
-      hidden: normalizeSidebarMode(sidebarMode) === "access",
-    };
+    return ["files", "search"].includes(mode) ? mode : "files";
   }
 
   function commandPaletteCommands() {
     return [
       { id: "files", kind: "command", label: "Files", detail: "Sidebar", target: "files" },
       { id: "search", kind: "command", label: "Search", detail: "Sidebar", target: "search" },
-      { id: "access", kind: "command", label: "Access", detail: "Sidebar", target: "access" },
+      { id: "access", kind: "command", label: "Vault access", detail: "Settings", target: "access" },
       { id: "graph", kind: "command", label: "Graph View", detail: "Workspace", target: "graph" },
       { id: "new-page", kind: "command", label: "New Page", detail: "Current Folder", target: "new-page" },
       { id: "refresh", kind: "command", label: "Refresh Vault", detail: "Sync", target: "refresh" },
@@ -3913,6 +4383,63 @@ const FiniteBrainProductClient = (() => {
       .slice(0, 12);
   }
 
+  function searchHighlightSegments(text, query) {
+    const source = String(text || "");
+    const needle = String(query || "").trim();
+    if (!source) return [];
+    if (!needle) return [{ match: false, text: source }];
+
+    const haystack = source.toLowerCase();
+    const normalizedNeedle = needle.toLowerCase();
+    const segments = [];
+    let cursor = 0;
+    let matchIndex = haystack.indexOf(normalizedNeedle, cursor);
+
+    while (matchIndex >= 0) {
+      if (matchIndex > cursor) {
+        segments.push({ match: false, text: source.slice(cursor, matchIndex) });
+      }
+      segments.push({
+        match: true,
+        text: source.slice(matchIndex, matchIndex + needle.length),
+      });
+      cursor = matchIndex + needle.length;
+      matchIndex = haystack.indexOf(normalizedNeedle, cursor);
+    }
+
+    if (cursor < source.length) {
+      segments.push({ match: false, text: source.slice(cursor) });
+    }
+    return segments.length ? segments : [{ match: false, text: source }];
+  }
+
+  function readerSearchHighlightForPage(pageKeyValue, searchHighlight) {
+    const query = String(searchHighlight?.query || "").trim();
+    return searchHighlight?.pageKey === pageKeyValue ? query : "";
+  }
+
+  function searchTextSnippet(text, query, maxLength = 96) {
+    const source = String(text || "").replace(/\s+/g, " ").trim();
+    const needle = String(query || "").trim();
+    if (!source || !needle) return "";
+
+    const matchIndex = source.toLowerCase().indexOf(needle.toLowerCase());
+    if (matchIndex < 0) return "";
+
+    const snippetLength = Math.max(maxLength, needle.length);
+    const start = Math.max(0, matchIndex - Math.floor((snippetLength - needle.length) / 2));
+    const end = Math.min(source.length, start + snippetLength);
+    const prefix = start > 0 ? "…" : "";
+    const suffix = end < source.length ? "…" : "";
+    return `${prefix}${source.slice(start, end).trim()}${suffix}`;
+  }
+
+  function searchResultSnippet(page, query) {
+    return [page?.text, page?.path, page?.folderId, page?.title]
+      .map((text) => searchTextSnippet(text, query))
+      .find(Boolean) || "";
+  }
+
   function searchPageRows(query, pages = readablePages()) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return [];
@@ -3929,12 +4456,16 @@ const FiniteBrainProductClient = (() => {
         ...page,
         label: pageTitleForPage(page),
         detail: `${page.folderId}/${page.path || `${page.objectId}.md`}`,
+        matchSnippet: searchResultSnippet(page, needle),
       }));
   }
 
   function contextMenuItemsForTarget(target) {
     if (!target) return [];
     if (target.type === "page") {
+      const discardLocalDraft = pageDeletionDisposition(target) === "discard-local";
+      const pageKeyValue = target.pageKey || pageKey(target.folderId, target.objectId);
+      const saveInFlight = state.pageSaveInFlight?.key === pageKeyValue;
       return [
         { action: "open-page", label: "Open Page" },
         { action: "new-page", label: "New Page in Folder" },
@@ -3943,7 +4474,12 @@ const FiniteBrainProductClient = (() => {
         { action: "copy-page-id", label: "Copy Page ID" },
         { action: "copy-folder-id", label: "Copy Folder ID" },
         { separator: true },
-        { action: "delete-page", label: "Delete Page", disabled: false, danger: true },
+        {
+          action: "delete-page",
+          label: saveInFlight ? "Saving Page…" : discardLocalDraft ? "Discard unsaved Page" : "Delete Page",
+          disabled: saveInFlight,
+          danger: true,
+        },
       ];
     }
     return [
@@ -3954,20 +4490,18 @@ const FiniteBrainProductClient = (() => {
       { action: "copy-folder-id", label: "Copy Folder ID" },
       { action: "manage-access", label: "Manage Access" },
       { action: "share-folder", label: "Share Folder" },
-      { separator: true },
-      { action: "delete-folder", label: "Delete Folder", disabled: true, danger: true },
     ];
   }
 
   function setSidebarMode(mode) {
-    state.activeSidebarMode = normalizeSidebarMode(mode);
+    const nextMode = normalizeSidebarMode(mode);
+    state.activeSidebarMode = nextMode;
     closeContextMenu();
     render();
   }
 
   function setWorkspaceView(view) {
     state.activeWorkspaceView = view === "graph" ? "graph" : "page";
-    if (state.activeWorkspaceView === "graph") renderGraphView();
     render();
   }
 
@@ -3994,23 +4528,6 @@ const FiniteBrainProductClient = (() => {
     document.title = chrome.shellView === "graph" ? "Graph View - FiniteBrain" : `${workspaceTitle} - FiniteBrain`;
   }
 
-  function renderVaultControlChrome() {
-    const details = $("vaultControlDetails");
-    if (!details) return;
-    const chrome = globalVaultControlState(state.activeSidebarMode);
-    details.hidden = chrome.hidden;
-    setText("vaultControlSummary", activeVaultLabel());
-    if (chrome.hidden) return;
-    if (state.metadata && !state.vaultControlsCollapsedAfterLoad) {
-      details.open = false;
-      state.vaultControlsCollapsedAfterLoad = true;
-    }
-    if (!state.metadata && state.vaultControlsCollapsedAfterLoad) {
-      details.open = true;
-      state.vaultControlsCollapsedAfterLoad = false;
-    }
-  }
-
   function nextDraftObjectId() {
     return `obj_${Date.now().toString(36)}`.padEnd(16, "0").slice(0, 128);
   }
@@ -4021,7 +4538,7 @@ const FiniteBrainProductClient = (() => {
 
   function focusInlineEditor() {
     const focusDraft = () => {
-      if (state.editorMode === "source") {
+      if (state.editorMode === "markdown") {
         const draft = $("pageDraftInput");
         draft.focus?.();
         draft.setSelectionRange?.(draft.value.length, draft.value.length);
@@ -4035,6 +4552,7 @@ const FiniteBrainProductClient = (() => {
 
   function startNewPageDraft(folderIdOverride = null) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return;
+    clearSearchHighlight();
     const folderId = folderIdOverride || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
     const objectId = nextDraftObjectId();
     const draftKey = pageKey(folderId, objectId);
@@ -4046,7 +4564,6 @@ const FiniteBrainProductClient = (() => {
     state.activeWorkspaceView = "page";
     state.expandedFolderIds.add(folderId);
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     $("pageObjectIdInput").value = objectId;
     $("pageBaseRevisionInput").value = "";
     setEditorDraftText(draftText);
@@ -4066,20 +4583,71 @@ const FiniteBrainProductClient = (() => {
     return projectionPages().find((page) => page.key === key) || null;
   }
 
+  function pageDeletionDisposition(page) {
+    const revision = Number(page?.revision || 0);
+    return page?.localDraft && (!Number.isInteger(revision) || revision < 1)
+      ? "discard-local"
+      : "tombstone";
+  }
+
+  function discardLocalPageDraft(projection, page) {
+    if (pageDeletionDisposition(page) !== "discard-local") return false;
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    return projection?.localDrafts?.delete(key) || false;
+  }
+
+  function pageSaveIsInFlight(page) {
+    if (!page) return false;
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    return state.pageSaveInFlight?.key === key;
+  }
+
   async function deletePageFromContextTarget(target) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const page = pageFromContextTarget(target);
     if (!page || !isReadablePage(page)) throw new Error("Select a readable Page before deleting");
+    if (pageSaveIsInFlight(page)) {
+      setClientActionFeedback("error", "Page is still saving. Wait for it to finish, then delete it.");
+      render();
+      return;
+    }
+    const title = pageTitleForPage(page);
+    const disposition = pageDeletionDisposition(page);
+    if (
+      window.confirm &&
+      !window.confirm(
+        disposition === "discard-local"
+          ? `Discard unsaved "${title}"? This only removes the local draft.`
+          : `Delete "${title}"? This writes a signed tombstone.`
+      )
+    ) {
+      return;
+    }
+    const key = page.key || pageKey(page.folderId, page.objectId);
+    if (disposition === "discard-local") {
+      discardLocalPageDraft(state.projection, page);
+      if (state.preparedWriteTarget && pageKey(state.preparedWriteTarget.folderId, state.preparedWriteTarget.objectId) === key) {
+        state.preparedWrite = null;
+        state.preparedWriteTarget = null;
+      }
+      if (state.selectedPageKey === key) state.selectedPageKey = null;
+      selectDefaultReaderTargets();
+      log("Discarded unsaved local Page draft.", {
+        folderId: page.folderId,
+        objectId: page.objectId,
+      });
+      render();
+      return;
+    }
     if (!page.revision) throw new Error("Page delete requires a saved revision");
     if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer before deleting");
-    const title = pageTitleForPage(page);
-    if (window.confirm && !window.confirm(`Delete "${title}"? This writes a signed tombstone.`)) return;
     const body = await buildPageDeleteRequest({
       authorNpub: currentActorNpub(),
       baseRevision: page.revision,
       folderId: page.folderId,
       objectId: page.objectId,
+      signEvent: requireNip07SignEvent(),
       vaultId,
     });
     requireCurrentSessionEpoch(sessionEpoch);
@@ -4091,7 +4659,6 @@ const FiniteBrainProductClient = (() => {
       body: JSON.stringify(body),
     });
     requireCurrentSessionEpoch(sessionEpoch);
-    const key = page.key || pageKey(page.folderId, page.objectId);
     state.projection.pages.delete(key);
     state.projection.localDrafts.delete(key);
     if (state.selectedPageKey === key) state.selectedPageKey = null;
@@ -4106,6 +4673,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function selectReaderFolder(folderId, options = {}) {
+    clearSearchHighlight();
     state.selectedFolderId = folderId;
     state.expandedFolderIds.add(folderId);
     if (options.selectFirstPage !== false) {
@@ -4114,7 +4682,6 @@ const FiniteBrainProductClient = (() => {
     }
     state.activeWorkspaceView = "page";
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     render();
   }
 
@@ -4136,10 +4703,10 @@ const FiniteBrainProductClient = (() => {
   }
 
   function toggleReaderFolder(folderId) {
+    clearSearchHighlight();
     const isExpanded = state.expandedFolderIds.has(folderId);
     state.selectedFolderId = folderId;
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     if (isExpanded) {
       state.expandedFolderIds.delete(folderId);
       state.selectedPageKey = null;
@@ -4153,18 +4720,18 @@ const FiniteBrainProductClient = (() => {
     render();
   }
 
-  function selectReaderPage(pageKeyValue) {
+  function selectReaderPage(pageKeyValue, options = {}) {
+    const searchQuery = String(options.searchQuery || "").trim();
+    state.searchHighlight = searchQuery ? { pageKey: pageKeyValue, query: searchQuery } : null;
+    state.searchHighlightShouldScroll = Boolean(searchQuery);
     state.selectedPageKey = pageKeyValue;
     state.activeWorkspaceView = "page";
     const page = selectedReaderPage();
     if (page) {
       state.selectedFolderId = page.folderId;
       state.expandedFolderIds.add(page.folderId);
-      $("pageFolderIdInput").value = page.folderId;
-      $("pageObjectIdInput").value = page.objectId;
-      $("pageBaseRevisionInput").value = String(page.revision || "");
-      if (pageTextIsPresent(page)) setEditorDraftText(page.text);
     }
+    syncReaderInputsFromSelectedPage();
     render();
   }
 
@@ -4229,18 +4796,11 @@ const FiniteBrainProductClient = (() => {
   }
 
   function graphEmptyStateCopy(options = {}) {
-    const filterText = String(options.filterText || "").trim();
     const readablePageCount = Number(options.readablePageCount || 0);
     if (readablePageCount <= 0) {
       return {
         title: "No graph yet",
         copy: "Open a vault to build the local graph.",
-      };
-    }
-    if (filterText) {
-      return {
-        title: "No matching Pages",
-        copy: "Clear or change the graph filter.",
       };
     }
     return {
@@ -4249,12 +4809,84 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  function graphViewBoxForZoom(zoom) {
+    const requestedZoom = Number(zoom);
+    const normalizedZoom = Math.min(
+      GRAPH_ZOOM_MAX,
+      Math.max(GRAPH_ZOOM_MIN, Number.isFinite(requestedZoom) ? requestedZoom : 1)
+    );
+    const width = graphViewport.width / normalizedZoom;
+    const height = graphViewport.height / normalizedZoom;
+    return {
+      height,
+      width,
+      x: (graphViewport.width - width) / 2,
+      y: (graphViewport.height - height) / 2,
+      zoom: normalizedZoom,
+    };
+  }
+
+  function graphViewBoxString(zoom) {
+    const viewBox = graphViewBoxForZoom(zoom);
+    return `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`;
+  }
+
+  function updateGraphZoomControls() {
+    const viewBox = graphViewBoxForZoom(state.graphZoom);
+    state.graphZoom = viewBox.zoom;
+    setText("graphZoomValue", `${Math.round(viewBox.zoom * 100)}%`);
+    setOptionalDisabled("zoomInGraphButton", viewBox.zoom >= GRAPH_ZOOM_MAX);
+    setOptionalDisabled("zoomOutGraphButton", viewBox.zoom <= GRAPH_ZOOM_MIN);
+    setOptionalDisabled("fitGraphButton", viewBox.zoom === 1);
+  }
+
+  function setGraphZoom(zoom) {
+    const viewBox = graphViewBoxForZoom(zoom);
+    state.graphZoom = viewBox.zoom;
+    const svg = $("graphCanvas");
+    svg?.setAttribute("viewBox", graphViewBoxString(viewBox.zoom));
+    updateGraphZoomControls();
+  }
+
+  function zoomGraphView(direction) {
+    setGraphZoom(state.graphZoom * (direction > 0 ? GRAPH_ZOOM_STEP : 1 / GRAPH_ZOOM_STEP));
+    log("Updated graph zoom.", { zoom: state.graphZoom });
+  }
+
+  function graphFullscreenSupported() {
+    return Boolean($("graphWorkspace")?.requestFullscreen && document.exitFullscreen);
+  }
+
+  function updateGraphFullscreenControl() {
+    const button = $("fullscreenGraphButton");
+    if (!button) return;
+    const isFullscreen = document.fullscreenElement === $("graphWorkspace");
+    button.disabled = !graphFullscreenSupported();
+    button.setAttribute("aria-pressed", String(isFullscreen));
+    button.setAttribute("aria-label", isFullscreen ? "Exit full screen" : "Enter full screen");
+    button.setAttribute("title", isFullscreen ? "Exit full screen" : "Enter full screen");
+  }
+
+  async function toggleGraphFullscreen() {
+    const workspace = $("graphWorkspace");
+    if (!graphFullscreenSupported() || !workspace) return;
+    try {
+      if (document.fullscreenElement === workspace) await document.exitFullscreen();
+      else await workspace.requestFullscreen();
+    } catch (error) {
+      state.lastError = "Full screen is unavailable in this browser.";
+      log("Failed to change graph full screen state.", { error: error.message });
+    } finally {
+      updateGraphFullscreenControl();
+    }
+  }
+
   function drawGraph(graph, options = {}) {
     const svg = $("graphCanvas");
     const emptyState = $("graphEmptyState");
     svg.replaceChildren();
     svg.classList.remove("is-hovering");
-    svg.setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
+    setGraphZoom(state.graphZoom);
     if (!graph.nodes.length) {
       if (emptyState) {
         const copy = graphEmptyStateCopy(options);
@@ -4378,18 +5010,6 @@ const FiniteBrainProductClient = (() => {
     parent.appendChild(row);
   }
 
-  function renderAccessBadgeRow(id, badges) {
-    const row = $(id);
-    if (!row) return;
-    row.replaceChildren();
-    for (const badge of badges) {
-      const element = document.createElement("span");
-      element.className = `access-badge ${badge.tone || "muted"}`;
-      element.textContent = badge.label;
-      row.appendChild(element);
-    }
-  }
-
   function setText(id, text) {
     const element = $(id);
     if (element) element.textContent = text;
@@ -4446,8 +5066,9 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderMarkdownPreview(container, markdown) {
+  function renderMarkdownPreview(container, markdown, options = {}) {
     container.replaceChildren();
+    let taskIndex = 0;
     for (const block of markdownPreviewBlocks(markdown)) {
       if (block.type === "heading") {
         const heading = document.createElement(`h${block.level}`);
@@ -4468,7 +5089,12 @@ const FiniteBrainProductClient = (() => {
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.checked = Boolean(itemBlock.checked);
-            checkbox.disabled = true;
+            checkbox.disabled = !options.editable;
+            checkbox.dataset.taskIndex = String(taskIndex);
+            checkbox.dataset.taskChecked = String(Boolean(itemBlock.checked));
+            checkbox.setAttribute?.("aria-label", taskCheckboxAriaLabel(itemBlock.text, checkbox.checked));
+            checkbox.setAttribute?.("contenteditable", "false");
+            taskIndex += 1;
             item.appendChild(checkbox);
           }
           appendInlineSegments(item, itemBlock.text);
@@ -4534,8 +5160,8 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderMarkdownEditor(container, markdown) {
-    renderMarkdownPreview(container, markdown);
+  function renderMarkdownEditor(container, markdown, options = {}) {
+    renderMarkdownPreview(container, markdown, options);
     if (!container.childNodes.length) {
       const paragraph = document.createElement("p");
       paragraph.appendChild(document.createElement("br"));
@@ -4664,11 +5290,36 @@ const FiniteBrainProductClient = (() => {
     return String(editor?.textContent || "").trim();
   }
 
+  function toggleMarkdownTask(markdown, taskIndex, checked) {
+    const source = String(markdown ?? "");
+    const lineEnding = source.includes("\r\n") ? "\r\n" : "\n";
+    const selectedIndex = Number(taskIndex);
+    const taskSourceLines = [];
+    for (const block of markdownPreviewBlocks(source, { includeSourcePositions: true })) {
+      if (block.type !== "list") continue;
+      for (const item of block.items) {
+        if (item.checked !== null) taskSourceLines.push(item.sourceLineIndex);
+      }
+    }
+    const sourceLineIndex = taskSourceLines[selectedIndex];
+    if (!Number.isInteger(sourceLineIndex)) return source;
+    const lines = source.split(/\r?\n/);
+    const task = lines[sourceLineIndex]?.match(/^(\s*[-*+]\s+\[)[ xX](\]\s+.+)$/);
+    if (!task) return source;
+    lines[sourceLineIndex] = `${task[1]}${checked ? "x" : " "}${task[2]}`;
+    return lines.join(lineEnding);
+  }
+
+  function taskCheckboxAriaLabel(taskText, checked) {
+    const text = String(taskText || "Task").replace(/\s+/g, " ").trim() || "Task";
+    return `${checked ? "Mark task incomplete" : "Mark task complete"}: ${text}`;
+  }
+
   function setEditorDraftText(markdown, options = {}) {
     const draft = $("pageDraftInput");
     if (draft) draft.value = markdown;
-    if (options.syncVisual && state.readerMode !== "source") {
-      renderMarkdownEditor(visualEditorElement(), markdown);
+    if (options.syncVisual && state.editorMode === "visual") {
+      renderMarkdownEditor(visualEditorElement(), markdown, { editable: true });
     }
     updateEditorChrome();
   }
@@ -4690,11 +5341,15 @@ const FiniteBrainProductClient = (() => {
   }
 
   function canSaveActiveDraft() {
-    return Boolean(state.signerStatus === "connected" && state.keyring && activeLocalDraft());
+    return Boolean(
+      !state.pageSaveInFlight && state.signerStatus === "connected" && state.keyring && activeLocalDraft()
+    );
   }
 
   function updateSaveControls() {
-    return canSaveActiveDraft();
+    const canSave = canSaveActiveDraft();
+    setOptionalDisabled("savePageButton", !canSave);
+    return canSave;
   }
 
   function rememberActiveDraft(markdown) {
@@ -4723,14 +5378,45 @@ const FiniteBrainProductClient = (() => {
     return markdown;
   }
 
+  function updateActiveTaskDraft(taskCheckbox) {
+    const editor = visualEditorElement();
+    const restoreInitialState = () => {
+      if (taskCheckbox) taskCheckbox.checked = taskCheckbox.dataset?.taskChecked === "true";
+    };
+    if (
+      !taskCheckbox ||
+      taskCheckbox.type !== "checkbox" ||
+      taskCheckbox.disabled ||
+      !editor?.contains?.(taskCheckbox) ||
+      editor.getAttribute?.("contenteditable") !== "true"
+    ) {
+      restoreInitialState();
+      return false;
+    }
+    const taskIndex = Array.from(editor.querySelectorAll?.("input[data-task-index]") || []).indexOf(taskCheckbox);
+    if (taskIndex < 0) {
+      restoreInitialState();
+      return false;
+    }
+    const currentMarkdown = $("pageDraftInput")?.value || "";
+    const markdown = toggleMarkdownTask(currentMarkdown, taskIndex, taskCheckbox.checked);
+    if (markdown !== currentMarkdown) rememberActiveDraft(markdown);
+    taskCheckbox.dataset.taskChecked = String(Boolean(taskCheckbox.checked));
+    taskCheckbox.setAttribute?.(
+      "aria-label",
+      taskCheckboxAriaLabel(taskCheckbox.closest?.("li")?.textContent || "Task", taskCheckbox.checked)
+    );
+    return true;
+  }
+
   function setEditorMode(mode) {
-    state.editorMode = mode === "source" ? "source" : "visual";
-    if (state.editorMode === "source") {
+    state.editorMode = mode === "markdown" ? "markdown" : "visual";
+    if (state.editorMode === "markdown") {
       syncDraftFromVisualEditor();
       setPageContentEditable(visualEditorElement(), false);
     } else {
-      renderMarkdownEditor(visualEditorElement(), $("pageDraftInput").value);
-      if (isReadablePage(selectedReaderPage()) && state.readerMode !== "source") {
+      renderMarkdownEditor(visualEditorElement(), $("pageDraftInput").value, { editable: true });
+      if (isReadablePage(selectedReaderPage())) {
         setPageContentEditable(visualEditorElement(), true);
       }
     }
@@ -4738,19 +5424,17 @@ const FiniteBrainProductClient = (() => {
   }
 
   function updateEditorChrome() {
-    const source = $("pageSourceEditorLabel");
+    const markdownEditor = $("pageMarkdownEditorLabel");
     const page = selectedReaderPage();
-    const canEditInline = isReadablePage(page) && state.readerMode !== "source" && state.editorMode !== "source";
-    if (source) source.hidden = state.editorMode !== "source";
+    const canEditInline = isReadablePage(page) && state.editorMode === "visual";
+    if (markdownEditor) markdownEditor.hidden = state.editorMode !== "markdown";
     let statusText = "Reading mode";
     if (!isReadablePage(page)) {
       statusText = "No page loaded";
-    } else if (state.editorMode === "source") {
-      statusText = "Raw Markdown editor";
+    } else if (state.editorMode === "markdown") {
+      statusText = "Markdown editor";
     } else if (canEditInline) {
       statusText = "Click to edit inline";
-    } else if (state.readerMode === "source") {
-      statusText = "Source reading mode";
     }
     setText("editorStatusText", statusText);
     updateSaveControls();
@@ -5016,6 +5700,45 @@ const FiniteBrainProductClient = (() => {
     content.removeAttribute("aria-multiline");
   }
 
+  function highlightReaderSearchMatches(container, query) {
+    if (!container || !query) return [];
+
+    const textNodes = [];
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (node.parentElement?.closest?.(".reader-search-match")) continue;
+      const segments = searchHighlightSegments(node.nodeValue, query);
+      if (segments.some((segment) => segment.match)) textNodes.push({ node, segments });
+    }
+
+    const matches = [];
+    for (const { node, segments } of textNodes) {
+      const fragment = document.createDocumentFragment();
+      for (const segment of segments) {
+        if (!segment.match) {
+          fragment.appendChild(document.createTextNode(segment.text));
+          continue;
+        }
+        const match = document.createElement("mark");
+        match.className = "reader-search-match";
+        match.textContent = segment.text;
+        fragment.appendChild(match);
+        matches.push(match);
+      }
+      node.replaceWith(fragment);
+    }
+    return matches;
+  }
+
+  function scrollReaderSearchMatchIntoView(match) {
+    if (!match) return;
+    const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth";
+    const scroll = () => match.scrollIntoView?.({ behavior, block: "center", inline: "nearest" });
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(scroll);
+    else scroll();
+  }
+
   function renderPageContent(page) {
     const content = $("readerPageContent");
     content.replaceChildren();
@@ -5025,7 +5748,7 @@ const FiniteBrainProductClient = (() => {
       content.textContent =
         state.sessionStatus === SESSION_STATUS.UNLOCKED
           ? "Open a vault to read pages."
-          : "Session locked. Resume to reopen encrypted Folder Key Grants.";
+          : "Session locked. Unlock to reopen encrypted Folder Key Grants.";
       return;
     }
     if (!isReadablePage(page)) {
@@ -5033,14 +5756,16 @@ const FiniteBrainProductClient = (() => {
       content.textContent = "This page is locked in this session.";
       return;
     }
-    if (state.readerMode === "source") {
-      content.className = "note-content note-source";
-      content.textContent = page.text || "";
-      return;
-    }
     content.className = `note-content note-markdown inline-page-editor${page.localDraft ? " inline-page-editor-dirty" : ""}`;
-    setPageContentEditable(content, state.editorMode !== "source");
-    renderMarkdownEditor(content, page.text || "");
+    setPageContentEditable(content, state.editorMode === "visual");
+    renderMarkdownEditor(content, page.text || "", { editable: state.editorMode === "visual" });
+    const searchQuery = readerSearchHighlightForPage(page.key, state.searchHighlight);
+    if (!searchQuery) return;
+    const matches = highlightReaderSearchMatches(content, searchQuery);
+    if (state.searchHighlightShouldScroll) {
+      state.searchHighlightShouldScroll = false;
+      scrollReaderSearchMatchIntoView(matches[0]);
+    }
   }
 
   function renderPageStatus(page) {
@@ -5051,15 +5776,13 @@ const FiniteBrainProductClient = (() => {
     return page;
   }
 
-  function setGraphStats(graph, readablePageCount) {
-    const stats = graphStats(graph, readablePageCount);
-    const filtered =
-      stats.filteredOutCount > 0 ? ` / ${stats.filteredOutCount} hidden by filter` : "";
+  function setGraphStats(graph) {
+    const stats = graphStats(graph);
     setPill(
       "graphStats",
       `${stats.nodeCount} ${stats.nodeCount === 1 ? "node" : "nodes"} / ${stats.edgeCount} ${
         stats.edgeCount === 1 ? "link" : "links"
-      }${filtered}`,
+      }`,
       stats.nodeCount ? "ready" : "muted"
     );
   }
@@ -5082,6 +5805,69 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function keyboardListNavigationIndex(key, currentIndex, itemCount) {
+    const count = Number.isInteger(itemCount) ? itemCount : 0;
+    if (count < 1) return null;
+    const hasCurrentIndex = Number.isInteger(currentIndex) && currentIndex >= 0 && currentIndex < count;
+    if (!hasCurrentIndex) {
+      if (key === "ArrowDown" || key === "Home") return 0;
+      if (key === "ArrowUp" || key === "End") return count - 1;
+      return null;
+    }
+    const current = Math.min(Math.max(Number.isInteger(currentIndex) ? currentIndex : 0, 0), count - 1);
+    if (key === "ArrowDown") return (current + 1) % count;
+    if (key === "ArrowUp") return (current - 1 + count) % count;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    return null;
+  }
+
+  function commandPaletteSelectionIndex(rows, currentIndex = state.commandPaletteSelectedIndex) {
+    const count = Array.isArray(rows) ? rows.length : 0;
+    if (count < 1) return -1;
+    return Math.min(Math.max(Number.isInteger(currentIndex) ? currentIndex : 0, 0), count - 1);
+  }
+
+  function primaryFormActionForInput(inputId) {
+    return (
+      {
+        accessShareTargetInput: "createShareLinkButton",
+        accessShareExpiresAtInput: "createShareLinkButton",
+        accessShareLinkInput: "acceptShareLinkButton",
+        vaultInviteTargetNpubInput: "createVaultInvitationButton",
+        vaultInviteFoldersInput: "createVaultInvitationButton",
+        vaultInviteExpiresAtInput: "createVaultInvitationButton",
+        vaultInviteCodeInput: "getVaultInvitationButton",
+        vaultInviteEmailInput: "getEmailInviteInstructionsButton",
+        vaultInviteEmailProofCreatedAtInput: "getEmailInviteInstructionsButton",
+        vaultInviteSecretInput: "getEmailInviteInstructionsButton",
+      }[inputId] || null
+    );
+  }
+
+  function shouldRunPrimaryFormAction(event, button) {
+    return Boolean(
+      event?.key === "Enter" &&
+        !event.isComposing &&
+        event.keyCode !== 229 &&
+        !event.currentTarget?.disabled &&
+        button &&
+        !button.disabled
+    );
+  }
+
+  function bindPrimaryFormAction(inputId) {
+    const input = $(inputId);
+    const buttonId = primaryFormActionForInput(inputId);
+    if (!input || !buttonId) return;
+    input.addEventListener("keydown", (event) => {
+      const button = $(buttonId);
+      if (!shouldRunPrimaryFormAction(event, button)) return;
+      event.preventDefault();
+      button.click();
+    });
+  }
+
   function log(message, _value) {
     // Event labels are useful during development, but values can contain
     // decrypted titles, paths, identity metadata, or invite material. Never
@@ -5089,21 +5875,102 @@ const FiniteBrainProductClient = (() => {
     console.debug(`[FiniteBrain] ${message}`);
   }
 
-  function closeContextMenu() {
-    state.contextMenuTarget = null;
+  function contextMenuFocusableElements() {
     const menu = $("contextMenu");
-    if (!menu) return;
-    menu.hidden = true;
-    menu.replaceChildren();
+    if (!menu) return [];
+    return Array.from(menu.querySelectorAll?.('button[role="menuitem"]:not([disabled])') || []);
   }
 
-  function closeCommandPalette() {
+  function focusContextMenuItem(index = 0) {
+    const items = contextMenuFocusableElements();
+    if (!items.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), items.length - 1);
+    items[nextIndex]?.focus?.();
+  }
+
+  function handleContextMenuKeydown(event) {
+    const menu = $("contextMenu");
+    if (!menu || menu.hidden || event.isComposing || event.keyCode === 229) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeContextMenu({ restoreFocus: true });
+      return true;
+    }
+    const items = contextMenuFocusableElements();
+    const currentIndex = items.indexOf(document.activeElement);
+    const nextIndex = keyboardListNavigationIndex(event.key, currentIndex, items.length);
+    if (nextIndex !== null) {
+      event.preventDefault();
+      focusContextMenuItem(nextIndex);
+      return true;
+    }
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return false;
+    const item = items[currentIndex];
+    if (!item) return false;
+    event.preventDefault();
+    item.click();
+    return true;
+  }
+
+  function closeContextMenu(options = {}) {
+    const previousFocus = state.contextMenuPreviousFocus;
+    state.contextMenuTarget = null;
+    state.contextMenuPreviousFocus = null;
+    const menu = $("contextMenu");
+    if (menu) {
+      menu.hidden = true;
+      menu.replaceChildren();
+    }
+    if (options.restoreFocus) previousFocus?.focus?.();
+  }
+
+  function commandPaletteFocusableElements() {
+    return overlayFocusableElements("commandPalette");
+  }
+
+  function closeCommandPalette(options = {}) {
     state.commandPaletteOpen = false;
+    state.commandPaletteSelectedIndex = 0;
     const palette = $("commandPalette");
-    if (!palette) return;
-    palette.hidden = true;
-    setPressed("ribbonCommandButton", false);
-    $("ribbonCommandButton").className = "ribbon-button";
+    if (palette) {
+      palette.hidden = true;
+      const input = $("commandPaletteInput");
+      input?.setAttribute("aria-expanded", "false");
+      input?.removeAttribute("aria-activedescendant");
+      setPressed("ribbonCommandButton", false);
+      $("ribbonCommandButton").className = "ribbon-button";
+    }
+    if (options.restoreFocus) $("ribbonCommandButton")?.focus?.();
+  }
+
+  function handleCommandPaletteKeydown(event) {
+    if (!state.commandPaletteOpen) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandPalette({ restoreFocus: true });
+      return true;
+    }
+    if (event.key === "Tab") {
+      const focusable = commandPaletteFocusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        return true;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return true;
+    }
+    if ((event.metaKey || event.ctrlKey) && ["p", "s"].includes(event.key.toLowerCase())) {
+      event.preventDefault();
+    }
+    return true;
   }
 
   function runCommandPaletteRow(row) {
@@ -5113,8 +5980,12 @@ const FiniteBrainProductClient = (() => {
       selectReaderPage(row.pageKey);
       return;
     }
-    if (row.target === "files" || row.target === "search" || row.target === "access") {
+    if (row.target === "files" || row.target === "search") {
       setSidebarMode(row.target);
+      return;
+    }
+    if (row.target === "access") {
+      openSettingsModal("access");
       return;
     }
     if (row.target === "graph") {
@@ -5127,7 +5998,7 @@ const FiniteBrainProductClient = (() => {
     }
     if (row.target === "refresh") {
       refreshReader().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to refresh Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
@@ -5143,9 +6014,14 @@ const FiniteBrainProductClient = (() => {
     $("ribbonCommandButton").className = `ribbon-button${state.commandPaletteOpen ? " utility-active" : ""}`;
     if (!state.commandPaletteOpen) return;
     const list = $("commandPaletteList");
-    const rows = commandPaletteRows($("commandPaletteInput").value);
+    const input = $("commandPaletteInput");
+    const rows = commandPaletteRows(input.value);
+    const selectedIndex = commandPaletteSelectionIndex(rows);
+    state.commandPaletteSelectedIndex = Math.max(selectedIndex, 0);
+    input.setAttribute("aria-expanded", "true");
     list.replaceChildren();
     if (!rows.length) {
+      input.removeAttribute("aria-activedescendant");
       const item = document.createElement("li");
       item.className = "empty-row";
       item.textContent = "No matching commands or Pages";
@@ -5156,7 +6032,11 @@ const FiniteBrainProductClient = (() => {
       const item = document.createElement("li");
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `command-palette-row${index === 0 ? " active" : ""}`;
+      button.id = `commandPaletteOption-${index}`;
+      button.tabIndex = -1;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === selectedIndex));
+      button.className = `command-palette-row${index === selectedIndex ? " active" : ""}`;
       const copy = document.createElement("span");
       const title = document.createElement("span");
       title.className = "command-palette-row-title";
@@ -5175,10 +6055,12 @@ const FiniteBrainProductClient = (() => {
       item.appendChild(button);
       list.appendChild(item);
     });
+    input.setAttribute("aria-activedescendant", `commandPaletteOption-${selectedIndex}`);
   }
 
   function openCommandPalette(seed = "") {
     state.commandPaletteOpen = true;
+    state.commandPaletteSelectedIndex = 0;
     closeContextMenu();
     $("commandPaletteInput").value = seed;
     renderCommandPalette();
@@ -5198,13 +6080,81 @@ const FiniteBrainProductClient = (() => {
     menu.style.top = `${Math.min(Math.max(8, y), maxTop)}px`;
   }
 
-  function writeClipboard(text) {
-    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
-    return Promise.resolve();
+  function clipboardFeedbackFor(kind) {
+    if (kind === "folder-id") {
+      return {
+        failure: CLIENT_ACTION_FEEDBACK.folderIdCopyFailure,
+        success: CLIENT_ACTION_FEEDBACK.folderIdCopySuccess,
+      };
+    }
+    if (kind === "invite-link") {
+      return {
+        failure: CLIENT_ACTION_FEEDBACK.inviteLinkCopyFailure,
+        success: CLIENT_ACTION_FEEDBACK.inviteLinkCopySuccess,
+      };
+    }
+    return {
+      failure: CLIENT_ACTION_FEEDBACK.pageIdCopyFailure,
+      success: CLIENT_ACTION_FEEDBACK.pageIdCopySuccess,
+    };
+  }
+
+  function clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration) {
+    return (
+      state.sessionEpoch === sessionEpoch &&
+      state.sessionStatus === SESSION_STATUS.UNLOCKED &&
+      state.clientActionFeedbackGeneration === feedbackGeneration
+    );
+  }
+
+  async function copyToClipboard(text, kind = "page-id") {
+    const feedback = clipboardFeedbackFor(kind);
+    const sessionEpoch = state.sessionEpoch;
+    const feedbackGeneration = clearClientActionFeedback();
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return false;
+    try {
+      if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      if (clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration)) {
+        setClientActionFeedback("success", feedback.success, { generation: feedbackGeneration });
+      }
+      return true;
+    } catch (_) {
+      if (clipboardFeedbackOperationIsCurrent(sessionEpoch, feedbackGeneration)) {
+        setClientActionFeedback("error", feedback.failure, { generation: feedbackGeneration });
+      }
+      return false;
+    }
+  }
+
+  async function copyVaultInviteUrl() {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.lastEmailInviteUrl) {
+      setClientActionFeedback("error", CLIENT_ACTION_FEEDBACK.inviteLinkCopyFailure);
+      return false;
+    }
+    return copyToClipboard(state.lastEmailInviteUrl, "invite-link");
   }
 
   function handleContextMenuAction(item, target) {
     if (item.disabled) return;
+    const accessRoute = accessActionRoute(item.action, target);
+    if (accessRoute) {
+      closeContextMenu({ restoreFocus: true });
+      state.accessResult = null;
+      state.activeAccessFolderId = accessRoute.folderId;
+      state.activeAccessIntent = accessRoute.intent;
+      state.selectedFolderId = accessRoute.folderId;
+      state.expandedFolderIds.add(accessRoute.folderId);
+      $("pageFolderIdInput").value = accessRoute.folderId;
+      openSettingsModal(accessRoute.settingsSection);
+      log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
+        folderId: accessRoute.folderId,
+        intent: accessRoute.intent,
+      });
+      return;
+    }
     closeContextMenu();
     if (item.action === "open-folder") {
       selectReaderFolder(target.folderId);
@@ -5219,67 +6169,47 @@ const FiniteBrainProductClient = (() => {
       return;
     }
     if (item.action === "new-folder") {
-      createFolderFromToolbar().catch((error) => {
+      createFolderFromToolbar(target.folderId).catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to create Folder from context menu.", { error: error.message });
         render();
       });
       return;
     }
     if (item.action === "open-graph") {
-      $("graphFilterInput").value = target.title || target.objectId || "";
       setWorkspaceView("graph");
       return;
     }
     if (item.action === "copy-page-id") {
-      writeClipboard(target.objectId).catch(() => {});
-      log("Copied Page ID.", { objectId: target.objectId });
+      void copyToClipboard(target.objectId, "page-id");
       return;
     }
     if (item.action === "copy-folder-id") {
-      writeClipboard(target.folderId).catch(() => {});
-      log("Copied Folder ID.", { folderId: target.folderId });
+      void copyToClipboard(target.folderId, "folder-id");
       return;
     }
     if (item.action === "delete-page") {
       deletePageFromContextTarget(target).catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to delete Page.", { error: error.message });
         render();
       });
       return;
     }
-    const accessRoute = accessActionRoute(item.action, target);
-    if (accessRoute) {
-      state.accessResult = null;
-      state.activeAccessView = "folder";
-      state.activeAccessFolderId = accessRoute.folderId;
-      state.activeAccessIntent = accessRoute.intent;
-      state.selectedFolderId = accessRoute.folderId;
-      state.expandedFolderIds.add(accessRoute.folderId);
-      $("pageFolderIdInput").value = accessRoute.folderId;
-      $("okfDestinationFolderInput").value = accessRoute.folderId;
-      setSidebarMode(accessRoute.sidebarMode);
-      log(accessIntentValue(accessRoute.intent) === "links" ? "Opened Folder links panel." : "Opened Folder access panel.", {
-        folderId: accessRoute.folderId,
-        intent: accessRoute.intent,
-      });
-      return;
-    }
   }
 
-  function openContextMenu(target, x, y) {
+  function openContextMenu(target, x, y, previousFocus = document.activeElement || null) {
     const menu = $("contextMenu");
     if (!menu) return;
     state.contextMenuTarget = target;
+    state.contextMenuPreviousFocus = previousFocus;
     menu.replaceChildren();
     const items = contextMenuItemsForTarget(target);
     for (const item of items) {
       if (item.separator) {
         const separator = document.createElement("div");
         separator.className = "context-menu-separator";
+        separator.setAttribute("role", "separator");
         menu.appendChild(separator);
         continue;
       }
@@ -5288,11 +6218,13 @@ const FiniteBrainProductClient = (() => {
       button.textContent = item.label;
       button.disabled = Boolean(item.disabled);
       button.className = item.danger ? "danger" : "";
+      button.setAttribute("role", "menuitem");
       button.addEventListener("click", () => handleContextMenuAction(item, target));
       menu.appendChild(button);
     }
     menu.hidden = false;
     positionContextMenu(menu, x, y, items.length);
+    focusContextMenuItem(0);
   }
 
   function appendObsidianDetail(button, detail) {
@@ -5303,31 +6235,73 @@ const FiniteBrainProductClient = (() => {
     button.appendChild(detailElement);
   }
 
+  function appendSearchHighlightedText(parent, text, query) {
+    for (const segment of searchHighlightSegments(text, query)) {
+      if (!segment.match) {
+        parent.appendChild(document.createTextNode(segment.text));
+        continue;
+      }
+      const match = document.createElement("mark");
+      match.className = "search-match";
+      match.textContent = segment.text;
+      parent.appendChild(match);
+    }
+  }
+
+  function appendSearchMatchSnippet(button, snippet, query) {
+    if (!snippet) return;
+    const snippetElement = document.createElement("span");
+    snippetElement.className = "search-match-snippet";
+    appendSearchHighlightedText(snippetElement, snippet, query);
+    button.appendChild(snippetElement);
+  }
+
   function obsidianTreeButton(label, detail, className, onClick, options = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = className;
     const title = document.createElement("span");
     title.className = "obsidian-file-title";
-    title.textContent = label;
+    if (options.highlightQuery) {
+      appendSearchHighlightedText(title, label, options.highlightQuery);
+    } else {
+      title.textContent = label;
+    }
     button.appendChild(title);
     appendObsidianDetail(button, detail);
+    appendSearchMatchSnippet(button, options.matchSnippet, options.highlightQuery);
     button.addEventListener("click", onClick);
     if (options.contextTarget) {
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        openContextMenu(options.contextTarget, event.clientX, event.clientY);
+        openContextMenu(options.contextTarget, event.clientX, event.clientY, button);
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        const bounds = button.getBoundingClientRect?.();
+        openContextMenu(
+          options.contextTarget,
+          bounds?.left || 8,
+          bounds?.bottom || 8,
+          button
+        );
       });
     }
     return button;
   }
 
-  function accessFolderOptionButton(row, isActive, openedFolders, onClick) {
+  function accessFolderOptionButton(row, options = {}) {
+    const { index = 0, isActive = false, isFocused = false, openedFolders } = options;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `folder-option-button ${row.status}${isActive ? " active" : ""}`;
+    button.id = `accessFolderOption-${index}`;
+    button.dataset.folderId = row.id;
+    button.dataset.folderIndex = String(index);
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", String(isActive));
+    button.tabIndex = isFocused ? 0 : -1;
 
     const title = document.createElement("span");
     title.className = "folder-option-title";
@@ -5339,7 +6313,6 @@ const FiniteBrainProductClient = (() => {
 
     button.appendChild(title);
     button.appendChild(meta);
-    button.addEventListener("click", onClick);
     return button;
   }
 
@@ -5348,14 +6321,14 @@ const FiniteBrainProductClient = (() => {
     state.activeSidebarMode = mode;
     $("filesSidebarPanel").hidden = mode !== "files";
     $("searchSidebarPanel").hidden = mode !== "search";
-    $("accessSidebarPanel").hidden = mode !== "access";
     $("ribbonFilesButton").className = `ribbon-button${mode === "files" ? " active" : ""}`;
     $("ribbonSearchButton").className = `ribbon-button${mode === "search" ? " active" : ""}`;
-    $("ribbonAccessButton").className = `ribbon-button${mode === "access" ? " active" : ""}`;
+    const accessActive = state.settingsModalOpen && state.settingsSection === "access";
+    $("ribbonAccessButton").className = `ribbon-button${accessActive ? " active" : ""}`;
     setText("sidebarModeTitle", sidebarModeLabel(mode));
     setPressed("ribbonFilesButton", mode === "files");
     setPressed("ribbonSearchButton", mode === "search");
-    setPressed("ribbonAccessButton", mode === "access");
+    setPressed("ribbonAccessButton", accessActive);
   }
 
   function renderSearchPanel() {
@@ -5371,15 +6344,19 @@ const FiniteBrainProductClient = (() => {
           row.label,
           row.detail,
           `obsidian-page-button ${row.key === state.selectedPageKey ? " active" : ""}`,
-          () => selectReaderPage(row.key),
+          () => selectReaderPage(row.key, { searchQuery: query }),
           {
             contextTarget: {
               type: "page",
               folderId: row.folderId,
+              localDraft: Boolean(row.localDraft),
               objectId: row.objectId,
               pageKey: row.key,
+              revision: row.revision,
               title: row.title,
             },
+            highlightQuery: query,
+            matchSnippet: row.matchSnippet,
           }
         );
         item.appendChild(button);
@@ -5409,26 +6386,15 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function renderAccessFlowPanel(activeRow) {
-    const restricted = activeRow?.access === "restricted";
-    const keyOpen = hasOpenedAccessFolderKey(activeRow);
-    const busy = state.accessBusy;
-
-    safeSetHidden("accessFlowPanel", true);
-    safeSetHidden("accessOverviewPanel", true);
-
-    // Set up share expiry defaults (these fields still exist in advanced section)
+  function renderAccessShareControls() {
+    // Keep visible share controls initialized without retaining hidden legacy
+    // controls that used to proxy Folder grants and removals.
     if (!$("accessShareExpiresAtInput").value) {
       $("accessShareExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
     }
     if (state.lastShareLinkId && !$("accessShareLinkInput").value) {
       $("accessShareLinkInput").value = state.lastShareLinkId;
     }
-
-    // Legacy buttons that may still be referenced elsewhere
-    const canUseFolderFlow = restricted && keyOpen && !busy && state.signerStatus === "connected";
-    safeSetElement("grantFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
-    safeSetElement("removeFolderAccessButton", (el) => el.disabled = !canUseFolderFlow);
 
     renderAccessResultPanel();
   }
@@ -5440,43 +6406,34 @@ const FiniteBrainProductClient = (() => {
     if ($("vaultInviteEmailProofCreatedAtInput") && !$("vaultInviteEmailProofCreatedAtInput").value) {
       $("vaultInviteEmailProofCreatedAtInput").value = dateTimeLocalFromIso(new Date().toISOString());
     }
-    if (state.lastVaultInvitationCode && !$("vaultInviteCodeInput").value) {
-      $("vaultInviteCodeInput").value = state.lastVaultInvitationCode;
-    }
     if (state.lastEmailInviteSecret && $("vaultInviteSecretInput") && !$("vaultInviteSecretInput").value) {
       $("vaultInviteSecretInput").value = state.lastEmailInviteSecret;
     }
-    if (state.lastEmailInviteUrl && $("vaultInviteUrlInput")) {
-      $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
-    }
-    const connected = state.signerStatus === "connected";
-    const busy = state.accessBusy;
-    const organizationVault = state.metadata?.kind === "organization";
-    const invitationInput = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode || "";
-    const codeAvailable = Boolean(invitationInput);
-    const codeHint = vaultInvitationIdentifierHint(invitationInput);
-    const inviteCodeUsable = codeAvailable && !codeHint;
-    const emailClaimReady = Boolean(
-      inviteCodeUsable &&
-        $("vaultInviteEmailInput")?.value.trim() &&
-        $("vaultInviteSecretInput")?.value.trim()
-    );
-    safeSetHidden("vaultInviteConnectSignerButton", connected);
-    setOptionalDisabled("vaultInviteConnectSignerButton", busy || !deriveSignerState(window.nostr).canConnect);
-    $("createVaultInvitationButton").disabled = !connected || busy || !state.activeVaultId || !organizationVault;
-    $("getVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
-    setOptionalDisabled("getEmailInviteInstructionsButton", !connected || busy || !emailClaimReady);
-    $("acceptVaultInvitationButton").disabled = !connected || busy || !inviteCodeUsable;
-    $("revokeVaultInvitationButton").disabled = !connected || busy || !codeAvailable || !organizationVault;
-    if (!connected) {
-      setText("vaultInvitationHint", "Connect signer");
-    } else if (codeHint) {
-      setText("vaultInvitationHint", codeHint);
-    } else if (inviteCodeUsable) {
-      setText("vaultInvitationHint", "Ready to join");
-    } else {
-      setText("vaultInvitationHint", "Accept invite code");
-    }
+    const inviteUrlVisible =
+      state.sessionStatus === SESSION_STATUS.UNLOCKED && Boolean(state.lastEmailInviteUrl);
+    safeSetHidden("vaultInviteUrlOutput", !inviteUrlVisible);
+    const inviteUrlInput = $("vaultInviteUrlInput");
+    if (inviteUrlInput) inviteUrlInput.value = inviteUrlVisible ? state.lastEmailInviteUrl : "";
+    setOptionalDisabled("copyVaultInviteUrlButton", !inviteUrlVisible);
+    const controls = vaultInvitationPanelState({
+      activeVaultAvailable: Boolean(state.activeVaultId),
+      busy: state.accessBusy,
+      code: $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode || "",
+      email: $("vaultInviteEmailInput")?.value,
+      inviteSecret: $("vaultInviteSecretInput")?.value,
+      organizationVault: state.metadata?.kind === "organization",
+      sessionStatus: state.sessionStatus,
+      signerCanConnect: deriveSignerState(window.nostr).canConnect,
+      signerStatus: state.signerStatus,
+    });
+    safeSetHidden("vaultInviteConnectSignerButton", controls.connected);
+    setOptionalDisabled("vaultInviteConnectSignerButton", controls.connectDisabled);
+    $("createVaultInvitationButton").disabled = controls.createDisabled;
+    $("getVaultInvitationButton").disabled = controls.inspectDisabled;
+    setOptionalDisabled("getEmailInviteInstructionsButton", controls.emailScopeDisabled);
+    $("acceptVaultInvitationButton").disabled = controls.acceptDisabled;
+    $("revokeVaultInvitationButton").disabled = controls.revokeDisabled;
+    setText("vaultInvitationHint", controls.hint);
   }
 
   function renderAccessPanel() {
@@ -5488,8 +6445,7 @@ const FiniteBrainProductClient = (() => {
       state.activeAccessFolderId = activeRow.id;
     }
 
-    renderAccessSidebarCount(rows, state.metadata);
-    renderAccessViewSwitch();
+    renderAccessSidebarCount(rows);
     renderAccessBusyChrome();
 
     // Render folder selector
@@ -5498,7 +6454,7 @@ const FiniteBrainProductClient = (() => {
     // Render main access inspector
     renderAccessInspector(activeRow, state.metadata, openedFolders);
 
-    renderVaultManagementPanel(state.metadata);
+    renderVaultAccessManagement(state.metadata);
 
     // Update access result panel (for feedback)
     renderAccessResultPanel();
@@ -5507,13 +6463,7 @@ const FiniteBrainProductClient = (() => {
     renderVaultInvitationPanel();
   }
 
-  function renderAccessSidebarCount(folderRows, metadata) {
-    const view = normalizeAccessView(state.activeAccessView);
-    if (view === "vault") {
-      const vaultCount = visibleVaultOptions().length;
-      setPill("accessSidebarCount", `${vaultCount}`, vaultCount ? "ready" : "muted");
-      return;
-    }
+  function renderAccessSidebarCount(folderRows) {
     const folderCount = folderRows.length;
     setPill("accessSidebarCount", `${folderCount}`, folderCount ? "ready" : "muted");
   }
@@ -5521,29 +6471,7 @@ const FiniteBrainProductClient = (() => {
   function renderAccessBusyChrome() {
     const busy = state.accessBusy;
     safeSetHidden("accessBusyStatus", !busy);
-    for (const id of ["accessFolderPanel", "accessVaultPanel"]) {
-      safeSetElement(id, (panel) => panel.classList.toggle("is-busy", busy));
-    }
-  }
-
-  function renderAccessViewSwitch() {
-    const view = normalizeAccessView(state.activeAccessView);
-    state.activeAccessView = view;
-    const folderPanel = $("accessFolderPanel");
-    const vaultPanel = $("accessVaultPanel");
-    if (folderPanel) folderPanel.hidden = view !== "folder";
-    if (vaultPanel) vaultPanel.hidden = view !== "vault";
-    for (const [id, value] of [
-      ["accessVaultViewButton", "vault"],
-      ["accessFolderViewButton", "folder"],
-    ]) {
-      const button = $(id);
-      if (!button) continue;
-      const active = view === value;
-      button.className = active ? "active" : "";
-      button.setAttribute("aria-selected", String(active));
-      button.setAttribute("tabindex", active ? "0" : "-1");
-    }
+    safeSetElement("accessFolderPanel", (panel) => panel.classList.toggle("is-busy", busy));
   }
 
   function actorIsVaultAdmin(metadata) {
@@ -5648,20 +6576,6 @@ const FiniteBrainProductClient = (() => {
     );
   }
 
-  function vaultGuideStepRows(signerStatus, metadata, isAdmin) {
-    const signerDone = signerStatus === "connected";
-    const organizationLoaded = metadata?.kind === "organization";
-    return [
-      { done: signerDone, id: "signer", label: "Connect a NIP-07 signer" },
-      { done: organizationLoaded, id: "vault", label: "Load or create an organization Vault" },
-      {
-        done: Boolean(organizationLoaded && isAdmin),
-        id: "admin",
-        label: "Use a Vault admin email",
-      },
-    ];
-  }
-
   function vaultPeopleRows(metadata) {
     if (!metadata) return [];
     const vaultPersonRow = (npub, role, type, removable) => {
@@ -5719,7 +6633,11 @@ const FiniteBrainProductClient = (() => {
   }
 
   function vaultManagementSummary(metadata) {
-    if (!metadata) return "Choose a Vault, then Load to decrypt its readable Folders.";
+    if (!metadata) {
+      return state.sessionStatus === SESSION_STATUS.LOCKED
+        ? "Choose a Vault, then unlock it to open encrypted content."
+        : "Choose a Vault, then load it to decrypt its readable Folders.";
+    }
     if (metadata.kind === "personal") {
       return "Personal vault loaded. Use Access for Folder permissions and share links.";
     }
@@ -5735,24 +6653,36 @@ const FiniteBrainProductClient = (() => {
     return `${kind} - ${role}${isLoaded ? " - loaded" : ""}`;
   }
 
-  function vaultSwitchButton(vault) {
+  function vaultSwitchButton(vault, surface = "management") {
     const isSelected = vault.vaultId === state.activeVaultId;
     const isLoaded = state.metadata?.vaultId === vault.vaultId;
+    const isLocked = state.sessionStatus === SESSION_STATUS.LOCKED && !state.visibleVaults.length;
+    const statusText = isLoaded
+      ? "loaded"
+      : isLocked
+        ? "locked"
+        : isSelected
+          ? "selected"
+          : "available";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `vault-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}`;
+    button.className = `vault-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}${isLocked ? " locked" : ""}`;
     button.setAttribute("aria-pressed", String(isSelected));
     button.setAttribute(
       "aria-label",
       `${vault.name || vault.vaultId}, ${vaultSwitchRowMeta(vault, isLoaded)}, ${
-        isLoaded ? "loaded" : isSelected ? "selected" : "not selected"
+        statusText
       }`
     );
     button.addEventListener("click", () => {
-      if (vault.vaultId === state.activeVaultId) return;
+      if (vault.vaultId === state.activeVaultId) {
+        if (surface === "switcher") closeVaultSwitcher();
+        return;
+      }
       setActiveVaultId(vault.vaultId);
       log("Selected Vault.", { vaultId: vault.vaultId });
-      render();
+      if (surface === "switcher") closeVaultSwitcher();
+      else render();
     });
 
     const title = document.createElement("span");
@@ -5764,8 +6694,8 @@ const FiniteBrainProductClient = (() => {
     meta.textContent = vaultSwitchRowMeta(vault, isLoaded);
 
     const status = document.createElement("span");
-    status.className = `pill ${isLoaded ? "ready" : isSelected ? "warn" : "muted"}`;
-    status.textContent = isLoaded ? "loaded" : isSelected ? "selected" : "select";
+    status.className = `pill ${isLoaded ? "ready" : isLocked ? "warn" : isSelected ? "warn" : "muted"}`;
+    status.textContent = statusText;
     status.setAttribute("aria-hidden", "true");
 
     button.appendChild(title);
@@ -5774,29 +6704,14 @@ const FiniteBrainProductClient = (() => {
     return button;
   }
 
-  function renderVaultSwitchList() {
-    const rows = visibleVaultOptions();
-    const emptyText = state.signerStatus === "connected"
-      ? "No Vaults available."
-      : "Connect a signer to list Vaults.";
-    setList("vaultSwitchList", rows, emptyText, (item, vault) => {
-      item.appendChild(vaultSwitchButton(vault));
-    });
-  }
-
-  function renderVaultManagementPanel(metadata) {
-    const signerConnected = state.signerStatus === "connected";
+  function renderVaultAccessManagement(metadata) {
     const organizationVault = hasOrganizationVaultControls(metadata);
     const inviteInProgress = Boolean(
       state.lastVaultInvitationCode ||
         $("vaultInviteCodeInput")?.value.trim() ||
         $("vaultInviteSecretInput")?.value.trim()
     );
-    setText("vaultManagementTitle", "Vaults");
-    setText("vaultManagementSummary", vaultManagementSummary(metadata));
-    renderVaultSwitchList();
-    safeSetHidden("accessConnectSignerButton", signerConnected);
-    safeSetHidden("accessCreateOrganizationPanel", !showsCreateOrganizationControl(metadata));
+    safeSetHidden("vaultInvitationActionSection", !organizationVault);
     safeSetElement("vaultPeopleActionPanel", (panel) => {
       panel.hidden = !organizationVault;
       if (!organizationVault) panel.open = false;
@@ -5805,25 +6720,13 @@ const FiniteBrainProductClient = (() => {
     safeSetHidden("vaultInvitationListSection", !organizationVault);
     safeSetHidden("sharedFolderSection", !organizationVault);
     safeSetElement("vaultInvitationPanel", (panel) => {
-      panel.hidden = !(organizationVault || inviteInProgress);
-      if (panel.hidden) {
-        panel.open = false;
-      } else if (inviteInProgress) {
+      panel.hidden = false;
+      if (inviteInProgress) {
         panel.open = true;
       }
     });
-    setOptionalDisabled("accessConnectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled(
-      "accessLoadVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault()
-    );
-    setOptionalDisabled(
-      "accessCreateOrganizationVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
-    );
     renderVaultPeopleList(metadata);
     renderVaultPeopleControls(metadata);
-    renderVaultGuide(metadata);
     renderVaultInvitationList();
     renderSharedFolderList();
   }
@@ -5894,7 +6797,7 @@ const FiniteBrainProductClient = (() => {
         removeButton.addEventListener("click", () => {
           const action = person.type === "admin" ? removeVaultAdminFromPanel : removeVaultMemberFromPanel;
           action(person.id).catch((error) => {
-            state.lastError = error.message;
+            reportClientActionFailure(error);
             log("Failed to update Vault Member Identities.", { error: error.message });
           });
         });
@@ -5916,7 +6819,7 @@ const FiniteBrainProductClient = (() => {
           ? "Admins must already be Vault members."
           : "Only Vault admins can change organization members and admins.";
     setText("vaultPeopleHint", hint);
-    setText("vaultPeopleActionHint", canManage ? "Invite, add, promote" : "Admin-only");
+    setText("vaultPeopleActionHint", canManage ? "Add or promote existing identities" : "Admin-only");
   }
 
   function linkRowActionButton(label, onClick, options = {}) {
@@ -5927,7 +6830,7 @@ const FiniteBrainProductClient = (() => {
     button.disabled = state.accessBusy;
     button.addEventListener("click", () => {
       onClick().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Access list action failed.", { error: error.message });
       });
     });
@@ -5954,36 +6857,6 @@ const FiniteBrainProductClient = (() => {
     item.appendChild(info);
   }
 
-  function renderVaultGuide(metadata) {
-    const list = $("vaultGuideSteps");
-    if (!list) return;
-    const isAdmin = actorIsVaultAdmin(metadata);
-    const fullyManaged =
-      metadata?.kind === "organization" && state.signerStatus === "connected" && isAdmin;
-    const showGuide = metadata?.kind === "organization" && !fullyManaged;
-    list.hidden = !showGuide;
-    if (!showGuide) {
-      list.replaceChildren();
-      return;
-    }
-    list.replaceChildren();
-    for (const step of vaultGuideStepRows(state.signerStatus, metadata, isAdmin)) {
-      const item = document.createElement("li");
-      item.className = `vault-guide-step${step.done ? " done" : ""}`;
-      const marker = document.createElement("span");
-      marker.className = "vault-guide-marker";
-      marker.innerHTML = step.done
-        ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4L19 7" /></svg>'
-        : "";
-      const label = document.createElement("span");
-      label.className = "vault-guide-label";
-      label.textContent = step.label;
-      item.appendChild(marker);
-      item.appendChild(label);
-      list.appendChild(item);
-    }
-  }
-
   function renderVaultInvitationList() {
     const rows = vaultInvitationRows(state.vaultInvitations);
     const pendingCount = rows.filter((row) => row.status === "pending").length;
@@ -5996,7 +6869,7 @@ const FiniteBrainProductClient = (() => {
       if (!row.revocable) return;
       item.appendChild(
         linkRowActionButton("Use code", async () => {
-          $("vaultInviteCodeInput").value = row.inviteCode;
+          rememberVaultInvitationSelection(row);
           setAccessResult("ready", "Invite code loaded", `${row.inviteCode} is in the invite field.`, {
             invitationId: row.id,
           });
@@ -6073,8 +6946,135 @@ const FiniteBrainProductClient = (() => {
     });
   }
 
+  function accessFolderOptionElements() {
+    const list = $("accessFolderList");
+    if (!list) return [];
+    return Array.from(list.querySelectorAll?.('[role="option"]:not([disabled])') || []);
+  }
+
+  function setAccessFolderDropdownOpen(open) {
+    const isOpen = Boolean(open);
+    state.accessFolderDropdownOpen = isOpen;
+    const dropdown = $("accessFolderDropdown");
+    const button = $("accessFolderButton");
+    if (dropdown) dropdown.hidden = !isOpen;
+    button?.setAttribute("aria-expanded", String(isOpen));
+  }
+
+  function closeAccessFolderDropdown(options = {}) {
+    setAccessFolderDropdownOpen(false);
+    if (options.focusTrigger) $("accessFolderButton")?.focus?.();
+  }
+
+  function openAccessFolderDropdown(options = {}) {
+    const optionElements = accessFolderOptionElements();
+    if (!state.accessFolderDropdownOpen) {
+      const selectedIndex = optionElements.findIndex(
+        (option) => option.getAttribute("aria-selected") === "true"
+      );
+      state.accessFolderFocusedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+    }
+    setAccessFolderDropdownOpen(true);
+    if (options.focus) focusAccessFolderOption(state.accessFolderFocusedIndex);
+  }
+
+  function focusAccessFolderOption(index) {
+    const optionElements = accessFolderOptionElements();
+    if (!optionElements.length) return;
+    const nextIndex = Math.min(Math.max(index, 0), optionElements.length - 1);
+    state.accessFolderFocusedIndex = nextIndex;
+    optionElements.forEach((option, optionIndex) => {
+      option.tabIndex = optionIndex === nextIndex ? 0 : -1;
+    });
+    optionElements[nextIndex]?.focus?.();
+  }
+
+  function accessFolderOptionFromEvent(event) {
+    return event.target?.closest?.('[role="option"][data-folder-id]') || null;
+  }
+
+  function selectAccessFolderOption(option) {
+    const folderId = option?.dataset?.folderId;
+    if (!folderId) return;
+    const index = Number(option.dataset.folderIndex);
+    if (Number.isInteger(index) && index >= 0) state.accessFolderFocusedIndex = index;
+    closeAccessFolderDropdown();
+    selectAccessFolder(folderId);
+    $("accessFolderButton")?.focus?.();
+  }
+
+  function bindAccessFolderSelector() {
+    const button = $("accessFolderButton");
+    const list = $("accessFolderList");
+    if (!button || !list) return;
+    button.addEventListener("click", () => {
+      if (state.accessFolderDropdownOpen) {
+        closeAccessFolderDropdown();
+      } else {
+        openAccessFolderDropdown();
+      }
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape" && state.accessFolderDropdownOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAccessFolderDropdown({ focusTrigger: true });
+        return;
+      }
+      const optionElements = accessFolderOptionElements();
+      const nextIndex = keyboardListNavigationIndex(
+        event.key,
+        state.accessFolderFocusedIndex,
+        optionElements.length
+      );
+      if (nextIndex === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAccessFolderDropdown();
+      focusAccessFolderOption(nextIndex);
+    });
+    list.addEventListener("click", (event) => {
+      const option = accessFolderOptionFromEvent(event);
+      if (!option) return;
+      selectAccessFolderOption(option);
+    });
+    list.addEventListener("focusin", (event) => {
+      const option = accessFolderOptionFromEvent(event);
+      const index = Number(option?.dataset?.folderIndex);
+      if (Number.isInteger(index) && index >= 0) state.accessFolderFocusedIndex = index;
+    });
+    list.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAccessFolderDropdown({ focusTrigger: true });
+        return;
+      }
+      const optionElements = accessFolderOptionElements();
+      const activeIndex = optionElements.indexOf(document.activeElement);
+      const nextIndex = keyboardListNavigationIndex(
+        event.key,
+        activeIndex >= 0 ? activeIndex : state.accessFolderFocusedIndex,
+        optionElements.length
+      );
+      if (nextIndex !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        focusAccessFolderOption(nextIndex);
+        return;
+      }
+      if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+      const option = accessFolderOptionFromEvent(event) || optionElements[state.accessFolderFocusedIndex];
+      if (!option) return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectAccessFolderOption(option);
+    });
+  }
+
   function renderFolderSelector(activeRow, rows, openedFolders) {
-    // Update folder selector button
     if (activeRow) {
       setText("accessFolderTitle", activeRow.path);
       setPill("accessFolderStatus", activeRow.accessLabel, activeRow.status === "ready" ? "ready" : "warn");
@@ -6083,29 +7083,31 @@ const FiniteBrainProductClient = (() => {
       setPill("accessFolderStatus", "empty", "muted");
     }
 
-    // Setup folder dropdown
     const dropdown = $("accessFolderDropdown");
     const button = $("accessFolderButton");
-
-    button.onclick = () => {
-      const isOpen = !dropdown.hidden;
-      dropdown.hidden = isOpen;
-      button.setAttribute("aria-expanded", String(!isOpen));
-    };
-
-    // Populate dropdown list
+    if (!dropdown || !button) return;
+    button.setAttribute("aria-controls", "accessFolderList");
+    dropdown.hidden = !state.accessFolderDropdownOpen;
+    button.setAttribute("aria-expanded", String(state.accessFolderDropdownOpen));
+    const selectedIndex = rows.findIndex((row) => row.id === activeRow?.id);
+    if (
+      !Number.isInteger(state.accessFolderFocusedIndex) ||
+      state.accessFolderFocusedIndex < 0 ||
+      state.accessFolderFocusedIndex >= rows.length ||
+      !state.accessFolderDropdownOpen
+    ) {
+      state.accessFolderFocusedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+    }
     setList("accessFolderList", rows, "Load a Vault to inspect access", (item, row) => {
-      const folderButton = accessFolderOptionButton(
-        row,
-        row.id === activeRow?.id,
-        openedFolders,
-        () => {
-          selectAccessFolder(row.id);
-          dropdown.hidden = true;
-          button.setAttribute("aria-expanded", "false");
-        }
+      const index = rows.indexOf(row);
+      item.appendChild(
+        accessFolderOptionButton(row, {
+          index,
+          isActive: row.id === activeRow?.id,
+          isFocused: index === state.accessFolderFocusedIndex,
+          openedFolders,
+        })
       );
-      item.appendChild(folderButton);
     });
 
     if (!state.accessFolderDropdownListenerBound) {
@@ -6113,10 +7115,9 @@ const FiniteBrainProductClient = (() => {
       document.addEventListener("click", (event) => {
         const currentButton = $("accessFolderButton");
         const currentDropdown = $("accessFolderDropdown");
-        if (!currentButton || !currentDropdown || currentDropdown.hidden) return;
+        if (!currentButton || !currentDropdown || !state.accessFolderDropdownOpen) return;
         if (!currentButton.contains(event.target) && !currentDropdown.contains(event.target)) {
-          currentDropdown.hidden = true;
-          currentButton.setAttribute("aria-expanded", "false");
+          closeAccessFolderDropdown();
         }
       });
     }
@@ -6127,7 +7128,7 @@ const FiniteBrainProductClient = (() => {
       setText("accessCurrentFolder", "No folder selected");
       setText("accessSummaryLine", "Load a Vault and select a Folder to inspect access.");
       renderWhoHasAccessList(null, metadata, openedFolders);
-      renderAccessFlowPanel(null);
+      renderAccessShareControls();
       updateAdvancedOptions(null, metadata, openedFolders);
       return;
     }
@@ -6140,8 +7141,8 @@ const FiniteBrainProductClient = (() => {
     renderWhoHasAccessList(activeRow, metadata, openedFolders);
     applyAccessIntentChrome(activeRow);
 
-    // Share-link defaults and legacy hidden controls stay in sync here.
-    renderAccessFlowPanel(activeRow);
+    // Share-link defaults stay in sync with the visible access controls.
+    renderAccessShareControls();
 
     // Update advanced options
     updateAdvancedOptions(activeRow, metadata, openedFolders);
@@ -6160,7 +7161,6 @@ const FiniteBrainProductClient = (() => {
   function renderWhoHasAccessList(row, metadata, openedFolders) {
     const list = $("accessWhoHasList");
     const addPanel = $("accessAddPersonPanel");
-    const manageToggle = $("accessManageToggle");
     const addForm = $("accessAddPersonForm");
 
     if (!row) {
@@ -6169,7 +7169,6 @@ const FiniteBrainProductClient = (() => {
         addPanel.hidden = true;
         addPanel.open = false;
       }
-      if (manageToggle) manageToggle.hidden = true;
       if (addForm) addForm.hidden = true;
       return;
     }
@@ -6186,12 +7185,6 @@ const FiniteBrainProductClient = (() => {
       addForm.classList.toggle("is-ready", canManage);
       addForm.classList.toggle("is-locked", !canManage);
     }
-    if (manageToggle) {
-      manageToggle.hidden = !canManage;
-      setText("accessManageToggleLabel", addForm?.hidden ? "Manage" : "Cancel");
-      manageToggle.setAttribute("aria-expanded", String(!addForm?.hidden));
-    }
-
     const accessList = buildAccessList(row, metadata);
 
     if (accessList.length === 0) {
@@ -6238,13 +7231,6 @@ const FiniteBrainProductClient = (() => {
         list.appendChild(item);
       });
     }
-
-    if (manageToggle && addForm) manageToggle.onclick = () => {
-      const isShowing = !addForm.hidden;
-      addForm.hidden = isShowing;
-      setText("accessManageToggleLabel", isShowing ? "Manage" : "Cancel");
-      manageToggle.setAttribute("aria-expanded", String(!addForm.hidden));
-    };
 
     setupAddPersonForm(row);
   }
@@ -6334,13 +7320,17 @@ const FiniteBrainProductClient = (() => {
     addInput.disabled = state.accessBusy || !canManage;
 
     addButton.onclick = () => {
-      const email = addInput.value.trim();
-      if (email && row) {
-        // Set the target field that the existing function expects
-        $("accessTargetNpubInput").value = email;
+      const identity = addInput.value.trim();
+      if (identity && row) {
         state.activeAccessIntent = "people";
-        grantFolderAccessFromPanel();
-        addInput.value = "";
+        grantFolderAccessFromPanel(identity)
+          .then(() => {
+            addInput.value = "";
+          })
+          .catch((error) => {
+            reportClientActionFailure(error);
+            log("Failed to grant Folder access.", { error: error.message });
+          });
       }
     };
 
@@ -6356,18 +7346,22 @@ const FiniteBrainProductClient = (() => {
       addHint.textContent = accessFlowHint(row, "people", keyOpen);
     } else {
       addHint.textContent = row.access === "all_members"
-        ? `Enter an existing Vault member email to send the Folder Key for "${row.path}"`
-        : `Enter an email to grant access to "${row.path}"`;
+        ? `Enter an existing Vault Member Identity to send the Folder Key for "${row.path}"`
+        : `Enter a Member Identity to grant access to "${row.path}"`;
     }
   }
 
   function removePersonAccess(personId, folderId) {
     if (state.accessBusy || state.signerStatus !== "connected") return;
 
-    // Use existing remove access functionality
     state.activeAccessIntent = "people";
-    $("accessTargetNpubInput").value = personId;
-    $("removeFolderAccessButton").click();
+    if (folderId && folderId !== state.activeAccessFolderId) {
+      state.activeAccessFolderId = folderId;
+    }
+    removeFolderAccessFromPanel(personId).catch((error) => {
+      reportClientActionFailure(error);
+      log("Failed to remove Folder access.", { error: error.message });
+    });
   }
 
   function updateAdvancedOptions(row, metadata, openedFolders) {
@@ -6421,12 +7415,12 @@ const FiniteBrainProductClient = (() => {
       } else if (!isRestricted) {
         shareHint.textContent = "Share links are for restricted Folders. Choose a restricted Folder to create one.";
       } else {
-        shareHint.textContent = "Target email receives a single-use Folder Key Grant through the link.";
+        shareHint.textContent = "The selected Member Identity receives a single-use Folder Key Grant through the link.";
       }
     }
     if (shareMountHint) {
       shareMountHint.textContent = canCreateShare
-        ? "When accepted, this adds the shared Folder to their Vault sidebar. It does not copy data or grant extra access."
+        ? "When accepted, this adds a shortcut to the shared Folder in their Personal Vault. It does not copy data or change Folder access."
         : "Available when creating a restricted Folder share link.";
     }
 
@@ -6459,6 +7453,7 @@ const FiniteBrainProductClient = (() => {
 
   function renderReader() {
     selectDefaultReaderTargets();
+    const page = syncReaderInputsFromSelectedPage();
     const folderRows = readerFolderRows(state.metadata);
 
     setList("readerFolderList", folderRows, "Load a Vault to browse folders", (item, row) => {
@@ -6494,8 +7489,10 @@ const FiniteBrainProductClient = (() => {
               contextTarget: {
                 type: "page",
                 folderId: pageRow.folderId,
+                localDraft: Boolean(pageRow.localDraft),
                 objectId: pageRow.objectId,
                 pageKey: pageRow.key,
+                revision: pageRow.revision,
                 title: pageRow.title,
               },
             }
@@ -6507,10 +7504,6 @@ const FiniteBrainProductClient = (() => {
       }
     });
 
-    const page = selectedReaderPage();
-    $("readerModeButton").textContent = state.readerMode === "source" ? "Source" : "Reading";
-    setPressed("readerModeButton", state.readerMode === "source");
-    $("readerModeButton").disabled = !isReadablePage(page);
     if (!page) {
       const sessionLocked = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
       setText(
@@ -6519,7 +7512,7 @@ const FiniteBrainProductClient = (() => {
       );
       setText(
         "readerPagePath",
-        sessionLocked ? "Resume the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
+        sessionLocked ? "Unlock the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
       );
       setPill("readerPageMeta", sessionLocked ? "locked" : "empty", sessionLocked ? "warn" : "muted");
       renderPageContent(null);
@@ -6544,6 +7537,13 @@ const FiniteBrainProductClient = (() => {
 
   function renderSessionSecurity() {
     const view = sessionStatusView(state.sessionStatus);
+    setText("sessionAccountVault", activeVaultLabel());
+    setText("sessionAccountIdentity", sessionIdentityLabel());
+    setText("sessionAccountStatus", view.title);
+    const vaultTrigger = $("sessionAccountVaultButton");
+    vaultTrigger?.setAttribute("aria-label", `Switch Vault (current: ${activeVaultLabel()})`);
+    vaultTrigger?.setAttribute("title", "Switch Vault");
+    vaultTrigger?.setAttribute("aria-expanded", String(state.vaultSwitcherOpen));
     setText("sessionSecurityTitle", view.title);
     setText("sessionSecurityDetail", state.sessionNotice || view.detail);
     safeSetHidden("resumeSessionButton", !view.locked);
@@ -6561,37 +7561,24 @@ const FiniteBrainProductClient = (() => {
       clearSessionSecretsAndPlaintext(state);
       clearSessionOwnedDom();
     }
-    safeSetHidden("connectSignerButton", state.signerStatus === "connected");
-    setOptionalDisabled("connectSignerButton", !deriveSignerState(window.nostr).canConnect);
-    setOptionalDisabled("loadVaultButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !canLoadVault());
-    setOptionalDisabled(
-      "createOrganizationVaultButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
-    );
+    renderClientActionFeedback();
     setOptionalDisabled("obsidianNewPageButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED);
     setOptionalDisabled("obsidianNewFolderButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.metadata);
-    setOptionalDisabled("openFolderKeyButton", !state.metadata);
-    setOptionalDisabled("encryptDraftButton", !state.keyring);
     setOptionalDisabled(
       "refreshReaderButton",
       state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.readerBusy || state.signerStatus !== "connected" || !state.metadata
     );
-    setOptionalDisabled("planOkfImportButton", !state.metadata);
-    setOptionalDisabled(
-      "executeOkfImportButton",
-      !state.okfPlan || !state.keyring || state.signerStatus !== "connected"
-    );
-    renderVaultSelect();
-
     renderSessionSecurity();
-    renderVaultControlChrome();
+    renderSettingsModal();
+    renderVaultSwitcher();
+    renderManageVaultsModal();
     renderSidebarMode();
     renderReader();
+    if (state.activeWorkspaceView === "graph") renderGraphView();
     updateEditorChrome();
     renderSearchPanel();
     renderAccessPanel();
     renderCommandPalette();
-    renderOkfPlan();
   }
 
   function utf8Base64(text) {
@@ -6611,10 +7598,15 @@ const FiniteBrainProductClient = (() => {
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  function authNonce() {
+    return bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  }
+
   async function buildAuthEventTemplate(method, url, bodyText) {
     const tags = [
       ["u", url],
       ["method", method.toUpperCase()],
+      ["nonce", authNonce()],
     ];
     if (bodyText) tags.push(["payload", await sha256Hex(bodyText)]);
     return {
@@ -6634,6 +7626,33 @@ const FiniteBrainProductClient = (() => {
     const eventTemplate = await buildAuthEventTemplate(method, url, bodyText);
     const signed = await signEvent(eventTemplate);
     return `${state.config.authScheme} ${utf8Base64(JSON.stringify(signed))}`;
+  }
+
+  function protectedRequestError(path, status, body) {
+    const reason = typeof body?.error === "string" ? body.error : null;
+    const error = new Error(reason || `Request failed with ${status}`);
+    error.status = status;
+    error.reason = reason;
+    error.path = path;
+    return error;
+  }
+
+  function isActiveVaultAuthorizationLoss(error, activeVaultId) {
+    if (
+      !error ||
+      error.status !== 403 ||
+      error.reason !== VAULT_ACCESS_REQUIRED_REASON
+    ) {
+      return false;
+    }
+    const vaultId = String(activeVaultId || "").trim();
+    if (!vaultId) return false;
+    const vaultPath = `/_admin/vaults/${encodeURIComponent(vaultId)}`;
+    return [
+      `${vaultPath}/metadata`,
+      `${vaultPath}/export`,
+      `${vaultPath}/sync/bootstrap`,
+    ].includes(error.path);
   }
 
   async function protectedRequest(path, options = {}) {
@@ -6659,8 +7678,9 @@ const FiniteBrainProductClient = (() => {
       body = text;
     }
     if (!response.ok) {
-      const message = body?.error || `Request failed with ${response.status}`;
-      throw new Error(message);
+      const error = protectedRequestError(path, response.status, body);
+      lockSessionForVaultAccessChange(error, sessionEpoch);
+      throw error;
     }
     rememberIdentitiesFrom(body);
     return body;
@@ -6683,7 +7703,7 @@ const FiniteBrainProductClient = (() => {
     );
     if (fallbackVaultId) {
       setActiveVaultId(fallbackVaultId);
-      state.sessionNotice = "The previously selected Vault is no longer visible. Resume session to open the fallback Vault.";
+      state.sessionNotice = "The previously selected Vault is no longer visible. Unlock the session to open the fallback Vault.";
       render();
       return state.visibleVaults;
     }
@@ -6875,15 +7895,14 @@ const FiniteBrainProductClient = (() => {
     const invitation = await protectedRequest(vaultInvitationAcceptPath(active.inviteCode), {
       method: "POST",
     });
-    state.lastVaultInvitationId = invitation.id;
-    state.lastVaultInvitationCode = invitation.inviteCode;
+    rememberVaultInvitationSelection(invitation);
     setActiveVaultId(invitation.vaultId, { reset: false });
     await loadVisibleVaults();
   }
 
-  async function createOrganizationVaultFromInput(inputId = "organizationVaultNameInput") {
+  async function createOrganizationVaultFromInput(inputId) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating a Vault");
+      throw new Error("Session is locked. Unlock the session before creating a Vault");
     }
     const sessionEpoch = state.sessionEpoch;
     const input = $(inputId);
@@ -6921,27 +7940,24 @@ const FiniteBrainProductClient = (() => {
   async function detectSigner() {
     const derived = deriveSignerState(window.nostr);
     state.signerStatus = derived.status;
-    setText("signerDetail", derived.detail);
     render();
   }
 
   async function connectSigner(options = {}) {
     const operationEpoch = options.sessionEpoch ?? state.sessionEpoch;
     const derived = deriveSignerState(window.nostr);
-    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     if (!derived.canConnect) {
       state.signerStatus = derived.status;
-      setText("signerDetail", derived.detail);
       render();
       return;
     }
     const pubkey = await window.nostr.getPublicKey();
     if (state.sessionEpoch !== operationEpoch) {
-      throw new Error("Session changed while signer connection was in progress; resume again");
+      throw new Error("Session changed while signer connection was in progress; unlock again");
     }
     const identityChanged = signerIdentityChanged(state.pubkeyHex, pubkey);
     if (identityChanged) {
-      resetVaultSessionState();
+      resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
     state.pubkeyHex = pubkey;
@@ -6949,13 +7965,6 @@ const FiniteBrainProductClient = (() => {
     if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId) {
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
-    setText(
-      "signerDetail",
-      identityChanged
-        ? "Signer identity changed. The previous session was locked."
-        : "Signer connected."
-    );
-    setText("authDetail", "Signed requests are ready for protected Vault routes.");
     log(identityChanged ? "Connected a different signer identity." : "Connected signer.", {
       status: "connected",
     });
@@ -6970,7 +7979,6 @@ const FiniteBrainProductClient = (() => {
 
   async function loadVaultMetadata(options = {}) {
     if (!options.preserveActive) {
-      setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
       await ensureInvitedVaultAcceptedForActiveSelection();
       await ensurePersonalVaultForActiveSelection();
     }
@@ -6980,7 +7988,9 @@ const FiniteBrainProductClient = (() => {
     rememberVisibleVault(metadata);
     log("Loaded Vault metadata.", metadata);
     render();
-    if (state.activeSidebarMode === "access") refreshAccessManagementListsInBackground();
+    if (state.settingsModalOpen && state.settingsSection === "access") {
+      refreshAccessManagementListsInBackground();
+    }
   }
 
   function canLoadVaultAdminLists() {
@@ -7036,6 +8046,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function revokeVaultInvitationById(invitationId) {
+    requireUnlockedVaultInvitationAction("revoking an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     beginAccessOperation(sessionEpoch);
@@ -7126,7 +8137,7 @@ const FiniteBrainProductClient = (() => {
 
   async function openAvailableFolderKeyGrants(options = {}) {
     if (!sessionGrantOpeningAllowed(state.sessionStatus)) {
-      throw new Error("Session is locked. Resume the session before opening encrypted Folder Key Grants");
+      throw new Error("Session is locked. Unlock the session before opening encrypted Folder Key Grants");
     }
     const sessionEpoch = state.sessionEpoch;
     const assertCurrent = () => requireCurrentSessionEpoch(sessionEpoch);
@@ -7152,9 +8163,8 @@ const FiniteBrainProductClient = (() => {
   async function loadVaultReader(options = {}) {
     const allowResume = options.allowResume === true;
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
-      throw new Error("Session is locked. Use Resume session before loading protected Vault state");
+      throw new Error("Session is locked. Use Unlock session before loading protected Vault state");
     }
-    setActiveVaultId(selectedVaultIdFromControls(), { reset: false });
     let relockOnFailure = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
     let sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
@@ -7163,7 +8173,7 @@ const FiniteBrainProductClient = (() => {
       await connectSigner({ loadVisibleVaults: false, sessionEpoch });
       if (state.signerStatus !== "connected") throw new Error("Connect a NIP-07 signer first");
       if (state.sessionStatus !== SESSION_STATUS.UNLOCKED && !allowResume) {
-        throw new Error("Signer identity changed. Use Resume session to open the new session");
+        throw new Error("Signer identity changed. Use Unlock session to open the new session");
       }
       relockOnFailure = relockOnFailure || state.sessionStatus !== SESSION_STATUS.UNLOCKED;
       if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) state.sessionStatus = SESSION_STATUS.RESUMING;
@@ -7183,7 +8193,7 @@ const FiniteBrainProductClient = (() => {
       renderGraphView();
       state.sessionStatus = SESSION_STATUS.UNLOCKED;
       if (applyPendingInviteNavigation()) {
-        state.sessionNotice = "Invitation details loaded into this resumed session.";
+        state.sessionNotice = "Invitation details loaded into this unlocked session.";
       }
       log("Loaded Vault reader.", {
         openedFolderKeys: grants.opened.length,
@@ -7201,7 +8211,7 @@ const FiniteBrainProductClient = (() => {
 
   async function refreshReader() {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before refreshing readable content");
+      throw new Error("Session is locked. Unlock the session before refreshing readable content");
     }
     const sessionEpoch = state.sessionEpoch;
     state.readerBusy = true;
@@ -7222,7 +8232,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function activePageInput() {
-    if (state.editorMode === "source") {
+    if (state.editorMode === "markdown") {
       rememberActiveDraft($("pageDraftInput").value);
     } else if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
       syncDraftFromVisualEditor();
@@ -7288,13 +8298,12 @@ const FiniteBrainProductClient = (() => {
     return Boolean(state.keyring?.keys.has(folderKeyId(state.activeVaultId, row.id, keyVersion)));
   }
 
-  async function normalizedTargetNpub() {
-    return normalizedNpubInput("accessTargetNpubInput", "Paste an email first");
+  async function normalizedNpubInput(inputId, message) {
+    return normalizedNpubValue($(inputId).value, message);
   }
 
-  async function normalizedNpubInput(inputId, message) {
-    const value = $(inputId).value.trim();
-    const identity = await resolveIdentityInputValue(value, message);
+  async function normalizedNpubValue(value, message) {
+    const identity = await resolveIdentityInputValue(String(value || "").trim(), message);
     return identity.npub;
   }
 
@@ -7338,6 +8347,36 @@ const FiniteBrainProductClient = (() => {
     return candidate;
   }
 
+  function folderCreationParent(parentFolderId, folders = []) {
+    if (parentFolderId === null || parentFolderId === undefined) return null;
+    const normalizedParentFolderId = String(parentFolderId).trim();
+    if (!normalizedParentFolderId) throw new Error("Select a valid parent Folder");
+    const parentFolder = (folders || []).find(
+      (folder) => folder?.id === normalizedParentFolderId
+    );
+    if (!parentFolder || !String(parentFolder.path || "").trim()) {
+      throw new Error("The selected parent Folder is no longer available");
+    }
+    return parentFolder;
+  }
+
+  function folderCreationHierarchy(parentFolder, name, folderId) {
+    const normalizedName = String(name || "").trim();
+    const normalizedFolderId = String(folderId || "").trim();
+    if (!normalizedName || !normalizedFolderId) {
+      throw new Error("Folder name and identifier are required");
+    }
+    if (!parentFolder) {
+      return { parentFolderId: null, path: normalizedFolderId };
+    }
+    const parentFolderId = String(parentFolder.id || "").trim();
+    const parentPath = String(parentFolder.path || "").trim();
+    if (!parentFolderId || !parentPath) {
+      throw new Error("The selected parent Folder is no longer available");
+    }
+    return { parentFolderId, path: `${parentPath}/${normalizedName}` };
+  }
+
   function folderRecipientsForAccess(access, accessUserIds = []) {
     const recipients = new Set();
     if (access === "owner") {
@@ -7358,10 +8397,10 @@ const FiniteBrainProductClient = (() => {
     return [...recipients];
   }
 
-  async function createFolderFromToolbar() {
+  async function createFolderFromToolbar(parentFolderId = null) {
     if (!state.metadata) throw new Error("Open a Vault before creating a Folder");
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating a Folder");
+      throw new Error("Session is locked. Unlock the session before creating a Folder");
     }
     const sessionEpoch = state.sessionEpoch;
     const vaultId = state.activeVaultId;
@@ -7373,6 +8412,8 @@ const FiniteBrainProductClient = (() => {
     const name = window.prompt("Folder name", "Notes")?.trim();
     if (!name) return;
     const folderId = uniqueFolderId(slugFromFolderName(name));
+    const parentFolder = folderCreationParent(parentFolderId, state.metadata?.folders || []);
+    const hierarchy = folderCreationHierarchy(parentFolder, name, folderId);
     const access = state.metadata.kind === "personal" ? "owner" : "all_members";
     const accessUserIds = [];
     const rawKey = randomFolderKeyBytes();
@@ -7421,8 +8462,8 @@ const FiniteBrainProductClient = (() => {
           folderId,
           grants,
           name,
-          parentFolderId: null,
-          path: folderId,
+          parentFolderId: hierarchy.parentFolderId,
+          path: hierarchy.path,
           role: "folder",
           sharedFolderSource: false,
         }),
@@ -7434,7 +8475,6 @@ const FiniteBrainProductClient = (() => {
     state.selectedFolderId = folderId;
     state.expandedFolderIds.add(folderId);
     $("pageFolderIdInput").value = folderId;
-    $("okfDestinationFolderInput").value = folderId;
     log("Created Folder from toolbar.", { folderId, recipients: recipients.length });
     render();
   }
@@ -7488,7 +8528,7 @@ const FiniteBrainProductClient = (() => {
     const value = String(input || "").trim();
     if (!value) return null;
     if (value.startsWith("invitation-")) {
-      return "That is an invitation id. Inspect and accept use an Invite Code like invite-...; use Revoke invite or fbrain invites accept --vault <vault-id> --id <invitation-id> for id-based actions.";
+      return "That is an invitation id. Inspect and Join Vault use an Invite Code like invite-...; use Revoke invite or fbrain invites accept --vault <vault-id> --id <invitation-id> for id-based actions.";
     }
     if (!value.startsWith("invite-")) {
       return "Invite Codes start with invite-. Check the copied code and the active signer.";
@@ -7496,9 +8536,133 @@ const FiniteBrainProductClient = (() => {
     return null;
   }
 
+  function vaultInvitationPanelState(input = {}) {
+    const code = String(input.code || "").trim();
+    const connected = input.signerStatus === "connected";
+    const unlocked = input.sessionStatus === SESSION_STATUS.UNLOCKED;
+    const busy = Boolean(input.busy);
+    const organizationVault = Boolean(input.organizationVault);
+    const codeHint = vaultInvitationIdentifierHint(code);
+    const inviteCodeUsable = Boolean(code) && !codeHint;
+    const emailClaimReady = Boolean(
+      inviteCodeUsable && String(input.email || "").trim() && String(input.inviteSecret || "").trim()
+    );
+    const protectedActionDisabled = !connected || !unlocked || busy;
+    let hint;
+    if (!unlocked) {
+      hint = "Unlock the session to inspect, accept, or manage invitations.";
+    } else if (!connected) {
+      hint = "Connect signer";
+    } else if (codeHint) {
+      hint = codeHint;
+    } else if (inviteCodeUsable) {
+      hint = "Ready to join Vault";
+    } else {
+      hint = "Enter an Invite Code";
+    }
+    return {
+      acceptDisabled: protectedActionDisabled || !inviteCodeUsable,
+      codeHint,
+      connectDisabled: busy || !input.signerCanConnect,
+      connected,
+      createDisabled:
+        protectedActionDisabled || !organizationVault || input.activeVaultAvailable === false,
+      emailScopeDisabled: protectedActionDisabled || !emailClaimReady,
+      hint,
+      inspectDisabled: protectedActionDisabled || !inviteCodeUsable,
+      inviteCodeUsable,
+      revokeDisabled: protectedActionDisabled || !organizationVault || !code,
+    };
+  }
+
+  function requireUnlockedVaultInvitationAction(action) {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
+      throw new Error(`Session is locked. Unlock the session before ${action}`);
+    }
+  }
+
+  function clearRememberedEmailInvitationMaterial() {
+    const rememberedSecret = state.lastEmailInviteSecret;
+    const secretInput = $("vaultInviteSecretInput");
+    if (rememberedSecret && secretInput?.value === rememberedSecret) {
+      secretInput.value = "";
+    }
+    state.lastEmailInviteSecret = null;
+    state.lastEmailInviteUrl = null;
+    const inviteUrlInput = $("vaultInviteUrlInput");
+    if (inviteUrlInput) inviteUrlInput.value = "";
+    safeSetHidden("vaultInviteUrlOutput", true);
+    setOptionalDisabled("copyVaultInviteUrlButton", true);
+  }
+
+  function rememberVaultInvitationSelection(invitation) {
+    const inviteCode = String(invitation?.inviteCode || "").trim();
+    const invitationId = String(invitation?.id || "").trim() || null;
+    const changed = inviteCode !== state.lastVaultInvitationCode;
+    state.lastVaultInvitationCode = inviteCode || null;
+    state.lastVaultInvitationId = invitationId;
+    if (changed) {
+      state.lastEmailInvitePostProof = null;
+      clearRememberedEmailInvitationMaterial();
+    }
+    const codeInput = $("vaultInviteCodeInput");
+    if (codeInput) codeInput.value = inviteCode;
+  }
+
+  function handleVaultInvitationInput(inputId) {
+    if (inputId === "vaultInviteCodeInput") {
+      const inviteCode = $("vaultInviteCodeInput")?.value.trim() || "";
+      if (inviteCode !== state.lastVaultInvitationCode) {
+        state.lastVaultInvitationCode = inviteCode || null;
+        state.lastVaultInvitationId = null;
+        state.lastEmailInvitePostProof = null;
+        clearRememberedEmailInvitationMaterial();
+      }
+    } else if (
+      inputId === "vaultInviteEmailInput" ||
+      inputId === "vaultInviteEmailProofCreatedAtInput" ||
+      inputId === "vaultInviteSecretInput"
+    ) {
+      state.lastEmailInvitePostProof = null;
+      if (
+        inputId === "vaultInviteSecretInput" &&
+        $("vaultInviteSecretInput")?.value.trim() !== state.lastEmailInviteSecret
+      ) {
+        clearRememberedEmailInvitationMaterial();
+      }
+    }
+    renderVaultInvitationPanel();
+  }
+
+  function vaultInvitationRevokeTarget(input = {}) {
+    const value = String(input.input || "").trim();
+    if (!value) throw new Error("Paste an Invite Code or invitation id first");
+    const vaultId = String(input.activeVaultId || "").trim();
+    if (!vaultId) throw new Error("Select a Vault before revoking an invitation");
+    const invitations = input.invitations || [];
+    const knownInvitation = invitations.find(
+      (invitation) => invitation?.id === value || invitation?.inviteCode === value
+    );
+    if (knownInvitation?.id) {
+      return { invitationId: knownInvitation.id, vaultId: knownInvitation.vaultId || vaultId };
+    }
+    if (
+      value === String(input.lastVaultInvitationCode || "").trim() &&
+      input.lastVaultInvitationId
+    ) {
+      return { invitationId: input.lastVaultInvitationId, vaultId };
+    }
+    if (value.startsWith("invitation-")) {
+      return { invitationId: value, vaultId };
+    }
+    throw new Error(
+      "Revoke an invitation created by this Vault admin from the pending invitation list, or paste its invitation id."
+    );
+  }
+
   function currentVaultInvitationInput() {
     const value = $("vaultInviteCodeInput").value.trim() || state.lastVaultInvitationCode;
-    if (!value) throw new Error("Paste an Invite Code first");
+    if (!value) throw new Error("Paste an Invite Code or invitation id first");
     return value;
   }
 
@@ -8110,6 +9274,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message) {
+    markAccessFailureHandled(error);
     if (!sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) return;
     setAccessResult("error", title, detail(error));
   }
@@ -8161,7 +9326,7 @@ const FiniteBrainProductClient = (() => {
   async function addVaultMemberFromPanel() {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
-    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member email first");
+    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -8186,7 +9351,7 @@ const FiniteBrainProductClient = (() => {
   async function addVaultAdminFromPanel() {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
-    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin email first");
+    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -8352,11 +9517,11 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  async function grantFolderAccessFromPanel() {
+  async function grantFolderAccessFromPanel(targetValue) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireGrantableAccessRow();
-    const targetNpub = await normalizedTargetNpub();
+    const targetNpub = await normalizedNpubValue(targetValue, "Enter an email first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -8393,11 +9558,11 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  async function removeFolderAccessFromPanel() {
+  async function removeFolderAccessFromPanel(targetValue) {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
-    const targetNpub = await normalizedTargetNpub();
+    const targetNpub = await normalizedNpubValue(targetValue, "Enter an email first");
     requireCurrentSessionEpoch(sessionEpoch);
     const operationKeyring = cloneSessionKeyring(state.keyring);
     const metadataSnapshot = state.metadata;
@@ -8455,7 +9620,7 @@ const FiniteBrainProductClient = (() => {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
-    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target email first");
+    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -8560,15 +9725,13 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createVaultInvitationFromPanel() {
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before creating an invitation");
-    }
+    requireUnlockedVaultInvitationAction("creating an invitation");
     const sessionEpoch = state.sessionEpoch;
     const vaultId = state.activeVaultId;
     const metadata = state.metadata;
     const publicBaseUrl = state.config?.publicBaseUrl;
     const targetInput = $("vaultInviteTargetNpubInput").value.trim();
-    if (!targetInput) throw new Error("Paste an invite email first");
+    if (!targetInput) throw new Error("Enter an email address or Member Identity first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -8580,7 +9743,7 @@ const FiniteBrainProductClient = (() => {
         let resolvedNpub = null;
         if (finiteVipEmail(targetInput)) {
           try {
-            resolvedNpub = (await resolveIdentityInputValue(targetInput, "Paste an invite email first")).npub;
+            resolvedNpub = (await resolveIdentityInputValue(targetInput, "Enter an email address or Member Identity first")).npub;
             requireCurrentSessionEpoch(sessionEpoch);
           } catch (error) {
             if (state.sessionEpoch !== sessionEpoch) throw error;
@@ -8614,7 +9777,7 @@ const FiniteBrainProductClient = (() => {
           state.keyring = sessionKeyring;
         }
       } else {
-        const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite email first");
+        const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Enter an email address or Member Identity first");
         requireCurrentSessionEpoch(sessionEpoch);
         body = JSON.stringify(
           buildVaultInvitationRequest({
@@ -8631,9 +9794,7 @@ const FiniteBrainProductClient = (() => {
         { method: "POST", body }
       );
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
-      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       if (localInviteSecret && invitation.targetKind === "email_bootstrap") {
         const invitedEmail = invitation.invitedEmail || canonicalInviteEmail(targetInput);
         state.lastEmailInviteSecret = localInviteSecret;
@@ -8647,11 +9808,12 @@ const FiniteBrainProductClient = (() => {
         $("vaultInviteEmailInput").value = invitedEmail;
         $("vaultInviteUrlInput").value = state.lastEmailInviteUrl;
       } else {
-        state.lastEmailInviteSecret = null;
-        state.lastEmailInviteUrl = null;
-        $("vaultInviteUrlInput").value = "";
+        clearRememberedEmailInvitationMaterial();
       }
-      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}.`, {
+      const invitationAccessDetail = invitation.targetKind === "email_bootstrap"
+        ? "They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email."
+        : "They can join with this one-time invite; grant any required Folder Keys after they join.";
+      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}. ${invitationAccessDetail}`, {
         inviteCode: invitation.inviteCode,
         invitationId: invitation.id,
         acceptPath: invitation.acceptPath,
@@ -8667,6 +9829,7 @@ const FiniteBrainProductClient = (() => {
       });
       await refreshVaultAdminLists();
     } catch (error) {
+      markAccessFailureHandled(error);
       if (state.sessionEpoch === sessionEpoch) {
         setAccessResult("error", "Invite failed", vaultInvitationUnavailableDetail(error));
       }
@@ -8680,15 +9843,14 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function inspectVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("inspecting an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     beginAccessOperation(sessionEpoch);
     try {
       const invitation = await protectedRequest(vaultInvitationLinkPath(code));
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
-      $("vaultInviteCodeInput").value = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       setAccessResult("ready", "Invitation loaded", `${identityDisplay(invitation.userId)} is ${invitation.status}.`, {
         vaultId: invitation.vaultId,
         invitationId: invitation.id,
@@ -8707,6 +9869,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function loadEmailInviteInstructionsFromPanel() {
+    requireUnlockedVaultInvitationAction("verifying email and loading invitation access");
     const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
@@ -8728,24 +9891,23 @@ const FiniteBrainProductClient = (() => {
         invitedEmail: email,
       });
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       state.lastEmailInvitePostProof = invitation;
       const folderScope = (invitation.bootstrapScope || [])
         .map((folder) => `${folder.folderId} v${folder.keyVersion}`)
         .join(", ");
-      setAccessResult("ready", "Email scope loaded", `${email} can claim ${invitation.vaultId}.`, {
+      setAccessResult("ready", "Email verified", `${email} can claim encrypted Folder Key Grants for ${invitation.vaultId}.`, {
         inviteCode: invitation.inviteCode,
         scope: folderScope || "none",
         status: invitation.status,
       });
-      log("Loaded post-proof email invitation scope.", {
+      log("Verified email invitation scope.", {
         invitationId: invitation.id,
         vaultId: invitation.vaultId,
       });
       return invitation;
     } catch (error) {
-      failAccessOperation(sessionEpoch, "Email scope failed", error, vaultInvitationUnavailableDetail);
+      failAccessOperation(sessionEpoch, "Email verification failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
       finishAccessOperation(sessionEpoch);
@@ -8753,6 +9915,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function acceptVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("accepting an invitation");
     const code = currentVaultInvitationCode();
     const email = $("vaultInviteEmailInput")?.value.trim();
     const inviteSecret = $("vaultInviteSecretInput")?.value.trim();
@@ -8768,8 +9931,9 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(invitation.vaultId);
       state.sessionNotice = invitation.duplicateAccept
-        ? "Invitation was already accepted. Resume session to open the selected Vault."
-        : "Invitation accepted. Resume session to open the selected Vault.";
+        ? "This Member Identity already joined the selected Vault. An admin must grant any required Folder Keys before encrypted content can open."
+        : "Joined the selected Vault. An admin must grant any required Folder Keys before encrypted content can open.";
+      render();
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
       failAccessOperation(sessionEpoch, "Accept failed", error, vaultInvitationUnavailableDetail);
@@ -8780,9 +9944,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function claimEmailVaultInvitationFromPanel(code) {
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Resume the session before claiming encrypted Folder Key Grants");
-    }
+    requireUnlockedVaultInvitationAction("claiming encrypted Folder Key Grants");
     const sessionEpoch = captureSessionOperationEpoch();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
     const inviteSecret = $("vaultInviteSecretInput").value.trim();
@@ -8821,8 +9983,9 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(claimed.vaultId);
       state.sessionNotice = claimed.duplicateAccept
-        ? "Email invitation was already claimed. Resume session to open the selected Vault."
-        : "Email invitation claimed. Resume session to open the selected Vault.";
+        ? "Email invitation was already claimed. Unlock the session to open the selected Vault."
+        : "Email invitation claimed. Unlock the session to open the selected Vault.";
+      render();
       log("Claimed email Vault invitation.", {
         invitationId: claimed.id,
         vaultId: claimed.vaultId,
@@ -8836,31 +9999,24 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function revokeVaultInvitationFromPanel() {
+    requireUnlockedVaultInvitationAction("revoking an invitation");
     const sessionEpoch = captureSessionOperationEpoch();
     const value = currentVaultInvitationInput();
+    const target = vaultInvitationRevokeTarget({
+      activeVaultId: state.activeVaultId,
+      input: value,
+      invitations: state.vaultInvitations,
+      lastVaultInvitationCode: state.lastVaultInvitationCode,
+      lastVaultInvitationId: state.lastVaultInvitationId,
+    });
     beginAccessOperation(sessionEpoch);
     try {
-      let invitationId = state.lastVaultInvitationId;
-      let vaultId = state.activeVaultId;
-      if (!invitationId || value !== invitationId) {
-        if (value.startsWith("invitation-")) {
-          invitationId = value;
-        } else {
-          const invitation = await protectedRequest(vaultInvitationLinkPath(value));
-          requireCurrentSessionEpoch(sessionEpoch);
-          invitationId = invitation.id;
-          vaultId = invitation.vaultId;
-          state.lastVaultInvitationId = invitation.id;
-          state.lastVaultInvitationCode = invitation.inviteCode;
-        }
-      }
       const invitation = await protectedRequest(
-        vaultInvitationRevokePath(vaultId, invitationId),
+        vaultInvitationRevokePath(target.vaultId, target.invitationId),
         { method: "DELETE" }
       );
       requireCurrentSessionEpoch(sessionEpoch);
-      state.lastVaultInvitationId = invitation.id;
-      state.lastVaultInvitationCode = invitation.inviteCode;
+      rememberVaultInvitationSelection(invitation);
       setAccessResult("warn", "Invitation revoked", `${invitation.id} is ${invitation.status}.`, {
         updatedAt: invitation.updatedAt,
       });
@@ -8873,35 +10029,6 @@ const FiniteBrainProductClient = (() => {
     } finally {
       finishAccessOperation(sessionEpoch);
     }
-  }
-
-  async function openEnteredFolderKey() {
-    const sessionEpoch = captureSessionOperationEpoch();
-    const keyring = state.keyring || createSessionKeyring();
-    const input = activePageInput();
-    const folderKey = $("folderKeyInput").value.trim();
-    if (!folderKey) throw new Error("Paste a base64 raw Folder Key first");
-    await openFolderKeyGrantPlaintext(
-      keyring,
-      {
-        version: "finite-folder-key-grant-v1",
-        vaultId: state.activeVaultId,
-        folderId: input.folderId,
-        keyVersion: currentFolderKeyVersion(input.folderId),
-        issuerNpub: "npub-local-session",
-        recipientNpub: state.pubkeyHex ? npubFromHex(state.pubkeyHex) : "npub-local-session",
-        folderKey,
-        issuedAt: new Date().toISOString(),
-      },
-      { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
-    );
-    requireCurrentSessionEpoch(sessionEpoch);
-    state.keyring = keyring;
-    log("Opened Folder Key into the in-memory session keyring.", {
-      folderId: input.folderId,
-      keyVersion: currentFolderKeyVersion(input.folderId),
-    });
-    render();
   }
 
   async function prepareDraftWrite(options = {}) {
@@ -8920,6 +10047,7 @@ const FiniteBrainProductClient = (() => {
       keyVersion,
       objectId: input.objectId,
       plaintext: encodeFolderObjectPagePlaintext(input.path, input.text),
+      signEvent: requireNip07SignEvent(),
       vaultId,
     });
     requireCurrentSessionEpoch(sessionEpoch);
@@ -8980,8 +10108,18 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function saveActivePage() {
-    await prepareDraftWrite({ renderAfter: false });
-    await savePreparedPage();
+    const { key } = activePageKeyFromInputs();
+    if (state.pageSaveInFlight) throw new Error("A Page save is already in progress");
+    const operation = { key, sessionEpoch: state.sessionEpoch };
+    state.pageSaveInFlight = operation;
+    updateSaveControls();
+    try {
+      await prepareDraftWrite({ renderAfter: false });
+      await savePreparedPage();
+    } finally {
+      if (state.pageSaveInFlight === operation) state.pageSaveInFlight = null;
+      updateSaveControls();
+    }
   }
 
   async function pullSyncBootstrap() {
@@ -9006,10 +10144,10 @@ const FiniteBrainProductClient = (() => {
 
   function renderGraphView() {
     const pages = decryptedPagesForGraph();
-    const filterText = $("graphFilterInput").value;
-    const graph = buildGraphProjection(pages, filterText);
-    drawGraph(graph, { filterText, readablePageCount: pages.length });
-    setGraphStats(graph, pages.length);
+    const graph = buildGraphProjection(pages);
+    drawGraph(graph, { readablePageCount: pages.length });
+    setGraphStats(graph);
+    updateGraphFullscreenControl();
     log("Rendered graph from decrypted client index.", {
       edges: graph.edges.length,
       nodes: graph.nodes.length,
@@ -9017,202 +10155,127 @@ const FiniteBrainProductClient = (() => {
   }
 
   function fitGraphView() {
-    $("graphCanvas").setAttribute("viewBox", `0 0 ${graphViewport.width} ${graphViewport.height}`);
-    log("Fit graph view to readable graph bounds.");
-  }
-
-  function resetGraphView() {
-    $("graphFilterInput").value = "";
-    renderGraphView();
-  }
-
-  function renderReplayFrames() {
-    const changes = [];
-    let sequence = 1;
-    for (const [key, draft] of state.projection.localDrafts.entries()) {
-      const [folderId, objectId] = key.split("/");
-      changes.push({
-        sequence,
-        recordEventId: `local-draft-${sequence}`,
-        page: {
-          folderId,
-          objectId,
-          status: "ready",
-          text: draft.text,
-        },
-      });
-      sequence += 1;
-    }
-    for (const [key, page] of state.projection.pages.entries()) {
-      if (!isReadablePage(page)) continue;
-      const [folderId, objectId] = key.split("/");
-      changes.push({
-        sequence,
-        recordEventId: `page-${sequence}`,
-        page: {
-          folderId,
-          objectId,
-          status: "ready",
-          text: page.text,
-          title: page.title,
-        },
-      });
-      sequence += 1;
-    }
-    const frames = buildReplayFrames(changes);
-    setList("replayList", frames, "No replay frames", (item, frame) => {
-      item.textContent = `#${frame.sequence} ${frame.action}: ${frame.nodeCount} nodes, ${frame.edgeCount} edges`;
-    });
-    if (frames.length) {
-      drawGraph(frames[frames.length - 1].graph, { readablePageCount: decryptedPagesForGraph().length });
-      setGraphStats(frames[frames.length - 1].graph, decryptedPagesForGraph().length);
-    }
-    log("Built graph replay frames.", frames.map((frame) => ({
-      edgeCount: frame.edgeCount,
-      nodeCount: frame.nodeCount,
-      sequence: frame.sequence,
-    })));
-  }
-
-  function renderOkfPlan() {
-    return state.okfPlan;
-  }
-
-  function folderKeyVersionMap() {
-    return new Map(
-      (state.metadata?.folders || []).map((folder) => [folder.id, folder.currentKeyVersion || 1])
-    );
-  }
-
-  function planEnteredOkfImport() {
-    const destinationFolderId = $("okfDestinationFolderInput").value.trim() || activePageInput().folderId;
-    const bundle = parseOkfBundle($("okfBundleInput").value, { destinationFolderId });
-    state.okfPlan = planOkfImport(bundle, existingPagesForImport(), {
-      conflictMode: $("okfConflictModeInput").value,
-      destinationFolderId,
-    });
-    log("Planned OKF import.", state.okfPlan.summary);
-    render();
-  }
-
-  async function executePlannedOkfImport() {
-    if (!state.okfPlan) throw new Error("Plan an OKF import before executing it");
-    if (!state.keyring) throw new Error("Open destination Folder Keys before importing OKF");
-    if (!state.pubkeyHex) throw new Error("Connect a signer before importing OKF");
-    const sessionEpoch = state.sessionEpoch;
-    const plan = state.okfPlan;
-    const keyring = state.keyring;
-    const vaultId = state.activeVaultId;
-    const folderKeyVersions = folderKeyVersionMap();
-    const authorNpub = npubFromHex(state.pubkeyHex);
-    const prepared = await prepareOkfImportWrites(keyring, plan, {
-      authorNpub,
-      currentKeyVersion: (folderId) => folderKeyVersions.get(folderId) || 1,
-      signEvent: requireNip07SignEvent(),
-      vaultId,
-    });
-    requireCurrentSessionEpoch(sessionEpoch);
-    const results = [];
-    for (const write of prepared.writes) {
-      requireCurrentSessionEpoch(sessionEpoch);
-      const result = await protectedRequest(write.path, {
-        method: "PUT",
-        body: JSON.stringify(write.body),
-      });
-      requireCurrentSessionEpoch(sessionEpoch);
-      const importedEntry = plan.entries.find((entry) => entry.objectId === write.objectId);
-      const importedAsset = importedEntry?.kind === "asset";
-      const projectionObject = {
-        folderId: write.folderId,
-        objectId: write.objectId,
-        path: write.targetPath,
-        revision: result.revision,
-        status: "ready",
-        type: importedAsset ? "asset" : "page",
-      };
-      if (importedAsset) {
-        const importedBytes = base64ToBytes(importedEntry?.bytesBase64 || "");
-        projectionObject.bytesBase64 = importedEntry?.bytesBase64 || "";
-        projectionObject.contentHash = await sha256HexBytes(importedBytes);
-        requireCurrentSessionEpoch(sessionEpoch);
-        projectionObject.contentType = importedEntry?.contentType || "application/octet-stream";
-        projectionObject.size = importedBytes.length;
-      } else {
-        const importedText = importedEntry?.markdown || "";
-        projectionObject.text = importedText;
-        projectionObject.title = pageTitleFromText(importedText, write.targetPath);
-      }
-      state.projection.pages.set(pageKey(write.folderId, write.objectId), projectionObject);
-      results.push({ ...result, targetPath: write.targetPath });
-    }
-    state.okfPlan = null;
-    log("Executed OKF import through encrypted secure object routes.", {
-      imported: results.length,
-      skipped: prepared.skipped.length,
-      results,
-    });
-    render();
+    setGraphZoom(1);
+    log("Reset graph zoom.");
   }
 
   function bind() {
     window.addEventListener?.("pagehide", handlePageHide);
     window.addEventListener?.("pageshow", handlePageShow);
-    $("connectSignerButton").addEventListener("click", () => {
-      connectSigner().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to connect signer.", { error: error.message });
-        render();
-      });
-    });
     onOptionalClick("lockSessionButton", () => {
       lockSession();
     });
     onOptionalClick("resumeSessionButton", () => {
       resumeSession().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to resume Product Client session.", { error: error.message });
+        reportClientActionFailure(error);
+        log("Failed to unlock Product Client session.", { error: error.message });
         render();
       });
     });
-    $("vaultSelect").addEventListener("change", () => {
-      setActiveVaultId($("vaultSelect").value);
-      render();
+    $("sessionSettingsButton")?.addEventListener("click", () => {
+      openSettingsModal("session");
     });
-    $("loadVaultButton").addEventListener("click", () => {
-      loadVaultReader().catch((error) => {
+    $("sessionAccountVaultButton")?.addEventListener("click", () => {
+      openVaultSwitcher();
+    });
+    $("manageVaultsButton")?.addEventListener("click", () => {
+      openManageVaultsModal();
+    });
+    $("closeManageVaultsButton")?.addEventListener("click", () => {
+      closeManageVaultsModal();
+    });
+    $("manageVaultsModal")?.addEventListener("click", (event) => {
+      if (event.target === $("manageVaultsModal")) closeManageVaultsModal();
+    });
+    $("manageVaultsConnectSignerButton")?.addEventListener("click", () => {
+      connectSigner().catch((error) => {
         state.lastError = error.message;
-        log("Failed to load Vault reader.", { error: error.message });
-        state.readerBusy = false;
+        log("Failed to connect signer from Manage Vaults.", { error: error.message });
         render();
       });
     });
-    $("createOrganizationVaultButton").addEventListener("click", () => {
-      createOrganizationVaultFromInput().catch((error) => {
+    $("manageVaultsLoadButton")?.addEventListener("click", () => {
+      manageVaultsLoadAction();
+    });
+    $("manageCreateOrganizationVaultButton")?.addEventListener("click", () => {
+      createOrganizationVaultFromInput("manageOrganizationVaultNameInput").catch((error) => {
         state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
+        log("Failed to create organization Vault from Manage Vaults.", { error: error.message });
         render();
       });
     });
-    $("organizationVaultNameInput").addEventListener("keydown", (event) => {
+    $("manageOrganizationVaultNameInput")?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
-      createOrganizationVaultFromInput().catch((error) => {
+      $("manageCreateOrganizationVaultButton")?.click?.();
+    });
+    $("settingsConnectSignerButton")?.addEventListener("click", () => {
+      connectSigner().catch((error) => {
         state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
+        log("Failed to connect signer from Settings.", { error: error.message });
         render();
       });
     });
+    $("settingsManageVaultsButton")?.addEventListener("click", () => {
+      openManageVaultsModal({ returnToSettings: true });
+    });
+    $("closeSettingsButton")?.addEventListener("click", () => {
+      closeSettingsModal();
+    });
+    $("settingsNavSession")?.addEventListener("click", () => {
+      setSettingsSection("session");
+    });
+    $("settingsNavVault")?.addEventListener("click", () => {
+      setSettingsSection("vault");
+    });
+    $("settingsNavAccess")?.addEventListener("click", () => {
+      setSettingsSection("access");
+    });
+    $("settingsNavInvitations")?.addEventListener("click", () => {
+      setSettingsSection("invitations");
+    });
+    $("settingsModal")?.addEventListener("click", (event) => {
+      if (event.target === $("settingsModal")) closeSettingsModal();
+    });
+    $("settingsNav")?.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+      const buttons = [
+        $("settingsNavSession"),
+        $("settingsNavVault"),
+        $("settingsNavAccess"),
+        $("settingsNavInvitations"),
+      ].filter(Boolean);
+      const activeIndex = buttons.findIndex((button) => button.getAttribute("aria-selected") === "true");
+      if (activeIndex < 0) return;
+      event.preventDefault();
+      if (event.key === "Home") {
+        setSettingsSection("session");
+        return;
+      }
+      if (event.key === "End") {
+        setSettingsSection("invitations");
+        return;
+      }
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = (activeIndex + direction + buttons.length) % buttons.length;
+      setSettingsSection(["session", "vault", "access", "invitations"][nextIndex] || "session");
+    });
+    bindAccessFolderSelector();
     $("refreshReaderButton").addEventListener("click", () => {
       refreshReader().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to refresh Vault reader.", { error: error.message });
         state.readerBusy = false;
         render();
       });
     });
-    $("readerModeButton").addEventListener("click", () => {
-      state.readerMode = state.readerMode === "source" ? "reading" : "source";
-      render();
+    onOptionalClick("savePageButton", () => {
+      if (!canSaveActiveDraft()) return;
+      saveActivePage().catch((error) => {
+        state.lastError = error.message;
+        log("Failed to save Page.", { error: error.message });
+        render();
+      });
     });
     $("ribbonGraphButton").addEventListener("click", () => {
       setWorkspaceView("graph");
@@ -9232,108 +10295,17 @@ const FiniteBrainProductClient = (() => {
       }
     });
     $("ribbonAccessButton").addEventListener("click", () => {
-      setSidebarMode("access");
+      openSettingsModal("access");
     });
-    onOptionalClick("accessOverviewButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessIntent = "overview";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder access overview.", { folderId });
-      render();
-    });
-    onOptionalClick("accessManageButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessIntent = "people";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder Member Identity access panel.", { folderId });
-      render();
-    });
-    onOptionalClick("accessShareButton", () => {
-      const folderId = state.activeAccessFolderId || state.selectedFolderId;
-      if (!folderId) return;
-      state.activeAccessView = "folder";
-      state.activeAccessIntent = "links";
-      state.activeAccessFolderId = folderId;
-      state.accessResult = null;
-      log("Opened Folder links panel.", { folderId });
-      render();
-    });
-    onOptionalClick("accessFolderViewButton", () => setAccessView("folder"));
-    onOptionalClick("accessVaultViewButton", () => setAccessView("vault"));
-    const accessViewSwitch = document.querySelector(".access-view-switch");
-    if (accessViewSwitch) {
-      accessViewSwitch.addEventListener("keydown", (event) => {
-        const tabs = ["accessVaultViewButton", "accessFolderViewButton"]
-          .map((id) => $(id))
-          .filter(Boolean);
-        const activeIndex = tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true");
-        if (activeIndex < 0) return;
-        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-          event.preventDefault();
-          const direction = event.key === "ArrowRight" ? 1 : -1;
-          const nextIndex = (activeIndex + direction + tabs.length) % tabs.length;
-          setAccessView(nextIndex === 0 ? "vault" : "folder");
-          tabs[nextIndex]?.focus();
-        }
-        if (event.key === "Home") {
-          event.preventDefault();
-          setAccessView("vault");
-          tabs[0]?.focus();
-        }
-        if (event.key === "End") {
-          event.preventDefault();
-          setAccessView("folder");
-          tabs[tabs.length - 1]?.focus();
-        }
-      });
-    }
-    onOptionalClick("accessConnectSignerButton", () => {
-      connectSigner().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to connect signer.", { error: error.message });
-        render();
-      });
-    });
-    onOptionalClick("accessLoadVaultButton", () => {
-      loadVaultReader().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to load Vault reader.", { error: error.message });
-        state.readerBusy = false;
-        render();
-      });
-    });
-    onOptionalClick("accessCreateOrganizationVaultButton", () => {
-      createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
-        state.lastError = error.message;
-        log("Failed to create organization Vault.", { error: error.message });
-        render();
-      });
-    });
-    const accessOrgNameInput = $("accessOrganizationVaultNameInput");
-    if (accessOrgNameInput) {
-      accessOrgNameInput.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        createOrganizationVaultFromInput("accessOrganizationVaultNameInput").catch((error) => {
-          state.lastError = error.message;
-          log("Failed to create organization Vault.", { error: error.message });
-          render();
-        });
-      });
-    }
     onOptionalClick("addVaultMemberButton", () => {
       addVaultMemberFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to add Vault member.", { error: error.message });
       });
     });
     onOptionalClick("addVaultAdminButton", () => {
       addVaultAdminFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to add Vault admin.", { error: error.message });
       });
     });
@@ -9350,57 +10322,48 @@ const FiniteBrainProductClient = (() => {
         if (!button?.disabled) button.click();
       });
     }
-    onOptionalClick("grantFolderAccessButton", () => {
-      grantFolderAccessFromPanel().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to grant Folder access.", { error: error.message });
-      });
-    });
-    onOptionalClick("removeFolderAccessButton", () => {
-      removeFolderAccessFromPanel().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to remove Folder access.", { error: error.message });
-      });
-    });
     onOptionalClick("createShareLinkButton", () => {
       createShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to create Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("acceptShareLinkButton", () => {
       acceptShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to accept Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("revokeShareLinkButton", () => {
       revokeShareLinkFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to revoke Folder share link.", { error: error.message });
       });
     });
     onOptionalClick("createVaultInvitationButton", () => {
       createVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to create Vault invitation.", { error: error.message });
       });
     });
+    onOptionalClick("copyVaultInviteUrlButton", () => {
+      void copyVaultInviteUrl();
+    });
     onOptionalClick("getVaultInvitationButton", () => {
       inspectVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to inspect Vault invitation.", { error: error.message });
       });
     });
     onOptionalClick("getEmailInviteInstructionsButton", () => {
       loadEmailInviteInstructionsFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to load email Vault invitation scope.", { error: error.message });
       });
     });
     onOptionalClick("acceptVaultInvitationButton", () => {
       acceptVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to accept Vault invitation.", { error: error.message });
       });
     });
@@ -9413,20 +10376,62 @@ const FiniteBrainProductClient = (() => {
     });
     onOptionalClick("revokeVaultInvitationButton", () => {
       revokeVaultInvitationFromPanel().catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to revoke Vault invitation.", { error: error.message });
       });
     });
+    for (const inputId of [
+      "accessShareTargetInput",
+      "accessShareExpiresAtInput",
+      "accessShareLinkInput",
+      "vaultInviteTargetNpubInput",
+      "vaultInviteFoldersInput",
+      "vaultInviteExpiresAtInput",
+      "vaultInviteCodeInput",
+      "vaultInviteEmailInput",
+      "vaultInviteEmailProofCreatedAtInput",
+      "vaultInviteSecretInput",
+    ]) {
+      bindPrimaryFormAction(inputId);
+    }
+    for (const inputId of [
+      "vaultInviteCodeInput",
+      "vaultInviteEmailInput",
+      "vaultInviteEmailProofCreatedAtInput",
+      "vaultInviteSecretInput",
+    ]) {
+      const input = $(inputId);
+      if (input) input.addEventListener("input", () => handleVaultInvitationInput(inputId));
+    }
     $("sidebarSearchInput").addEventListener("input", () => {
+      if (state.searchHighlight) {
+        const query = $("sidebarSearchInput").value.trim();
+        state.searchHighlight = query ? { ...state.searchHighlight, query } : null;
+        state.searchHighlightShouldScroll = Boolean(query);
+        render();
+        return;
+      }
       renderSearchPanel();
     });
     $("commandPaletteInput").addEventListener("input", () => {
+      state.commandPaletteSelectedIndex = 0;
       renderCommandPalette();
     });
     $("commandPaletteInput").addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      const rows = commandPaletteRows($("commandPaletteInput").value);
+      const currentIndex = commandPaletteSelectionIndex(rows);
+      const nextIndex = keyboardListNavigationIndex(event.key, currentIndex, rows.length);
+      if (nextIndex !== null) {
+        event.preventDefault();
+        state.commandPaletteSelectedIndex = nextIndex;
+        renderCommandPalette();
+        $("commandPaletteOption-" + nextIndex)?.scrollIntoView?.({ block: "nearest" });
+        return;
+      }
       if (event.key !== "Enter") return;
       event.preventDefault();
-      runCommandPaletteRow(commandPaletteRows($("commandPaletteInput").value)[0]);
+      runCommandPaletteRow(rows[currentIndex]);
     });
     $("closeCommandPaletteButton").addEventListener("click", () => {
       closeCommandPalette();
@@ -9440,16 +10445,19 @@ const FiniteBrainProductClient = (() => {
     $("obsidianNewFolderButton").addEventListener("click", () => {
       createFolderFromToolbar().catch((error) => {
         state.lastError = error.message;
-        window.alert?.(error.message);
         log("Failed to create Folder from toolbar.", { error: error.message });
         render();
       });
     });
-    $("readerPageContent").addEventListener("input", () => {
+    $("readerPageContent").addEventListener("input", (event) => {
+      if (event.target?.matches?.("input[data-task-index]")) return;
       if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
         syncDraftFromVisualEditor({ remember: true });
         refreshEditorSlashMenu();
       }
+    });
+    $("readerPageContent").addEventListener("change", (event) => {
+      updateActiveTaskDraft(event.target);
     });
     $("readerPageContent").addEventListener("click", (event) => {
       activatePageContentLink(event);
@@ -9462,68 +10470,34 @@ const FiniteBrainProductClient = (() => {
       rememberActiveDraft($("pageDraftInput").value);
     });
     $("editorDrawer").addEventListener("toggle", () => {
-      setEditorMode($("editorDrawer").open ? "source" : "visual");
+      setEditorMode($("editorDrawer").open ? "markdown" : "visual");
     });
-    onOptionalClick("openFolderKeyButton", () => {
-      openEnteredFolderKey().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to open Folder Key.", { error: error.message });
-        render();
-      });
+    $("zoomInGraphButton").addEventListener("click", () => {
+      zoomGraphView(1);
     });
-    onOptionalClick("encryptDraftButton", () => {
-      prepareDraftWrite().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to encrypt Page draft.", { error: error.message });
-        render();
-      });
-    });
-    $("renderGraphButton").addEventListener("click", () => {
-      try {
-        renderGraphView();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to render graph.", { error: error.message });
-      }
-    });
-    $("graphFilterInput").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      renderGraphView();
+    $("zoomOutGraphButton").addEventListener("click", () => {
+      zoomGraphView(-1);
     });
     $("fitGraphButton").addEventListener("click", () => {
       fitGraphView();
     });
-    $("resetGraphButton").addEventListener("click", () => {
-      resetGraphView();
+    $("fullscreenGraphButton").addEventListener("click", () => {
+      toggleGraphFullscreen();
     });
-    $("replayGraphButton").addEventListener("click", () => {
-      try {
-        renderReplayFrames();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to build replay.", { error: error.message });
-      }
-    });
-    onOptionalClick("planOkfImportButton", () => {
-      try {
-        planEnteredOkfImport();
-      } catch (error) {
-        state.lastError = error.message;
-        log("Failed to plan OKF import.", { error: error.message });
-        render();
-      }
-    });
-    onOptionalClick("executeOkfImportButton", () => {
-      executePlannedOkfImport().catch((error) => {
-        state.lastError = error.message;
-        log("Failed to execute OKF import.", { error: error.message });
-        render();
-      });
-    });
+    document.addEventListener("fullscreenchange", updateGraphFullscreenControl);
     document.addEventListener("click", (event) => {
       const menu = $("contextMenu");
       if (!menu.hidden && !menu.contains(event.target)) closeContextMenu();
+      const vaultSwitcher = $("vaultSwitcherMenu");
+      const vaultSwitcherTrigger = $("sessionAccountVaultButton");
+      if (
+        state.vaultSwitcherOpen &&
+        vaultSwitcher &&
+        !vaultSwitcher.contains(event.target) &&
+        !vaultSwitcherTrigger?.contains?.(event.target)
+      ) {
+        closeVaultSwitcher();
+      }
       const slashMenu = $("editorSlashMenu");
       if (state.editorSlashOpen && slashMenu && !slashMenu.contains(event.target) && !visualEditorElement()?.contains(event.target)) {
         closeEditorSlashMenu();
@@ -9533,6 +10507,89 @@ const FiniteBrainProductClient = (() => {
       if (state.editorSlashOpen) refreshEditorSlashMenu();
     });
     document.addEventListener("keydown", (event) => {
+      if (state.manageVaultsModalOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeManageVaultsModal();
+          return;
+        }
+        if (event.key === "Tab") {
+          const focusable = manageVaultsModalFocusableElements();
+          if (!focusable.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+          return;
+        }
+        return;
+      }
+      if (state.vaultSwitcherOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeVaultSwitcher();
+          return;
+        }
+        if (event.key === "Tab") {
+          event.preventDefault();
+          moveVaultSwitcherFocusOut({ backwards: event.shiftKey });
+          return;
+        }
+        const direction =
+          event.key === "ArrowDown" ? 1 :
+          event.key === "ArrowUp" ? -1 :
+          event.key === "Home" ? 0 :
+          event.key === "End" ? Number.POSITIVE_INFINITY :
+          null;
+        if (direction !== null) {
+          const items = vaultSwitcherFocusableElements();
+          if (!items.length) return;
+          event.preventDefault();
+          const currentIndex = Math.max(0, items.indexOf(document.activeElement));
+          const nextIndex = direction === Number.POSITIVE_INFINITY
+            ? items.length - 1
+            : direction === 0
+              ? 0
+              : (currentIndex + direction + items.length) % items.length;
+          items[nextIndex]?.focus?.();
+        }
+        return;
+      }
+      if (handleCommandPaletteKeydown(event)) return;
+      if (handleContextMenuKeydown(event)) return;
+      if (state.settingsModalOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeSettingsModal();
+          return;
+        }
+        if (event.key === "Tab") {
+          const focusable = settingsModalFocusableElements();
+          if (!focusable.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+          return;
+        }
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
         event.preventDefault();
         openCommandPalette();
@@ -9625,8 +10682,7 @@ const FiniteBrainProductClient = (() => {
     if (!pending) return false;
     let populated = false;
     if (pending.inviteCode) {
-      state.lastVaultInvitationCode = pending.inviteCode;
-      if ($("vaultInviteCodeInput")) $("vaultInviteCodeInput").value = pending.inviteCode;
+      rememberVaultInvitationSelection({ inviteCode: pending.inviteCode });
       populated = true;
     }
     if (pending.inviteEmail) {
@@ -9639,12 +10695,14 @@ const FiniteBrainProductClient = (() => {
       populated = true;
     }
     if (!populated) return false;
-    state.activeSidebarMode = "access";
-    state.activeAccessView = "folder";
+    state.settingsSection = "invitations";
+    state.settingsModalOpen = true;
     return true;
   }
 
   async function start() {
+    mountAccessPanelInSettings();
+    mountInvitationPanelInSettings();
     bind();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();
@@ -9673,7 +10731,6 @@ const FiniteBrainProductClient = (() => {
     buildVaultInvitationRequest,
     buildVaultBootstrapPlan,
     buildGraphProjection,
-    buildReplayFrames,
     canonicalAdminAccessChangePayload,
     canonicalEmailInviteAuthorizationPayload,
     canonicalInviteEmail,
@@ -9686,6 +10743,7 @@ const FiniteBrainProductClient = (() => {
     createLocalNip07ProviderFromSecret,
     createSessionKeyring,
     deriveSignerState,
+    discardLocalPageDraft,
     defaultVaultBootstrapFolderIds,
     defaultVaultPages,
     defaultVaultPagesFolderId,
@@ -9703,15 +10761,19 @@ const FiniteBrainProductClient = (() => {
     editorSlashCommandRows,
     extractPageLinks,
     folderAllowsDirectGrant,
+    folderCreationHierarchy,
+    folderCreationParent,
     folderShareLinkRows,
     graphEmptyStateCopy,
     graphLayout,
     graphNeighborIds,
     graphStats,
+    graphViewBoxForZoom,
     handlePageHide,
     handlePageShow,
     inlineLinkSegments,
     initialVaultInvitationFolders,
+    isActiveVaultAuthorizationLoss,
     applyPendingInviteNavigation,
     inviteNavigationFromHash,
     inviteUnwrapKeypairFromSecret,
@@ -9723,10 +10785,9 @@ const FiniteBrainProductClient = (() => {
     metadataFolderRows,
     metadataMountRows,
     nextDraftObjectId,
-    normalizeAccessView,
     normalizeSidebarMode,
+    normalizeSettingsSection,
     normalizeVisibleVault,
-    globalVaultControlState,
     npubFromHex,
     npubToHex,
     openFolderKeyGrants,
@@ -9736,6 +10797,7 @@ const FiniteBrainProductClient = (() => {
     openFolderObject,
     openSyncObjects,
     parseOkfBundle,
+    pageDeletionDisposition,
     pageKeyForReference,
     pageLinkContext,
     pageReferencesForPage,
@@ -9748,13 +10810,18 @@ const FiniteBrainProductClient = (() => {
     populateInviteFromHash,
     prepareOkfImportWrites,
     projectionPagesFromProjection,
+    protectedRequestError,
     publicKeyIdentityFromInput,
     readerFolderDetail,
     readerFolderRows,
+    readerSearchHighlightForPage,
     readerPageDetail,
     readerPageRows,
     resumeSession,
+    searchHighlightSegments,
     searchPageRows,
+    searchResultSnippet,
+    settingsSectionsForSession,
     sharedFolderRelationshipRows,
     sessionGrantOpeningAllowed,
     sessionOperationIsCurrent,
@@ -9781,12 +10848,14 @@ const FiniteBrainProductClient = (() => {
     vaultInvitationCreatePath,
     vaultInvitationIdentifierHint,
     vaultInvitationLinkPath,
+    vaultInvitationPanelState,
     vaultInvitationRevokePath,
+    vaultInvitationRevokeTarget,
     vaultInvitationRows,
     vaultInvitationUnavailableDetail,
-    vaultGuideStepRows,
     vaultPeopleRows,
-    withActiveVaultOption,
+    toggleMarkdownTask,
+    taskCheckboxAriaLabel,
   };
 })();
 

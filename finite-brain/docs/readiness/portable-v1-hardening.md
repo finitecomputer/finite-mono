@@ -53,7 +53,7 @@ Evidence:
 
 | Topic | Current status |
 | --- | --- |
-| Replay resistance | HTTP auth binds `u`, `method`, optional body payload hash, signature, and 60-second timestamp. The server rejects a reused auth event id within the configured auth window. State-changing sync records are additionally idempotent or conflict-checked by signed event id and base revision. |
+| Replay resistance | First-party Product Clients and the CLI include a fresh signed nonce in each HTTP auth event. HTTP auth binds `u`, `method`, optional body payload hash, signature, and 60-second timestamp; the server rejects a reused auth event id within the configured auth window. State-changing sync records are additionally idempotent or conflict-checked by signed event id and base revision. |
 | Signer mismatch | Core validates revision, tombstone, and access-change signer fields. Server route tests cover signer mismatch on object writes. |
 | Nonce uniqueness | Core encryption generates a fresh 12-byte AES-GCM nonce with `OsRng`. Deterministic nonce helper is public only for fixtures/tests and named as such. |
 | NIP-07 trust boundary | Browser/provider signing and NIP-44 encryption remain trusted-client responsibilities. The Product Client owns signer discovery, auth signing, Folder Key Grant opening, and local plaintext indexes. The development Smoke UI never holds production keys and only accepts pasted signed payloads. |

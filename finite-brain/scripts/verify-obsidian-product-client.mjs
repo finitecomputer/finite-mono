@@ -174,14 +174,7 @@ function checkStaticShell() {
 
   for (const marker of [
     "obsidian-shell",
-    "compact-icon-button",
-    "vaultControlDetails",
-    "vaultControlSummary",
-    "vaultSelect",
-    "vault-connect-button",
-    "organizationVaultNameInput",
-    "createOrganizationVaultButton",
-    "app-ribbon",
+    "sidebar-primary-nav",
     "file-sidebar",
     "ribbonFilesButton",
     "ribbonGraphButton",
@@ -195,13 +188,10 @@ function checkStaticShell() {
     "pageWorkspace",
     "graphWorkspace",
     "graphEmptyState",
-    "graph-icon-button",
+    "graph-floating-controls",
     "accessFolderButton",
     "accessSidebarCount",
-    "accessFolderViewButton",
-    "accessVaultViewButton",
     "accessFolderPanel",
-    "accessVaultPanel",
     "accessFolderDropdown",
     "accessFolderList",
     "accessInspector",
@@ -221,13 +211,8 @@ function checkStaticShell() {
     "accessShareForm",
     "accessShareHint",
     "accessShareTargetInput",
-    "accessOverviewPanel",
-    "accessFlowPanel",
-    "accessTargetNpubInput",
     "accessShareExpiresAtInput",
     "accessShareMountInput",
-    "grantFolderAccessButton",
-    "removeFolderAccessButton",
     "createShareLinkButton",
     "accessShareLinkInput",
     "acceptShareLinkButton",
@@ -236,7 +221,6 @@ function checkStaticShell() {
     "accessBusyStatus",
     "vaultManagementTitle",
     "vaultPeopleList",
-    "vaultGuideSteps",
     "vaultInvitationList",
     "vaultInvitationCount",
     "sharedFolderList",
@@ -254,7 +238,9 @@ function checkStaticShell() {
     "vaultInviteExpiresAtInput",
     "createVaultInvitationButton",
     "revokeVaultInvitationButton",
+    "vaultInviteUrlOutput",
     "vaultInviteUrlInput",
+    "copyVaultInviteUrlButton",
     "vaultInviteCodeInput",
     "vaultInviteEmailInput",
     "vaultInviteEmailProofCreatedAtInput",
@@ -263,10 +249,12 @@ function checkStaticShell() {
     "getVaultInvitationButton",
     "getEmailInviteInstructionsButton",
     "acceptVaultInvitationButton",
-    "readerModeButton",
+    "settingsManageVaultsButton",
+    "manageVaultsModal",
+    "savePageButton",
     "editorSlashMenu",
     "readerPageContent",
-    "pageSourceEditorLabel",
+    "pageMarkdownEditorLabel",
     "readerPagePath",
     "commandPalette",
     "commandPaletteInput",
@@ -274,36 +262,69 @@ function checkStaticShell() {
   ]) {
     assertIncludes(html, marker, "Product Client HTML");
   }
+  const primaryNavigationMarkup = html.match(
+    /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/
+  )?.[1];
+  assert.ok(primaryNavigationMarkup, "Product Client HTML should keep primary navigation in the File sidebar header");
+  for (const buttonId of [
+    "ribbonFilesButton",
+    "ribbonGraphButton",
+    "ribbonSearchButton",
+    "ribbonCommandButton",
+    "ribbonAccessButton",
+  ]) {
+    assertIncludes(primaryNavigationMarkup, `id="${buttonId}"`, "Product Client primary navigation");
+  }
+  assertNotIncludes(html, "app-ribbon", "Product Client HTML");
   assert.ok(
     !/id="vaultInvitationPanel"[^>]*open/.test(html),
     "Product Client HTML should keep the Vault invitation panel closed by default"
   );
+  assertNotIncludes(html, "graphFilterInput", "Product Client HTML");
+  assertNotIncludes(html, "aria-label=\"Filter graph\"", "Product Client HTML");
+  assertNotIncludes(html, "graph-icon-button", "Product Client HTML");
+  assertNotIncludes(html, "readerModeButton", "Product Client HTML");
+  assertNotIncludes(css, ".graph-controls", "Product Client CSS");
+  assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
+  assertNotIncludes(js, "graphFilterInput", "Product Client JS");
+  assertNotIncludes(js, "readerMode", "Product Client JS");
+  assertNotIncludes(js, 'action: "delete-folder"', "Product Client JS");
+  for (const legacyMarker of [
+    "accessFolderViewButton",
+    "accessVaultViewButton",
+    "accessVaultPanel",
+    "accessOverviewPanel",
+    "accessFlowPanel",
+    "accessTargetNpubInput",
+    "grantFolderAccessButton",
+    "removeFolderAccessButton",
+    "folderKeyInput",
+    "okfDestinationFolderInput",
+    "okfConflictModeInput",
+    "okfBundleInput",
+    "encryptDraftButton",
+  ]) {
+    assertNotIncludes(html, `id="${legacyMarker}"`, "Product Client HTML");
+  }
 
   for (const marker of [
     ".obsidian-shell",
     ".obsidian-shell[data-workspace-view=\"graph\"]",
     "[hidden]",
     "--shadow-access-ring",
-    ".compact-icon-button",
-    ".vault-control-body",
-    ".vault-picker",
-    ".vault-create-row",
-    ".vault-connect-button",
-    ".app-ribbon",
+    ".sidebar-primary-nav",
     ".obsidian-folder-button",
     ".obsidian-file-title",
     ".context-menu",
     ".command-palette-backdrop",
     ".command-palette-row",
     ".graph-stage",
-    ".graph-icon-button",
+    ".graph-floating-controls",
     ".graph-empty-state",
     ".graph-canvas.is-hovering",
     ".node.hover-active",
     ".edge.hover-connected",
-    ".graph-replay-overlay",
-    ".access-view-switch",
-    ".access-mode-panel",
+    ".access-content-panel",
     ".access-folder-selector",
     ".folder-selector-button",
     ".folder-dropdown",
@@ -327,10 +348,9 @@ function checkStaticShell() {
     ".access-checkbox",
     ".access-share-hint",
     ".access-link-status",
-    ".vault-guide-steps",
-    ".vault-guide-marker",
     ".access-busy-status",
-    ".access-mode-panel.is-busy",
+    ".vault-invite-url-output",
+    ".access-content-panel.is-busy",
     ".access-badge",
     ".note-content-empty",
     ".note-markdown",
@@ -340,24 +360,26 @@ function checkStaticShell() {
     ".note-markdown table",
     ".note-markdown pre[data-language]",
     ".task-list",
-    ".page-source-editor",
-    ".note-source",
+    ".page-markdown-editor",
+    ".page-save-button",
     ".internal-link",
   ]) {
     assertIncludes(css, marker, "Product Client CSS");
   }
+  assertNotIncludes(css, ".app-ribbon", "Product Client CSS");
 
   for (const marker of [
     "buildGraphProjection",
-    "buildReplayFrames",
+    "graphLayout",
+    "graphStats",
     "buildAdminAccessChangeEvent",
     "buildFolderKeyGrantRequest",
     "canonicalAdminAccessChangePayload",
     "commandPaletteRows",
-    "renderVaultControlChrome",
     "visibleVaultOptions",
     "personalVaultIdForPubkey",
-    "vaultControlsCollapsedAfterLoad",
+    "openManageVaultsModal",
+    "openSettingsModal",
     "workspaceChromeState",
     "graphNeighborIds",
     "accessBadgesForFolder",
@@ -366,12 +388,10 @@ function checkStaticShell() {
     "accessPanelState",
     "accessPeopleSummary",
     "identityMetadataForNpub",
-    "normalizeAccessView",
     "vaultPeopleRows",
     "vaultInvitationRows",
     "folderShareLinkRows",
     "sharedFolderRelationshipRows",
-    "vaultGuideStepRows",
     "refreshVaultAdminLists",
     "refreshFolderShareLinks",
     "revokeVaultInvitationById",
@@ -383,6 +403,8 @@ function checkStaticShell() {
     "addVaultAdminFromPanel",
     "buildFolderAccessRemovalRequest",
     "buildEmailVaultInvitationRequest",
+    "copyToClipboard",
+    "copyVaultInviteUrl",
     "buildEmailInviteClaimRequest",
     "emailInviteBootstrapPath",
     "emailInviteClientUrl",
@@ -403,6 +425,7 @@ function checkStaticShell() {
     "parseMarkdownListItem",
     "visualEditorElement",
     "markdownPreviewBlocks",
+    "toggleMarkdownTask",
     "pageLinkContext",
     "readerFolderRows",
     "readerPageRows",
@@ -411,6 +434,37 @@ function checkStaticShell() {
   ]) {
     assertIncludes(js, marker, "Product Client JS");
   }
+
+  assert.match(
+    html,
+    /id="vaultInviteUrlOutput"[^>]*hidden/,
+    "Product Client HTML must keep generated invite URLs hidden before an unlocked session creates one"
+  );
+  assert.match(
+    html,
+    /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+    "Product Client HTML must expose a generated invite URL as readable local output"
+  );
+  assert.match(
+    html,
+    /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
+    "Product Client HTML must name the client-only invite copy action"
+  );
+  assert.match(
+    html,
+    /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+    "Product Client HTML must keep manually entered Invite Secrets masked"
+  );
+  assert.match(
+    js,
+    /async function copyToClipboard\(text\)/,
+    "Product Client JS must route copy actions through one safe helper"
+  );
+  assert.doesNotMatch(
+    js,
+    /log\("Copied (?:Page|Folder) ID\./,
+    "Product Client JS must not log copied identifiers"
+  );
 
   for (const marker of [
     "obsidian-titlebar",
@@ -423,7 +477,6 @@ function checkStaticShell() {
     "editorToolbar",
     "inline-editor-toolbar",
     "data-editor-command",
-    "savePageButton",
     "syncBootstrapButton",
     "workspace-status-cluster",
     "folderCount",

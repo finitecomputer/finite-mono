@@ -37,7 +37,7 @@ pub(crate) async fn smoke_ui_js_handler() -> impl IntoResponse {
 }
 
 const PRODUCT_CLIENT_APP_SCRIPT_TAG: &str =
-    r#"<script src="/client/app.js?v=20260707-share-mount-copy"></script>"#;
+    r#"<script src="/client/app.js?v=20260712-settings-consistency"></script>"#;
 
 pub(crate) async fn product_client_handler(State(state): State<ServerState>) -> impl IntoResponse {
     let mut html = include_str!("../product-client.html").to_owned();
@@ -45,8 +45,8 @@ pub(crate) async fn product_client_handler(State(state): State<ServerState>) -> 
         html = html.replace(
             PRODUCT_CLIENT_APP_SCRIPT_TAG,
             r#"<script>window.__FINITE_BRAIN_DISABLE_AUTOSTART__ = true;</script>
-    <script src="/client/app.js?v=20260707-share-mount-copy"></script>
-    <script src="/client/smoke-nip07.js?v=20260707-share-mount-copy"></script>"#,
+    <script src="/client/app.js?v=20260712-settings-consistency"></script>
+    <script src="/client/smoke-nip07.js?v=20260712-settings-consistency"></script>"#,
         );
     }
     ([(CACHE_CONTROL, PRODUCT_CLIENT_CACHE_CONTROL)], Html(html))
@@ -70,6 +70,57 @@ pub(crate) async fn product_client_js_handler() -> impl IntoResponse {
         ],
         include_str!("../product-client.js"),
     )
+}
+
+fn product_client_font_response(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (CONTENT_TYPE, "font/ttf"),
+            (CACHE_CONTROL, PRODUCT_CLIENT_CACHE_CONTROL),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub(crate) async fn product_client_funnel_display_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-500.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_display_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-600.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_display_700_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-display-700.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_400_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-400.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-500.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-600.ttf"))
+}
+
+pub(crate) async fn product_client_funnel_sans_700_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/funnel-sans-700.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_400_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-400.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_500_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-500.ttf"))
+}
+
+pub(crate) async fn product_client_jetbrains_mono_600_font_handler() -> Response {
+    product_client_font_response(include_bytes!("../fonts/jetbrains-mono-600.ttf"))
 }
 
 pub(crate) async fn product_client_smoke_nip07_js_handler(

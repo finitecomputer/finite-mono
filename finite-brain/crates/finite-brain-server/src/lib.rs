@@ -441,6 +441,46 @@ pub fn router_with_state(state: ServerState) -> Router {
         .route("/client/app.css", get(product_client_css_handler))
         .route("/client/app.js", get(product_client_js_handler))
         .route(
+            "/client/fonts/funnel-display-500.ttf",
+            get(product_client_funnel_display_500_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-display-600.ttf",
+            get(product_client_funnel_display_600_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-display-700.ttf",
+            get(product_client_funnel_display_700_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-400.ttf",
+            get(product_client_funnel_sans_400_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-500.ttf",
+            get(product_client_funnel_sans_500_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-600.ttf",
+            get(product_client_funnel_sans_600_font_handler),
+        )
+        .route(
+            "/client/fonts/funnel-sans-700.ttf",
+            get(product_client_funnel_sans_700_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-400.ttf",
+            get(product_client_jetbrains_mono_400_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-500.ttf",
+            get(product_client_jetbrains_mono_500_font_handler),
+        )
+        .route(
+            "/client/fonts/jetbrains-mono-600.ttf",
+            get(product_client_jetbrains_mono_600_font_handler),
+        )
+        .route(
             "/client/smoke-nip07.js",
             get(product_client_smoke_nip07_js_handler),
         )
@@ -2026,7 +2066,7 @@ mod tests {
     use axum::http::Request;
     use axum::http::header::{
         ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CACHE_CONTROL,
-        ORIGIN,
+        CONTENT_TYPE, ORIGIN,
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
@@ -2252,23 +2292,25 @@ mod tests {
         assert!(!client_body.contains("pageTabButton"));
         assert!(!client_body.contains("graphTabButton"));
         assert!(!client_body.contains("titlebarNewTabButton"));
-        assert!(client_body.contains("app-ribbon"));
+        assert!(client_body.contains("sidebar-primary-nav"));
+        assert!(!client_body.contains("app-ribbon"));
         assert!(client_body.contains("file-sidebar"));
         assert!(client_body.contains("Connect signer"));
         assert!(client_body.contains("Session locked"));
         assert!(client_body.contains("resumeSessionButton"));
         assert!(client_body.contains("lockSessionButton"));
         assert!(!client_body.contains("Open accessible vault"));
-        assert!(client_body.contains("vaultControlDetails"));
-        assert!(client_body.contains("vaultSelect"));
-        assert!(client_body.contains("vault-connect-button"));
-        assert!(client_body.contains("organizationVaultNameInput"));
-        assert!(client_body.contains("createOrganizationVaultButton"));
+        assert!(!client_body.contains("vaultControlDetails"));
+        assert!(!client_body.contains("vaultSelect"));
+        assert!(client_body.contains("sessionAccountVaultButton"));
+        assert!(client_body.contains("vaultSwitcherMenu"));
+        assert!(client_body.contains("manageVaultsModal"));
+        assert!(client_body.contains("settingsManageVaultsButton"));
         assert!(client_body.contains("readerFolderList"));
         assert!(client_body.contains("searchSidebarPanel"));
         assert!(client_body.contains("commandPalette"));
         assert!(client_body.contains("Quick switcher"));
-        assert!(client_body.contains("graph-icon-button"));
+        assert!(client_body.contains("graph-floating-controls"));
         assert!(client_body.contains("ribbonGraphButton"));
         assert!(!client_body.contains("editorToolbar"));
         assert!(!client_body.contains("inline-editor-toolbar"));
@@ -2277,20 +2319,35 @@ mod tests {
         assert!(client_body.contains("aria-label=\"Page reader\""));
         assert!(client_body.contains("aria-label=\"Graph View\""));
         assert!(client_body.contains("aria-label=\"Search pages\""));
-        assert!(client_body.contains("aria-label=\"Filter graph\""));
+        assert!(!client_body.contains("graphFilterInput"));
+        assert!(!client_body.contains("aria-label=\"Filter graph\""));
         assert!(client_body.contains("accessFolderButton"));
         assert!(client_body.contains("accessInspector"));
         assert!(client_body.contains("accessWhoHasList"));
         assert!(client_body.contains("accessAdvancedSection"));
         assert!(!client_body.contains("accessChangeMode"));
-        assert!(client_body.contains("removeFolderAccessButton"));
+        assert!(!client_body.contains("accessVaultViewButton"));
+        assert!(!client_body.contains("accessFolderViewButton"));
+        assert!(!client_body.contains("accessVaultPanel"));
+        assert!(!client_body.contains("vaultSwitchList"));
+        assert!(!client_body.contains("removeFolderAccessButton"));
+        assert!(!client_body.contains("folderKeyInput"));
+        assert!(!client_body.contains("okfBundleInput"));
+        assert!(!client_body.contains("encryptDraftButton"));
         assert!(client_body.contains("createVaultInvitationButton"));
         assert!(client_body.contains("acceptVaultInvitationButton"));
         assert!(client_body.contains("revokeVaultInvitationButton"));
-        assert!(!client_body.contains("savePageButton"));
+        assert!(client_body.contains("vaultInviteUrlOutput"));
+        assert!(client_body.contains("copyVaultInviteUrlButton"));
+        assert!(client_body.contains("Copy private invite link"));
+        assert!(client_body.contains("savePageButton"));
+        assert!(!client_body.contains("readerModeButton"));
+        assert!(client_body.contains("Edit Markdown"));
         assert!(!client_body.contains("syncBootstrapButton"));
         assert!(client_body.contains("Graph View"));
-        assert!(client_body.contains("Render graph"));
+        assert!(client_body.contains("Zoom in"));
+        assert!(client_body.contains("Reset zoom"));
+        assert!(client_body.contains("Enter full screen"));
         assert!(client_body.contains("contextMenu"));
         assert!(client_body.contains("/client/app.js"));
         assert!(!client_body.contains("__FINITE_BRAIN_DISABLE_AUTOSTART__"));
@@ -2340,27 +2397,47 @@ mod tests {
             css_response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, max-age=0"
         );
-        let css_body = to_bytes(css_response.into_body(), 96 * 1024)
+        let css_body = to_bytes(css_response.into_body(), 128 * 1024)
             .await
             .expect("client css body");
         let css_body = std::str::from_utf8(&css_body).expect("client css utf8");
+        assert!(css_body.contains("font-family: \"Funnel Sans\""));
+        assert!(css_body.contains("font-family: \"Funnel Display\""));
+        assert!(css_body.contains("font-family: \"JetBrains Mono\""));
+        assert!(css_body.contains("/client/fonts/funnel-sans-400.ttf"));
+        assert!(css_body.contains("/client/fonts/funnel-display-600.ttf"));
+        assert!(css_body.contains("/client/fonts/jetbrains-mono-400.ttf"));
+        assert!(css_body.contains("@media (prefers-color-scheme: light)"));
+        assert!(css_body.contains("--font-sans:"));
+        assert!(css_body.contains("--font-display:"));
+        assert!(css_body.contains("--font-mono:"));
+        assert!(css_body.contains("--status-success:"));
+        assert!(css_body.contains("--status-warning:"));
+        assert!(css_body.contains("--status-error:"));
         assert!(css_body.contains(".obsidian-shell"));
         assert!(!css_body.contains(".obsidian-titlebar"));
         assert!(!css_body.contains(".traffic-light"));
         assert!(!css_body.contains(".titlebar-tab"));
-        assert!(css_body.contains(".app-ribbon"));
+        assert!(css_body.contains(".sidebar-primary-nav"));
+        assert!(!css_body.contains(".app-ribbon"));
         assert!(css_body.contains(".vault-picker"));
         assert!(css_body.contains(".vault-create-row"));
         assert!(css_body.contains(".folder-option-button"));
         assert!(css_body.contains(".obsidian-folder-button"));
         assert!(css_body.contains(".context-menu"));
         assert!(css_body.contains(".graph-stage"));
+        assert!(css_body.contains(".graph-floating-controls"));
+        assert!(!css_body.contains(".graph-icon-button"));
+        assert!(!css_body.contains(".graph-controls"));
         assert!(css_body.contains(".graph-canvas.is-hovering"));
         assert!(css_body.contains(".node.hover-active"));
         assert!(css_body.contains(".edge.hover-connected"));
         assert!(css_body.contains(".access-inspector"));
         assert!(css_body.contains(".access-badge"));
-        assert!(css_body.contains(".okf-controls"));
+        assert!(css_body.contains(".access-content-panel"));
+        assert!(css_body.contains(".vault-invite-url-output"));
+        assert!(!css_body.contains(".access-view-switch"));
+        assert!(!css_body.contains(".okf-controls"));
         assert!(css_body.contains(".session-security-status"));
 
         let js_response = router
@@ -2393,14 +2470,20 @@ mod tests {
         assert!(js_body.contains("personalVaultIdForPubkey"));
         assert!(js_body.contains("accessBadgesForFolder"));
         assert!(js_body.contains("accessActionRoute"));
+        assert!(js_body.contains("openManageVaultsModal"));
+        assert!(js_body.contains("removeFolderAccessFromPanel"));
+        assert!(!js_body.contains("removeFolderAccessButton"));
         assert!(js_body.contains("readerFolderRows"));
         assert!(js_body.contains("readerPageRows"));
         assert!(js_body.contains("buildGraphProjection"));
-        assert!(js_body.contains("buildReplayFrames"));
+        assert!(js_body.contains("graphLayout"));
+        assert!(js_body.contains("graphStats"));
         assert!(js_body.contains("graphNeighborIds"));
         assert!(js_body.contains("setGraphHover"));
         assert!(js_body.contains("createSessionKeyring"));
         assert!(js_body.contains("clearSessionSecretsAndPlaintext"));
+        assert!(js_body.contains("copyToClipboard"));
+        assert!(js_body.contains("copyVaultInviteUrl"));
         assert!(js_body.contains("sessionStatusView"));
         assert!(js_body.contains("sessionGrantOpeningAllowed"));
         assert!(js_body.contains("extractPageLinks"));
@@ -2421,6 +2504,96 @@ mod tests {
             .await
             .expect("smoke signer response");
         assert_eq!(smoke_signer_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn product_client_serves_local_dashboard_fonts() {
+        let router = test_router();
+        let fonts = [
+            (
+                "/client/fonts/funnel-display-500.ttf",
+                32_880,
+                "d820e428132e2622a7d175a74a826748bff68d113e7aec79b6f3545e86ff20f2",
+            ),
+            (
+                "/client/fonts/funnel-display-600.ttf",
+                32_864,
+                "e37cbfefbb7a762fe2b69e43e12c7e840d81452d1fdc6fc3ecf0b0ec7605b3af",
+            ),
+            (
+                "/client/fonts/funnel-display-700.ttf",
+                32_812,
+                "c61b735d94ac0bcd32904da436e3003f99804d09ee81ea3bea6690b180ea7a1b",
+            ),
+            (
+                "/client/fonts/funnel-sans-400.ttf",
+                32_988,
+                "d9cd65b22ca457dee2310777973cb3b77e55d28866cc574018a77cd593d5d0d6",
+            ),
+            (
+                "/client/fonts/funnel-sans-500.ttf",
+                32_964,
+                "ed6bdb3b1d1fbe7bf38f702e64c6f99ab8b324a30bee2a4fca591da57505289c",
+            ),
+            (
+                "/client/fonts/funnel-sans-600.ttf",
+                33_004,
+                "f23f08c47901e39db4c1ae4f212c88f43ed0b6037d1252f9d589807ff6a023b5",
+            ),
+            (
+                "/client/fonts/funnel-sans-700.ttf",
+                32_892,
+                "56a1277e3f904bd9543e533e1e6656c88f2e46738e1c6d1da438709323e7e87e",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-400.ttf",
+                112_172,
+                "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-500.ttf",
+                112_204,
+                "3386a05f6ece969e4537de6be894170d20558e82f7d56c8c5d332972ef172160",
+            ),
+            (
+                "/client/fonts/jetbrains-mono-600.ttf",
+                112_160,
+                "df54dbfafba61d4911eb3dab9bba2d20531fb009f01d64dd42fa96ab862584d8",
+            ),
+        ];
+
+        for (path, expected_len, expected_sha256) in fonts {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("valid font request"),
+                )
+                .await
+                .expect("font response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get(CONTENT_TYPE).unwrap(),
+                "font/ttf",
+                "{path}"
+            );
+            assert_eq!(
+                response.headers().get(CACHE_CONTROL).unwrap(),
+                "no-store, max-age=0",
+                "{path}"
+            );
+            let body = to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .expect("font body");
+            assert_eq!(body.len(), expected_len, "{path}");
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&body)),
+                expected_sha256,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,102 @@
+# FiniteBrain Dashboard Theme Goal Ledger
+
+## Run
+
+- Run ID: `2026-07-11-finitebrain-dashboard-theme`
+- Loop: Plebdev Feature Dev v0.4.0
+- Target repo: `finitecomputer/finite-mono`, scoped to `finite-brain`
+- Base branch: `main` (human-confirmed exception because this monorepo has no `staging` branch)
+- Feature branch: `feature/finitebrain-dashboard-theme`
+- Human owner: plebdev
+- Started: 2026-07-11
+- Current status: complete; non-draft PR #9 is open, the human-requested control-consistency follow-up is committed, and local review is clean
+- Skill setup status: present under `finite-brain/docs/agents/`; GitHub issue tracker, canonical triage labels, and single-context domain docs are configured
+
+## Goal
+
+Without changing any critical layout or functionality of the FiniteBrain Product
+Client prototype frontend, reskin and retheme it end to end so it fits the
+Finite dashboard's theme, color system, typography, surfaces, controls, and
+overall visual character in a high-quality, elegant, surgical way.
+
+## Durable Artifacts
+
+- CONTEXT updates: added `Dashboard-Aligned Product Theme`
+- ADRs: none warranted yet; this is a reversible presentation-layer change
+- Prototype source branch, if any: none planned unless visual evidence exposes an unresolved design choice
+- Spec issue: [finitecomputer/finite-mono#4](https://github.com/finitecomputer/finite-mono/issues/4)
+- Tickets: [#5](https://github.com/finitecomputer/finite-mono/issues/5),
+  [#6](https://github.com/finitecomputer/finite-mono/issues/6),
+  [#7](https://github.com/finitecomputer/finite-mono/issues/7), and
+  [#8](https://github.com/finitecomputer/finite-mono/issues/8)
+- Ticket sessions: `finite-brain/docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-session.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-session.md`
+- Agent briefs: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-01-foundation.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-02-knowledge-workspace.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-03-access-workflows.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-ticket-04-responsive-verification.md`
+- Review packets: `finite-brain/docs/feature-dev/2026-07-11-issue-5-dashboard-theme-foundation-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-6-dashboard-theme-knowledge-workspace-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-7-dashboard-theme-access-workflows-review-packet.md`;
+  `finite-brain/docs/feature-dev/2026-07-11-issue-8-dashboard-theme-responsive-verification-review-packet.md`
+- Local CodeRabbit report: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-local-coderabbit-round.md`
+- PR CodeRabbit/fallback report: `finite-brain/docs/feature-dev/2026-07-11-dashboard-theme-pr-coderabbit-round.md`
+- PR URL: [finitecomputer/finite-mono#9](https://github.com/finitecomputer/finite-mono/pull/9)
+
+## Commands
+
+- Install: repository dependencies are Nix-managed; no system install. Use `scripts/with-dev-env` for direct commands.
+- Syntax check: `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
+- Test: `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`; `scripts/with-dev-env cargo test -p finite-brain-server`
+- Build: `scripts/with-dev-env cargo build -p finite-brain-app`
+- Visual verification: seed the smoke fixture, run `finite-brain/scripts/verify-obsidian-product-client.mjs`, serve `finite-brain-app`, and inspect `/client` at desktop and mobile widths with screenshots
+
+## Ticket Ledger
+
+| Issue | Type | Status | Review thread | Fixes needed | Verified |
+| --- | --- | --- | --- | --- | --- |
+| #5 | AFK | complete | `/root/ticket_5_theme_foundation` | browser-found light workspace defect and review command-record finding fixed | full ticket suite and four-state visual pass |
+| #6 | AFK | complete | `/root/ticket_6_knowledge_workspace` | review-found Graph contrast and CSS test coupling fixed | full ticket suite and resumed desktop light/dark visual pass repeated after fixes |
+| #7 | AFK | complete | `/root/ticket_7_access_workflows` | stale ADR references and two unused tokens fixed | full ticket suite and resumed desktop light/dark visual pass |
+| #8 | AFK | complete | `/root/ticket_8_responsive_verification` | quick-switcher spacing fixed; scratch-evidence visibility concern closed with committed curated matrix | full workspace gates, committed desktop/tablet/mobile light/dark browser evidence, standards/spec pass |
+
+## Parked HITL Slices
+
+| Issue | Why parked | Blocks | Required human action | Final PR decision |
+| --- | --- | --- | --- | --- |
+| None | — | — | — | — |
+
+## Issue Session Ledger
+
+| Issue | Fixed point | Worker session | Commit | Review result | Checks |
+| --- | --- | --- | --- | --- | --- |
+| #5 | `6c32dbb` | `/root/ticket_5_theme_foundation` | `aa3b7a1` plus review fix follow-up | standards/spec pass after one command-record fix | Rust server suite, JS, seeded verifier, format, Clippy, build, diff, and browser pass |
+| #6 | `3ccedda` | `/root/ticket_6_knowledge_workspace` | `8ee9129` plus review-fix follow-up | standards pass; two spec findings fixed; spec re-review pass | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
+| #7 | `ac6564a` | `/root/ticket_7_access_workflows` | `2960af7` plus review-fix follow-up | standards/spec pass after two low-severity standards fixes | 40 server tests, Product Client deterministic suite, seeded verifier, Rustfmt, Clippy, build, diff, and resumed desktop light/dark browser pass |
+| #8 | `8e36d7a` | `/root/ticket_8_responsive_verification` | `296a30d` plus review-evidence follow-up | standards/spec pass after durable screenshot follow-up | Product Client tests, seeded verifier, asset/font routes, full locked workspace test/Clippy/build, Rustfmt, diff, and committed desktop/tablet/mobile light/dark browser matrix |
+
+## Human Visual Consistency Follow-up
+
+- Fixed point: `45b811f`
+- Commit: `eb67b6f` (`fix(fbrain): normalize product client controls`)
+- Scope: normalized visible dashboard chrome around one 32px control token; aligned Vault select/Load/Connect signer controls; reduced Resume/Lock CTA geometry; aligned ribbon, toolbar, search, command-palette, and Access action controls; repaired the file-sidebar grid row that vertically centered its toolbar inside the empty explorer area; retained intentional 40px structural rows, the 52px two-line Folder selector, and existing responsive workspace columns.
+- Sidecar evidence: two bounded read-only `grok-4.5-xhigh` passes found the competing control-size system and then the residual file-sidebar grid-row defect; Codex applied and verified the accepted recommendations.
+- Browser evidence: 12 local screenshots cover locked, stable resumed, and visible Access create-form states across desktop/mobile and light/dark. All four browser scenarios reported meaningful content, zero page/console errors, zero framework overlays, and 32px rendered geometry for the changed visible controls.
+- Review: two-axis `code-review` passed after removing redundant control-height tokens, preserving the existing 1180px workspace breakpoint, and expanding the browser matrix. Local CodeRabbit uncommitted review completed with zero findings.
+- Checks: Product Client syntax and deterministic seams, 40 `finite-brain-server` tests, `finite-brain-app` build, Rustfmt, and `git diff --check` passed.
+- Preserved user work: the pre-existing untracked `finite-brain/docs/research/` directory was not edited or staged.
+
+## Open Questions
+
+- None for tickets #5 through #8 or the final goal review.
+
+## Escalations
+
+- The human approved `main` as the base and PR target because `staging` is absent.
+- The human approved system-driven light and dark Product Client themes matching the dashboard.
+- The human approved self-hosting the dashboard's exact Funnel Sans, Funnel Display, and JetBrains Mono assets from the Product Client origin.
+- The human approved a native Finite dashboard visual identity; the Product Client retains its current Obsidian-like interaction structure and information density, not its purple/charcoal styling.
+- The human confirmed shared understanding of the full reskin scope and preservation constraints.
+- The human approved the end-to-end browser, Product Client contract, Rust asset-route, and full regression testing seams.
