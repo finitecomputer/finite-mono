@@ -3,13 +3,15 @@
 > **ROLE CHANGE 2026-07-09 — lat2 is now the CI RUNNER BOX.** The
 > consolidation cutover **migrated finitesitesd (sites), finite-search, and the
 > finite-core-tunnel to lat1**; those services are **DISABLED** here. lat2's
-> live role is the **GitHub Actions runners** — `finite-lat-2-mono` (against
-> finite-mono) plus the 3 legacy-repo runners until those repos are archived
-> (`runners.md`). The Services / Ports / Secrets tables below are the
+> live role is the **finite-mono CI runner and x86_64 Nix build host**.
+> Production lat1 closures must be built here, never on clawland or the
+> production host. It also runs the 3 legacy-repo runners until those repos
+> are archived (`runners.md`). The Services / Ports / Secrets tables below are the
 > **pre-cutover** capture; the sites/search/tunnel rows are historical.
 
-Formerly the dedicated sites + search + CI-runner box; now the CI runner box.
-Captured read-only 2026-07-08 (before the sites/search/tunnel migration).
+Formerly the dedicated sites + search + CI-runner box; now the finite-mono CI
+runner and x86_64 Nix builder. Captured read-only 2026-07-08 (before the
+sites/search/tunnel migration).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
   7.0.0-15-generic, x86-64.
