@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FiniteBrain</title>
-    <link rel="stylesheet" href="/client/app.css?v=20260707-share-mount-copy" />
+    <link rel="stylesheet" href="/client/app.css?v=20260712-settings-consistency" />
   </head>
   <body>
     <div class="obsidian-shell" data-workspace-view="page">
@@ -144,15 +144,16 @@
 
                   <div id="accessAddPersonForm" class="access-inline-form" hidden>
                     <label class="access-inline-field">
+                      <span class="sr-only">Member Identity</span>
                       <input
                         id="accessAddPersonInput"
-                        placeholder="name@example.com"
+                        placeholder="npub… or name@domain"
                         autocomplete="off"
                         spellcheck="false"
                       />
                       <button id="accessAddPersonButton" type="button" class="access-add-button">Add</button>
                     </label>
-                    <p id="accessAddPersonHint" class="access-field-hint">Enter an email to grant folder access</p>
+                    <p id="accessAddPersonHint" class="access-field-hint">Enter a Member Identity to grant Folder access</p>
                   </div>
                 </div>
               </details>
@@ -171,10 +172,10 @@
                     <div id="accessShareForm" class="access-share-form">
                       <p id="accessShareHint" class="access-field-hint access-share-hint">Open this Folder key to create share links.</p>
                       <label class="access-field">
-                        <span>Email</span>
+                        <span>Member Identity</span>
                         <input
                           id="accessShareTargetInput"
-                          placeholder="name@example.com"
+                          placeholder="npub… or name@domain"
                           autocomplete="off"
                           spellcheck="false"
                           aria-describedby="accessShareHint"
@@ -190,10 +191,10 @@
                       </label>
                       <label class="access-checkbox">
                         <input id="accessShareMountInput" type="checkbox" aria-describedby="accessShareMountHint" />
-                        <span>Show in recipient's Vault</span>
+                        <span>Add a shortcut to their Personal Vault</span>
                       </label>
                       <p id="accessShareMountHint" class="access-field-hint access-checkbox-hint">
-                        When accepted, this adds the shared Folder to their Vault sidebar. It does not copy data or grant extra access.
+                        When accepted, this adds a shortcut to the shared Folder in their Personal Vault. It does not copy data or change Folder access.
                       </p>
                       <button id="createShareLinkButton" type="button" class="access-primary-button">Create share link</button>
                     </div>
@@ -225,34 +226,37 @@
                     <path d="M18 8v6" />
                     <path d="M15 11h6" />
                   </svg>
-                  <span>Give Vault access</span>
-                  <small id="vaultPeopleActionHint">Invite, add, promote</small>
+                  <span>Manage members</span>
+                  <small id="vaultPeopleActionHint">Add or promote existing identities</small>
                 </summary>
                 <div class="access-admin-content">
                   <div class="vault-access-action-grid">
-                    <section id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary">
+                    <section id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary settings-invitation-create">
                       <div class="vault-access-option-heading">
-                        <h4>Invite by email</h4>
-                        <span class="pill ready">email invite</span>
+                        <h4>Invite someone</h4>
+                        <span class="pill ready">email or npub</span>
                       </div>
+                      <p class="access-field-hint settings-invitation-copy">Use an email address or Member Identity. Email invitations provision encrypted Folder Key Grants after a successful claim; direct Member Identity invitations record the access plan and need normal Folder Key grants after joining.</p>
                       <label class="access-field">
-                        <span>Email</span>
+                        <span>Email or Member Identity</span>
                         <input
                           id="vaultInviteTargetNpubInput"
-                          placeholder="name@example.com"
+                          placeholder="name@example.com or npub…"
                           autocomplete="off"
                           spellcheck="false"
                         />
                       </label>
                       <label class="access-field">
-                        <span>Folders granted on join</span>
+                        <span>Folder access plan</span>
                         <input
                           id="vaultInviteFoldersInput"
                           value="getting-started"
                           autocomplete="off"
                           spellcheck="false"
+                          aria-describedby="vaultInviteFolderPlanHint"
                         />
                       </label>
+                      <p id="vaultInviteFolderPlanHint" class="access-field-hint">For an email invite, these Folders are included in the encrypted claim scope. For an existing Member Identity, grant any required Folder Keys after they join.</p>
                       <label class="access-field">
                         <span>Expires</span>
                         <input
@@ -267,7 +271,7 @@
                       </div>
                       <div id="vaultInviteUrlOutput" class="vault-invite-url-output" hidden>
                         <label class="access-field">
-                          <span>Client-only invite URL</span>
+                          <span>Private invite link</span>
                           <input
                             id="vaultInviteUrlInput"
                             type="text"
@@ -280,11 +284,12 @@
                           id="copyVaultInviteUrlButton"
                           class="access-primary-button"
                           type="button"
-                          aria-label="Copy client-only invite link"
+                          aria-label="Copy private invite link"
                           disabled
                         >
-                          Copy client-only invite link
+                          Copy private invite link
                         </button>
+                        <p class="access-field-hint settings-invite-secret-warning">This full link contains a client-only Invite Secret in its <code>#</code> fragment. Do not paste it into email, support, analytics, or server-visible chat.</p>
                       </div>
                     </section>
 
@@ -294,9 +299,10 @@
                         <span class="pill muted">existing identity</span>
                       </div>
                       <label class="access-inline-field">
+                        <span class="sr-only">Member Identity</span>
                         <input
                           id="vaultMemberNpubInput"
-                          placeholder="name@example.com"
+                          placeholder="npub… or name@domain"
                           autocomplete="off"
                           spellcheck="false"
                         />
@@ -310,9 +316,10 @@
                         <span class="pill muted">existing member</span>
                       </div>
                       <label class="access-inline-field">
+                        <span class="sr-only">Member Identity</span>
                         <input
                           id="vaultAdminNpubInput"
-                          placeholder="name@example.com"
+                          placeholder="npub… or name@domain"
                           autocomplete="off"
                           spellcheck="false"
                         />
@@ -330,11 +337,12 @@
                     <rect x="3" y="5" width="18" height="14" rx="2" />
                     <path d="M3 7l9 6 9-6" />
                   </svg>
-                  <span>Join with invite</span>
-                  <small id="vaultInvitationHint">Accept invite code</small>
+                  <span>Join a Vault</span>
+                  <small id="vaultInvitationHint">Use a one-time Invite Code</small>
                 </summary>
                 <div class="access-admin-content">
                   <div class="access-admin-section">
+                    <p class="access-field-hint settings-invitation-copy">An Invite Code is bound to an identity or email claim. It does not open encrypted content until the required Folder Key Grants are available.</p>
                     <label class="access-field">
                       <span>Invite code</span>
                       <input
@@ -345,7 +353,7 @@
                       />
                     </label>
                     <label class="access-field">
-                      <span>Invited email</span>
+                      <span>Email for an email invite</span>
                       <input
                         id="vaultInviteEmailInput"
                         placeholder="name@example.com"
@@ -354,15 +362,7 @@
                       />
                     </label>
                     <label class="access-field">
-                      <span>Email proof time</span>
-                      <input
-                        id="vaultInviteEmailProofCreatedAtInput"
-                        type="datetime-local"
-                        autocomplete="off"
-                      />
-                    </label>
-                    <label class="access-field">
-                      <span>Invite Secret</span>
+                      <span>Private Invite Secret</span>
                       <input
                         id="vaultInviteSecretInput"
                         type="password"
@@ -370,11 +370,24 @@
                         spellcheck="false"
                       />
                     </label>
+                    <p class="access-field-hint settings-invite-secret-warning">Never paste the Invite Secret into a server-visible channel. It proves possession without being sent to the FiniteBrain server.</p>
+                    <details class="settings-advanced-details">
+                      <summary>Email invite details</summary>
+                      <p>Use this only when an email invitation requires a supplied proof time.</p>
+                      <label class="access-field">
+                        <span>Email proof time</span>
+                        <input
+                          id="vaultInviteEmailProofCreatedAtInput"
+                          type="datetime-local"
+                          autocomplete="off"
+                        />
+                      </label>
+                    </details>
                     <div class="access-button-row">
                       <button id="vaultInviteConnectSignerButton" type="button">Connect signer</button>
                       <button id="getVaultInvitationButton" type="button">Inspect invite</button>
-                      <button id="getEmailInviteInstructionsButton" type="button">Load email scope</button>
-                      <button id="acceptVaultInvitationButton" type="button">Accept invite</button>
+                      <button id="getEmailInviteInstructionsButton" type="button">Verify email and load access</button>
+                      <button id="acceptVaultInvitationButton" type="button">Join Vault</button>
                     </div>
                   </div>
                 </div>
@@ -434,15 +447,6 @@
             </div>
           </div>
 
-          <div
-            id="accessResultPanel"
-            class="access-result"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            hidden
-          ></div>
-          <p id="accessBusyStatus" class="access-busy-status" hidden aria-live="polite">Working…</p>
         </section>
 
         <footer class="sidebar-account-footer">
@@ -689,11 +693,11 @@ Start writing here.</textarea>
               </svg>
             </button>
           </header>
-          <div class="settings-modal-layout">
+          <div id="settingsModalLayout" class="settings-modal-layout">
             <nav id="settingsNav" class="settings-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
               <button id="settingsNavSession" class="settings-nav-item active" type="button" role="tab" aria-selected="true" aria-controls="settingsSessionPanel" tabindex="0">
                 <span class="settings-nav-icon" aria-hidden="true">
-                  <svg class="icon" viewBox="0 0 24 24"><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M5.9 5.9l1.4 1.4M16.7 16.7l1.4 1.4M18.1 5.9l-1.4 1.4M7.3 16.7l-1.4 1.4" /><circle cx="12" cy="12" r="3.5" /></svg>
+                  <svg class="icon" viewBox="0 0 24 24"><path d="M7 11V8a5 5 0 0 1 10 0v3" /><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M12 15v3" /></svg>
                 </span>
                 <span>
                   <strong>Session</strong>
@@ -729,10 +733,22 @@ Start writing here.</textarea>
               </button>
             </nav>
             <div class="settings-modal-content">
-              <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavSession">
+              <div id="settingsSharedFeedback" class="settings-shared-feedback">
+                <div
+                  id="accessResultPanel"
+                  class="access-result"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  hidden
+                ></div>
+                <p id="accessBusyStatus" class="access-busy-status" hidden aria-live="polite">Working…</p>
+              </div>
+
+              <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsSessionTitle">
                 <header class="settings-section-header">
                   <p class="eyebrow">Session</p>
-                  <h3>Session security</h3>
+                  <h3 id="settingsSessionTitle">Session and signer</h3>
                   <p>Session Folder Keys and readable content stay in memory only while this session is unlocked.</p>
                 </header>
                 <section id="sessionSecurityStatus" class="session-security-status settings-card" aria-live="polite">
@@ -743,19 +759,35 @@ Start writing here.</textarea>
                   <button id="resumeSessionButton" type="button">Unlock session</button>
                   <button id="lockSessionButton" type="button" hidden>Lock session</button>
                 </section>
+                <section class="settings-card settings-signer-card" aria-live="polite">
+                  <div class="settings-card-copy">
+                    <span class="settings-card-label">Signer</span>
+                    <strong id="settingsSignerTitle">Checking signer</strong>
+                    <p id="settingsSignerDetail">Looking for a NIP-07 signer in this browser.</p>
+                  </div>
+                  <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
+                    Connect signer
+                  </button>
+                </section>
                 <div class="settings-info-card">
                   <span class="settings-info-icon" aria-hidden="true">
                     <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 10v6M12 7h.01" /></svg>
                   </span>
                   <p>Locking clears Session Folder Keys, decrypted pages, drafts, and other temporary plaintext from this client.</p>
                 </div>
+                <div class="settings-info-card settings-recovery-note">
+                  <span class="settings-info-icon" aria-hidden="true">
+                    <svg class="icon" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.4-2.9 8-7 10-4.1-2-7-5.6-7-10V6z" /><path d="M9 12l2 2 4-4" /></svg>
+                  </span>
+                  <p>The server cannot reconstruct a lost Folder Key or sole signer. Treat a Vault as durable only after a separate recovery path has reopened it on a replacement client.</p>
+                </div>
               </section>
 
               <section id="settingsVaultPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavVault" hidden>
                 <header class="settings-section-header">
                   <p class="eyebrow">Vault</p>
-                  <h3>Current Vault</h3>
-                  <p>Review the Vault context and signer used for this Product Client session.</p>
+                  <h3>Vault context</h3>
+                  <p>Review the selected Vault and active signer. Switching, loading, and organization creation stay explicit in Manage Vaults.</p>
                 </header>
                 <div class="settings-card settings-vault-summary">
                   <div>
@@ -764,7 +796,7 @@ Start writing here.</textarea>
                   </div>
                   <dl>
                     <div>
-                      <dt>Member Identity</dt>
+                      <dt>Connected signer</dt>
                       <dd id="settingsVaultIdentity">Signer unavailable</dd>
                     </div>
                     <div>
@@ -773,30 +805,23 @@ Start writing here.</textarea>
                     </div>
                   </dl>
                 </div>
-              <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
+                <button id="settingsManageVaultsButton" class="settings-secondary-action" type="button">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="7.5" cy="12.5" r="3.5" />
-                    <path d="M11 12.5h9M16 12.5v3M19 12.5v2" />
-                </svg>
-                <span>Connect signer</span>
-              </button>
-              <button id="settingsManageVaultsButton" class="settings-primary-action" type="button">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 7h16M4 12h16M4 17h16" />
-                  <circle cx="8" cy="7" r="1.5" />
-                  <circle cx="15" cy="12" r="1.5" />
-                  <circle cx="10" cy="17" r="1.5" />
-                </svg>
-                <span>Manage Vaults</span>
-              </button>
-              <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
+                    <path d="M4 7h16M4 12h16M4 17h16" />
+                    <circle cx="8" cy="7" r="1.5" />
+                    <circle cx="15" cy="12" r="1.5" />
+                    <circle cx="10" cy="17" r="1.5" />
+                  </svg>
+                  <span>Manage Vaults</span>
+                </button>
+                <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
               </section>
 
               <section id="settingsAccessPanel" class="settings-section settings-access-section" role="tabpanel" aria-labelledby="settingsNavAccess" hidden>
                 <header class="settings-section-header">
                   <p class="eyebrow">Access &amp; sharing</p>
-                  <h3>Vault access</h3>
-                  <p>Manage folder access, Vault members, invitations, and single-use sharing links.</p>
+                  <h3>Folder access and sharing</h3>
+                  <p>Choose a Folder to review people, grant direct access, and manage restricted-Folder share links. Organization member management appears when available.</p>
                 </header>
                 <div id="settingsAccessPanelMount"></div>
               </section>
@@ -804,8 +829,8 @@ Start writing here.</textarea>
               <section id="settingsInvitationsPanel" class="settings-section settings-invitations-section" role="tabpanel" aria-labelledby="settingsNavInvitations" hidden>
                 <header class="settings-section-header">
                   <p class="eyebrow">Invitations</p>
-                  <h3>Vault invitations</h3>
-                  <p>Create and accept one-shot Vault invitations, then review pending invites and shared-folder relationships.</p>
+                  <h3>Invite or join a Vault</h3>
+                  <p>Invite an email or Member Identity, join with a one-time Invite Code, and review pending invitations or shared-Folder relationships.</p>
                 </header>
                 <div id="settingsInvitationsPanelMount"></div>
               </section>
@@ -873,6 +898,6 @@ Start writing here.</textarea>
       </div>
     </div>
 
-    <script src="/client/app.js?v=20260707-share-mount-copy"></script>
+    <script src="/client/app.js?v=20260712-settings-consistency"></script>
   </body>
 </html>

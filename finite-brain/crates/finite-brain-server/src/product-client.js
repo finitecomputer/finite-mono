@@ -108,8 +108,8 @@ const FiniteBrainProductClient = (() => {
     "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
   const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
   const CLIENT_ACTION_FEEDBACK = Object.freeze({
-    inviteLinkCopyFailure: "Could not copy client-only invite link. Try again.",
-    inviteLinkCopySuccess: "Client-only invite link copied.",
+    inviteLinkCopyFailure: "Could not copy private invite link. Try again.",
+    inviteLinkCopySuccess: "Private invite link copied.",
     folderIdCopyFailure: "Could not copy Folder ID. Try again.",
     folderIdCopySuccess: "Folder ID copied.",
     pageIdCopyFailure: "Could not copy Page ID. Try again.",
@@ -1077,7 +1077,6 @@ const FiniteBrainProductClient = (() => {
       resetVaultSessionState({ preserveManageVaultsReturnToSettings: false });
       state.pubkeyHex = null;
       state.signerStatus = deriveSignerState(window.nostr).status;
-      setText("signerDetail", "Signer identity changed. The previous session was locked.");
       render();
       throw new Error("Signer identity changed while signing; the session was locked");
     };
@@ -2005,8 +2004,35 @@ const FiniteBrainProductClient = (() => {
 
   const SETTINGS_SECTIONS = Object.freeze(["session", "vault", "access", "invitations"]);
 
-  function normalizeSettingsSection(section) {
-    return SETTINGS_SECTIONS.includes(section) ? section : "session";
+  function settingsSectionsForSession(sessionStatus = state.sessionStatus) {
+    return sessionStatus === SESSION_STATUS.UNLOCKED ? SETTINGS_SECTIONS : ["session"];
+  }
+
+  function normalizeSettingsSection(section, sessionStatus = state.sessionStatus) {
+    return settingsSectionsForSession(sessionStatus).includes(section) ? section : "session";
+  }
+
+  function settingsSignerView() {
+    const signer = deriveSignerState(window.nostr);
+    if (state.signerStatus === "connected" && state.pubkeyHex) {
+      return {
+        canConnect: false,
+        detail: `Connected as ${sessionIdentityLabel()}. Signed Vault requests use this Member Identity.`,
+        title: "Signer connected",
+      };
+    }
+    if (state.signerStatus === "checking") {
+      return {
+        canConnect: false,
+        detail: "Looking for a NIP-07 signer in this browser.",
+        title: "Checking signer",
+      };
+    }
+    return {
+      canConnect: signer.canConnect,
+      detail: signer.detail,
+      title: signer.canConnect ? "Signer ready" : "Signer unavailable",
+    };
   }
 
   function isSequentiallyFocusable(element) {
@@ -2055,19 +2081,26 @@ const FiniteBrainProductClient = (() => {
   }
 
   function focusSettingsSection(section = state.settingsSection) {
-    const navButton = $(
-      section === "vault"
-        ? "settingsNavVault"
-        : section === "access"
-          ? "settingsNavAccess"
-          : section === "invitations"
-            ? "settingsNavInvitations"
-          : "settingsNavSession"
-    );
+    const sessionOnly = settingsSectionsForSession().length === 1;
+    const resumeButton = $("resumeSessionButton");
+    const navButton = sessionOnly
+      ? null
+      : $(
+          section === "vault"
+            ? "settingsNavVault"
+            : section === "access"
+              ? "settingsNavAccess"
+              : section === "invitations"
+                ? "settingsNavInvitations"
+                : "settingsNavSession"
+        );
+    const focusTarget = sessionOnly
+      ? (resumeButton && !resumeButton.disabled ? resumeButton : $("closeSettingsButton"))
+      : navButton;
     if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(() => navButton?.focus?.());
+      requestAnimationFrame(() => focusTarget?.focus?.());
     } else {
-      navButton?.focus?.();
+      focusTarget?.focus?.();
     }
   }
 
@@ -2176,6 +2209,10 @@ const FiniteBrainProductClient = (() => {
   }
 
   function focusManageVaultsReturnTarget() {
+    if (state.settingsSection !== "vault") {
+      focusSettingsSection(state.settingsSection);
+      return;
+    }
     const target = $("settingsManageVaultsButton");
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(() => target?.focus?.());
@@ -2258,6 +2295,16 @@ const FiniteBrainProductClient = (() => {
     modal.setAttribute("aria-hidden", String(!state.settingsModalOpen));
     const shell = document.querySelector?.(".obsidian-shell");
     if (shell) shell.dataset.settingsOpen = state.settingsModalOpen ? "true" : "false";
+    const availableSections = settingsSectionsForSession(state.sessionStatus);
+    const sessionOnly = availableSections.length === 1;
+    const forcedSessionSection = !availableSections.includes(state.settingsSection);
+    state.settingsSection = normalizeSettingsSection(state.settingsSection);
+    const settingsNav = $("settingsNav");
+    if (settingsNav) {
+      settingsNav.hidden = sessionOnly;
+      settingsNav.setAttribute("aria-hidden", String(sessionOnly));
+    }
+    $("settingsModalLayout")?.classList?.toggle("settings-session-only", sessionOnly);
     const sessionNav = $("settingsNavSession");
     const vaultNav = $("settingsNavVault");
     const accessNav = $("settingsNavAccess");
@@ -2271,21 +2318,25 @@ const FiniteBrainProductClient = (() => {
     const accessActive = state.settingsSection === "access";
     const invitationsActive = state.settingsSection === "invitations";
     if (sessionNav) {
+      sessionNav.hidden = false;
       sessionNav.className = `settings-nav-item${sessionActive ? " active" : ""}`;
       sessionNav.setAttribute("aria-selected", String(sessionActive));
       sessionNav.tabIndex = sessionActive ? 0 : -1;
     }
     if (vaultNav) {
+      vaultNav.hidden = sessionOnly;
       vaultNav.className = `settings-nav-item${vaultActive ? " active" : ""}`;
       vaultNav.setAttribute("aria-selected", String(vaultActive));
       vaultNav.tabIndex = vaultActive ? 0 : -1;
     }
     if (accessNav) {
+      accessNav.hidden = sessionOnly;
       accessNav.className = `settings-nav-item${accessActive ? " active" : ""}`;
       accessNav.setAttribute("aria-selected", String(accessActive));
       accessNav.tabIndex = accessActive ? 0 : -1;
     }
     if (invitationsNav) {
+      invitationsNav.hidden = sessionOnly;
       invitationsNav.className = `settings-nav-item${invitationsActive ? " active" : ""}`;
       invitationsNav.setAttribute("aria-selected", String(invitationsActive));
       invitationsNav.tabIndex = invitationsActive ? 0 : -1;
@@ -2309,10 +2360,15 @@ const FiniteBrainProductClient = (() => {
     setText("settingsVaultName", activeVaultLabel());
     setText("settingsVaultIdentity", sessionIdentityLabel());
     setText("settingsVaultStatus", sessionStatusView(state.sessionStatus).title);
+    const signer = settingsSignerView();
+    setText("settingsSignerTitle", signer.title);
+    setText("settingsSignerDetail", signer.detail);
+    safeSetHidden("settingsConnectSignerButton", !signer.canConnect);
     setOptionalDisabled(
       "settingsConnectSignerButton",
-      !deriveSignerState(window.nostr).canConnect
+      !signer.canConnect
     );
+    if (state.settingsModalOpen && forcedSessionSection) focusSettingsSection("session");
   }
 
   function renderVaultSwitcher() {
@@ -6581,7 +6637,7 @@ const FiniteBrainProductClient = (() => {
         $("vaultInviteCodeInput")?.value.trim() ||
         $("vaultInviteSecretInput")?.value.trim()
     );
-    safeSetHidden("vaultInvitationActionSection", !(organizationVault || inviteInProgress));
+    safeSetHidden("vaultInvitationActionSection", !organizationVault);
     safeSetElement("vaultPeopleActionPanel", (panel) => {
       panel.hidden = !organizationVault;
       if (!organizationVault) panel.open = false;
@@ -6590,10 +6646,8 @@ const FiniteBrainProductClient = (() => {
     safeSetHidden("vaultInvitationListSection", !organizationVault);
     safeSetHidden("sharedFolderSection", !organizationVault);
     safeSetElement("vaultInvitationPanel", (panel) => {
-      panel.hidden = !(organizationVault || inviteInProgress);
-      if (panel.hidden) {
-        panel.open = false;
-      } else if (inviteInProgress) {
+      panel.hidden = false;
+      if (inviteInProgress) {
         panel.open = true;
       }
     });
@@ -6691,7 +6745,7 @@ const FiniteBrainProductClient = (() => {
           ? "Admins must already be Vault members."
           : "Only Vault admins can change organization members and admins.";
     setText("vaultPeopleHint", hint);
-    setText("vaultPeopleActionHint", canManage ? "Invite, add, promote" : "Admin-only");
+    setText("vaultPeopleActionHint", canManage ? "Add or promote existing identities" : "Admin-only");
   }
 
   function linkRowActionButton(label, onClick, options = {}) {
@@ -7192,10 +7246,10 @@ const FiniteBrainProductClient = (() => {
     addInput.disabled = state.accessBusy || !canManage;
 
     addButton.onclick = () => {
-      const email = addInput.value.trim();
-      if (email && row) {
+      const identity = addInput.value.trim();
+      if (identity && row) {
         state.activeAccessIntent = "people";
-        grantFolderAccessFromPanel(email)
+        grantFolderAccessFromPanel(identity)
           .then(() => {
             addInput.value = "";
           })
@@ -7218,8 +7272,8 @@ const FiniteBrainProductClient = (() => {
       addHint.textContent = accessFlowHint(row, "people", keyOpen);
     } else {
       addHint.textContent = row.access === "all_members"
-        ? `Enter an existing Vault member email to send the Folder Key for "${row.path}"`
-        : `Enter an email to grant access to "${row.path}"`;
+        ? `Enter an existing Vault Member Identity to send the Folder Key for "${row.path}"`
+        : `Enter a Member Identity to grant access to "${row.path}"`;
     }
   }
 
@@ -7287,12 +7341,12 @@ const FiniteBrainProductClient = (() => {
       } else if (!isRestricted) {
         shareHint.textContent = "Share links are for restricted Folders. Choose a restricted Folder to create one.";
       } else {
-        shareHint.textContent = "Target email receives a single-use Folder Key Grant through the link.";
+        shareHint.textContent = "The selected Member Identity receives a single-use Folder Key Grant through the link.";
       }
     }
     if (shareMountHint) {
       shareMountHint.textContent = canCreateShare
-        ? "When accepted, this adds the shared Folder to their Vault sidebar. It does not copy data or grant extra access."
+        ? "When accepted, this adds a shortcut to the shared Folder in their Personal Vault. It does not copy data or change Folder access."
         : "Available when creating a restricted Folder share link.";
     }
 
@@ -7810,7 +7864,6 @@ const FiniteBrainProductClient = (() => {
   async function detectSigner() {
     const derived = deriveSignerState(window.nostr);
     state.signerStatus = derived.status;
-    setText("signerDetail", derived.detail);
     render();
   }
 
@@ -7819,7 +7872,6 @@ const FiniteBrainProductClient = (() => {
     const derived = deriveSignerState(window.nostr);
     if (!derived.canConnect) {
       state.signerStatus = derived.status;
-      setText("signerDetail", derived.detail);
       render();
       return;
     }
@@ -7837,13 +7889,6 @@ const FiniteBrainProductClient = (() => {
     if (state.activeVaultId === PERSONAL_VAULT_PLACEHOLDER_ID || state.activeVaultId === state.config?.defaultVaultId) {
       setActiveVaultId(personalVaultIdForPubkey(pubkey), { reset: false });
     }
-    setText(
-      "signerDetail",
-      identityChanged
-        ? "Signer identity changed. The previous session was locked."
-        : "Signer connected."
-    );
-    setText("authDetail", "Signed requests are ready for protected Vault routes.");
     log(identityChanged ? "Connected a different signer identity." : "Connected signer.", {
       status: "connected",
     });
@@ -8407,7 +8452,7 @@ const FiniteBrainProductClient = (() => {
     const value = String(input || "").trim();
     if (!value) return null;
     if (value.startsWith("invitation-")) {
-      return "That is an invitation id. Inspect and accept use an Invite Code like invite-...; use Revoke invite or fbrain invites accept --vault <vault-id> --id <invitation-id> for id-based actions.";
+      return "That is an invitation id. Inspect and Join Vault use an Invite Code like invite-...; use Revoke invite or fbrain invites accept --vault <vault-id> --id <invitation-id> for id-based actions.";
     }
     if (!value.startsWith("invite-")) {
       return "Invite Codes start with invite-. Check the copied code and the active signer.";
@@ -8435,9 +8480,9 @@ const FiniteBrainProductClient = (() => {
     } else if (codeHint) {
       hint = codeHint;
     } else if (inviteCodeUsable) {
-      hint = "Ready to join";
+      hint = "Ready to join Vault";
     } else {
-      hint = "Accept invite code";
+      hint = "Enter an Invite Code";
     }
     return {
       acceptDisabled: protectedActionDisabled || !inviteCodeUsable,
@@ -9205,7 +9250,7 @@ const FiniteBrainProductClient = (() => {
   async function addVaultMemberFromPanel() {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
-    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Paste a member email first");
+    const targetNpub = await normalizedNpubInput("vaultMemberNpubInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -9230,7 +9275,7 @@ const FiniteBrainProductClient = (() => {
   async function addVaultAdminFromPanel() {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
-    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Paste an admin email first");
+    const targetNpub = await normalizedNpubInput("vaultAdminNpubInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -9499,7 +9544,7 @@ const FiniteBrainProductClient = (() => {
     const sessionEpoch = captureSessionOperationEpoch();
     const vaultId = state.activeVaultId;
     const row = requireRestrictedAccessRow();
-    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Paste a share target email first");
+    const recipientNpub = await normalizedNpubInput("accessShareTargetInput", "Enter a Member Identity first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
     try {
@@ -9610,7 +9655,7 @@ const FiniteBrainProductClient = (() => {
     const metadata = state.metadata;
     const publicBaseUrl = state.config?.publicBaseUrl;
     const targetInput = $("vaultInviteTargetNpubInput").value.trim();
-    if (!targetInput) throw new Error("Paste an invite email first");
+    if (!targetInput) throw new Error("Enter an email address or Member Identity first");
     state.accessBusy = true;
     state.accessResult = null;
     render();
@@ -9622,7 +9667,7 @@ const FiniteBrainProductClient = (() => {
         let resolvedNpub = null;
         if (finiteVipEmail(targetInput)) {
           try {
-            resolvedNpub = (await resolveIdentityInputValue(targetInput, "Paste an invite email first")).npub;
+            resolvedNpub = (await resolveIdentityInputValue(targetInput, "Enter an email address or Member Identity first")).npub;
             requireCurrentSessionEpoch(sessionEpoch);
           } catch (error) {
             if (state.sessionEpoch !== sessionEpoch) throw error;
@@ -9656,7 +9701,7 @@ const FiniteBrainProductClient = (() => {
           state.keyring = sessionKeyring;
         }
       } else {
-        const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Paste an invite email first");
+        const targetNpub = await normalizedNpubInput("vaultInviteTargetNpubInput", "Enter an email address or Member Identity first");
         requireCurrentSessionEpoch(sessionEpoch);
         body = JSON.stringify(
           buildVaultInvitationRequest({
@@ -9689,7 +9734,10 @@ const FiniteBrainProductClient = (() => {
       } else {
         clearRememberedEmailInvitationMaterial();
       }
-      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}.`, {
+      const invitationAccessDetail = invitation.targetKind === "email_bootstrap"
+        ? "They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email."
+        : "They can join with this one-time invite; grant any required Folder Keys after they join.";
+      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.vaultId}. ${invitationAccessDetail}`, {
         inviteCode: invitation.inviteCode,
         invitationId: invitation.id,
         acceptPath: invitation.acceptPath,
@@ -9745,7 +9793,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function loadEmailInviteInstructionsFromPanel() {
-    requireUnlockedVaultInvitationAction("loading email invitation scope");
+    requireUnlockedVaultInvitationAction("verifying email and loading invitation access");
     const sessionEpoch = captureSessionOperationEpoch();
     const code = currentVaultInvitationCode();
     const email = canonicalInviteEmail($("vaultInviteEmailInput").value);
@@ -9772,18 +9820,18 @@ const FiniteBrainProductClient = (() => {
       const folderScope = (invitation.bootstrapScope || [])
         .map((folder) => `${folder.folderId} v${folder.keyVersion}`)
         .join(", ");
-      setAccessResult("ready", "Email scope loaded", `${email} can claim ${invitation.vaultId}.`, {
+      setAccessResult("ready", "Email verified", `${email} can claim encrypted Folder Key Grants for ${invitation.vaultId}.`, {
         inviteCode: invitation.inviteCode,
         scope: folderScope || "none",
         status: invitation.status,
       });
-      log("Loaded post-proof email invitation scope.", {
+      log("Verified email invitation scope.", {
         invitationId: invitation.id,
         vaultId: invitation.vaultId,
       });
       return invitation;
     } catch (error) {
-      failAccessOperation(sessionEpoch, "Email scope failed", error, vaultInvitationUnavailableDetail);
+      failAccessOperation(sessionEpoch, "Email verification failed", error, vaultInvitationUnavailableDetail);
       throw error;
     } finally {
       finishAccessOperation(sessionEpoch);
@@ -9807,8 +9855,8 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveVaultId(invitation.vaultId);
       state.sessionNotice = invitation.duplicateAccept
-        ? "Invitation was already accepted. Unlock the session to open the selected Vault."
-        : "Invitation accepted. Unlock the session to open the selected Vault.";
+        ? "This Member Identity already joined the selected Vault. An admin must grant any required Folder Keys before encrypted content can open."
+        : "Joined the selected Vault. An admin must grant any required Folder Keys before encrypted content can open.";
       render();
       log("Accepted Vault invitation.", { invitationId: invitation.id, vaultId: invitation.vaultId });
     } catch (error) {
@@ -10651,6 +10699,7 @@ const FiniteBrainProductClient = (() => {
     metadataMountRows,
     nextDraftObjectId,
     normalizeSidebarMode,
+    normalizeSettingsSection,
     normalizeVisibleVault,
     npubFromHex,
     npubToHex,
@@ -10684,6 +10733,7 @@ const FiniteBrainProductClient = (() => {
     searchHighlightSegments,
     searchPageRows,
     searchResultSnippet,
+    settingsSectionsForSession,
     sharedFolderRelationshipRows,
     sessionGrantOpeningAllowed,
     sessionOperationIsCurrent,

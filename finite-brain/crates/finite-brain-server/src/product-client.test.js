@@ -102,6 +102,24 @@ vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
 
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("locked")),
+  JSON.stringify(["session"]),
+  "A locked Settings modal must expose only the safe Session section"
+);
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("resuming")),
+  JSON.stringify(["session"]),
+  "Settings must keep access controls hidden while encrypted grants are reopening"
+);
+assert.equal(
+  JSON.stringify(client.settingsSectionsForSession("unlocked")),
+  JSON.stringify(["session", "vault", "access", "invitations"])
+);
+assert.equal(client.normalizeSettingsSection("access", "locked"), "session");
+assert.equal(client.normalizeSettingsSection("invitations", "resuming"), "session");
+assert.equal(client.normalizeSettingsSection("access", "unlocked"), "access");
+
 function accessFailureTestSeams() {
   const testElements = new Map();
   const testContext = {
@@ -280,6 +298,7 @@ for (const inputId of ["acceptVaultInvitationButton", "revokeVaultInvitationButt
     `${inputId} must never receive an Enter shortcut`
   );
 }
+
 assert.equal(
   keyboardNavigation.shouldRunPrimaryFormAction(
     { isComposing: false, key: "Enter", currentTarget: { disabled: false } },
@@ -605,7 +624,7 @@ assert.match(
 );
 assert.match(
   htmlSource,
-  /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
+  /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
   "The generated invite URL must have an explicitly named copy action"
 );
 assert.match(
@@ -800,26 +819,32 @@ assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
 assert.match(htmlSource, /id="accessShareHint"/);
 assert.match(htmlSource, /id="accessShareMountHint"/);
-assert.match(htmlSource, />\s*Show in recipient's Vault\s*</);
+assert.match(htmlSource, />\s*Add a shortcut to their Personal Vault\s*</);
+assert.match(
+  htmlSource,
+  /adds a shortcut to the shared Folder in their Personal Vault\. It does not copy data or change Folder access\./
+);
 assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
 assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
 assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
-assert.match(htmlSource, /placeholder="name@example\.com"/);
-assert.doesNotMatch(htmlSource, /placeholder="[^"]*(npub|hex|NIP-05)/);
+assert.match(htmlSource, /placeholder="npub… or name@domain"/);
+assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeholder="name@example\.com"/);
 assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
 assert.match(htmlSource, /class="vault-access-action-grid"/);
-assert.match(htmlSource, />\s*Give Vault access\s*</);
-assert.match(htmlSource, />\s*Invite, add, promote\s*</);
-assert.match(htmlSource, />\s*Vault Member Identities\s*</);
-assert.match(htmlSource, />\s*Invite by email\s*</);
+assert.match(htmlSource, />\s*Manage members\s*</);
+assert.match(htmlSource, />\s*Add or promote existing identities\s*</);
+assert.match(htmlSource, />\s*Invite someone\s*</);
+assert.match(htmlSource, />\s*Email or Member Identity\s*</);
+assert.match(htmlSource, />\s*Folder access plan\s*</);
 assert.match(htmlSource, />\s*Add member now\s*</);
 assert.match(htmlSource, />\s*Make admin\s*</);
-assert.match(htmlSource, />\s*Join with invite\s*</);
-assert.match(htmlSource, />\s*Accept invite code\s*</);
+assert.match(htmlSource, />\s*Join a Vault\s*</);
+assert.match(htmlSource, />\s*Verify email and load access\s*</);
+assert.match(htmlSource, />\s*Join Vault\s*</);
 assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
 assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
@@ -839,7 +864,7 @@ assert.match(htmlSource, /id="accessShareTargetInput"/);
 assert.match(htmlSource, /id="addVaultMemberButton"/);
 assert.match(htmlSource, /id="addVaultAdminButton"/);
 assert.match(htmlSource, /id="vaultInvitationPanel" class="access-vault-admin"/);
-assert.match(htmlSource, /id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary"/);
+assert.match(htmlSource, /id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary settings-invitation-create"/);
 assert.doesNotMatch(htmlSource, /id="vaultInvitationPanel"[^>]*open/);
 assert.doesNotMatch(htmlSource, /id="accessChangeMode"/);
 assert.doesNotMatch(htmlSource, /id="accessManageToggle"/);
@@ -1114,7 +1139,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(copyInviteUrlButton.disabled, false);
   assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), true);
   assert.equal(copiedValues.at(-1), clipboardFeedbackState.lastEmailInviteUrl);
-  assert.equal(clipboardFeedbackElement.textContent, "Client-only invite link copied.");
+  assert.equal(clipboardFeedbackElement.textContent, "Private invite link copied.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
 
   clipboardFeedback.seams.lockSession();
@@ -1132,7 +1157,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   );
   assert.equal(copiedValues.length, copiedBeforeLockedPageAttempt);
   assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), false);
-  assert.equal(clipboardFeedbackElement.textContent, "Could not copy client-only invite link. Try again.");
+  assert.equal(clipboardFeedbackElement.textContent, "Could not copy private invite link. Try again.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
   assert.equal(
     copiedValues.includes("https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel"),
@@ -1278,7 +1303,8 @@ function assertNestedManageVaultReturnContract() {
   const nestedManage = clipboardInvitationFeedbackTestSeams({});
   const nestedState = nestedManage.seams.state;
   const settingsTrigger = nestedManage.context.document.getElementById("sessionSettingsButton");
-  const manageButton = nestedManage.context.document.getElementById("settingsManageVaultsButton");
+  const closeSettingsButton = nestedManage.context.document.getElementById("closeSettingsButton");
+  const resumeButton = nestedManage.context.document.getElementById("resumeSessionButton");
   nestedManage.context.document.activeElement = settingsTrigger;
   nestedState.activeVaultId = "personal";
   nestedState.settingsModalOpen = true;
@@ -1295,8 +1321,17 @@ function assertNestedManageVaultReturnContract() {
   assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
   nestedManage.seams.closeManageVaultsModal();
   assert.equal(nestedState.settingsModalOpen, true);
-  assert.equal(nestedState.settingsSection, "vault");
-  assert.equal(nestedManage.context.document.activeElement, manageButton);
+  assert.equal(
+    nestedState.settingsSection,
+    "session",
+    "A nested Manage Vaults return after Session Lock must reopen only the safe Session section"
+  );
+  assert.equal(
+    nestedManage.context.document.activeElement,
+    closeSettingsButton,
+    "A locked nested return without an available signer must focus the visible Settings close action rather than hidden Vault controls"
+  );
+  assert.equal(resumeButton.disabled, true);
 
   nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
   nestedManage.seams.resetVaultSessionState();
@@ -1307,7 +1342,7 @@ function assertNestedManageVaultReturnContract() {
   );
   nestedManage.seams.closeManageVaultsModal();
   assert.equal(nestedState.settingsModalOpen, true);
-  assert.equal(nestedState.settingsSection, "vault");
+  assert.equal(nestedState.settingsSection, "session");
 
   nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
   nestedManage.seams.lockSession();
@@ -1466,6 +1501,7 @@ function assertModalFocusAndContextRouteContracts() {
   const contextState = contextRoute.seams.state;
   const invokingControl = contextRoute.context.document.getElementById("invokingContextControl");
   const detachedMenuItem = contextRoute.context.document.getElementById("detachedContextMenuItem");
+  contextState.sessionStatus = "unlocked";
   contextState.contextMenuPreviousFocus = invokingControl;
   contextRoute.context.document.activeElement = detachedMenuItem;
   contextRoute.seams.handleContextMenuAction(
@@ -1596,18 +1632,50 @@ assert.match(
   /id="sessionSettingsButton"[\s\S]{0,900}<circle cx="12" cy="12" r="3"\s*\/>[\s\S]{0,900}M19\.4 15a1\.65 1\.65/,
 );
 assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
+assert.match(htmlSource, /id="settingsModalLayout"/);
 assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavVault"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
 assert.match(htmlSource, /id="settingsNavInvitations"[^>]*role="tab"[^>]*aria-controls="settingsInvitationsPanel"/);
-assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsSessionTitle"/);
+assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Session and signer</);
 assert.match(htmlSource, /id="settingsVaultPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanelMount"/);
 assert.match(htmlSource, /id="settingsInvitationsPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsInvitationsPanelMount"/);
+const settingsModalMarkup = htmlSource.slice(
+  htmlSource.indexOf('id="settingsModal"'),
+  htmlSource.indexOf('id="manageVaultsModal"')
+);
+const accessSidebarMarkup = htmlSource.slice(
+  htmlSource.indexOf('id="accessSidebarPanel"'),
+  htmlSource.indexOf('id="contextMenu"')
+);
+assert.match(
+  settingsModalMarkup,
+  /id="settingsSharedFeedback"[\s\S]{0,420}id="accessResultPanel"[\s\S]{0,240}id="accessBusyStatus"/,
+  "Settings feedback must remain visible above every Settings section"
+);
+assert.doesNotMatch(
+  accessSidebarMarkup,
+  /id="accessResultPanel"/,
+  "Invitation feedback must not be stranded inside the hidden Access section"
+);
 assert.match(htmlSource, /id="settingsConnectSignerButton"/);
+assert.match(htmlSource, /id="settingsSignerTitle"/);
+assert.match(htmlSource, /id="settingsSignerDetail"/);
+assert.match(
+  htmlSource,
+  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Vault as durable only after a separate recovery path has reopened it on a replacement client\./,
+  "Settings must disclose the current recovery limitation without inventing a recovery control"
+);
 assert.match(htmlSource, /id="settingsManageVaultsButton"/);
+assert.doesNotMatch(
+  htmlSource.slice(htmlSource.indexOf('id="settingsVaultPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
+  /id="settingsConnectSignerButton"/,
+  "Signer connection must live in Session rather than a duplicate Vault action"
+);
 assert.match(source, /openSettingsModal\("session"\)/);
 assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
 assert.match(source, /settingsNavInvitations[\s\S]{0,120}setSettingsSection\("invitations"\)/);
@@ -1617,6 +1685,24 @@ assert.match(source, /mount\.appendChild\(panel\)/);
 assert.match(source, /for \(const node of invitationNodes\) \{[\s\S]{0,160}mount\.appendChild\(node\)/);
 assert.match(source, /start\(\) \{[\s\S]{0,180}mountAccessPanelInSettings\(\);[\s\S]{0,120}mountInvitationPanelInSettings\(\);/);
 assert.match(source, /state\.settingsSection = "invitations"/);
+assert.match(source, /function settingsSectionsForSession\(sessionStatus = state\.sessionStatus\) \{\s*return sessionStatus === SESSION_STATUS\.UNLOCKED \? SETTINGS_SECTIONS : \["session"\];/s);
+assert.match(source, /settingsNav\.hidden = sessionOnly;/);
+assert.match(source, /panel\.hidden = false;[\s\S]{0,120}panel\.open = true;/);
+assert.match(
+  createVaultInvitationFromPanelSource,
+  /They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email\.[\s\S]{0,260}They can join with this one-time invite; grant any required Folder Keys after they join\./s,
+  "Invitation creation must distinguish email grant claim from direct Member Identity membership"
+);
+assert.match(
+  acceptVaultInvitationFromPanelSource,
+  /An admin must grant any required Folder Keys before encrypted content can open\./,
+  "Direct invitation acceptance must not promise Folder Keys"
+);
+assert.match(
+  loadEmailInviteInstructionsFromPanelSource,
+  /Email verified[\s\S]{0,220}can claim encrypted Folder Key Grants/,
+  "Email invitation flow must keep the grant claim explicit"
+);
 assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"\)/);
 assert.match(source, /row\.target === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
 assert.match(
@@ -1685,7 +1771,7 @@ assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
 assert.match(cssSource, /@media \(max-width: 640px\)/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*display:\s*flex;/s);
-assert.match(htmlSource, /<span class="pill ready">email invite<\/span>/);
+assert.match(htmlSource, /<span class="pill ready">email or npub<\/span>/);
 assert.doesNotMatch(htmlSource, /<span class="pill ready">new Member Identity<\/span>/);
 assert.match(source, /clearSessionSecretsAndPlaintext\(state\)/);
 assert.equal(client.sessionGrantOpeningAllowed("locked"), false);

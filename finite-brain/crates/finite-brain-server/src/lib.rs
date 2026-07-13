@@ -2338,7 +2338,7 @@ mod tests {
         assert!(client_body.contains("revokeVaultInvitationButton"));
         assert!(client_body.contains("vaultInviteUrlOutput"));
         assert!(client_body.contains("copyVaultInviteUrlButton"));
-        assert!(client_body.contains("Copy client-only invite link"));
+        assert!(client_body.contains("Copy private invite link"));
         assert!(client_body.contains("savePageButton"));
         assert!(!client_body.contains("readerModeButton"));
         assert!(client_body.contains("Edit Markdown"));

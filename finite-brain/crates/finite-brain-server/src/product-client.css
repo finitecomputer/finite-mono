@@ -1962,6 +1962,16 @@ pre {
   min-height: 0;
 }
 
+.settings-modal-layout.settings-session-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-modal-layout.settings-session-only .settings-modal-content {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
 .settings-nav {
   display: flex;
   flex-direction: column;
@@ -2038,9 +2048,23 @@ pre {
 }
 
 .settings-modal-content {
+  display: grid;
+  align-content: start;
+  gap: 18px;
   min-width: 0;
   overflow: auto;
   padding: 24px;
+}
+
+.settings-shared-feedback {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-shared-feedback .access-result,
+.settings-shared-feedback .access-busy-status {
+  margin: 0;
 }
 
 .settings-section {
@@ -2054,20 +2078,24 @@ pre {
 }
 
 .settings-access-section > #settingsAccessPanelMount {
+  display: grid;
+  gap: 12px;
   min-width: 0;
 }
 
 .settings-access-section #accessSidebarPanel {
+  --access-panel-inset: 0px;
+  --access-surface-radius: 10px;
+  padding: 0;
   overflow: visible;
 }
 
 .settings-access-section #accessSidebarPanel > .sidebar-section-title {
-  position: static;
+  display: none;
 }
 
-.settings-access-section #accessSidebarPanel > .sidebar-section-title::before,
-.settings-access-section #accessSidebarPanel > .sidebar-section-title::after {
-  display: none;
+.settings-access-section #accessSidebarPanel > * + * {
+  margin-top: 0;
 }
 
 .settings-invitations-section {
@@ -2090,6 +2118,71 @@ pre {
 
 .settings-invitations-section #settingsInvitationsPanelMount > .vault-access-option {
   width: auto;
+}
+
+.settings-access-section .access-button-row button,
+.settings-invitations-section .access-button-row button,
+.settings-invitations-section .access-primary-button {
+  min-height: 40px;
+}
+
+.settings-invitation-copy {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+.settings-invite-secret-warning {
+  margin: 10px 0 0;
+  border-radius: var(--radius-control);
+  background: var(--status-warning-bg);
+  box-shadow: inset 3px 0 0 var(--status-warning);
+  color: var(--muted);
+  padding: 9px 10px;
+}
+
+.settings-invite-secret-warning code {
+  color: var(--text);
+  font-size: 0.95em;
+  font-weight: 700;
+}
+
+.settings-advanced-details {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  border-top: 1px solid var(--access-border);
+  padding-top: 12px;
+}
+
+.settings-advanced-details summary {
+  cursor: pointer;
+  color: var(--access-muted);
+  font-size: 11px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.settings-advanced-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-advanced-details summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--access-soft);
+  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.settings-advanced-details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.settings-advanced-details p {
+  margin: 0;
+  color: var(--access-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .settings-section-header {
@@ -2192,6 +2285,40 @@ pre {
   height: 16px;
 }
 
+.settings-recovery-note {
+  border-color: var(--line-strong);
+  background: var(--surface-soft);
+}
+
+.settings-recovery-note .settings-info-icon {
+  color: var(--muted);
+}
+
+.settings-signer-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-card-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-card-copy strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.settings-card-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .settings-vault-summary {
   display: grid;
   gap: 18px;
@@ -2260,6 +2387,35 @@ pre {
 }
 
 .settings-primary-action .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-signer-card .settings-primary-action {
+  flex: 0 0 auto;
+  min-width: 132px;
+}
+
+.settings-secondary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: max-content;
+  min-height: 40px;
+  border-color: var(--line-strong);
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.settings-secondary-action:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface-active);
+  box-shadow: var(--shadow-control-hover);
+  color: var(--text);
+}
+
+.settings-secondary-action .icon {
   width: 16px;
   height: 16px;
 }
@@ -5011,8 +5167,23 @@ pre {
     padding: 6px 8px;
   }
 
+  .settings-nav-item small {
+    display: none;
+  }
+
   .settings-modal-content {
     padding: 18px 16px 20px;
+  }
+
+  .settings-signer-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-signer-card .settings-primary-action,
+  .settings-secondary-action {
+    justify-content: center;
+    width: 100%;
   }
 
   .vault-switcher-menu {
