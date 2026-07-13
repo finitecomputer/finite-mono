@@ -135,6 +135,15 @@ type FakeHostedChatState = {
     display_name: string;
     activity_kind: "typing" | "thinking" | "working";
   }>;
+  hosted_agent_binding: {
+    version: number;
+    project_id: string;
+    human_account_id: string;
+    agent_account_id: string;
+    agent_npub: string;
+    canonical_room_id: string;
+    associated_room_ids: string[];
+  } | null;
   profiles: Array<{
     account_id: string;
     npub: string;
@@ -175,6 +184,10 @@ type HostedDeviceState = {
   actions: Array<Record<string, unknown>>;
   runtimeCommands: Array<Record<string, unknown>>;
   authRequests: HostedAuthRequest[];
+  agentBindings: Map<
+    string,
+    NonNullable<FakeHostedChatState["hosted_agent_binding"]>
+  >;
   connections: AgentConnectionsStatus;
 };
 
@@ -659,11 +672,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       const bootstrapActions = hostedDevice.state.actions.map(actionName);
       const startRuntimeIndex = bootstrapActions.indexOf("StartRuntime");
-      const scanTargetIndex = bootstrapActions.indexOf("ScanTarget");
-      const startProfileChatIndex = bootstrapActions.indexOf("StartProfileChat");
       assert(startRuntimeIndex >= 0);
-      assert(scanTargetIndex > startRuntimeIndex);
-      assert(startProfileChatIndex > scanTargetIndex);
+      assert(
+        hostedDevice.state.authRequests.some(
+          (request) => request.path === "/v1/app/agent-bindings/ensure"
+        ),
+        "chat bootstrap did not persist the canonical Agent binding"
+      );
 
       const message = "Keep the runtime boundary thin.";
       await page.getByLabel("Message your agent").fill(message);
@@ -839,8 +854,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         hostedDevice.state.app.selected_chat_id,
         "chat_browser_remembered"
       );
-      const profileChatStartsBeforeReturn = hostedDevice.state.actions.filter(
-        (action) => actionName(action) === "StartProfileChat"
+      const bindingOpensBeforeReturn = hostedDevice.state.authRequests.filter(
+        (request) => request.path === "/v1/app/agent-bindings/open"
       ).length;
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot`
@@ -849,11 +864,11 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/chat$/u);
       await waitFor(
         () =>
-          hostedDevice.state.actions.filter(
-            (action) => actionName(action) === "StartProfileChat"
-          ).length > profileChatStartsBeforeReturn,
+          hostedDevice.state.authRequests.filter(
+            (request) => request.path === "/v1/app/agent-bindings/open"
+          ).length > bindingOpensBeforeReturn,
         5_000,
-        () => "returning to chat did not run the profile chat bootstrap"
+        () => "returning to chat did not reopen the canonical Agent binding"
       );
       await page
         .getByRole("banner")
@@ -862,7 +877,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.equal(
         hostedDevice.state.app.selected_chat_id,
         "chat_browser_remembered",
-        "profile chat bootstrap reset the remembered chat"
+        "canonical binding reopen reset the remembered chat"
       );
 
       await waitFor(() =>
@@ -1091,6 +1106,7 @@ async function startFakeHostedDevice() {
     actions: [],
     runtimeCommands: [],
     authRequests: [],
+    agentBindings: new Map(),
     connections: {
       inference: {
         profile: "finite_private",
@@ -1232,6 +1248,42 @@ async function handleHostedDeviceRequest(
     return;
   }
 
+  if (request.method === "POST" && path === "/v1/app/agent-bindings/open") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    const projectId = String(body.project_id ?? "");
+    const binding = state.agentBindings.get(projectId);
+    if (!binding) {
+      writeJson(response, 404, { error: "agent binding not found" });
+      return;
+    }
+    state.app.hosted_agent_binding = binding;
+    writeJson(response, 200, state.app);
+    return;
+  }
+
+  if (request.method === "POST" && path === "/v1/app/agent-bindings/ensure") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    const projectId = String(body.project_id ?? "");
+    assert(projectId);
+    let binding = state.agentBindings.get(projectId);
+    if (!binding) {
+      applyHostedAction(state.app, { StartProfileChat: null });
+      binding = {
+        version: 1,
+        project_id: projectId,
+        human_account_id: state.app.identity.account_id,
+        agent_account_id: "agent-account-browser",
+        agent_npub: String(body.agent_npub ?? AGENT_NPUB),
+        canonical_room_id: "room_browser_agent",
+        associated_room_ids: ["room_browser_agent"],
+      };
+      state.agentBindings.set(projectId, binding);
+    }
+    state.app.hosted_agent_binding = binding;
+    writeJson(response, 200, state.app);
+    return;
+  }
+
   if (request.method === "POST" && path === "/v1/app/attachments") {
     await readBytes(request);
     state.app.messages.push(
@@ -1348,6 +1400,7 @@ function initialHostedChatState(): FakeHostedChatState {
       },
     ],
     typing_members: [],
+    hosted_agent_binding: null,
     flow: {
       notice_text: null,
       notice_busy: false,

@@ -356,9 +356,12 @@ export function HostedWebChat({
   const previousTopics = useMemo(() => {
     const associated = new Set(state?.hosted_agent_binding?.associated_room_ids ?? []);
     return (state?.topics ?? []).filter(
-      (topic) => associated.has(topic.room_id) && !topic.archived
+      (topic) =>
+        topic.room_id !== canonicalRoomId
+        && associated.has(topic.room_id)
+        && !topic.archived
     );
-  }, [state?.hosted_agent_binding?.associated_room_ids, state?.topics]);
+  }, [canonicalRoomId, state?.hosted_agent_binding?.associated_room_ids, state?.topics]);
   const selectedTopic = useMemo(
     () =>
       roomTopics.find((topic) => topic.topic_id === state?.selected_topic_id)
