@@ -59,10 +59,43 @@ pub struct SupervisorHandle {
 
 impl SupervisorHandle {
     pub async fn restart_hermes(&self) -> Result<(), AgentdError> {
+        let previous_restart_count = self
+            .status
+            .read()
+            .await
+            .processes
+            .get("hermes")
+            .map(|status| status.restart_count)
+            .unwrap_or(0);
         self.hermes_tx
             .send(ProcessAction::Restart)
             .await
-            .map_err(|_| AgentdError::Supervisor("Hermes supervisor stopped".to_owned()))
+            .map_err(|_| AgentdError::Supervisor("Hermes supervisor stopped".to_owned()))?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let restarted = self
+                    .status
+                    .read()
+                    .await
+                    .processes
+                    .get("hermes")
+                    .is_some_and(|status| {
+                        status.state == "running"
+                            && status.restart_count > previous_restart_count
+                            && status.pid.is_some()
+                    });
+                if restarted {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            AgentdError::Supervisor(
+                "Hermes did not return to running state after restart".to_owned(),
+            )
+        })
     }
 
     pub async fn status(&self) -> SupervisorStatus {
@@ -244,4 +277,51 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restart_hermes_waits_for_a_new_running_process() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+        );
+        let original_pid = wait_for_running(&handle, "hermes").await.pid.unwrap();
+
+        handle.restart_hermes().await.unwrap();
+
+        let restarted = handle.status().await.processes["hermes"].clone();
+        assert_eq!(restarted.state, "running");
+        assert_eq!(restarted.restart_count, 1);
+        assert_ne!(restarted.pid, Some(original_pid));
+        handle.shutdown().await;
+    }
+
+    fn sleeping_process(name: &'static str) -> ProcessSpec {
+        ProcessSpec {
+            name,
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
+            environment: BTreeMap::new(),
+        }
+    }
+
+    async fn wait_for_running(handle: &SupervisorHandle, name: &str) -> ProcessStatus {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = handle.status().await.processes.get(name)
+                    && status.state == "running"
+                {
+                    return status.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
 }

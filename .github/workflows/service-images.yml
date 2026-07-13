@@ -17,6 +17,7 @@ on:
           - core
           - dashboard
           - private-limiter
+          - specialization-worker
       version:
         description: "Image version tag, for example 2026-07-08.1"
         required: true
@@ -54,6 +55,11 @@ jobs:
               # serving the currently-deployed pinned digest.
               echo "name=private-limiter" >> "$GITHUB_OUTPUT"
               echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              ;;
+            specialization-worker)
+              echo "name=finite-specialization-worker" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=infra/images/specialization-worker.Dockerfile" >> "$GITHUB_OUTPUT"
               echo "context=." >> "$GITHUB_OUTPUT"
               ;;
           esac

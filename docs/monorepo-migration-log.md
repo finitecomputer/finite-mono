@@ -786,3 +786,10 @@ Date: 2026-07-09
 - Retained the earlier import entries in this migration log and monorepo plan
   as historical facts. `finite-identity` is the active shared identity owner;
   human and agent Nostr identities remain separate.
+
+## import-sync: `finite-specialization` (2026-07-13)
+
+- Source: https://github.com/finitecomputer/finite-specialization
+- Base (previous import): `54a87aedc2f43dfb794a9ca9b654e42f45c97ecd`
+- Synced to: `5d4fc416cbc65538924398d817f006949012f92b`
+- Method: three-way merge via scripts/import-sync (mono-side edits preserved).

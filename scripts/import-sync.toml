@@ -50,4 +50,4 @@ last_import_sha = "80ada39d477d645eaaacb624e89e0010d3e4aedc"
 [finite-specialization]
 mono_dir = "finite-specialization"
 source_url = "https://github.com/finitecomputer/finite-specialization"
-last_import_sha = "54a87aedc2f43dfb794a9ca9b654e42f45c97ecd"
+last_import_sha = "5d4fc416cbc65538924398d817f006949012f92b"

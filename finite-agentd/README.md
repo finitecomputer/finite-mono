@@ -35,6 +35,7 @@ Platform Channel:
 - `agent.chat.recover`
 - `agent.connections.status`
 - `agent.inference.apply`
+- `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
@@ -42,11 +43,21 @@ Platform Channel:
 - `agent.hermes.config.apply`
 - `agent.hermes.config.rollback`
 
-Only the `auxiliary.vision` Hermes config field is allowlisted initially.
+Specialization reconciliation owns only the `auxiliary.vision` Hermes config
+field. Its typed AEON desired state includes the worker endpoint, canonical
+model alias, independently declared image/audio/video capabilities, prompt
+versions, and normalization limits. Existing worker credentials are retained
+unless a replacement credential is supplied through the encrypted command.
 Finite-applied values carry a durable pre-image and ownership hash; validation
 failure restores the exact previous bytes, and later user/Hermes drift blocks
 automatic rollback. Remote commands fail closed unless the sending Finite Chat
 Principal is in the durable authorization ledger.
+
+An AEON image reconciliation becomes effective only after Hermes restarts and
+its installed `vision_analyze_tool` returns exact semantic output for a fixed
+image through `auxiliary.vision`. The packaged probe uses the same
+`HERMES_HOME` as the resident process and emits only a bounded pass/fail result;
+it does not expose the worker credential or provider response.
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill
 an empty ledger; later claims and every other unauthorized command fail

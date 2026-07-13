@@ -1,0 +1,76 @@
+# Active Finite multimodal specialization fragment.
+#
+# Hermes auxiliary.vision uses the shared compatibility worker. The Spark alias
+# itself also accepts audio understanding and sampled-video input directly.
+
+specialization:
+  id: vision-input.spark-aeon-gemma12
+  status: active_verified_specialization
+  verified_at: "2026-07-13"
+  capability_id: vision-input
+  target_agent_profile: glm52-text-agent
+  hermes_surface: auxiliary.vision
+  backing_plane: spark-public-beta
+
+spark_route:
+  base_url: https://inference.finite.computer/v1
+  model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
+  required_capabilities:
+    images: true
+    audio_understanding: true
+    sampled_video: true
+    responses: true
+    chat_completions: true
+  health_requirement:
+    route_health: healthy
+    capability_smoke: multimodal_semantic_matrix
+
+compatibility_bridge:
+  required: true
+  service_name: finite-specialization-worker
+  service_namespace: fc-specializations
+  service_port: 18998
+  bridge_base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
+  secret_inputs:
+    FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN: external_secret_only
+  reconciliation:
+    command: agent.specialization.aeon.reconcile
+    schema: finite.agent.specialization.aeon.reconcile.v1
+    owned_path: auxiliary.vision
+  prompt_versions:
+    image: aeon-image-analysis-v1
+    audio: aeon-audio-understanding-v1
+    video: aeon-video-understanding-v1
+  normalization_limits:
+    max_images: 8
+    max_inline_bytes: 16777216
+    max_download_bytes: 33554432
+    max_output_chars: 32768
+  active_capabilities:
+    image: true
+    audio: false
+    video: false
+
+hermes_fragment:
+  auxiliary:
+    vision:
+      provider: custom
+      model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
+      base_url: http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1
+      api_key: external_worker_secret_only
+      api_mode: chat_completions
+      timeout: 120
+      download_timeout: 30
+
+verification:
+  checkpoint: docs/checkpoints/2026-07-13-austin-multimodal-spark-aeon-gemma12.md
+  normalized_result_fields:
+    - capability
+    - text
+    - model
+    - request_id
+    - duration_ms
+
+rollback:
+  scope: target_agent_and_shared_worker_model_selection
+  action: Restore the previous verified vision alias and restart only the shared worker.

@@ -9,6 +9,12 @@
 > **historical** (its migration story is in
 > [`finitechat-server.md`](finitechat-server.md)).
 
+The one current finite-mono deployment exception is the first-party AEON
+specialization request worker. Its digest-pinned manifest and rollback procedure
+are owned here in [`finite-specialization-worker.yaml`](finite-specialization-worker.yaml)
+and [`finite-specialization-worker.md`](finite-specialization-worker.md). This
+exception does not make clawland a general finite-mono build or deploy host.
+
 Legacy finite.vip fleet box, managed by the LEGACY `finitecomputer` repo
 (deliberately outside finite-mono). It **formerly hosted the live finitechat
 server** (migrated to lat1 in the 2026-07-09 cutover) — see

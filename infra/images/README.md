@@ -17,6 +17,7 @@ runs.
 | `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; lat1 runs the nix binary, not this image) |
 | `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat1 (podman oci-container, digest-pinned in `modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-kimi-k2-6) |
+| `finite-specialization-worker` | `specialization-worker.Dockerfile` (context: repo root) | `service-images.yml` | shared AEON capability worker on clawland (digest-pinned Kubernetes deployment) |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml` after the test-only `hermes-runtime-smoke.yml` proves the same definition | local Docker, Kata, Phala, and agent canary lanes |
 
 Legacy package names (`finite-private-limiter`, `finite-agent-runtime`,

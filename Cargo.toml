@@ -15,6 +15,7 @@ members = [
     "finitecomputer-v2/crates/finite-saas-core",
     "finitecomputer-v2/crates/finite-saas-local",
     "finitecomputer-v2/crates/finite-saas-runner",
+    "finitecomputer-v2/crates/finite-specialization-worker",
     "finitechat/crates/finitechat-blob",
     "finitechat/crates/finitechat-cli",
     "finitechat/crates/finitechat-client",
@@ -59,6 +60,7 @@ finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
 flate2 = "1"
 futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 getrandom = "0.3"
 hex = "0.4"
 hkdf = "0.12"
@@ -87,6 +89,8 @@ time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
 uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }

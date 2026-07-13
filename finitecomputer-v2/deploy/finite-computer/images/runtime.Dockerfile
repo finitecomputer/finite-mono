@@ -71,6 +71,7 @@ COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
 COPY finitechat/containers/agent/health_server.py /opt/health_server.py
 COPY finitechat/containers/agent/reconcile_hermes_config.py /opt/reconcile_hermes_config.py
 COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py
+COPY finitechat/containers/agent/probe_hermes_vision.py /opt/probe_hermes_vision.py
 COPY finitechat/containers/agent/run_hermes_gateway.sh /opt/run_hermes_gateway.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh /runtime/healthcheck.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/README.md /runtime/README.md
@@ -80,6 +81,7 @@ RUN chmod +x \
       /opt/health_server.py \
       /opt/reconcile_hermes_config.py \
       /opt/recover_chat_boot.py \
+      /opt/probe_hermes_vision.py \
       /opt/run_hermes_gateway.sh \
       /runtime/bin/finite \
       /runtime/healthcheck.sh

@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finitechat_proto::{
@@ -16,10 +17,13 @@ use finitechat_proto::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::AgentdError;
-use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
+use crate::config::{
+    AeonSpecializationDesiredStateV1, ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1,
+};
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
@@ -36,10 +40,12 @@ const CONFIG_ROLLBACK_SCHEMA: &str = "finite.hermes.config.rollback.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
+const AEON_SPECIALIZATION_RECONCILE_SCHEMA: &str = "finite.agent.specialization.aeon.reconcile.v1";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
+const AEON_HERMES_PROBE_MARKER: &str = "FINITE_AEON_HERMES_PROBE ";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -50,6 +56,8 @@ pub struct DaemonConfig {
     pub finitechat_bin: PathBuf,
     pub prepare_command: PathBuf,
     pub hermes_command: PathBuf,
+    pub hermes_probe_python: PathBuf,
+    pub hermes_probe_script: PathBuf,
     pub health_python: PathBuf,
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
@@ -115,6 +123,14 @@ impl DaemonConfig {
                 std::env::var("FINITE_AGENTD_HERMES_COMMAND")
                     .unwrap_or_else(|_| "/opt/run_hermes_gateway.sh".to_owned()),
             ),
+            hermes_probe_python: PathBuf::from(
+                std::env::var("FINITE_AGENTD_HERMES_PROBE_PYTHON")
+                    .unwrap_or_else(|_| "python".to_owned()),
+            ),
+            hermes_probe_script: PathBuf::from(
+                std::env::var("FINITE_AGENTD_HERMES_PROBE_SCRIPT")
+                    .unwrap_or_else(|_| "/opt/probe_hermes_vision.py".to_owned()),
+            ),
             health_python: PathBuf::from(
                 std::env::var("FINITE_AGENTD_HEALTH_PYTHON")
                     .unwrap_or_else(|_| "python".to_owned()),
@@ -173,6 +189,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         config_manager,
         connection_manager,
         hermes_home: config.hermes_home,
+        hermes_probe_python: config.hermes_probe_python,
+        hermes_probe_script: config.hermes_probe_script,
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
     };
@@ -232,6 +250,45 @@ fn prepare_agent_runtime(config: &DaemonConfig) -> Result<(), AgentdError> {
     }
 }
 
+async fn probe_hermes_vision(
+    python: &Path,
+    script: &Path,
+    hermes_home: &Path,
+) -> Result<(), AgentdError> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(150),
+        TokioCommand::new(python)
+            .arg(script)
+            .env("HERMES_HOME", hermes_home)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| AgentdError::Config("Hermes vision probe timed out".to_owned()))??;
+    if !output.status.success() {
+        return Err(AgentdError::Config(
+            "Hermes vision probe failed through auxiliary.vision".to_owned(),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result = stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(AEON_HERMES_PROBE_MARKER))
+        .ok_or_else(|| AgentdError::Config("Hermes vision probe result was missing".to_owned()))?;
+    let result: Value = serde_json::from_str(result)
+        .map_err(|_| AgentdError::Config("Hermes vision probe result was invalid".to_owned()))?;
+    if result.get("success").and_then(Value::as_bool) != Some(true)
+        || result.get("analysis").and_then(Value::as_str) != Some("RED")
+    {
+        return Err(AgentdError::Config(
+            "Hermes auxiliary.vision did not return exact RED".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct CommandExecutor {
     identity: DeviceRef,
@@ -239,11 +296,63 @@ struct CommandExecutor {
     config_manager: ConfigManager,
     connection_manager: ConnectionManager,
     hermes_home: PathBuf,
+    hermes_probe_python: PathBuf,
+    hermes_probe_script: PathBuf,
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
 }
 
 impl CommandExecutor {
+    async fn rollback_aeon_specialization(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<(), AgentdError> {
+        let rollback = HermesConfigRollbackV1 {
+            proposal_id: desired.proposal_id.clone(),
+        };
+        let manager = self.config_manager.clone();
+        let hermes_home = self.hermes_home.clone();
+        tokio::task::spawn_blocking(move || {
+            manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
+        })
+        .await
+        .map_err(|error| {
+            AgentdError::Config(format!("specialization rollback failed: {error}"))
+        })??;
+        self.supervisor.restart_hermes().await
+    }
+
+    async fn verify_aeon_specialization(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<(), AgentdError> {
+        let manager = self.config_manager.clone();
+        let hermes_home = self.hermes_home.clone();
+        let desired_for_readback = desired.clone();
+        tokio::task::spawn_blocking(move || {
+            validate_hermes_config(&hermes_home)?;
+            if !manager.aeon_specialization_matches(&desired_for_readback)? {
+                return Err(AgentdError::Config(
+                    "Hermes specialization read-back did not match desired state".to_owned(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| AgentdError::Config(error.to_string()))??;
+
+        if desired.capabilities.image {
+            probe_hermes_vision(
+                &self.hermes_probe_python,
+                &self.hermes_probe_script,
+                &self.hermes_home,
+            )
+            .await
+        } else {
+            Ok(())
+        }
+    }
+
     async fn handle_delivery(&self, delivery: RuntimeCommandDeliveryV1) -> Result<(), AgentdError> {
         let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
             self.bridge.acknowledge(&delivery).await?;
@@ -335,6 +444,48 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_offer(&request.request_id, body)?;
                 self.apply_config_offer(offer).await
+            }
+            "agent.specialization.aeon.reconcile" => {
+                let desired = parse_body::<AeonSpecializationDesiredStateV1>(
+                    request,
+                    AEON_SPECIALIZATION_RECONCILE_SCHEMA,
+                )?;
+                let manager = self.config_manager.clone();
+                let hermes_home = self.hermes_home.clone();
+                let desired_for_apply = desired.clone();
+                let mut result = tokio::task::spawn_blocking(move || {
+                    manager.reconcile_aeon_specialization(&desired_for_apply, || {
+                        validate_hermes_config(&hermes_home)
+                    })
+                })
+                .await
+                .map_err(|error| AgentdError::Config(error.to_string()))??;
+                if let Err(error) = self.supervisor.restart_hermes().await {
+                    if result.applied {
+                        self.rollback_aeon_specialization(&desired).await.map_err(
+                            |restore_error| {
+                                AgentdError::Supervisor(format!(
+                                    "Hermes specialization activation failed ({error}); previous configuration could not be reactivated ({restore_error})"
+                                ))
+                            },
+                        )?;
+                    }
+                    return Err(error);
+                }
+                if let Err(error) = self.verify_aeon_specialization(&desired).await {
+                    if result.applied {
+                        self.rollback_aeon_specialization(&desired).await.map_err(
+                            |restore_error| {
+                                AgentdError::Config(format!(
+                                    "Hermes specialization verification failed ({error}); previous configuration could not be reactivated ({restore_error})"
+                                ))
+                            },
+                        )?;
+                    }
+                    return Err(error);
+                }
+                result.effective_matches_desired = true;
+                Ok(serde_json::to_value(result)?)
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;
@@ -679,6 +830,44 @@ mod tests {
     use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
 
     use super::*;
+
+    #[tokio::test]
+    async fn aeon_reconciliation_probe_runs_through_hermes_with_its_home() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("config.yaml"), "auxiliary: {}\n").unwrap();
+        let script = home.path().join("probe.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntest -f \"$HERMES_HOME/config.yaml\" || exit 2\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\"}}'\n",
+                AEON_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+
+        probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn aeon_reconciliation_rejects_stale_hermes_semantics() {
+        let home = tempfile::tempdir().unwrap();
+        let script = home.path().join("probe.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' 'WORKER_DIRECT_HEALTHY RED'\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"BLUE\"}}'\n",
+                AEON_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+
+        let error = probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::Config(_)));
+    }
 
     fn delivery(message_id: &str, seq: u64) -> RuntimeCommandDeliveryV1 {
         RuntimeCommandDeliveryV1 {
