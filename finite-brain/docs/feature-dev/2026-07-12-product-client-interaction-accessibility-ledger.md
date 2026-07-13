@@ -35,8 +35,10 @@ undefined.
 - Ticket sessions: #25, #26, #27, #28, and post-review follow-up recorded
 - Agent briefs: read-only affordance, keyboard/accessibility, and product-truth
   audits completed before specification
-- Review packets: scoped standards/spec and independent post-review audits
-  completed; worthy P2 findings were fixed
+- Review packet:
+  `2026-07-12-product-client-interaction-accessibility-final-review-packet.md`
+  records scoped standards/spec and independent post-review audits; worthy P2
+  findings were fixed
 - Local CodeRabbit report:
   `2026-07-12-product-client-interaction-accessibility-local-coderabbit-round.md`
   (three silent free-allowance attempts; independent fallback review completed)
