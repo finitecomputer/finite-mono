@@ -2527,6 +2527,67 @@ mod tests {
         assert!(stopped, "deadline left ffprobe process {pid} running");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caller_cancellation_kills_in_flight_media_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("probe.pid");
+        let probe = directory.path().join("blocking-ffprobe.sh");
+        std::fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = test_config("http://127.0.0.1:9");
+        config.ffprobe_path = probe;
+        let worker = spawn_worker(config).await;
+        let request = audio_canary_request();
+        let operation = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{worker}/v1/chat/completions"))
+                .bearer_auth("worker-secret")
+                .json(&request)
+                .send()
+                .await
+        });
+
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let pid = tokio::fs::read_to_string(&pid_file).await.unwrap();
+        operation.abort();
+        let _ = operation.await;
+
+        let mut stopped = false;
+        for _ in 0..40 {
+            if !Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success())
+            {
+                stopped = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            stopped,
+            "caller cancellation left ffprobe process {pid} running"
+        );
+    }
+
     #[test]
     fn uniform_video_sampling_covers_short_and_long_clips() {
         assert_eq!(uniform_video_timestamps(3.2, 16), vec![0.0, 1.0, 2.0, 3.0]);
