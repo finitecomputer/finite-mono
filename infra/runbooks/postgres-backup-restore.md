@@ -17,8 +17,10 @@ custom-format dumps to `/data/backups/postgres/finite_core_<UTC-stamp>.dump`
 on the `OnCalendar=*-*-* 00/6:17:00` cadence (every 6h at :17), with local
 retention (see the module). `/data/backups/postgres` is 0750 postgres:postgres.
 
-> **REDUNDANCY GAP (top follow-up):** offsite borg is NOT yet enabled
-> (`modules/backups.nix` lists the paths but the offsite target is a TODO).
+> **REDUNDANCY GAP (top follow-up):** the coordinated Hosted Web Chat snapshot
+> now includes a fresh custom-format `finite_core` dump and its Nix definition
+> selects a dedicated repository at the existing rsync.net destination, but
+> credentials, deployment, first archive, and restore proof are not complete.
 > lat1 root is **single-disk, no mdadm** ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)) —
 > so today the timestamped dumps and the live db share one disk. A dump that
 > never leaves that disk survives a bad `DELETE`, not a disk loss. Enabling
@@ -144,12 +146,13 @@ migration:
 
 ## Structural fixes to schedule (in priority order)
 
-1. **Offsite borg (redundancy gap — do this first).** The dumps and chat/brain
-   SQLite must leave lat1's single root disk. `modules/backups.nix` already
-   enumerates the paths (`/data/backups/postgres`,
-   `/var/lib/private/finite-chat`, `/var/lib/private/finitebrain`); the
-   remaining TODO is the offsite target + passphrase (`/etc/finite/borg.env`,
-   value by name only) and a restore drill of the borg archive itself.
+1. **Activate and prove offsite Borg (redundancy gap — do this first).** The
+   coordinated recovery snapshot uses `pg_dump`, SQLite backup APIs, and a
+   brief writer fence; `modules/backups.nix` archives that artifact to the
+   configured rsync.net repository. Provision only the named root-owned Borg
+   credential files documented in `hosted-web-chat-recovery.md`, deploy, and
+   complete its Borg archive and empty-target drill. Brain and Sites need
+   separately declared recovery sets; do not imply they are covered here.
 2. **Disk mirror.** Two spare NVMes on lat1 are free for a future mirror (ZFS,
    or mdadm on a newer nixpkgs — the cutover's mdadm arrays were
    unassemblable; see [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)).

@@ -144,7 +144,6 @@ export function HostedWebChat({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
-  const [ownerClaimEpoch, setOwnerClaimEpoch] = useState(0);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -180,7 +179,10 @@ export function HostedWebChat({
       return false;
     }
     snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
-    setState(next);
+    setState((current) => ({
+      ...next,
+      hosted_agent_binding: next.hosted_agent_binding ?? current?.hosted_agent_binding ?? null,
+    }));
     return true;
   }, []);
 
@@ -227,19 +229,6 @@ export function HostedWebChat({
     return pending;
   }, [apiBase]);
 
-  const startFreshChat = useCallback(async () => {
-    const requestGeneration = snapshotSourceRef.current.generation;
-    try {
-      const next = await chatRequest<HostedChatState>(`${apiBase}/fresh`, { method: "POST" });
-      applyHttpSnapshot(next, requestGeneration);
-      setOwnerClaimed(false);
-      setError(null);
-      setOwnerClaimEpoch((current) => current + 1);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    }
-  }, [apiBase, applyHttpSnapshot]);
-
   const dispatch = useCallback(
     async (action: HostedChatAction) => {
       const requestGeneration = snapshotSourceRef.current.generation;
@@ -276,7 +265,7 @@ export function HostedWebChat({
     const controller = new AbortController();
     void runInitialHostedChatRetries(claimOwner, controller.signal);
     return () => controller.abort();
-  }, [claimOwner, hasState, ownerClaimed, ownerClaimEpoch]);
+  }, [claimOwner, hasState, ownerClaimed]);
 
   useEffect(() => {
     if (!hasState) {
@@ -304,7 +293,10 @@ export function HostedWebChat({
             return;
           }
           snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
-          setState(next);
+          setState((current) => ({
+            ...next,
+            hosted_agent_binding: next.hosted_agent_binding ?? current?.hosted_agent_binding ?? null,
+          }));
           setError(null);
           setStreamConnected(true);
         } catch {
@@ -354,6 +346,19 @@ export function HostedWebChat({
         }),
     [selectedRoom?.room_id, state?.topics]
   );
+  const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? selectedRoom?.room_id;
+  const canonicalTopics = useMemo(
+    () => (state?.topics ?? []).filter(
+      (topic) => topic.room_id === canonicalRoomId && !topic.archived
+    ),
+    [canonicalRoomId, state?.topics]
+  );
+  const previousTopics = useMemo(() => {
+    const associated = new Set(state?.hosted_agent_binding?.associated_room_ids ?? []);
+    return (state?.topics ?? []).filter(
+      (topic) => associated.has(topic.room_id) && !topic.archived
+    );
+  }, [state?.hosted_agent_binding?.associated_room_ids, state?.topics]);
   const selectedTopic = useMemo(
     () =>
       roomTopics.find((topic) => topic.topic_id === state?.selected_topic_id)
@@ -650,12 +655,17 @@ export function HostedWebChat({
     }
   }
 
-  async function createChat(topic = selectedTopic) {
-    if (!selectedRoom || !topic) return;
+  async function createChat(topic = canonicalTopics.find((item) => item.topic_id === HOME_TOPIC_ID) ?? canonicalTopics[0]) {
+    if (!canonicalRoomId || !topic) return;
     setError(null);
     try {
       await dispatch({
-        StartTopicChat: { room_id: selectedRoom.room_id, topic_id: topic.topic_id, reason: null },
+        StartTopicChatIntent: {
+          room_id: canonicalRoomId,
+          topic_id: topic.topic_id,
+          reason: null,
+          intent_key: crypto.randomUUID(),
+        },
       });
       setSidebarOpen(false);
     } catch (caught) {
@@ -665,10 +675,10 @@ export function HostedWebChat({
 
   async function createTopic(event: FormEvent) {
     event.preventDefault();
-    if (!selectedRoom || !createTopicTitle.trim()) return;
+    if (!canonicalRoomId || !createTopicTitle.trim()) return;
     try {
       await dispatch({
-        CreateTopic: { room_id: selectedRoom.room_id, title: createTopicTitle.trim() },
+        CreateTopic: { room_id: canonicalRoomId, title: createTopicTitle.trim() },
       });
       setCreateTopicTitle("");
       setCreateTopicOpen(false);
@@ -741,7 +751,8 @@ export function HostedWebChat({
         machineId={machineId}
         machineLabel={machineLabel}
         viewerEmail={viewerEmail}
-        topics={roomTopics}
+        topics={canonicalTopics}
+        previousTopics={previousTopics}
         selectedTopic={selectedTopic}
         selectedChat={selectedChat}
         liveMembers={state?.typing_members ?? []}
@@ -901,18 +912,8 @@ export function HostedWebChat({
                     onClick={() => void (hasState && !ownerClaimed ? claimOwner() : load())}
                   >
                     <RotateCcwIcon />
-                    Retry
+                    {hasState && !ownerClaimed ? "Retry claim" : "Retry load"}
                   </Button>
-                  {hasState && !ownerClaimed ? (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void startFreshChat()}
-                    >
-                      Start a fresh chat
-                    </Button>
-                  ) : null}
                 </div>
               ) : null}
 
@@ -1180,6 +1181,7 @@ function ChatSidebar({
   selectedTopic,
   showSkills,
   topics,
+  previousTopics,
   viewerEmail,
 }: {
   collapsed: boolean;
@@ -1198,6 +1200,7 @@ function ChatSidebar({
   selectedTopic: HostedChatTopic | null;
   showSkills: boolean;
   topics: HostedChatTopic[];
+  previousTopics: HostedChatTopic[];
   viewerEmail?: string | null;
 }) {
   return (
@@ -1235,7 +1238,7 @@ function ChatSidebar({
             (member) => !member.topic_id || member.topic_id === topic.topic_id
           );
           return (
-            <div className="finite-chat__folder" key={topic.topic_id}>
+            <div className="finite-chat__folder" key={`${topic.room_id}:${topic.topic_id}`}>
               <div className="finite-chat__folder-header">
                 <button
                   type="button"
@@ -1282,6 +1285,44 @@ function ChatSidebar({
             </div>
           );
         })}
+        {previousTopics.length > 0 ? (
+          <>
+            <div className="finite-chat__sidebar-section-row">
+              <span className="finite-chat__sidebar-section">Previous conversations</span>
+            </div>
+            {previousTopics.map((topic) => (
+              <div className="finite-chat__folder" key={`previous:${topic.room_id}:${topic.topic_id}`}>
+                <div className="finite-chat__folder-header">
+                  <button
+                    type="button"
+                    className={`finite-chat__folder-summary ${topic.room_id === selectedTopic?.room_id && topic.topic_id === selectedTopic?.topic_id ? "is-active" : ""}`}
+                    onClick={() => onOpenTopic(topic)}
+                  >
+                    <span className="finite-chat__folder-main">
+                      <span className="finite-chat__folder-icon" aria-hidden><HashIcon className="size-3.5" /></span>
+                      <span className="finite-chat__folder-label">{topic.title}</span>
+                    </span>
+                  </button>
+                </div>
+                <div className="finite-chat__folder-body">
+                  {topic.chats.map((chat) => (
+                    <button
+                      key={chat.chat_id}
+                      type="button"
+                      className={topic.room_id === selectedTopic?.room_id && topic.topic_id === selectedTopic?.topic_id && chat.chat_id === selectedChat?.chat_id ? "is-active" : ""}
+                      onClick={() => onOpenChat(topic, chat)}
+                    >
+                      <ThreadActivityIndicator state={null} />
+                      <span className="finite-chat__thread-main">
+                        <span className="finite-chat__thread-title">{chat.title || "New chat"}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </>
+        ) : null}
       </nav>
 
       <button

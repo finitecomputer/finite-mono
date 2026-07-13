@@ -27,9 +27,10 @@ drilled the Postgres dump into a scratch container before wiping. Do the same.
 
 ## Prerequisites
 
-- A machine with Nix + the built closure (the cutover used lat2, the runner
-  box). `nix build .#nixosConfigurations.finite-lat-1.config.system.build.toplevel`
-  first — this is the go/no-go gate; do NOT wipe until it builds clean.
+- SSH access to `finite-lat-2`, the repository's x86_64 Nix builder. Run
+  `just nixos-build-lat1` first; it explicitly selects lat2 and ignores
+  unrelated ambient builder configuration. This is the go/no-go gate; do NOT
+  wipe until it builds clean.
 - `cpio` installed on BOTH the driver host and the target (nixos-anywhere
   needs it to build the kexec initrd; its absence aborts safely pre-wipe).
 - Latitude console access (IPMI + Rescue Mode) — the recovery net if boot

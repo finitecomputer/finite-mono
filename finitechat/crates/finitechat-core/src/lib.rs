@@ -861,6 +861,17 @@ enum AppRuntimeCommand {
         target_device_id: String,
         response: mpsc::SyncSender<Result<DeviceLinkFanoutReport, FiniteChatCoreError>>,
     },
+    ProfileChatRooms {
+        account_id: String,
+        response: mpsc::SyncSender<Result<Vec<String>, FiniteChatCoreError>>,
+    },
+    StartTopicChatIntent {
+        room_id: String,
+        topic_id: String,
+        reason: Option<String>,
+        intent_key: String,
+        response: mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>,
+    },
     #[cfg(test)]
     TestLoadOutbox {
         response: mpsc::SyncSender<Result<Vec<StoredOutboundMessage>, FiniteChatCoreError>>,
@@ -1204,6 +1215,52 @@ impl FiniteChatRuntime {
 }
 
 impl FiniteChatRuntime {
+    pub fn start_topic_chat_intent_and_wait(
+        &self,
+        room_id: String,
+        topic_id: String,
+        reason: Option<String>,
+        intent_key: String,
+    ) -> Result<AppState, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::StartTopicChatIntent {
+                room_id,
+                topic_id,
+                reason,
+                intent_key,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before starting a Chat".to_owned(),
+            })?
+    }
+
+    pub fn profile_chat_room_ids(
+        &self,
+        account_id: String,
+    ) -> Result<Vec<String>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::ProfileChatRooms {
+                account_id,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before inspecting profile rooms".to_owned(),
+            })?
+    }
+
     /// Advance the crash-safe account-room fanout for one already-created
     /// Device. The target must use this runtime's account id and publish its
     /// own KeyPackages before fanout can make progress.
@@ -1713,6 +1770,29 @@ fn spawn_app_runtime_worker(
                         let snapshot = state.app.clone();
                         publish_app_update(&snapshot, &shared_state, &reconciler);
                     }
+                    let _ = response.send(result);
+                }
+                AppRuntimeCommand::ProfileChatRooms {
+                    account_id,
+                    response,
+                } => {
+                    let _ = response.send(Ok(state.profile_chat_room_ids(&account_id)));
+                }
+                AppRuntimeCommand::StartTopicChatIntent {
+                    room_id,
+                    topic_id,
+                    reason,
+                    intent_key,
+                    response,
+                } => {
+                    let result = state
+                        .start_topic_chat_intent(room_id, topic_id, reason, intent_key)
+                        .map(|()| {
+                            state.bump_rev();
+                            let snapshot = state.app.clone();
+                            publish_app_update(&snapshot, &shared_state, &reconciler);
+                            snapshot
+                        });
                     let _ = response.send(result);
                 }
                 #[cfg(test)]
@@ -2669,6 +2749,38 @@ impl AppRuntimeState {
         Ok(())
     }
 
+    fn start_topic_chat_intent(
+        &mut self,
+        room_id: String,
+        topic_id: String,
+        reason: Option<String>,
+        intent_key: String,
+    ) -> Result<(), FiniteChatCoreError> {
+        let intent_key = intent_key.trim();
+        validate_string_bytes("new chat intent key", intent_key, MAX_OBJECT_ID_BYTES)
+            .map_err(client_error)?;
+        if intent_key.is_empty() {
+            return Err(FiniteChatCoreError::Client {
+                reason: "new chat intent key must not be empty".to_owned(),
+            });
+        }
+        let digest = Sha256::digest(
+            format!("finitechat.new-chat-intent.v1\0{room_id}\0{topic_id}\0{intent_key}")
+                .as_bytes(),
+        );
+        let chat_id = format!("segment-{}", hex::encode(&digest[..20]));
+        if !self.chat_exists(&room_id, &topic_id, &chat_id) {
+            self.append_topic_chat_with_id(&room_id, &topic_id, reason, chat_id.clone())?;
+        }
+        self.app.selected_room_id = Some(room_id);
+        self.app.selected_topic_id = Some(topic_id);
+        self.app.selected_chat_id = Some(chat_id);
+        self.persist_app_state()?;
+        self.sync_selected_room_messages();
+        self.app.status = "chat created".to_owned();
+        Ok(())
+    }
+
     fn append_topic_chat(
         &mut self,
         room_id: &str,
@@ -2684,10 +2796,27 @@ impl AppRuntimeState {
         let reason = reason
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let segment = ConversationSegmentStartV1 {
-            segment_id: self.core.generate_object_id("segment")?,
-            reason,
-        };
+        let segment_id = self.core.generate_object_id("segment")?;
+        self.append_topic_chat_with_id(room_id, topic_id, reason, segment_id)
+    }
+
+    fn append_topic_chat_with_id(
+        &mut self,
+        room_id: &str,
+        topic_id: &str,
+        reason: Option<String>,
+        segment_id: String,
+    ) -> Result<String, FiniteChatCoreError> {
+        if !self.room_is_connected(room_id) {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not ready to start chats"),
+            });
+        }
+        self.validate_topic(room_id, topic_id)?;
+        let reason = reason
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let segment = ConversationSegmentStartV1 { segment_id, reason };
         segment.validate_limits().map_err(client_error)?;
         let payload = serde_json::to_vec(&segment).map_err(client_error)?;
         let event = self.core.send_application_event(
@@ -5630,6 +5759,10 @@ impl AppRuntimeState {
     }
 
     fn existing_profile_chat_room_id(&self, account_id: &str) -> Option<String> {
+        self.profile_chat_room_ids(account_id).into_iter().next()
+    }
+
+    fn profile_chat_room_ids(&self, account_id: &str) -> Vec<String> {
         let current_account_id = &self.app.identity.account_id;
         let matches_profile_chat = |room_id: &str| {
             let Some(room) = self.app.rooms.iter().find(|room| room.room_id == room_id) else {
@@ -5650,17 +5783,15 @@ impl AppRuntimeState {
                 && member_account_ids.contains(account_id)
         };
 
-        if let Some(selected_room_id) = self.app.selected_room_id.as_deref()
-            && matches_profile_chat(selected_room_id)
-        {
-            return Some(selected_room_id.to_owned());
-        }
-
-        self.app
+        let mut room_ids = self
+            .app
             .rooms
             .iter()
-            .find(|room| matches_profile_chat(&room.room_id))
+            .filter(|room| matches_profile_chat(&room.room_id))
             .map(|room| room.room_id.clone())
+            .collect::<Vec<_>>();
+        room_ids.sort();
+        room_ids
     }
 
     fn room(&self, room_id: &str) -> Option<&AppRoomSummary> {
@@ -13296,7 +13427,7 @@ mod tests {
     }
 
     #[test]
-    fn app_profile_chat_prefers_selected_connected_direct_room() {
+    fn app_profile_chat_ignores_selection_and_chooses_stable_direct_room() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -13336,8 +13467,8 @@ mod tests {
 
         let mut sorted = [first, second];
         sorted.sort();
-        let [sorted_fallback, selected_recovery_room] = sorted;
-        assert_ne!(selected_recovery_room, sorted_fallback);
+        let [canonical_room, selected_recovery_room] = sorted;
+        assert_ne!(selected_recovery_room, canonical_room);
         alice
             .dispatch_and_wait(AppAction::OpenRoom {
                 room_id: selected_recovery_room.clone(),
@@ -13353,10 +13484,66 @@ mod tests {
         assert_eq!(opened.status, "chat opened");
         assert_eq!(
             opened.selected_room_id.as_deref(),
-            Some(selected_recovery_room.as_str()),
-            "dashboard bootstrap must retain the explicitly selected fresh recovery room"
+            Some(canonical_room.as_str()),
+            "selection is a cursor and must not choose the direct Room identity"
         );
         assert_eq!(opened.rooms.len(), 2);
+    }
+
+    #[test]
+    fn app_new_chat_intent_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let initial = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Agent".to_owned(),
+            })
+            .unwrap();
+        let room_id = initial.selected_room_id.unwrap();
+        let before = initial
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap()
+            .chats
+            .len();
+        let first = app
+            .start_topic_chat_intent_and_wait(
+                room_id.clone(),
+                HOME_TOPIC_ID.to_owned(),
+                None,
+                "browser-intent-1".to_owned(),
+            )
+            .unwrap();
+        let first_chat_id = first.selected_chat_id.clone().unwrap();
+        let retried = app
+            .start_topic_chat_intent_and_wait(
+                room_id.clone(),
+                HOME_TOPIC_ID.to_owned(),
+                None,
+                "browser-intent-1".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            retried.selected_chat_id.as_deref(),
+            Some(first_chat_id.as_str())
+        );
+        let chats = retried
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap()
+            .chats
+            .len();
+        assert_eq!(chats, before + 1);
     }
 
     #[test]

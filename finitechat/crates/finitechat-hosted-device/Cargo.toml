@@ -21,6 +21,8 @@ finitechat-proto = { path = "../finitechat-proto" }
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+openmls.workspace = true
+openmls_rust_crypto.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

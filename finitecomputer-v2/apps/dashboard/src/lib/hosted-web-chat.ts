@@ -7,11 +7,14 @@ import {
   hostedDeviceAttachment,
   hostedDeviceAttachments,
   hostedDeviceConfig,
+  hostedDeviceEnsureAgentBinding,
+  hostedDeviceOpenAgentBinding,
+  hostedDeviceNewChat,
   hostedDeviceRuntimeCommand,
   hostedDeviceState,
   hostedDeviceUpdates,
+  HostedDeviceRequestError,
   type HostedChatAction,
-  type HostedChatProfile,
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
@@ -34,74 +37,53 @@ export function hostedWebChatErrorMessage(error: unknown) {
 
 export async function bootstrapHostedWebChat(machineId: string) {
   const context = await hostedWebChatContext(machineId);
-  let state = await hostedDeviceState(context.config, context.account);
-  state = await ensureRuntimeStarted(context, state);
+  try {
+    return await hostedDeviceOpenAgentBinding(context.config, context.account, context.projectId);
+  } catch (error) {
+    if (!(error instanceof HostedDeviceRequestError) || error.status !== 404) {
+      throw error;
+    }
+  }
+
+  const state = await hostedDeviceState(context.config, context.account);
+  await ensureRuntimeStarted(context, state);
 
   const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
   if (!agentNpub) {
     throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
   }
-  state = await connectAgentProfile(context, state, agentNpub);
-
-  return state;
+  return hostedDeviceEnsureAgentBinding(context.config, context.account, {
+    project_id: context.projectId,
+    agent_npub: agentNpub,
+    display_name: `Chat with ${context.agentName}`,
+  });
 }
 
 export async function claimHostedWebChatOwner(machineId: string) {
   const context = await hostedWebChatContext(machineId);
-  let state = await hostedDeviceState(context.config, context.account);
-  state = await ensureRuntimeStarted(context, state);
-
-  const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
-  if (!agentNpub) {
-    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
+  const state = await bootstrapHostedWebChat(machineId);
+  const binding = state.hosted_agent_binding;
+  if (!binding) {
+    throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
   }
-  state = await connectAgentProfile(context, state, agentNpub);
-  await claimAgentOwner(context, state, agentNpub);
+  await claimAgentOwner(context, state, binding.agent_account_id, binding.canonical_room_id);
   return { claimed: true as const };
-}
-
-export async function startFreshHostedWebChat(machineId: string) {
-  const context = await hostedWebChatContext(machineId);
-  let state = await hostedDeviceState(context.config, context.account);
-  state = await ensureRuntimeStarted(context, state);
-
-  const agentNpub = await fetchRuntimeAgentNpub(context.primaryUrl);
-  if (!agentNpub) {
-    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
-  }
-  state = await hostedDeviceAction(context.config, context.account, {
-    ScanTarget: { value: agentNpub },
-  });
-  const profile = profileForNpub(state, agentNpub);
-  if (!profile) {
-    throw new HostedWebChatError("Your agent is still getting ready. Try again shortly.", 503);
-  }
-  return hostedDeviceAction(
-    context.config,
-    context.account,
-    freshAgentChatAction(profile, context.agentName)
-  );
-}
-
-export function freshAgentChatAction(
-  profile: HostedChatProfile,
-  agentName: string
-): HostedChatAction {
-  return {
-    StartGroupChat: {
-      profiles: [profile],
-      display_name: freshAgentChatLabel(agentName),
-    },
-  };
-}
-
-export function freshAgentChatLabel(agentName: string) {
-  return `A · ${agentName.trim() || "Agent"}`;
 }
 
 export async function dispatchHostedWebChatAction(machineId: string, payload: unknown) {
   const context = await hostedWebChatContext(machineId);
   const action = parseHostedChatAction(payload);
+  if ("StartTopicChatIntent" in action) {
+    const bound = await hostedDeviceOpenAgentBinding(
+      context.config,
+      context.account,
+      context.projectId
+    );
+    if (action.StartTopicChatIntent.room_id !== bound.hosted_agent_binding?.canonical_room_id) {
+      throw new HostedWebChatError("New chats must stay in the Agent conversation.", 409);
+    }
+    return hostedDeviceNewChat(context.config, context.account, action.StartTopicChatIntent);
+  }
   return hostedDeviceAction(context.config, context.account, action);
 }
 
@@ -151,42 +133,22 @@ async function hostedWebChatContext(machineId: string) {
     config,
     primaryUrl: access.primaryUrl,
     agentName: access.displayName,
+    projectId: access.coreProject.project.id,
   };
-}
-
-async function connectAgentProfile(
-  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
-  state: HostedChatState,
-  agentNpub: string
-) {
-  state = await hostedDeviceAction(context.config, context.account, {
-    ScanTarget: { value: agentNpub },
-  });
-  const profile = profileForNpub(state, agentNpub);
-  if (!profile) {
-    return state;
-  }
-  return hostedDeviceAction(context.config, context.account, {
-    StartProfileChat: {
-      profile,
-      display_name: `Chat with ${context.agentName}`,
-    },
-  });
 }
 
 async function claimAgentOwner(
   context: Awaited<ReturnType<typeof hostedWebChatContext>>,
   state: HostedChatState,
-  agentNpub: string
+  agentAccountId: string,
+  canonicalRoomId: string
 ) {
-  const profile = profileForNpub(state, agentNpub);
-  const roomId = state.selected_room_id?.trim();
-  if (!profile || !roomId) {
+  if (!state.rooms.some((room) => room.room_id === canonicalRoomId)) {
     throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
   }
   const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
-    room_id: roomId,
-    target_account_id: profile.account_id,
+    room_id: canonicalRoomId,
+    target_account_id: agentAccountId,
     command: OWNER_CLAIM,
     resource_key: "agent.connections",
     schema: EMPTY_SCHEMA,
@@ -195,10 +157,6 @@ async function claimAgentOwner(
     wait_millis: 45_000,
   });
   assertCommandSucceeded(response);
-}
-
-function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile | null {
-  return state.profiles.find((profile) => profile.npub.toLowerCase() === npub.toLowerCase()) ?? null;
 }
 
 function assertCommandSucceeded(response: HostedRuntimeCommandResponse) {
@@ -268,13 +226,14 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
-    case "StartTopicChat": {
+    case "StartTopicChatIntent": {
       const value = objectRecord(input, operation);
       return {
-        StartTopicChat: {
+        StartTopicChatIntent: {
           room_id: boundedString(value.room_id, "room_id"),
           topic_id: boundedString(value.topic_id, "topic_id"),
           reason: optionalBoundedString(value.reason, "reason", 256),
+          intent_key: boundedString(value.intent_key, "intent_key", 256),
         },
       };
     }

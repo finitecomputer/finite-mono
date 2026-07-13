@@ -1356,6 +1356,8 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "http-body-util",
+ "openmls",
+ "openmls_rust_crypto",
  "reqwest",
  "serde",
  "serde_json",

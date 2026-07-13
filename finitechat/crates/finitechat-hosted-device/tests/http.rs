@@ -981,6 +981,197 @@ async fn hosted_device_chats_with_an_agent_and_restarts_with_the_transcript() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_agent_binding_survives_selection_claim_retry_and_restart() {
+    let root = TempDir::new().unwrap();
+    let server_db = root.path().join("binding-server.sqlite3");
+    let (server_url, _, server_task) = spawn_chat_server(&server_db, None).await;
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("binding-agent").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: None,
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let agent_account_id = agent_state.identity.account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("binding-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app(config.clone());
+    action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    let profile = serde_json::json!({
+        "account_id": agent_account_id,
+        "npub": agent_npub,
+        "display_name": "Binding Agent",
+        "about": null,
+        "picture": null,
+        "stale": false,
+        "is_agent": true
+    });
+    let first = action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({
+            "StartProfileChat": { "profile": profile, "display_name": "First" }
+        }),
+    )
+    .await;
+    let first_room = first["selected_room_id"].as_str().unwrap().to_owned();
+    action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({ "CreateTopic": { "room_id": first_room, "title": "Retained first" } }),
+    )
+    .await;
+
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let duplicate = action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({
+            "StartGroupChat": { "profiles": [profile], "display_name": "Duplicate recovery" }
+        }),
+    )
+    .await;
+    let duplicate_room = duplicate["selected_room_id"].as_str().unwrap().to_owned();
+    assert_ne!(duplicate_room, first_room);
+    action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({ "CreateTopic": { "room_id": duplicate_room, "title": "Retained duplicate" } }),
+    )
+    .await;
+
+    let ensured = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/ensure",
+        serde_json::json!({
+            "project_id": "project-one",
+            "agent_npub": agent_npub,
+            "display_name": "Chat with Binding Agent"
+        }),
+    )
+    .await;
+    let mut expected = [first_room.clone(), duplicate_room.clone()];
+    expected.sort();
+    assert_eq!(
+        ensured["hosted_agent_binding"]["canonical_room_id"],
+        expected[0]
+    );
+    assert_eq!(ensured["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(ensured["topics"].as_array().unwrap().len(), 4);
+    let canonical_home_before = ensured["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|topic| topic["room_id"] == expected[0] && topic["topic_id"] == "home")
+        .unwrap()["chats"]
+        .as_array()
+        .unwrap()
+        .len();
+    let new_chat = serde_json::json!({
+        "room_id": expected[0],
+        "topic_id": "home",
+        "reason": null,
+        "intent_key": "browser-new-chat-1"
+    });
+    let first_new_chat = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/new-chat",
+        new_chat.clone(),
+    )
+    .await;
+    let retried_new_chat =
+        binding_for(hosted.clone(), "binding-user", "/v1/app/new-chat", new_chat).await;
+    assert_eq!(
+        first_new_chat["selected_chat_id"],
+        retried_new_chat["selected_chat_id"]
+    );
+    let canonical_home_after = retried_new_chat["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|topic| topic["room_id"] == expected[0] && topic["topic_id"] == "home")
+        .unwrap()["chats"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(canonical_home_after, canonical_home_before + 1);
+    let binding_path = fs::read_dir(
+        root.path()
+            .join("binding-hosted/users")
+            .join(hex::encode(sha2::Sha256::digest(b"binding-user")))
+            .join("agent-bindings"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    let sealed_binding = fs::read_to_string(binding_path).unwrap();
+    assert!(!sealed_binding.contains("project-one"));
+    assert!(!sealed_binding.contains(&agent_account_id));
+    assert!(!sealed_binding.contains(&first_room));
+    assert!(!sealed_binding.contains(&duplicate_room));
+    let failed_claim = runtime_command_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({
+            "room_id": expected[0],
+            "target_account_id": agent_account_id,
+            "command": "agent.owner.claim",
+            "resource_key": "agent.connections",
+            "schema": "finite.agent.empty.request.v1",
+            "body": {},
+            "reuse_succeeded_owner_claim": true,
+            "wait_millis": 1_000
+        }),
+    )
+    .await;
+    assert_eq!(failed_claim.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let after_failed_claim = binding_for(
+        hosted.clone(),
+        "binding-user",
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-one" }),
+    )
+    .await;
+    assert_eq!(after_failed_claim["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(after_failed_claim["topics"].as_array().unwrap().len(), 4);
+
+    action_for(
+        hosted.clone(),
+        "binding-user",
+        serde_json::json!({ "OpenRoom": { "room_id": expected[1] } }),
+    )
+    .await;
+    drop(hosted);
+    server_task.abort();
+    let reopened = binding_for(
+        app(config),
+        "binding-user",
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-one" }),
+    )
+    .await;
+    assert_eq!(reopened["selected_room_id"], expected[0]);
+    assert_eq!(reopened["rooms"].as_array().unwrap().len(), 2);
+    assert_eq!(reopened["topics"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_bytes_are_isolated_redacted_and_survive_device_restart() {
     let root = TempDir::new().unwrap();
     let server_db = root.path().join("attachment-server.sqlite3");
@@ -1234,6 +1425,29 @@ async fn runtime_command_for(
     )
     .await
     .unwrap()
+}
+
+async fn binding_for(app: axum::Router, user_id: &str, path: &str, body: Value) -> Value {
+    let response = app
+        .oneshot(
+            Request::post(path)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, user_id)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 struct MultipartFile {

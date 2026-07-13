@@ -118,9 +118,13 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
 5. **Backups are only real once restored.** Before first-slice user data, every
    stateful service must have a service-consistent backup, an off-host copy, a
    restore runbook, and an empty-target restore drill. The current deployment
-   does not satisfy this rule: lat1 is single-disk, the Borg target in
-   `modules/backups.nix` is a placeholder, live SQLite directories are not yet
-   converted into service-owned consistent snapshots, Agent Runtime `/data` is
-   not covered, and the complete restore drill has not run. Paid-cohort launch
-   is blocked on closing those gaps. A disk mirror (2 spare NVMes) remains
+   does not yet satisfy this rule: lat1 is single-disk, and the Hosted Web Chat
+   module now creates service-consistent 15-minute snapshots and configures a
+   dedicated repository at the existing finitecomputer rsync.net destination,
+   but the existing finitecomputer credential bundle still needs to be copied
+   to lat1, its destination-side append-only restriction verified, and the
+   deployment, first archive, and complete empty-target restore drill executed.
+   Agent Runtime `/data` is not covered.
+   Chat continuity or recovery failure blocks paid admission regardless of
+   Stripe. A disk mirror (2 spare NVMes) remains
    defense in depth, not a backup.

@@ -31,10 +31,10 @@ by copying a release tarball onto the box.
   rev).
 - ssh access to lat1 (`ssh root@64.34.82.77`, key-only) or a nix driver host
   that reaches it as root.
-- A fresh Postgres/state safety net exists — for sites, `/var/lib/finite-sites`
-  (`registry.db` is WAL-mode SQLite) is covered by the lat1 backup timer
-  (`modules/backups.nix`); FLAG: offsite borg is not yet enabled
-  ([postgres-backup-restore.md](postgres-backup-restore.md)).
+- A fresh Postgres/state safety net exists. FLAG: the Hosted Web Chat recovery
+  snapshot does **not** cover `/var/lib/finite-sites`; Sites still needs its own
+  service-consistent off-host recovery set and restore proof. Do not treat the
+  configured chat Borg repository as Sites protection.
 
 ### STEPS
 

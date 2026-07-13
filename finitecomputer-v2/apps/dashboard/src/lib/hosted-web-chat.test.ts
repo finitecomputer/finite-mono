@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  freshAgentChatAction,
-  freshAgentChatLabel,
   HostedWebChatError,
   hostedWebChatErrorMessage,
   parseHostedChatAction,
@@ -21,24 +19,28 @@ test("unexpected chat infrastructure errors are replaced with plain product copy
   );
 });
 
-test("fresh chat recovery uses a stable label without exposing transport details", () => {
-  assert.equal(freshAgentChatLabel(" Sol 2 "), "A · Sol 2");
-  assert.equal(freshAgentChatLabel("  "), "A · Agent");
-  const profile = {
-    account_id: "agent-account",
-    npub: "npub1agent",
-    display_name: "Sol 2",
-    stale: false,
-    is_agent: true,
-  };
-  assert.deepEqual(freshAgentChatAction(profile, "Sol 2"), {
-    StartGroupChat: { profiles: [profile], display_name: "A · Sol 2" },
-  });
-});
-
 test("parseHostedChatAction accepts the bounded message operations used by web chat", () => {
   assert.deepEqual(
     parseHostedChatAction({
+      StartTopicChatIntent: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        reason: null,
+        intent_key: "intent-1",
+      },
+    }),
+    {
+      StartTopicChatIntent: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        reason: null,
+        intent_key: "intent-1",
+      },
+    }
+  );
+
+  assert.deepEqual(
+    parseHostedChatAction({
       SendChatMessage: {
         room_id: "room-1",
         topic_id: "topic-1",
@@ -71,23 +73,6 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
         topic_id: "topic-1",
         chat_id: "chat-1",
         title: "Launch checklist",
-      },
-    }
-  );
-
-  assert.deepEqual(
-    parseHostedChatAction({
-      StartTopicChat: {
-        room_id: "room-1",
-        topic_id: "topic-1",
-        reason: null,
-      },
-    }),
-    {
-      StartTopicChat: {
-        room_id: "room-1",
-        topic_id: "topic-1",
-        reason: null,
       },
     }
   );
@@ -111,6 +96,13 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
 });
 
 test("parseHostedChatAction keeps pairing and unsupported operations off the browser action surface", () => {
+  assert.throws(
+    () =>
+      parseHostedChatAction({
+        StartTopicChat: { room_id: "legacy-room", topic_id: "home", reason: null },
+      }),
+    /Unsupported chat action/
+  );
   assert.throws(
     () => parseHostedChatAction({ ScanTarget: { value: "finite://join?secret" } }),
     (error: unknown) =>

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+builder="${FINITE_NIX_X86_BUILDER:-finite-lat-2}"
+store="ssh-ng://${builder}"
+target="nixosConfigurations.finite-lat-1.config.system.build.toplevel"
+
+if [[ $# -ne 0 ]]; then
+  echo "usage: $0" >&2
+  exit 64
+fi
+
+# A plain `nix build` inherits the operator's global builders file, which is
+# unrelated to finite-mono and may name personal machines. Fail against the
+# repository's x86 builder before evaluating a large system closure.
+nix store info --store "$store" >/dev/null
+
+archive_json="$(nix flake archive --json --to "$store" "$repo_root")"
+remote_source="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["path"])' <<<"$archive_json")"
+
+# Evaluate and build on lat2 itself. Evaluating locally against a remote store
+# turns thousands of store queries into SSH round trips and is needlessly slow.
+exec ssh -o BatchMode=yes "$builder" \
+  nix build --no-link "path:${remote_source}#${target}"

@@ -4,10 +4,11 @@ import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 import {
   hostedDeviceAction,
   hostedDeviceConfig,
+  hostedDeviceEnsureAgentBinding,
+  hostedDeviceOpenAgentBinding,
   hostedDeviceRuntimeCommand,
   hostedDeviceState,
-  type HostedChatProfile,
-  type HostedChatState,
+  HostedDeviceRequestError,
   type HostedRuntimeCommand,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
@@ -154,34 +155,47 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
   if (!config) {
     throw new HostedAgentControlError("Connections are unavailable right now.", 503);
   }
+  try {
+    const bound = await hostedDeviceOpenAgentBinding(config, account, access.coreProject.project.id);
+    const binding = bound.hosted_agent_binding;
+    if (!binding) {
+      throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
+    }
+    return {
+      account,
+      config,
+      roomId: binding.canonical_room_id,
+      targetAccountId: binding.agent_account_id,
+    };
+  } catch (error) {
+    if (!(error instanceof HostedDeviceRequestError) || error.status !== 404) {
+      throw error;
+    }
+  }
+
   const agentNpub = await fetchRuntimeAgentNpub(access.primaryUrl);
   if (!agentNpub) {
     throw new HostedAgentControlError("This agent is still starting. Try again shortly.", 503);
   }
-
-  let state = await hostedDeviceState(config, account);
+  const state = await hostedDeviceState(config, account);
   if (!state.status.toLowerCase().includes("running")) {
-    state = await hostedDeviceAction(config, account, { StartRuntime: null });
+    await hostedDeviceAction(config, account, { StartRuntime: null });
   }
-  state = await hostedDeviceAction(config, account, { ScanTarget: { value: agentNpub } });
-  const profile = profileForNpub(state, agentNpub);
-  if (!profile) {
-    throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
-  }
-  state = await hostedDeviceAction(config, account, {
-    StartProfileChat: { profile, display_name: `Chat with ${access.displayName}` },
+  const bound = await hostedDeviceEnsureAgentBinding(config, account, {
+    project_id: access.coreProject.project.id,
+    agent_npub: agentNpub,
+    display_name: `Chat with ${access.displayName}`,
   });
-  const roomId = state.selected_room_id?.trim();
-  if (!roomId) {
+  const binding = bound.hosted_agent_binding;
+  if (!binding) {
     throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
   }
-  return { account, config, roomId, targetAccountId: profile.account_id };
-}
-
-function profileForNpub(state: HostedChatState, npub: string): HostedChatProfile | null {
-  return (
-    state.profiles.find((profile) => profile.npub.toLowerCase() === npub.toLowerCase()) ?? null
-  );
+  return {
+    account,
+    config,
+    roomId: binding.canonical_room_id,
+    targetAccountId: binding.agent_account_id,
+  };
 }
 
 async function claimOwner(context: AgentCommandContext) {

@@ -71,11 +71,11 @@ matching the expected finite-chat commit, and `source_dirty: false`.
 
 `ssh root@finite-lat-1 nixos-rebuild switch --rollback` (or re-deploy the
 previous known-good mono rev), then re-run the gate against it. Data rollback
-(SQLite) comes from the lat1 backup set — FLAG: offsite borg is not yet
-enabled on lat1 (the current redundancy gap; single-disk root), so a durable
-copy of `/var/lib/private/finite-chat/data/` is the top follow-up. TODO:
-drill the restore once borg lands (same discipline as
-[postgres-backup-restore.md](postgres-backup-restore.md)).
+(SQLite) comes from the coordinated Hosted Web Chat recovery set. FLAG: its
+rsync.net repository is configured in Nix, but credentials, deployment, first
+archive, and empty-target proof are still outstanding on single-disk lat1.
+Follow [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md); configuration
+alone is not a backup.
 
 ## Single-writer doctrine (Paul, 2026-07-09 — applies to every chat move, forever)
 

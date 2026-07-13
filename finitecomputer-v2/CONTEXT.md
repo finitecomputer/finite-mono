@@ -88,6 +88,17 @@ _Avoid_: Customer Organization administrator, permission taxonomy, role slug
 A Finite-operated Finite Chat device bound to one Account Auth identity whose server-held device state powers dashboard web chat.
 _Avoid_: Browser E2EE, dashboard relay, Agent Principal Key
 
+**Canonical Agent Room**:
+The exact-member Finite Chat Room durably bound to one Project, human
+Principal, and Agent Principal. Owner claim and new Chats use this Room;
+selection never chooses it.
+_Avoid_: Selected Room, newest Room, recovery Room
+
+**Previous conversations**:
+Retained Topics and Chats in legacy associated exact-member Agent Rooms. They
+remain readable and navigable without merging or deleting protocol history.
+_Avoid_: Orphaned Rooms, duplicate cleanup, hidden history
+
 **User Nostr Identity**:
 The human-controlled Nostr identity used by the user's Finite Chat account and eligible to be generated or imported by the user.
 _Avoid_: Account Auth, Agent Principal Key, Device key

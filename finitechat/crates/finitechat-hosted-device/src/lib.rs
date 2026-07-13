@@ -34,6 +34,8 @@ use finitechat_proto::{
     RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
 };
 use futures_util::{Stream, StreamExt};
+use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
+use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -69,6 +71,11 @@ const DEVICE_LINK_HTTP_TIMEOUT_SECS: u64 = 10;
 const MAX_DEVICE_LINK_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
+const AGENT_BINDING_VERSION: u16 = 1;
+const AGENT_BINDING_NONCE_BYTES: usize = 12;
+const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
+const AGENT_BINDING_KEY_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding-key.v1";
+const AGENT_BINDING_AAD_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding.v1";
 
 #[derive(Clone, Debug)]
 pub struct HostedDeviceConfig {
@@ -104,6 +111,13 @@ impl HostedDeviceState {
         let digest = Sha256::digest(link_session_id.as_bytes());
         self.user_root(user_id)
             .join("device-links")
+            .join(format!("{}.json", hex::encode(digest)))
+    }
+
+    fn agent_binding_path(&self, user_id: &str, project_id: &str) -> PathBuf {
+        let digest = Sha256::digest(project_id.as_bytes());
+        self.user_root(user_id)
+            .join("agent-bindings")
             .join(format!("{}.json", hex::encode(digest)))
     }
 
@@ -173,6 +187,10 @@ pub enum HostedDeviceError {
     LockPoisoned,
     #[error("hosted chat state is incomplete; recovery is required")]
     IncompleteUserState,
+    #[error("canonical Agent conversation is not bound; recovery is required")]
+    AgentBindingNotFound,
+    #[error("canonical Agent conversation requires recovery: {0}")]
+    AgentBindingInvalid(String),
     #[error("hosted chat state could not be inspected: {0}")]
     Io(#[from] std::io::Error),
     #[error("hosted device task failed: {0}")]
@@ -193,12 +211,16 @@ impl IntoResponse for HostedDeviceError {
                 StatusCode::BAD_REQUEST
             }
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::AttachmentNotFound | Self::DeviceLinkNotFound => StatusCode::NOT_FOUND,
+            Self::AttachmentNotFound | Self::DeviceLinkNotFound | Self::AgentBindingNotFound => {
+                StatusCode::NOT_FOUND
+            }
             Self::DeviceLinkConflict(_) => StatusCode::CONFLICT,
             Self::InvalidDeviceLink(_) => StatusCode::BAD_REQUEST,
             Self::DeviceLinkService(_) => StatusCode::BAD_GATEWAY,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
-            Self::IncompleteUserState => StatusCode::SERVICE_UNAVAILABLE,
+            Self::IncompleteUserState | Self::AgentBindingInvalid(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Core(FiniteChatCoreError::Client { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::Profile { .. }) => StatusCode::BAD_REQUEST,
             Self::Core(FiniteChatCoreError::ServerRejected { .. })
@@ -246,6 +268,16 @@ fn app_with_device_link_now(
         .route("/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
         .route("/v1/app/actions", post(dispatch_action))
+        .route("/v1/app/new-chat", post(start_new_chat))
+        .route(
+            "/v1/app/agent-bindings/open",
+            post(open_agent_binding).layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
+        )
+        .route(
+            "/v1/app/agent-bindings/ensure",
+            post(ensure_agent_binding)
+                .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
+        )
         .route(
             "/v1/app/images",
             post(upload_profile_image).layer(DefaultBodyLimit::max(MAX_HOSTED_PROFILE_IMAGE_BYTES)),
@@ -1101,6 +1133,329 @@ async fn app_state(
     Ok(Json(redacted_state(runtime.state()?)))
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct OpenAgentBindingRequest {
+    project_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct EnsureAgentBindingRequest {
+    project_id: String,
+    agent_npub: String,
+    display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct HostedAgentBindingV1 {
+    version: u16,
+    project_id: String,
+    human_account_id: String,
+    agent_account_id: String,
+    agent_npub: String,
+    canonical_room_id: String,
+    associated_room_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SealedHostedAgentBindingV1 {
+    version: u16,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct HostedAgentBindingResponse {
+    #[serde(flatten)]
+    state: AppState,
+    hosted_agent_binding: HostedAgentBindingV1,
+}
+
+async fn open_agent_binding(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<OpenAgentBindingRequest>,
+) -> Result<Json<HostedAgentBindingResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    validate_binding_field("project_id", &input.project_id)?;
+    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let runtime = state.runtime_for(&user_id)?;
+        let binding = load_agent_binding(&state, &user_id, &input.project_id, &runtime)?
+            .ok_or(HostedDeviceError::AgentBindingNotFound)?;
+        let response = open_validated_agent_binding(&runtime, binding)?;
+        persist_agent_binding(&state, &user_id, &response.hosted_agent_binding, &runtime)?;
+        Ok(response)
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+async fn ensure_agent_binding(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<EnsureAgentBindingRequest>,
+) -> Result<Json<HostedAgentBindingResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    validate_binding_field("project_id", &input.project_id)?;
+    validate_binding_field("agent_npub", &input.agent_npub)?;
+    validate_binding_field("display_name", &input.display_name)?;
+    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let runtime = state.runtime_for(&user_id)?;
+        if let Some(binding) = load_agent_binding(&state, &user_id, &input.project_id, &runtime)? {
+            if !binding.agent_npub.eq_ignore_ascii_case(&input.agent_npub) {
+                return Err(HostedDeviceError::AgentBindingInvalid(
+                    "the observed Agent Principal changed".to_owned(),
+                ));
+            }
+            let response = open_validated_agent_binding(&runtime, binding)?;
+            persist_agent_binding(&state, &user_id, &response.hosted_agent_binding, &runtime)?;
+            return Ok(response);
+        }
+
+        let before = retained_identifier_counts(&runtime.state()?);
+        let mut app = runtime.dispatch_and_wait(AppAction::ScanTarget {
+            value: input.agent_npub.clone(),
+        })?;
+        let profile = app
+            .profiles
+            .iter()
+            .find(|profile| profile.npub.eq_ignore_ascii_case(&input.agent_npub))
+            .cloned()
+            .ok_or_else(|| {
+                HostedDeviceError::AgentBindingInvalid(
+                    "the Agent Principal could not be resolved".to_owned(),
+                )
+            })?;
+        let mut room_ids = runtime.profile_chat_room_ids(profile.account_id.clone())?;
+        if room_ids.is_empty() {
+            app = runtime.dispatch_and_wait(AppAction::StartProfileChat {
+                profile: profile.clone(),
+                display_name: input.display_name,
+            })?;
+            room_ids = runtime.profile_chat_room_ids(profile.account_id.clone())?;
+        }
+        let canonical_room_id = room_ids.first().cloned().ok_or_else(|| {
+            HostedDeviceError::AgentBindingInvalid(
+                "no exact-member Agent Room is available".to_owned(),
+            )
+        })?;
+        let after = retained_identifier_counts(&app);
+        if !after.is_superset_of(&before) {
+            return Err(HostedDeviceError::AgentBindingInvalid(
+                "retained identifiers became unreachable during migration".to_owned(),
+            ));
+        }
+        let binding = HostedAgentBindingV1 {
+            version: AGENT_BINDING_VERSION,
+            project_id: input.project_id,
+            human_account_id: app.identity.account_id.clone(),
+            agent_account_id: profile.account_id,
+            agent_npub: profile.npub,
+            canonical_room_id,
+            associated_room_ids: room_ids.into_iter().skip(1).collect(),
+        };
+        persist_agent_binding(&state, &user_id, &binding, &runtime)?;
+        open_validated_agent_binding(&runtime, binding)
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+fn open_validated_agent_binding(
+    runtime: &FiniteChatRuntime,
+    mut binding: HostedAgentBindingV1,
+) -> Result<HostedAgentBindingResponse, HostedDeviceError> {
+    let state = runtime.state()?;
+    if state.identity.account_id != binding.human_account_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the Hosted Web Device identity changed".to_owned(),
+        ));
+    }
+    let room_ids = runtime.profile_chat_room_ids(binding.agent_account_id.clone())?;
+    if !room_ids.contains(&binding.canonical_room_id) {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the canonical Room is missing or has unexpected members".to_owned(),
+        ));
+    }
+    binding.associated_room_ids = room_ids
+        .into_iter()
+        .filter(|room_id| room_id != &binding.canonical_room_id)
+        .collect();
+    let state = runtime.dispatch_and_wait(AppAction::OpenRoom {
+        room_id: binding.canonical_room_id.clone(),
+    })?;
+    Ok(HostedAgentBindingResponse {
+        state: redacted_state(state),
+        hosted_agent_binding: binding,
+    })
+}
+
+#[derive(Default)]
+struct RetainedIdentifierCounts {
+    rooms: HashSet<String>,
+    topics: HashSet<String>,
+    chats: HashSet<String>,
+    messages: HashSet<String>,
+    attachments: HashSet<String>,
+}
+
+impl RetainedIdentifierCounts {
+    fn is_superset_of(&self, other: &Self) -> bool {
+        self.rooms.is_superset(&other.rooms)
+            && self.topics.is_superset(&other.topics)
+            && self.chats.is_superset(&other.chats)
+            && self.messages.is_superset(&other.messages)
+            && self.attachments.is_superset(&other.attachments)
+    }
+}
+
+fn retained_identifier_counts(state: &AppState) -> RetainedIdentifierCounts {
+    RetainedIdentifierCounts {
+        rooms: state
+            .rooms
+            .iter()
+            .map(|room| room.room_id.clone())
+            .collect(),
+        topics: state
+            .topics
+            .iter()
+            .map(|topic| topic.topic_id.clone())
+            .collect(),
+        chats: state
+            .topics
+            .iter()
+            .flat_map(|topic| topic.chats.iter().map(|chat| chat.chat_id.clone()))
+            .collect(),
+        messages: state
+            .messages
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect(),
+        attachments: state
+            .messages
+            .iter()
+            .flat_map(|message| message.media.iter().map(|item| item.attachment_id.clone()))
+            .collect(),
+    }
+}
+
+fn validate_binding_field(name: &str, value: &str) -> Result<(), HostedDeviceError> {
+    if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(HostedDeviceError::AgentBindingInvalid(format!(
+            "{name} is invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn binding_key(runtime: &FiniteChatRuntime) -> Result<[u8; 32], HostedDeviceError> {
+    let secret = hex::decode(runtime.state()?.identity.account_secret_hex).map_err(|_| {
+        HostedDeviceError::AgentBindingInvalid("Device key material is invalid".to_owned())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(AGENT_BINDING_KEY_DOMAIN);
+    hasher.update(secret);
+    Ok(hasher.finalize().into())
+}
+
+fn binding_aad(user_id: &str, project_id: &str) -> Vec<u8> {
+    let mut aad = AGENT_BINDING_AAD_DOMAIN.to_vec();
+    aad.extend_from_slice(user_storage_id(user_id).as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(project_id.as_bytes());
+    aad
+}
+
+fn load_agent_binding(
+    state: &HostedDeviceState,
+    user_id: &str,
+    project_id: &str,
+    runtime: &FiniteChatRuntime,
+) -> Result<Option<HostedAgentBindingV1>, HostedDeviceError> {
+    let path = state.agent_binding_path(user_id, project_id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if bytes.len() > MAX_DEVICE_LINK_RECORD_BYTES as usize {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the binding record is oversized".to_owned(),
+        ));
+    }
+    let sealed: SealedHostedAgentBindingV1 = serde_json::from_slice(&bytes).map_err(|_| {
+        HostedDeviceError::AgentBindingInvalid("the binding record is corrupt".to_owned())
+    })?;
+    if sealed.version != AGENT_BINDING_VERSION || sealed.nonce.len() != AGENT_BINDING_NONCE_BYTES {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the binding record version is unsupported".to_owned(),
+        ));
+    }
+    let provider = OpenMlsRustCrypto::default();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            &binding_key(runtime)?,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &binding_aad(user_id, project_id),
+        )
+        .map_err(|_| {
+            HostedDeviceError::AgentBindingInvalid(
+                "the binding record failed authentication".to_owned(),
+            )
+        })?;
+    let binding: HostedAgentBindingV1 = serde_json::from_slice(&plaintext).map_err(|_| {
+        HostedDeviceError::AgentBindingInvalid("the binding plaintext is invalid".to_owned())
+    })?;
+    if binding.version != AGENT_BINDING_VERSION || binding.project_id != project_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the binding record does not match this Project".to_owned(),
+        ));
+    }
+    Ok(Some(binding))
+}
+
+fn persist_agent_binding(
+    state: &HostedDeviceState,
+    user_id: &str,
+    binding: &HostedAgentBindingV1,
+    runtime: &FiniteChatRuntime,
+) -> Result<(), HostedDeviceError> {
+    let plaintext = serde_json::to_vec(binding)?;
+    let provider = OpenMlsRustCrypto::default();
+    let nonce: [u8; AGENT_BINDING_NONCE_BYTES] = provider
+        .rand()
+        .random_array()
+        .map_err(|_| HostedDeviceError::Task("binding nonce generation failed".to_owned()))?;
+    let ciphertext = provider
+        .crypto()
+        .aead_encrypt(
+            AeadType::Aes256Gcm,
+            &binding_key(runtime)?,
+            &plaintext,
+            &nonce,
+            &binding_aad(user_id, &binding.project_id),
+        )
+        .map_err(|_| HostedDeviceError::Task("binding encryption failed".to_owned()))?;
+    let encoded = serde_json::to_vec(&SealedHostedAgentBindingV1 {
+        version: AGENT_BINDING_VERSION,
+        nonce: nonce.to_vec(),
+        ciphertext,
+    })?;
+    let path = state.agent_binding_path(user_id, &binding.project_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| HostedDeviceError::Task("invalid binding path".to_owned()))?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, encoded)?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
 async fn dispatch_action(
     State(state): State<HostedDeviceState>,
     headers: HeaderMap,
@@ -1111,6 +1466,34 @@ async fn dispatch_action(
     let next = tokio::task::spawn_blocking(move || runtime.dispatch_and_wait(action))
         .await
         .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(redacted_state(next)))
+}
+
+#[derive(Deserialize)]
+struct StartNewChatRequest {
+    room_id: String,
+    topic_id: String,
+    reason: Option<String>,
+    intent_key: String,
+}
+
+async fn start_new_chat(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<StartNewChatRequest>,
+) -> Result<Json<AppState>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let runtime = state.runtime_for(&user_id)?;
+    let next = tokio::task::spawn_blocking(move || {
+        runtime.start_topic_chat_intent_and_wait(
+            input.room_id,
+            input.topic_id,
+            input.reason,
+            input.intent_key,
+        )
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
 }
 

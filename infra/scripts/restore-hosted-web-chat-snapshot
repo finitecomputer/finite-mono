@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: FINITE_RESTORE_ISOLATED=1 $0 SNAPSHOT_DIR EMPTY_TARGET_DIR" >&2
+  exit 64
+}
+
+[ "$#" -eq 2 ] || usage
+[ "${FINITE_RESTORE_ISOLATED:-}" = 1 ] || {
+  echo "restore refused: FINITE_RESTORE_ISOLATED=1 is required" >&2
+  exit 65
+}
+
+source_dir=${1%/}
+target_dir=${2%/}
+[ -f "$source_dir/format" ] || { echo "restore refused: format marker missing" >&2; exit 66; }
+[ "$(cat "$source_dir/format")" = finite.hosted-web-chat-recovery-snapshot.v1 ] || {
+  echo "restore refused: unsupported snapshot format" >&2
+  exit 66
+}
+[ -f "$source_dir/manifest.sha256" ] || { echo "restore refused: manifest missing" >&2; exit 66; }
+
+(cd "$source_dir" && sha256sum --check manifest.sha256)
+find "$source_dir/hosted-device" -type f -name client.sqlite3 -print0 \
+  | while IFS= read -r -d '' database; do
+      [ "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = ok ] || {
+        echo "restore refused: Hosted Device SQLite integrity failed" >&2
+        exit 67
+      }
+    done
+[ "$(sqlite3 "$source_dir/finite-chat/server.sqlite3" 'PRAGMA integrity_check;')" = ok ] || {
+  echo "restore refused: Finite Chat SQLite integrity failed" >&2
+  exit 67
+}
+pg_restore --list "$source_dir/saas-core/finite_core.dump" >/dev/null
+
+if [ -e "$target_dir" ] && [ -n "$(find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  echo "restore refused: target is not empty" >&2
+  exit 68
+fi
+parent=$(dirname "$target_dir")
+name=$(basename "$target_dir")
+staging="$parent/.${name}.restore-staging"
+[ ! -e "$staging" ] || { echo "restore refused: stale staging path exists" >&2; exit 68; }
+trap 'rm -rf "$staging"' EXIT
+install -d -m 0700 "$staging"
+cp -a "$source_dir/hosted-device" "$source_dir/finite-chat" "$source_dir/saas-core" "$staging/"
+cp -a "$source_dir/format" "$source_dir/manifest.sha256" "$staging/"
+if [ -e "$target_dir" ]; then rmdir "$target_dir"; fi
+mv "$staging" "$target_dir"
+trap - EXIT
+echo "verified isolated restore artifacts at $target_dir"

@@ -612,9 +612,13 @@ Work top-down. Every retained item is required.
   Product Release manifest, and completed migration facts to the migration
   log. The closing commit deletes this run per run-document governance.
 
-### P1 — Paul acceptance
+### P1 — Acceptance Request
 
-- Paul completes the acceptance statement at the top of this run. The final
+- Produce the exact Acceptance Request defined in `README.md`, including the
+  deployed revisions, dedicated account/workspace, expected observation after
+  each paid-provider, recovery, and attestation step, stop conditions, and
+  estimated minutes. Paul completes it and the acceptance statement at the
+  top. The final
   check includes the browser experience, real chat, recovery-mode outcome,
   restored data/identity, attestation summary, provider inventory, and observed
   cost. No automated suite or operator-only API transcript substitutes for it.

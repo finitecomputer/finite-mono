@@ -22,6 +22,12 @@
 
   networking.hostName = "finite-lat-1";
 
+  # Reuse the existing finitecomputer rsync.net destination account, with a
+  # repository dedicated to lat1 so encryption and retention are not coupled
+  # to clawland's finitecomputer archives.
+  finite.recoveryBackup.borgRepository =
+    "fm2890@fm2890.rsync.net:finitecomputer/finite-lat-1";
+
   # Static public addressing via systemd-networkd, matched by the WAN NIC's
   # MAC (90:5a:08:2e:63:1b, derived from the capture's eno1 link-local
   # fe80::925a:8ff:fe2e:631b). Matching by MAC instead of interface name

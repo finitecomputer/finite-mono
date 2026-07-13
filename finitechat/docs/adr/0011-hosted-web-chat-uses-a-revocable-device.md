@@ -23,3 +23,9 @@ its Finite-operated process and restored store as potentially accessible during
 audited Finite-assisted recovery. Store loss must restore a usable Device and
 retained-history/export path; silently minting an unrelated chat account or
 showing server ciphertext as recovered data is not acceptable.
+
+ADR 0012 tightens the continuity rule: the Hosted Web Device also owns the
+encrypted Project/Principal-to-canonical-Room binding. Navigation selection is
+only a cursor, bootstrap opens the binding before Runtime contact, legacy
+duplicate exact-member Rooms remain reachable, and recovery cannot mint a
+replacement Room.

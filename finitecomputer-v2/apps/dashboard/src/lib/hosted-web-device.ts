@@ -143,6 +143,7 @@ export type HostedChatState = {
   profiles: HostedChatProfile[];
   devices: HostedChatDevice[];
   typing_members: HostedChatTypingMember[];
+  hosted_agent_binding?: HostedAgentBinding | null;
   flow: {
     notice_text?: string | null;
     notice_busy: boolean;
@@ -150,6 +151,16 @@ export type HostedChatState = {
     scan_result: string;
     image_upload_url?: string | null;
   };
+};
+
+export type HostedAgentBinding = {
+  version: number;
+  project_id: string;
+  human_account_id: string;
+  agent_account_id: string;
+  agent_npub: string;
+  canonical_room_id: string;
+  associated_room_ids: string[];
 };
 
 export type HostedChatAction =
@@ -163,6 +174,14 @@ export type HostedChatAction =
         room_id: string;
         topic_id: string;
         reason?: string | null;
+      };
+    }
+  | {
+      StartTopicChatIntent: {
+        room_id: string;
+        topic_id: string;
+        reason?: string | null;
+        intent_key: string;
       };
     }
   | {
@@ -294,6 +313,39 @@ export async function hostedDeviceAction(
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/actions", {
     method: "POST",
     body: JSON.stringify(action),
+  });
+}
+
+export async function hostedDeviceOpenAgentBinding(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  projectId: string
+) {
+  return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/agent-bindings/open", {
+    method: "POST",
+    body: JSON.stringify({ project_id: projectId }),
+  });
+}
+
+export async function hostedDeviceEnsureAgentBinding(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: { project_id: string; agent_npub: string; display_name: string }
+) {
+  return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/agent-bindings/ensure", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function hostedDeviceNewChat(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: Extract<HostedChatAction, { StartTopicChatIntent: unknown }>["StartTopicChatIntent"]
+) {
+  return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/new-chat", {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }
 

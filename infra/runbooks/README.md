@@ -26,6 +26,8 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Rebuilding / recovering lat1** (NixOS) — the cutover procedure + the mdadm / NIC-by-MAC / ACME gotchas |
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
 | [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 native Postgres — highest-priority runbook in this tree |
+| [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md) | Coordinated Hosted Web Device + Finite Chat + SaaS Core snapshot and empty-target drill |
+| [chats-appear-missing.md](chats-appear-missing.md) | Read-only-first continuity incident diagnosis; never creates replacement state |
 | [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
 | [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
 | [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
@@ -60,9 +62,10 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
-- Backups are only real once restored. The Postgres restore drill
-  ([postgres-backup-restore.md](postgres-backup-restore.md)) has never been
-  run — run it before trusting anything else here.
+- Backups are only real once restored. The coordinated Hosted Web Chat and
+  Postgres empty-target drills have not yet passed; paid admission remains
+  blocked until the real off-host repository and current restore evidence
+  exist.
 - Any manual change made on a box during an incident must land back in
   `infra/` (or be reverted) **within a day** — see
   [break-glass.md](break-glass.md).

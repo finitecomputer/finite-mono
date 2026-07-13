@@ -92,10 +92,12 @@ Hosted Web UI.
   deployment as a true handoff; automated/local evidence is not Paul's final
   acceptance.
 
-### P1 — Paul acceptance
+### P1 — Acceptance Request
 
-- Paul completes the acceptance statement at the top of this run against the
-  alpha build. Do not claim acceptance from automated tests alone.
+- If this run is explicitly resumed, produce the exact Acceptance Request
+  defined in `README.md` against the deployed alpha revision. Paul completes
+  that request and the acceptance statement at the top; automated tests alone
+  do not claim acceptance.
 
 ## Out of scope
 

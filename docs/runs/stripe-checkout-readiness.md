@@ -1,6 +1,7 @@
 # Stripe Checkout Readiness
 
-Status: ACTIVE
+Status: PAUSED (2026-07-13 — Paul explicitly directed Hosted Web Chat
+Continuity/Borg work next; resume this as the sole ACTIVE run afterward)
 
 Owner: Paul
 
@@ -63,10 +64,14 @@ Work top-down. Every retained item is required.
 - Record live/test Stripe configuration, deployment, and signing needs as true
   external handoffs rather than weakening readiness or fabricating evidence.
 
-### P1 — Paul acceptance
+### P1 — Acceptance Request
 
-- Paul completes the acceptance statement at the top of this run. Do not claim
-  acceptance from synthetic events, unit tests, or a test clock alone.
+- Deploy the accepted revision under separate production-mutation authority,
+  then produce the exact Acceptance Request defined in `README.md`: revision,
+  URL, invited test account, expected observation after each Checkout/webhook/
+  draft-resume step, stop conditions, and estimated minutes.
+- Paul completes that request and the acceptance statement at the top of this
+  run. Synthetic events, unit tests, and a test clock do not claim acceptance.
 
 ## Out of scope
 

@@ -11,7 +11,9 @@ config; `nixos-rebuild switch --flake ...#finite-lat-1` is the deploy.
 Rebuild/recover procedure + the hard-won gotchas (single-disk/no-mdadm, disks
 by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`. Brain is
 served under the WorkOS-protected dashboard origin; a disk mirror and proven
-offsite backups remain deferred.
+offsite backups remain deferred. The Hosted Web Chat offsite destination is
+configured, but credentials, deployment, first archive, and restore evidence
+are still outstanding.
 
 ## Deploy story
 
@@ -21,12 +23,19 @@ Full procedure — install, rescue-mode recovery, secrets, data restore, DNS
 ordering — is in `infra/runbooks/lat1-nixos-reinstall.md`. In short:
 
 ```sh
-nix build .#nixosConfigurations.finite-lat-1.config.system.build.toplevel  # gate: build before you wipe
+just nixos-build-lat1  # explicit x86_64 build on finite-lat-2; gate before you wipe
 nix run github:nix-community/nixos-anywhere -- \
   --flake .#finite-lat-1 --target-host root@64.34.82.77 --phases kexec,disko,install
 ```
 
 Then the secrets checklist below + the data restore in the runbook.
+
+Do not run the system build through a plain local `nix build` on macOS. Nix
+would inherit `/etc/nix/machines` or the operator's personal builder settings.
+The root recipe pins `ssh-ng://finite-lat-2`, verifies the remote store, archives
+the dirty or clean flake into it, and evaluates/builds on lat2 itself. It never
+consults the Mac's builder scheduler. `FINITE_NIX_X86_BUILDER` is available
+only as an explicit replacement-builder override.
 
 ### Every deploy after that
 
@@ -58,11 +67,11 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FC_WORKOS_OPERATOR_ORG_ID`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` (+ optional `FC_RELAY_ADMIN_TOKEN`, `FC_RELAY_HOST_ENDPOINTS_JSON`) | Existing names come from the k8s Secret on old lat1; provision the same missing operator-org predicate used by Core before rollout |
 | `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
+| `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
 | `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env` |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
 | `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
-| `/etc/finite/borg.env` + `/etc/finite/borg_ed25519` | `BORG_PASSPHRASE`; ssh key | generated at bootstrap; passphrase ALSO goes in the team password manager |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
 finite-brain has **no** secret env (plain-config `Environment=` lines only,
@@ -143,8 +152,12 @@ to loopback :3015, then Brain applies its Nostr authorization.
 Resolved during the 2026-07-09 cutover: disko device layout (single-disk,
 by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
 
-- **Offsite borg backups** (`modules/backups.nix`) — target undecided; this
-  is the current redundancy gap while root is single-disk. Highest priority.
+- **Offsite Borg activation + restore proof** (`modules/backups.nix`) — the
+  15-minute service-consistent Hosted Web Chat snapshot, rsync.net repository,
+  Borg 1.2 selection, established finitecomputer credential paths, and
+  stale-health units are defined. Copying the existing credential bundle and
+  verifying the destination-side append-only restriction remain operator work;
+  no deployment/archive or empty-target drill is claimed by repository config.
 - **Disk mirror** — root + /data are single NVMe; two spare NVMes are free
   for a ZFS/mdadm mirror (the mdadm RAID1 bug is why we went single-disk).
 - **Runner fast-follow** — Kata is the production adapter; Phala must pass the

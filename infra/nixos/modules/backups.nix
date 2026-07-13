@@ -1,44 +1,200 @@
-# Proposed offsite Borg job — NOT an operational backup until the repo target is
-# real and empty-target restores pass. The listed live SQLite service directories
-# also need service-owned consistent snapshots; copying them directly is not a
-# sufficient restore contract. Agent Runtime `/data` is outside this host job
-# and needs its own provider-independent off-host Recovery Snapshot path.
-#
-# TODO: offsite target decision. The repo URL below is a placeholder.
-# Candidates: lat2's /data (1.8T, empty, becomes the CI box — borg over ssh),
-# or the legacy fleet's borg target (clawland's box1_borg_backup.sh already
-# pushes there). Off-box is the requirement; /data on THIS host does not count.
-{ ... }:
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.finite.recoveryBackup;
+  snapshotRoot = "/data/recovery-snapshots/hosted-web-chat";
+  # Reuse the established finitecomputer Borg credential layout verbatim.
+  # Values are copied host-to-host/off-host and never enter this public repo.
+  borgStateRoot = "/var/lib/finitecomputer/backups";
+  borgSecretRoot = "${borgStateRoot}/rsync-net";
+in
 {
-  services.borgbackup.jobs."finite-offsite" = {
-    paths = [
-      "/var/lib/finite-sites" # sites data (static user, real path)
-      "/var/lib/private/finite-chat" # chat sqlite (DynamicUser real path;
-      # /var/lib/finite-chat is only a symlink borg would store as a symlink)
-      "/var/lib/private/finitechat-hosted-device" # Hosted Device keys + chat stores
-      "/var/lib/private/finitebrain" # brain sqlite (DynamicUser real path)
-      "/data/backups/postgres" # timestamped pg_dumps (modules/postgres.nix)
-      "/etc/finite-saas" # sites.env + Cloudflare Origin CA cert pair
+  options.finite.recoveryBackup = {
+    borgRepository = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "account@account.rsync.net:finitecomputer/finite-lat-1";
+      description = "Append-only off-host Borg repository; null keeps archival disabled.";
+    };
+    borgRemotePath = lib.mkOption {
+      type = lib.types.str;
+      default = "borg12";
+      description = "Remote Borg executable selected by the backup destination.";
+    };
+  };
+
+  config = {
+    systemd.services.finite-hosted-web-chat-snapshot = {
+    description = "Service-consistent Hosted Web Chat Recovery Snapshot";
+    after = [ "postgresql.service" ];
+    requires = [ "postgresql.service" ];
+    path = [
+      config.services.postgresql.package
+      pkgs.coreutils
+      pkgs.findutils
+      pkgs.gnused
+      pkgs.sqlite
+      pkgs.systemd
+      pkgs.util-linux
     ];
-    # TODO: replace with the real offsite repo once the target is decided.
-    repo = "ssh://borg@TODO-offsite-target/./finite-lat-1";
-    encryption = {
-      mode = "repokey-blake2";
-      # /etc/finite/borg.env (root:root 0600), NAMES only:
-      #   BORG_PASSPHRASE   (generated at bootstrap; ALSO store it in the
-      #                      team password manager — a passphrase that only
-      #                      exists on the box it protects is not a backup)
-      passCommand = "sh -c '. /etc/finite/borg.env && printf %s \"$BORG_PASSPHRASE\"'";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+      UMask = "0077";
     };
-    # TODO: generate this ssh key at bootstrap and authorize it (append-only)
-    # on the offsite target.
-    environment.BORG_RSH = "ssh -i /etc/finite/borg_ed25519";
-    compression = "auto,zstd";
-    startAt = "daily";
-    prune.keep = {
-      daily = 7;
-      weekly = 4;
-      monthly = 6;
+    script = ''
+      set -euo pipefail
+      root=${snapshotRoot}
+      stamp=$(date -u +%Y%m%dT%H%M%SZ)
+      staging="$root/.staging-$stamp"
+      final="$root/$stamp"
+      hosted_was_active=0
+      chat_was_active=0
+
+      cleanup() {
+        rm -rf "$staging"
+        if [ "$chat_was_active" = 1 ]; then systemctl start finitechat-server.service; fi
+        if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service; fi
+      }
+      trap cleanup EXIT
+
+      install -d -m 0700 "$root" "$staging/hosted-device" "$staging/finite-chat" "$staging/saas-core"
+      systemctl is-active --quiet finitechat-hosted-device.service && hosted_was_active=1 || true
+      systemctl is-active --quiet finitechat-server.service && chat_was_active=1 || true
+      if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi
+      if [ "$chat_was_active" = 1 ]; then systemctl stop finitechat-server.service; fi
+
+      # The brief write fence makes identity files and encrypted binding sidecars
+      # one composition. Every SQLite database is then copied through SQLite's
+      # online backup API; live db/WAL file copies are never snapshot artifacts.
+      cp -a /var/lib/private/finitechat-hosted-device/. "$staging/hosted-device/"
+      find "$staging/hosted-device" -type f \( -name 'client.sqlite3' -o -name 'client.sqlite3-wal' -o -name 'client.sqlite3-shm' \) -delete
+      while IFS= read -r source; do
+        relative="''${source#/var/lib/private/finitechat-hosted-device/}"
+        destination="$staging/hosted-device/$relative"
+        install -d -m 0700 "$(dirname "$destination")"
+        sqlite3 "$source" ".backup '$destination'"
+        test "$(sqlite3 "$destination" 'PRAGMA integrity_check;')" = ok
+      done < <(find /var/lib/private/finitechat-hosted-device -type f -name client.sqlite3 -print)
+
+      sqlite3 /var/lib/private/finite-chat/data/server.sqlite3 ".backup '$staging/finite-chat/server.sqlite3'"
+      test "$(sqlite3 "$staging/finite-chat/server.sqlite3" 'PRAGMA integrity_check;')" = ok
+      runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
+      pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
+
+      printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v1' > "$staging/format"
+      (
+        cd "$staging"
+        find format hosted-device finite-chat saas-core -type f -print0 \
+          | sort -z \
+          | xargs -0 sha256sum > manifest.sha256
+      )
+      mv "$staging" "$final"
+      ln -sfn "$stamp" "$root/latest"
+      find "$root" -mindepth 1 -maxdepth 1 -type d -name '20*T*Z' -mtime +2 -exec rm -rf -- {} +
+      trap - EXIT
+      cleanup
+    '';
+  };
+
+  systemd.timers.finite-hosted-web-chat-snapshot = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/15";
+      Persistent = true;
+      Unit = "finite-hosted-web-chat-snapshot.service";
     };
+  };
+
+  systemd.services.finite-hosted-web-chat-snapshot-health = {
+    description = "Fail if the Hosted Web Chat snapshot is older than 30 minutes";
+    path = [ pkgs.coreutils ];
+    serviceConfig = {
+      Type = "oneshot";
+      User = "root";
+    };
+    script = ''
+      set -euo pipefail
+      latest=${snapshotRoot}/latest
+      test -L "$latest"
+      age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
+      if [ "$age" -gt 1800 ]; then
+        echo "Hosted Web Chat Recovery Snapshot is stale ($age seconds)" >&2
+        exit 1
+      fi
+      (cd "$latest" && sha256sum --check manifest.sha256)
+    '';
+  };
+
+  systemd.timers.finite-hosted-web-chat-snapshot-health = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "20min";
+      OnUnitActiveSec = "5min";
+    };
+  };
+
+  services.borgbackup.jobs."finite-hosted-web-chat-offsite" =
+    lib.mkIf (cfg.borgRepository != null) {
+      paths = [ snapshotRoot ];
+      repo = cfg.borgRepository;
+      archiveBaseName = "finite-lat-1-hosted-web-chat";
+      encryption = {
+        mode = "repokey-blake2";
+        passCommand = "cat ${borgSecretRoot}/borg-passphrase";
+      };
+      environment.BORG_RSH = "ssh -i ${borgSecretRoot}/id_ed25519 -o BatchMode=yes -o UserKnownHostsFile=${borgSecretRoot}/known_hosts -o StrictHostKeyChecking=yes";
+      extraArgs = [ "--remote-path=${cfg.borgRemotePath}" ];
+      compression = "auto,zstd";
+      failOnWarnings = true;
+      persistentTimer = true;
+      startAt = "*:07/15";
+      readWritePaths = [ borgStateRoot ];
+      preHook = ''
+        latest=${snapshotRoot}/latest
+        test -L "$latest"
+        test $(( $(date +%s) - $(stat -Lc %Y "$latest") )) -le 1800
+        (cd "$latest" && sha256sum --check manifest.sha256)
+      '';
+      postCreate = ''
+        date +%s > ${borgStateRoot}/hosted-web-chat-last-success
+      '';
+    };
+
+    systemd.services.finite-hosted-web-chat-offsite-health =
+      lib.mkIf (cfg.borgRepository != null) {
+        description = "Fail if the Hosted Web Chat offsite archive is older than 30 minutes";
+        path = [ pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          User = "root";
+        };
+        script = ''
+          set -euo pipefail
+          stamp=${borgStateRoot}/hosted-web-chat-last-success
+          test -s "$stamp"
+          last_success=$(cat "$stamp")
+          age=$(( $(date +%s) - last_success ))
+          if [ "$age" -gt 1800 ]; then
+            echo "Hosted Web Chat offsite archive is stale ($age seconds)" >&2
+            exit 1
+          fi
+        '';
+      };
+
+    systemd.timers.finite-hosted-web-chat-offsite-health =
+      lib.mkIf (cfg.borgRepository != null) {
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnBootSec = "20min";
+          OnUnitActiveSec = "5min";
+        };
+      };
+
+    systemd.tmpfiles.rules = [
+      "d /data/recovery-snapshots 0700 root root -"
+      "d ${snapshotRoot} 0700 root root -"
+      "d ${borgStateRoot} 0700 root root -"
+      "d ${borgSecretRoot} 0700 root root -"
+    ];
   };
 }
