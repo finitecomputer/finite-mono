@@ -180,10 +180,37 @@ export function CoreAgentCreationForm({
         </div>
 
         {stripeConfigured ? (
-          <Button type="submit" name="access" value="stripe" className="w-fit">
-            <CreditCardIcon />
-            Continue to payment
-          </Button>
+          <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4">
+            <div>
+              <div className="font-medium text-foreground">Finite Computer Hosted Agent</div>
+              <div className="text-2xl font-semibold text-foreground">
+                $200 USD <span className="text-sm font-normal text-muted-foreground">/ month</span>
+              </div>
+            </div>
+            <ul className="grid gap-1 text-xs text-muted-foreground">
+              <li>No trial. Renews automatically each month until canceled.</li>
+              <li>Stripe calculates tax at checkout and adds it when applicable.</li>
+              <li>Service setup begins after payment and subscription confirmation.</li>
+              <li>Cancel in the billing portal; cancellation takes effect at period end.</li>
+            </ul>
+            <p className="text-xs text-muted-foreground">
+              Refund requests are reviewed individually.{" "}
+              <a
+                href="https://docs.google.com/forms/d/e/1FAIpQLSePGnux9EVHRGZf30q7MPEMdMmTb7djJxAPCM0hCf-wRTGv3w/viewform"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                Contact Finite
+              </a>{" "}
+              before paying if you have questions about service delivery, cancellation,
+              or refunds.
+            </p>
+            <Button type="submit" name="access" value="stripe" className="w-fit">
+              <CreditCardIcon />
+              Continue to secure payment
+            </Button>
+          </div>
         ) : null}
 
         <div className="grid max-w-sm gap-2">

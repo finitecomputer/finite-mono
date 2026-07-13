@@ -24,8 +24,10 @@ runtime-scoped Finite Private keys, and usage decisions.
 2. Dashboard asks Core for `/api/core/v1/me/billing`.
 3. If the customer organization does not have active billing, dashboard shows a
    billing setup panel instead of agent creation.
-4. The user starts Stripe Checkout for the standard hosted-agent recurring
-   price. Checkout allows promotion codes.
+4. The user sees the exact $200 USD monthly offer, renewal, tax, delivery,
+   cancellation, and refund summary, then starts Stripe Checkout for the
+   standard hosted-agent recurring price. Checkout allows promotion codes,
+   pins the synchronous card flow, and enables Stripe automatic tax.
 5. Stripe sends subscription webhooks to `/api/stripe/webhook`.
 6. The dashboard webhook verifies the Stripe signature, fetches the current
    Subscription from Stripe, checks that it contains the standard hosted-agent
@@ -97,6 +99,10 @@ Create one recurring Stripe Price for the standard hosted agent plan:
 - Price: `$200/month`
 - Currency: `USD`
 - Trial: none
+- Payment methods: cards and card wallets through Stripe's card flow
+- Tax: Stripe automatic tax, with the account's Automatic default treating USD
+  as tax-exclusive
+- Cancellation: in Customer Portal at the end of the current billing period
 
 The amount and interval live in Stripe, not in code.
 
@@ -125,6 +131,10 @@ Use the printed webhook signing secret as `STRIPE_WEBHOOK_SECRET`.
 
 The current dashboard Checkout flow is a server-side redirect. It does not
 need `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` yet.
+
+The API-created Checkout Session explicitly sends `automatic_tax.enabled=true`
+and `payment_method_types=["card"]`. Enabling Stripe Tax or payment methods in
+the Dashboard is not a substitute for those application constraints.
 
 ## Test Clock E2E
 

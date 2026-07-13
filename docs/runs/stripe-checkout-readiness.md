@@ -1,12 +1,16 @@
 # Stripe Checkout Readiness
 
-Status: ACTIVE
+Status: PAUSED (2026-07-13 — Paul explicitly activated Stripe Production
+Activation for build, test, and shipment)
 
 Sequence note: On 2026-07-13, Paul explicitly accepted the shipped Hosted Web
 Chat product-continuity outcome, directed that run closed and deleted, and
 moved its remaining empty-target recovery proof into the no-authority proposed
 run [Hosted Web Chat Disaster Recovery](hosted-web-chat-disaster-recovery.md).
-This run therefore resumes as the sole ACTIVE run.
+This run briefly resumed, then Paul explicitly activated
+[Stripe Production Activation](stripe-production-activation.md) later that day.
+Its queue and human test-mode Checkout acceptance remain prerequisites in that
+ACTIVE run.
 
 Owner: Paul
 

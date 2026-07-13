@@ -41,6 +41,10 @@ runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
     python3 -m unittest discover -s scripts/tests -p 'test_runtime_image_contract.py'
 
+# Static production contract: Dashboard and Core must enforce the same Price.
+stripe-price-contract:
+    python3 scripts/check_stripe_price_contract.py
+
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity

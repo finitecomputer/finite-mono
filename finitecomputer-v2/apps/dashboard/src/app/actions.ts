@@ -46,8 +46,9 @@ import {
 import {
   billingSubscriptionShouldUsePortal,
   requireStripeClient,
-  standardAgentCheckoutMetadata,
+  standardAgentCheckoutParams,
   standardAgentPriceId,
+  stripeCheckoutAvailable,
   stripeDashboardOnboardingReturnPath,
   stripeDashboardReturnUrl,
   stripeIdempotencyKey,
@@ -155,6 +156,9 @@ export async function billingCheckoutDestination(
   attemptId: string = randomUUID(),
   returnMachineId?: string | null
 ) {
+  if (!stripeCheckoutAvailable()) {
+    throw new Error("Payment is unavailable right now.");
+  }
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
     throw new Error(billing.error ?? "Sign in again to manage billing.");
@@ -180,7 +184,6 @@ export async function billingCheckoutDestination(
     return billingPortalDestination(stripeCustomerId, returnMachineId);
   }
 
-  const metadata = standardAgentCheckoutMetadata(customerOrgId);
   const successParams = new URLSearchParams({ new: "1", billing: "success" });
   const cancelParams = new URLSearchParams({ new: "1", billing: "cancelled" });
   if (returnMachineId) {
@@ -188,24 +191,13 @@ export async function billingCheckoutDestination(
     cancelParams.set("machine", returnMachineId);
   }
   const checkout = await stripe.checkout.sessions.create(
-    {
-      mode: "subscription",
-      customer: stripeCustomerId,
-      client_reference_id: metadata.clientReferenceId,
-      allow_promotion_codes: true,
-      success_url: stripeDashboardReturnUrl(`/dashboard?${successParams.toString()}`),
-      cancel_url: stripeDashboardReturnUrl(`/dashboard?${cancelParams.toString()}`),
-      line_items: [
-        {
-          price: standardAgentPriceId(),
-          quantity: 1,
-        },
-      ],
-      metadata: metadata.checkout,
-      subscription_data: {
-        metadata: metadata.subscription,
-      },
-    },
+    standardAgentCheckoutParams({
+      stripeCustomerId,
+      customerOrgId,
+      priceId: standardAgentPriceId(),
+      successUrl: stripeDashboardReturnUrl(`/dashboard?${successParams.toString()}`),
+      cancelUrl: stripeDashboardReturnUrl(`/dashboard?${cancelParams.toString()}`),
+    }),
     { idempotencyKey: stripeIdempotencyKey("checkout", attemptId) }
   );
 
