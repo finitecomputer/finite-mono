@@ -13,7 +13,7 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       example = "account@account.rsync.net:finitecomputer/finite-lat-1";
-      description = "Append-only off-host Borg repository; null keeps archival disabled.";
+      description = "Off-host Borg repository used by a no-prune production job; destination-enforced append-only access is recommended. Null keeps archival disabled.";
     };
     borgRemotePath = lib.mkOption {
       type = lib.types.str;

@@ -14,10 +14,11 @@ Paid admission is blocked unless all of these are true, regardless of Stripe:
 - `finite.recoveryBackup.borgRepository` names the dedicated
   `finitecomputer/finite-lat-1` repository at the same rsync.net destination as
   existing finitecomputer backups. It reuses the established finitecomputer
-  SSH key, pinned host key, and passphrase bundle. Append-only protection must
-  be verified at the destination; reusing credentials does not by itself prove
-  that property. The existing off-host passphrase copy and a Borg key export
-  remain available independently of finite-lat-1.
+  SSH key, pinned host key, and passphrase bundle. The production job never
+  prunes or compacts. Destination-enforced append-only credentials are strongly
+  recommended, but Paul accepted the current overprovisioned credential as
+  hardening debt on 2026-07-13. The existing off-host passphrase copy and a Borg
+  key export remain available independently of finite-lat-1.
 - A current archive has passed the empty-target drill below with the dedicated
   synthetic account. A green timer or successful `borg check` is insufficient.
 
@@ -26,10 +27,9 @@ credential paths used by `../finitecomputer`. On 2026-07-13 the existing bundle
 was copied byte-for-byte to finite-lat-1, revision `7d58aa1` was deployed, and
 the dedicated repository was initialized with a verified first archive. The
 reused SSH credential also accepted an arbitrary read-only remote command, so
-server-enforced append-only protection is **not** present. Paid admission stays
-blocked until rsync.net restricts the archival credential without breaking the
-separate administrative retention credential, and until the empty-target drill
-passes.
+server-enforced append-only protection is **not** present. Restricting it while
+preserving separate administrative retention access remains recommended
+hardening; it is not an admission blocker. The empty-target drill still is.
 
 ## One-time Borg activation
 
@@ -49,11 +49,11 @@ passes.
    /var/lib/finitecomputer/backups/rsync-net/borg-passphrase
    ```
 
-3. Verify how the existing SSH key is restricted at rsync.net. The 2026-07-13
+3. Record how the existing SSH key is restricted at rsync.net. The 2026-07-13
    activation proved that it can run an arbitrary remote command, so the
-   archival credential is not append-only. This continuity gate remains unmet;
-   do not treat the no-prune host job as destination enforcement and do not
-   invent a second local passphrase.
+   archival credential is not append-only. Treat destination restriction as
+   recommended hardening, not as evidence supplied by the no-prune host job;
+   do not invent a second local passphrase.
 4. Deploy an exact committed revision under the normal Nix deployment
    authority, start `finite-hosted-web-chat-snapshot.service`, then start
    `borgbackup-job-finite-hosted-web-chat-offsite.service`. The job initializes
@@ -65,8 +65,8 @@ passes.
 6. Verify both health units below. A repository configured in Nix is not an
    off-host copy until this succeeds.
 
-The host job intentionally does not prune or compact: its append-only
-credential must be unable to erase recovery history. Perform reviewed
+The host job intentionally does not prune or compact. Prefer an append-only
+archival credential that cannot erase recovery history. Perform reviewed
 retention and compaction from an off-host administrative credential after
 restore proof; start from the existing finitecomputer policy (7 daily, 4
 weekly, 6 monthly) and retain the last 48 hours of 15-minute archives unless a

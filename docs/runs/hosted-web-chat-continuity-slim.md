@@ -57,9 +57,11 @@ the operator activation and empty-target drill pass.
    API / a brief write fence — never copies of live db/WAL files. One
    snapshot = Hosted Web Device identity + encrypted client state, the whole
    Finite Chat server SQLite, a SaaS Core pg_dump, and a manifest with
-   hashes. Encrypted, append-only, real Borg destination, passphrase held
-   off-host. No plaintext bodies, secrets, or live ids in logs or manifest
-   metadata.
+   hashes. Encrypted, real Borg destination, passphrase held off-host, and no
+   automated prune/compact from the production host. The archival credential
+   should be destination-restricted append-only, but its current broader access
+   is accepted hardening debt rather than an admission blocker. No plaintext
+   bodies, secrets, or live ids in logs or manifest metadata.
 6. **Recovery readiness = a proven empty-target restore**, not a green
    timer. The separately retained Agent Runtime is out of scope and must
    merely reconnect; full-host loss remains a separate gate.
@@ -89,8 +91,9 @@ Work top-down.
 ### P0 — Real backups and one proven restore
 
 - Service-owned consistent snapshot commands; Borg archives those artifacts
-  (plus the pg_dump) to a real encrypted append-only off-host target;
-  snapshot every 15 minutes, alert on failure or age > 30 minutes.
+  (plus the pg_dump) to a real encrypted off-host target without production-host
+  pruning; snapshot every 15 minutes, alert on failure or age > 30 minutes.
+  Record destination-enforced append-only credentials as recommended hardening.
 - Restore onto an empty target in isolated mode (public traffic and outbound
   side effects off), verify identifiers/history/attachment/claim/fresh turn,
   and reject corrupt, partial, or wrong-key snapshots without touching the
@@ -126,10 +129,10 @@ Work top-down.
   `finite-lat-1-hosted-web-chat-2026-07-13T15:00:05` in the dedicated
   `finitecomputer/finite-lat-1` repository. Its pre-create manifest check and
   create completed successfully, and a subsequent remote listing found it.
-- Append-only is **not proven**: the reused SSH credential accepted an
-  arbitrary remote command. The empty-target service restore and Paul's
-  browser lifecycle checks also remain. Therefore this run is not yet
-  Ready-for-Paul and paid admission remains blocked.
+- The reused SSH credential accepted an arbitrary remote command. It should be
+  replaced or restricted to append-only, but Paul explicitly accepted this as
+  hardening debt on 2026-07-13. The empty-target service restore and Paul's
+  browser lifecycle checks remain, so this run is not yet Ready-for-Paul.
 
 ## Acceptance Request — blocked on retained queue prerequisites
 
@@ -138,7 +141,7 @@ Work top-down.
   finite-lat-1, the dedicated synthetic account, and an empty isolated restore
   target. Secrets remain only at the paths named in the recovery runbook.
 - **Time:** estimate 20 minutes for Paul's final browser lifecycle checks after
-  the automated empty-target drill and append-only restriction pass.
+  the automated empty-target drill passes.
 - **Steps and observations:** reload every retained Chat; restart/deploy each
   covered service; exercise failed and retried owner claim; verify the same
   canonical Room and retained Chat set after each action; then inspect the
@@ -147,9 +150,8 @@ Work top-down.
   identifier evidence from the synthetic account and the selected archive.
 - **Fail/stop:** any identifier-set change, unreachable retained Chat,
   unreadable attachment, claim divergence, restore mutation before complete
-  verification, or an archival credential able to rewrite history. Capture
-  count-only/read-only evidence and stop; do not switch restored traffic or
-  admit paid users.
+  verification, or archive/extraction failure. Capture count-only/read-only
+  evidence and stop; do not switch restored traffic or admit paid users.
 
 ## Out of scope
 

@@ -121,9 +121,9 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
    does not yet satisfy this rule: lat1 is single-disk, and the Hosted Web Chat
    module now creates service-consistent 15-minute snapshots and configures a
    dedicated repository at the existing finitecomputer rsync.net destination,
-   but the existing finitecomputer credential bundle still needs to be copied
-   to lat1, its destination-side append-only restriction verified, and the
-   deployment, first archive, and complete empty-target restore drill executed.
+   and now has a verified first archive. Destination-side append-only
+   restriction is recommended hardening; the complete empty-target restore
+   drill remains the admission gate.
    Agent Runtime `/data` is not covered.
    Chat continuity or recovery failure blocks paid admission regardless of
    Stripe. A disk mirror (2 spare NVMes) remains
