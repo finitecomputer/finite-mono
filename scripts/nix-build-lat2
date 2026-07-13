@@ -83,8 +83,11 @@ if [[ ! -x "$disko_path" ]]; then
   echo "disko output is not executable: ${disko_path}" >&2
   exit 70
 fi
-if [[ "$(readlink -f "$disko_gc_root")" != "$disko_path" ]]; then
-  echo "GC root ${disko_gc_root} does not resolve to ${disko_path}" >&2
+# The disko build output is itself a symlink to its executable. Check the
+# out-link's first hop so we prove that Nix rooted the exact output it printed;
+# readlink -f would intentionally continue through the output symlink.
+if [[ "$(readlink "$disko_gc_root")" != "$disko_path" ]]; then
+  echo "GC root ${disko_gc_root} does not point to ${disko_path}" >&2
   exit 70
 fi
 

@@ -6,17 +6,13 @@ import json
 
 from tools.vision_tools import vision_analyze_tool
 
-
 MARKER = "FINITE_AEON_HERMES_PROBE "
 RED_FIXTURE = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAEAQMAAACTPww9AAAAA1BMVEX/AAAZ4gk3"
     "AAAAC0lEQVQI12NggAAAAAgAAS8g3TEAAAAASUVORK5CYII="
 )
-RED_PROMPT = (
-    "What is the dominant color of this image? "
-    "Reply with one uppercase color word."
-)
+RED_PROMPT = "What is the dominant color of this image? Reply with one uppercase color word."
 
 
 async def probe() -> int:

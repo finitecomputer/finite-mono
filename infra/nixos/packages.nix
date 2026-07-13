@@ -8,29 +8,45 @@ let
   crateVersion =
     dir: (builtins.fromTOML (builtins.readFile (src + "/${dir}/Cargo.toml"))).package.version;
 
+  # A flake fetched by exact Git revision has no .git directory for build.rs
+  # to inspect. Carry the immutable source revision into the server compiler
+  # environment instead; dirty local flakes intentionally omit provenance.
+  finitechatProvenance =
+    if src ? rev then
+      {
+        FINITECHAT_BUILD_COMMIT = builtins.substring 0 12 src.rev;
+        FINITECHAT_BUILD_DIRTY = "false";
+      }
+    else
+      { };
+
   mkWorkspaceCrate =
     {
       pname,
       crate ? pname,
       dir,
       mainProgram ? pname,
+      extraAttrs ? { },
     }:
-    pkgs.rustPlatform.buildRustPackage {
-      inherit pname src;
-      version = crateVersion dir;
-      cargoLock = {
-        lockFile = src + "/Cargo.lock";
-        allowBuiltinFetchGit = true;
-      };
-      cargoBuildFlags = [
-        "-p"
-        crate
-      ];
-      doCheck = false;
-      nativeBuildInputs = [ pkgs.pkg-config ];
-      buildInputs = [ pkgs.openssl ];
-      meta.mainProgram = mainProgram;
-    };
+    pkgs.rustPlatform.buildRustPackage (
+      {
+        inherit pname src;
+        version = crateVersion dir;
+        cargoLock = {
+          lockFile = src + "/Cargo.lock";
+          allowBuiltinFetchGit = true;
+        };
+        cargoBuildFlags = [
+          "-p"
+          crate
+        ];
+        doCheck = false;
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl ];
+        meta.mainProgram = mainProgram;
+      }
+      // extraAttrs
+    );
 in
 {
   # Servers
@@ -45,6 +61,7 @@ in
   finitechat-server = mkWorkspaceCrate {
     pname = "finitechat-server";
     dir = "finitechat/crates/finitechat-server";
+    extraAttrs = finitechatProvenance;
   };
   finitechat-hosted-device = mkWorkspaceCrate {
     pname = "finitechat-hosted-device";

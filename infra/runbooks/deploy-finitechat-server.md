@@ -73,7 +73,10 @@ matching the expected finite-chat commit, and `source_dirty: false`.
    test "$(readlink -f "$ROOT")" = "$SYSTEM"
    nix path-info --option builders '' "$SYSTEM" >/dev/null
    ssh -o BatchMode=yes root@64.34.82.77 true
-   nix copy --option builders '' --to ssh-ng://root@64.34.82.77 "$SYSTEM"
+   # The exact lat2-built closure is unsigned; authenticated root SSH is the
+   # trust boundary for this reviewed handoff.
+   nix copy --no-check-sigs --option builders '' \
+     --to ssh-ng://root@64.34.82.77 "$SYSTEM"
 
    UNIT="finite-nixos-activate-${REV}.service"
    ssh -o BatchMode=yes root@64.34.82.77 \
@@ -87,7 +90,7 @@ matching the expected finite-chat commit, and `source_dirty: false`.
    [[ "$unit" == "finite-nixos-activate-${rev}.service" ]] || exit 64
    test "$(readlink -f "$system")" = "$system"
    test -x "$system/bin/switch-to-configuration"
-   nix path-info --option builders '' "$system" >/dev/null
+   nix-store --check-validity "$system" >/dev/null
    load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
    [[ "$load_state" == not-found ]] || {
      echo "refusing to replace existing transient unit $unit ($load_state)" >&2
