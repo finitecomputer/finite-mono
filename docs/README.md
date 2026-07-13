@@ -21,6 +21,9 @@ commands against the owning source folder before relying on them.
   `process-compose`, and `just dev` usage.
 - [Devfinity architecture plan](devfinity-architecture-plan.md): plan for
   evolving `devfinity` into a typed integration harness.
+- [Brain and Sites integrated viewing decision](brain-sites-integrated-viewing-decision.md):
+  draft cross-platform identity, client-crypto, native/web adapter, UI, and
+  contextual Artifact Viewer decision for FiniteBrain maintainer review.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
   reference analysis used to calibrate Finite's Rust, Nix, command, docs,
   harness, CI, and quality-gate choices.
