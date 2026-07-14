@@ -22,7 +22,7 @@ test("agent access follows the explicitly submitted path", () => {
   assert.equal(resolveAgentCreationAccessPath(null, true), "denied");
 });
 
-test("billing stays after profile when Core still requires it", () => {
+test("customer onboarding always places Access after Profile", () => {
   assert.equal(
     agentCreationRequiresAccess({
       runtimeMode: "customer",
@@ -37,7 +37,7 @@ test("billing stays after profile when Core still requires it", () => {
       canCreateAgent: true,
       requiresBilling: false,
     }),
-    false
+    true
   );
   assert.equal(
     agentCreationRequiresAccess({

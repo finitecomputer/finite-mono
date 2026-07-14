@@ -271,19 +271,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     core.reset({
       canCreateAgent: true,
       requiresBilling: false,
-      creationError: "billing is required before creating an agent",
     });
     await withSignedInPage(browser, paidDashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?new=1`);
-      await page.getByLabel("Agent name").fill("Billing Recovery Proof");
-      await page.getByRole("button", { name: "Create agent" }).click();
-      await page.waitForURL(/agentCreationRecovery=access/u);
-      await expectVisibleText(page, "Choose payment or enter a Launch Code to continue.");
+      await page.getByLabel("Agent name").fill("Customer Access Proof");
       await page.getByRole("button", { name: "Continue" }).waitFor({ state: "visible" });
       assert.equal(
         await page.getByRole("button", { name: "Create agent" }).count(),
         0,
-        "billing recovery must not render the contradictory Create agent action"
+        "fresh customer onboarding must never bypass Access from Profile"
       );
       await page.getByRole("button", { name: "Continue" }).click();
       await page
@@ -296,6 +292,11 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await expectVisibleText(
         page,
         "Cancel in the billing portal; cancellation takes effect at period end."
+      );
+      assert.equal(
+        core.state.creationPosts.length,
+        0,
+        "Profile must not submit agent creation before the customer chooses Access"
       );
     });
 
