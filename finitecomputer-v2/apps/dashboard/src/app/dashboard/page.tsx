@@ -64,6 +64,7 @@ import {
 import { stripeCheckoutAvailable } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
+  agentCreationErrorRecovery,
   agentCreationRequiresAccess,
   draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
@@ -81,6 +82,7 @@ function shortValue(value: string | null | undefined, length = 12) {
 type DashboardSearchParams = {
   agentRemoval?: string | string[];
   agentCreationError?: string | string[];
+  agentCreationRecovery?: string | string[];
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
   creation?: string | string[];
@@ -104,6 +106,11 @@ export default async function DashboardPage({
   const query = await searchParams;
   const agentRemoval = firstSearchParam(query.agentRemoval);
   const agentCreationError = firstSearchParam(query.agentCreationError);
+  const agentCreationRecoveryParam = firstSearchParam(query.agentCreationRecovery);
+  const agentCreationRecovery =
+    agentCreationRecoveryParam === "access"
+      ? "access"
+      : agentCreationErrorRecovery(agentCreationError);
   const billingReturnParam = parseBillingReturnParam(firstSearchParam(query.billing));
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
     firstSearchParam(query.billingSyncStartedAt)
@@ -276,7 +283,7 @@ export default async function DashboardPage({
               runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
               canCreateAgent: Boolean(billing.billing?.can_create_agent),
               requiresBilling: Boolean(billing.billing?.requires_billing),
-              error: agentCreationError,
+              recovery: agentCreationRecovery,
             })}
           />
         ) : null}

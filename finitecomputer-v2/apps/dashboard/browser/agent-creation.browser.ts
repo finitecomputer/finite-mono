@@ -68,6 +68,7 @@ type CoreState = {
   restartPosts: string[];
   createDelayMs: number;
   canCreateAgent: boolean;
+  requiresBilling: boolean;
   creationError: string | null;
 };
 
@@ -267,12 +268,23 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       ...chromeExecutable(),
     });
 
-    // A stale creation-capacity bit must never skip the Access step while
-    // Core still says billing is required.
-    core.reset({ canCreateAgent: true });
+    core.reset({
+      canCreateAgent: true,
+      requiresBilling: false,
+      creationError: "billing is required before creating an agent",
+    });
     await withSignedInPage(browser, paidDashboardPort, async (page) => {
-      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard`);
-      await page.getByLabel("Agent name").fill("Paid Browser Proof");
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?new=1`);
+      await page.getByLabel("Agent name").fill("Billing Recovery Proof");
+      await page.getByRole("button", { name: "Create agent" }).click();
+      await page.waitForURL(/agentCreationRecovery=access/u);
+      await expectVisibleText(page, "Choose payment or enter a Launch Code to continue.");
+      await page.getByRole("button", { name: "Continue" }).waitFor({ state: "visible" });
+      assert.equal(
+        await page.getByRole("button", { name: "Create agent" }).count(),
+        0,
+        "billing recovery must not render the contradictory Create agent action"
+      );
       await page.getByRole("button", { name: "Continue" }).click();
       await page
         .getByRole("button", { name: "Continue to secure payment" })
@@ -2078,7 +2090,7 @@ async function handleCoreRequest(
         updated_at: "2026-05-28T12:01:00Z",
       },
       can_create_agent: state.canCreateAgent,
-      requires_billing: true,
+      requires_billing: state.requiresBilling,
     });
     return;
   }
@@ -2242,6 +2254,7 @@ function emptyCoreState(): CoreState {
     restartPosts: [],
     createDelayMs: 0,
     canCreateAgent: false,
+    requiresBilling: true,
     creationError: null,
   };
 }

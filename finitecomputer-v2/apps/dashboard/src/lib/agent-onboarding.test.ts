@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentCreationErrorRecovery,
   agentCreationErrorMessage,
   agentCreationRequiresAccess,
   draftStartedStripeCheckout,
@@ -43,10 +44,24 @@ test("billing stays after profile when Core still requires it", () => {
       runtimeMode: "customer",
       canCreateAgent: true,
       requiresBilling: false,
-      error: "billing is required before creating an agent",
+      recovery: agentCreationErrorRecovery(
+        "Choose payment or enter a Launch Code to continue."
+      ),
     }),
     true
   );
+});
+
+test("billing rejection carries machine-readable Access recovery after friendly copy", () => {
+  assert.equal(
+    agentCreationErrorRecovery(new Error("billing is required before creating an agent")),
+    "access"
+  );
+  assert.equal(
+    agentCreationErrorRecovery("Choose payment or enter a Launch Code to continue."),
+    "access"
+  );
+  assert.equal(agentCreationErrorRecovery("Chat initialization is unavailable."), null);
 });
 
 test("only a signed draft that initiated Stripe is eligible for checkout completion", () => {
