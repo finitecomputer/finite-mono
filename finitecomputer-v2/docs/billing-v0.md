@@ -278,8 +278,8 @@ dollars.
 Core creates the default `finite-private-generous` profile with:
 
 - burst window: 18,000 seconds
-- burst limit: 5,000,000 units
-- weekly limit: 25,000,000 units
+- burst limit: 50,000,000 units
+- weekly limit: uncapped
 
 Every Finite Private reservation checks both burst and weekly limits before
 upstream work. Denied weekly requests return `weekly_limit_exceeded` and do not

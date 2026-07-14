@@ -7,6 +7,7 @@ import {
 } from "@/lib/brain-identity-provider";
 import { proxyBrainRequest } from "@/lib/brain-proxy";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
+import { browserVisibleRequestOrigin } from "@/lib/http-headers";
 
 type RouteContext = {
   params: Promise<{ path?: string[] }>;
@@ -19,6 +20,13 @@ async function proxy(request: NextRequest, context: RouteContext) {
       return Response.json(
         { error: "Brain opens only inside its dashboard frame." },
         { status: 403, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const parentOrigin = browserVisibleRequestOrigin(request);
+    if (!parentOrigin) {
+      return Response.json(
+        { error: "Brain could not verify the dashboard origin." },
+        { status: 400, headers: { "cache-control": "no-store" } },
       );
     }
     const account = await getAccountAuthContext();
@@ -37,7 +45,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
     }
     return proxyBrainRequest(request, "/client", path, {
       clientCapability: issueBrainClientCapability(config.apiToken, account.workosUserId),
-      parentOrigin: new URL(request.url).origin,
+      parentOrigin,
     });
   }
   return proxyBrainRequest(request, "/client", path);

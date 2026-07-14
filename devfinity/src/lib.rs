@@ -1064,7 +1064,7 @@ wait "$postgres_pid"
                     "FINITE_BRAIN_ADDR",
                     format!("127.0.0.1:{}", self.ports.finite_brain),
                 ),
-                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.finite_brain_url()),
+                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.dashboard_origin()),
                 (
                     "FINITE_BRAIN_DB",
                     self.finite_brain_dir()
@@ -2105,7 +2105,11 @@ wait "$postgres_pid"
     }
 
     fn dashboard_url(&self) -> String {
-        format!("http://127.0.0.1:{}/dashboard", self.ports.dashboard)
+        format!("{}/dashboard", self.dashboard_origin())
+    }
+
+    fn dashboard_origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.dashboard)
     }
 
     fn finitechat_url(&self) -> String {
@@ -2980,6 +2984,7 @@ mod tests {
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
         assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
         assert!(
@@ -3001,6 +3006,7 @@ mod tests {
         assert!(yaml.contains(".image_metadata.digest"));
         assert!(yaml.contains("digest_hex=$(jq"));
         assert!(yaml.contains("artifact_id='devfinity-runtime'-\"$digest_hex\""));
+        assert!(!yaml.contains("${digest#"));
         assert!(yaml.contains("runner-artifact.sh"));
         assert!(yaml.contains("--promoted"));
         assert!(yaml.contains("runner:"));

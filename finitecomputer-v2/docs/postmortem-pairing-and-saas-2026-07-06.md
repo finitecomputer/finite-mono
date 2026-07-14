@@ -156,6 +156,10 @@ row). So real GPU inference is currently **weekly-uncapped** in prod. Backfill
 is a one-line UPDATE but would start denying anyone already over 25M/week —
 Paul's call, not done.
 
+**Resolved 2026-07-14:** local and fresh Core databases match the deployed
+profile: burst=50M and weekly=NULL. Existing databases are aligned by the
+idempotent `0010_align_finite_private_generous.sql` migration.
+
 ---
 
 ## §4. Local rung-2 test harness (running on Paul's Mac — throwaway)

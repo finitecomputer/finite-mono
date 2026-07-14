@@ -17,6 +17,7 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
@@ -940,9 +941,65 @@ function ShareAttachmentButton({ href, name }: { href: string; name: string }) {
 function MarkdownMessage({ text }: { text: string }) {
   return (
     <div className="finite-chat__assistant-text finite-chat__markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink, table: MarkdownTable }}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink, pre: MarkdownCodeBlock, table: MarkdownTable }}>{text}</ReactMarkdown>
     </div>
   );
+}
+
+function MarkdownCodeBlock({ children, ...props }: ComponentProps<"pre">) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => () => {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+  }, []);
+
+  async function copyCode() {
+    const text = preRef.current?.textContent?.replace(/\n$/, "");
+    if (!text) return;
+
+    if (await copyTextToClipboard(text)) {
+      setCopied(true);
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = setTimeout(() => setCopied(false), 2_000);
+    }
+  }
+
+  return (
+    <div className="finite-chat__code-block">
+      <button
+        type="button"
+        className="finite-chat__code-copy"
+        aria-label={copied ? "Code copied" : "Copy code block"}
+        onClick={() => void copyCode()}
+      >
+        {copied ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+      <pre {...props} ref={preRef}>{children}</pre>
+    </div>
+  );
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const activeElement = document.activeElement;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (activeElement instanceof HTMLElement) activeElement.focus();
+    return copied;
+  }
 }
 
 function MarkdownTable({ children, ...props }: ComponentProps<"table">) {

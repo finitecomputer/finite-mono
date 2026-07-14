@@ -10,6 +10,7 @@ import {
   hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
 } from "@/lib/hosted-web-device";
+import { browserVisibleRequestOrigin } from "@/lib/http-headers";
 
 const MAX_PROVIDER_REQUEST_BYTES = 1024 * 1024;
 const BRAIN_CLIENT_CAPABILITY_HEADER = "x-finite-brain-client-capability";
@@ -86,11 +87,18 @@ export async function POST(request: Request) {
       source: "workos" as const,
     };
     const input = parseBrainIdentityProviderRequest(JSON.parse(text));
+    const brainPublicOrigin = browserVisibleRequestOrigin(request);
+    if (!brainPublicOrigin) {
+      return Response.json(
+        { error: "Brain could not verify the dashboard origin." },
+        { status: 400, headers: PROVIDER_HEADERS },
+      );
+    }
     const result = await hostedDeviceBrainIdentityProvider(
       config,
       account,
       input,
-      new URL(request.url).origin
+      brainPublicOrigin
     );
     return Response.json(result, { headers: PROVIDER_HEADERS });
   } catch (error) {

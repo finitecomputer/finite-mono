@@ -957,7 +957,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
-
       hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
         "complete";
       hostedDevice.state.app.messages.push({
