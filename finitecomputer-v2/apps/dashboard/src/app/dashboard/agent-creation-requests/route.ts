@@ -6,6 +6,7 @@ import {
   AGENT_DRAFT_COOKIE,
   AGENT_DRAFT_TTL_SECONDS,
   MAX_AGENT_PROFILE_IMAGE_BYTES,
+  agentCreationErrorRecovery,
   agentCreationErrorMessage,
   normalizeAgentDisplayName,
   normalizeAgentReturnMachineId,
@@ -44,6 +45,10 @@ function dashboardRedirect(
       "agentCreationError",
       agentCreationErrorMessage(error)
     );
+    const recovery = agentCreationErrorRecovery(error);
+    if (recovery) {
+      url.searchParams.set("agentCreationRecovery", recovery);
+    }
   }
   if (returnMachineId) {
     url.searchParams.set("machine", returnMachineId);
