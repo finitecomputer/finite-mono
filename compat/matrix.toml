@@ -29,9 +29,9 @@ notes = "v0.1.3 hard-cuts durable CLI unlock state, scopes raw Folder Keys to op
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.
 image = "ghcr.io/finitecomputer/agent-runtime"
-deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "2026-07-10.6", "2026-07-11.2", "2026-07-11.3", "2026-07-11.4", "2026-07-11.6"]
-digest = "sha256:30d2b8d705f4a53d6db49fa691c0a8434b89596ffdb9f01f806cf5bc59a05bd8"
-source_commit = "39d35cb0f9265d90bbeb3d2ee6598e28b35e328e"
+deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "2026-07-10.6", "2026-07-11.2", "2026-07-11.3", "2026-07-11.4", "2026-07-11.6", "2026-07-14.1"]
+digest = "sha256:5d25384a217d59618d0da309da1196e6ee4630645b7f54df6af2980a10305c5f"
+source_commit = "9c80bc6edd00a8c06854834b94ca2e0a1435db1e"
 hermes = "0.18.2"
 notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents retain their launch-time image and update at their own pace."
 
