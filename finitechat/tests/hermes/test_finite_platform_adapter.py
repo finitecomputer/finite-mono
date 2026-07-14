@@ -128,9 +128,13 @@ def load_adapter_module():
 class MockPluginContext:
     def __init__(self):
         self.registered: list[dict[str, Any]] = []
+        self.registered_tools: list[dict[str, Any]] = []
 
     def register_platform(self, **kwargs):
         self.registered.append(kwargs)
+
+    def register_tool(self, **kwargs):
+        self.registered_tools.append(kwargs)
 
 
 class FinitePlatformAdapterTests(unittest.TestCase):
@@ -153,6 +157,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(entry["label"], "Finite Chat")
         self.assertEqual(entry["required_env"], ["FINITECHAT_HOME"])
         self.assertEqual(entry["allowed_users_env"], "FINITECHAT_ALLOWED_USERS")
+        self.assertEqual(len(ctx.registered_tools), 1)
+        tool = ctx.registered_tools[0]
+        self.assertEqual(tool["name"], "aeon_interpret")
+        self.assertEqual(tool["toolset"], "finitechat_media")
+        self.assertTrue(tool["is_async"])
         self.assertEqual(
             entry["max_message_length"], self.module.FiniteChatAdapter.MAX_MESSAGE_LENGTH
         )
@@ -381,6 +390,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_poll_event_maps_room_to_chat_and_conversation_to_thread_then_acks(self):
         adapter = self.adapter()
+        cast(Any, self.module).check_aeon_requirements = lambda: True
         calls = []
 
         async def fake_json(action, payload, *, timeout):
@@ -424,12 +434,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(adapter.handled_messages), 1)
         event = adapter.handled_messages[0]
         self.assertIn("please build", event.text)
-        self.assertIn('"capability":"image"', event.text)
-        self.assertIn('"status":"FAIL"', event.text)
-        self.assertIn('"error_code":"capability_unavailable"', event.text)
+        self.assertIn("Finite Chat attachments", event.text)
+        self.assertIn('"mime_type":"image/png"', event.text)
+        self.assertIn('"attachment_id":"attachment_', event.text)
+        self.assertNotIn('"status"', event.text)
         self.assertIn("project prompt", event.channel_prompt)
-        self.assertIn("AEON not tested", event.channel_prompt)
-        self.assertIn("Do not substitute", event.channel_prompt)
+        self.assertNotIn("AEON", event.channel_prompt)
         self.assertEqual(event.message_type, MessageType.TEXT)
         self.assertEqual(event.source.chat_id, "room-agent-1")
         self.assertEqual(event.source.thread_id, "chat-build-1")
@@ -451,39 +461,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             {"room_id": "room-agent-1", "seq": 12, "message_id": "msg-12"},
         )
 
-    def test_configured_aeon_decomposes_mixed_media_before_hermes_handoff(self):
+    def test_mixed_media_is_made_available_without_automatic_inference(self):
         adapter = self.adapter()
+        cast(Any, self.module).check_aeon_requirements = lambda: True
         calls = []
         adapter._finitechat_json = self._record_json(calls)
-
-        class FakeSpecialization:
-            async def interpret(self, instruction, media_urls, media_types):
-                self.call = (instruction, media_urls, media_types)
-                return [
-                    types.SimpleNamespace(
-                        capability="image",
-                        model="aeon-test",
-                        success=True,
-                        text="A red chart.",
-                        error_code="",
-                        retryable=False,
-                        request_id="req-image",
-                        duration_ms=123,
-                    ),
-                    types.SimpleNamespace(
-                        capability="audio",
-                        model="aeon-test",
-                        success=False,
-                        text="Audio was corrupt.",
-                        error_code="media_decode_failed",
-                        retryable=False,
-                        request_id="req-audio",
-                        duration_ms=45,
-                    ),
-                ]
-
-        specialization = FakeSpecialization()
-        adapter._aeon_specialization = specialization
         raw_event = {
             "room_id": "room-agent-1",
             "seq": 20,
@@ -497,25 +479,38 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         asyncio.run(adapter._handle_finitechat_event(raw_event))
 
-        self.assertEqual(
-            specialization.call,
-            (
-                "Compare these inputs",
-                ["/tmp/chart.png", "/tmp/clip.wav"],
-                ["image/png", "audio/wav"],
-            ),
-        )
         event = adapter.handled_messages[0]
         self.assertEqual(event.message_type, MessageType.TEXT)
         self.assertEqual(event.media_urls, [])
-        self.assertIn('"capability":"image"', event.text)
-        self.assertIn('"model":"aeon-test"', event.text)
-        self.assertIn('"status":"PASS"', event.text)
-        self.assertIn('"capability":"audio"', event.text)
-        self.assertIn('"status":"FAIL"', event.text)
-        self.assertIn('"error_code":"media_decode_failed"', event.text)
+        self.assertEqual(event.text.count('"attachment_id":"attachment_'), 2)
+        self.assertIn('"mime_type":"image/png"', event.text)
+        self.assertIn('"mime_type":"audio/wav"', event.text)
+        self.assertNotIn("specialization_results", event.text)
+        self.assertNotIn('"model"', event.text)
+        self.assertNotIn('"status"', event.text)
 
-    def test_text_only_event_receives_aeon_acceptance_contract(self):
+    def test_media_uses_normal_hermes_path_when_aeon_is_not_configured(self):
+        adapter = self.adapter()
+        cast(Any, self.module).check_aeon_requirements = lambda: False
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 22,
+            "message_id": "msg-22",
+            "text": "Describe this",
+            "attachments": [{"path": "/tmp/chart.png", "mime_type": "image/png"}],
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        event = adapter.handled_messages[0]
+        self.assertEqual(event.text, "Describe this")
+        self.assertEqual(event.media_urls, ["/tmp/chart.png"])
+        self.assertEqual(event.media_types, ["image/png"])
+        self.assertEqual(event.message_type, MessageType.PHOTO)
+
+    def test_text_only_event_does_not_receive_aeon_policy(self):
         adapter = self.adapter()
         calls = []
         adapter._finitechat_json = self._record_json(calls)
@@ -531,9 +526,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         event = adapter.handled_messages[0]
         self.assertEqual(event.text, raw_event["text"])
-        self.assertIn("AEON not tested", event.channel_prompt)
-        self.assertIn("actual inbound Finite Chat attachments", event.channel_prompt)
-        self.assertIn("request_id", event.channel_prompt)
+        self.assertIsNone(event.channel_prompt)
 
     def test_unavailable_encrypted_attachment_delivers_caption_as_text_then_acks(self):
         adapter = self.adapter()
