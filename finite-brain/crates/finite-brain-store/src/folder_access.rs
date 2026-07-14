@@ -14,10 +14,39 @@ impl BrainStore {
             });
         }
 
-        let vault = self.load_core_vault(vault_id)?;
+        let mut vault = self.load_core_vault(vault_id)?;
+        let adds_personal_members = vault.kind == VaultKind::Personal;
+        if adds_personal_members {
+            if vault
+                .owner_user_id
+                .as_ref()
+                .is_some_and(|owner| access_user_ids.contains(owner))
+            {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "Personal Vault owner cannot be an ordinary Folder member".to_owned(),
+                });
+            }
+            for user_id in access_user_ids {
+                if !vault
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == *user_id)
+                {
+                    vault.members.push(VaultMember {
+                        user_id: user_id.clone(),
+                        folder_access: BTreeSet::from([folder.id.clone()]),
+                    });
+                }
+            }
+        }
         self.validate_folder_request(&vault, folder, access_user_ids, grants)?;
 
         let tx = self.conn.transaction()?;
+        if adds_personal_members {
+            for user_id in access_user_ids {
+                insert_member_if_missing(&tx, vault_id, user_id)?;
+            }
+        }
         insert_folder(&tx, vault_id, folder, false)?;
         insert_folder_access(&tx, vault_id, &folder.id, access_user_ids)?;
         for grant in grants {
@@ -109,15 +138,38 @@ impl BrainStore {
         user_id: &UserId,
         grant: &FolderKeyGrantMetadata,
     ) -> Result<(), StoreError> {
-        let stored = self.load_vault(vault_id)?;
+        let mut stored = self.load_vault(vault_id)?;
         let folder = stored
             .vault
             .folders
             .iter()
             .find(|folder| folder.id == *folder_id)
+            .cloned()
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: folder_id.to_string(),
             })?;
+        let adds_personal_member = stored.vault.kind == VaultKind::Personal
+            && !stored
+                .vault
+                .members
+                .iter()
+                .any(|member| member.user_id == *user_id);
+        if adds_personal_member {
+            if folder.access != FolderAccessMode::Restricted {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "Personal Vault shared access requires a restricted Folder".to_owned(),
+                });
+            }
+            if stored.vault.owner_user_id.as_ref() == Some(user_id) {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "Personal Vault owner cannot be an ordinary Folder member".to_owned(),
+                });
+            }
+            stored.vault.members.push(VaultMember {
+                user_id: user_id.clone(),
+                folder_access: BTreeSet::from([folder_id.clone()]),
+            });
+        }
         validate_access_membership(&stored.vault, &BTreeSet::from([user_id.clone()]))?;
         validate_grant_metadata(grant)?;
         validate_grant_issuer(&stored.vault, grant)?;
@@ -197,6 +249,9 @@ impl BrainStore {
         };
 
         let tx = self.conn.transaction()?;
+        if adds_personal_member {
+            insert_member_if_missing(&tx, vault_id, user_id)?;
+        }
         if inserts_access_row {
             tx.execute(
                 "INSERT INTO folder_access (vault_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
@@ -249,6 +304,31 @@ impl BrainStore {
                 reason: "folder access target does not currently have access".to_owned(),
             });
         }
+        let is_active_agent_workspace = self.conn.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM brain_email_access_delegations
+                WHERE vault_id = ?1
+                  AND agent_npub = ?2
+                  AND workspace_folder_id = ?3
+                  AND status = 'active'
+            )
+            "#,
+            params![
+                vault_id.as_str(),
+                removed_user_id.as_str(),
+                folder_id.as_str()
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if is_active_agent_workspace {
+            return Err(StoreError::BrokenInvariant {
+                reason:
+                    "active Agent Workspace access must be removed through delegation revocation"
+                        .to_owned(),
+            });
+        }
 
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = new_key_version;
@@ -271,6 +351,19 @@ impl BrainStore {
                 removed_user_id.as_str()
             ],
         )?;
+        if stored.vault.kind == VaultKind::Personal {
+            let has_remaining_scope = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM folder_access WHERE vault_id = ?1 AND user_id = ?2)",
+                params![vault_id.as_str(), removed_user_id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !has_remaining_scope {
+                tx.execute(
+                    "DELETE FROM vault_members WHERE vault_id = ?1 AND user_id = ?2",
+                    params![vault_id.as_str(), removed_user_id.as_str()],
+                )?;
+            }
+        }
         tx.execute(
             "UPDATE folders SET current_key_version = ?3 WHERE vault_id = ?1 AND id = ?2",
             params![vault_id.as_str(), folder_id.as_str(), new_key_version],

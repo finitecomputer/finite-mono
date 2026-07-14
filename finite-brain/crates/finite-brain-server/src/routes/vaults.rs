@@ -81,7 +81,7 @@ pub(crate) async fn vault_metadata_handler(
         store.mounted_folder_projection(&vault_id, &UserId::new(actor_npub.clone())?)?
     };
 
-    let mut response = metadata_response_with_mounts(stored, mounted_folders);
+    let mut response = metadata_response_for_actor(stored, mounted_folders, &actor_npub);
     {
         let store = state.store.lock().map_err(lock_error)?;
         enrich_metadata_identities(&store, &mut response)?;

@@ -94,6 +94,13 @@ const context = {
   },
   window: {
     __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    location: {
+      hash: "",
+      href: "http://finite.test/client",
+      origin: "http://finite.test",
+      pathname: "/client",
+      search: "",
+    },
   },
 };
 context.globalThis = context;
@@ -185,6 +192,9 @@ function invitationPanelTestSeams() {
   );
   assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
+  testContext.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    testContext.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(testContext.window.nostr)
+  );
   assert.ok(seams, "The Product Client must expose the captured invitation panel seams to this deterministic test");
   return { context: testContext, elements: testElements, seams };
 }
@@ -229,6 +239,9 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   vm.runInNewContext(seamSource, testContext, {
     filename: "product-client-clipboard-invitation-feedback.test.js",
   });
+  testContext.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    testContext.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(testContext.window.nostr)
+  );
   assert.ok(seams, "The Product Client must expose the captured clipboard and invitation seams");
   return { context: testContext, elements: testElements, seams };
 }
@@ -511,8 +524,8 @@ const prepareDraftWriteSource = source.slice(
 );
 assert.match(
   prepareDraftWriteSource,
-  /signEvent:\s*requireNip07SignEvent\(\),/,
-  "Save must sign its Page revision through the session-aware NIP-07 adapter"
+  /signEvent:\s*requireBrainEventAuthorizer\("folder-object-revision"\),/,
+  "Save must authorize its Page revision through the bounded Brain identity contract"
 );
 
 const deletePageFromContextTargetSource = source.slice(
@@ -521,8 +534,8 @@ const deletePageFromContextTargetSource = source.slice(
 );
 assert.match(
   deletePageFromContextTargetSource,
-  /signEvent:\s*requireNip07SignEvent\(\),/,
-  "Delete Page must sign its tombstone through the session-aware NIP-07 adapter"
+  /signEvent:\s*requireBrainEventAuthorizer\("folder-object-tombstone"\),/,
+  "Delete Page must authorize its tombstone through the bounded Brain identity contract"
 );
 
 const reportClientActionFailureSource = source.slice(
@@ -836,6 +849,10 @@ assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeho
 assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
+assert.match(htmlSource, /id="agentWorkspacePairingSection"/);
+assert.match(htmlSource, /id="agentWorkspaceNpubInput"/);
+assert.match(htmlSource, /id="pairAgentWorkspaceButton"/);
+assert.match(htmlSource, /id="agentWorkspacePairingList"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
 assert.match(htmlSource, /class="vault-access-action-grid"/);
 assert.match(htmlSource, />\s*Manage members\s*</);
@@ -859,6 +876,16 @@ assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
+assert.match(
+  source,
+  /onOptionalClick\("pairAgentWorkspaceButton"/,
+  "The Personal Vault owner pairing control must invoke the pairing flow"
+);
+assert.match(
+  source,
+  /window\.addEventListener\?\.\("finite:account-session-ended", expireBrainIdentitySession\)/,
+  "Account session expiry must immediately drop the Brain identity capability"
+);
 assert.match(htmlSource, /id="manageVaultCreateDetails"/);
 assert.doesNotMatch(htmlSource, /id="vaultControlDetails"/);
 assert.doesNotMatch(htmlSource, /id="vaultSelect"/);
@@ -1703,7 +1730,7 @@ assert.match(source, /mountAccessPanelInSettings\(\)/);
 assert.match(source, /mountInvitationPanelInSettings\(\)/);
 assert.match(source, /mount\.appendChild\(panel\)/);
 assert.match(source, /for \(const node of invitationNodes\) \{[\s\S]{0,160}mount\.appendChild\(node\)/);
-assert.match(source, /start\(\) \{[\s\S]{0,180}mountAccessPanelInSettings\(\);[\s\S]{0,120}mountInvitationPanelInSettings\(\);/);
+assert.match(source, /start\(options = \{\}\) \{[\s\S]{0,520}mountAccessPanelInSettings\(\);[\s\S]{0,120}mountInvitationPanelInSettings\(\);/);
 assert.match(source, /state\.settingsSection = "invitations"/);
 assert.match(source, /function settingsSectionsForSession\(sessionStatus = state\.sessionStatus\) \{\s*return sessionStatus === SESSION_STATUS\.UNLOCKED \? SETTINGS_SECTIONS : \["session"\];/s);
 assert.match(source, /settingsNav\.hidden = sessionOnly;/);
@@ -2027,6 +2054,244 @@ assert.doesNotMatch(
 );
 
 (async () => {
+  const rawNip07Provider = {
+    async getPublicKey() {
+      return "11".repeat(32);
+    },
+    async signEvent(eventTemplate) {
+      return { ...eventTemplate, id: "signed-event", pubkey: "11".repeat(32), sig: "signature" };
+    },
+    nip44: {
+      async decrypt(_peerHex, ciphertext) {
+        return `opened:${ciphertext}`;
+      },
+      async encrypt(_peerHex, plaintext) {
+        return `wrapped:${plaintext}`;
+      },
+    },
+  };
+  const brainIdentityProvider = client.createNip07BrainIdentityProvider(rawNip07Provider);
+  assert.equal(
+    client.agentWorkspacePairingsPath("personal/user"),
+    "/_admin/vaults/personal%2Fuser/agent-workspace-pairings"
+  );
+  const personalOwnerNpub = client.npubFromHex("33".repeat(32));
+  const personalMemberNpub = client.npubFromHex("44".repeat(32));
+  assert.equal(
+    client.metadataVaultRole(
+      { kind: "personal", ownerUserId: personalOwnerNpub },
+      personalOwnerNpub
+    ),
+    "owner"
+  );
+  assert.equal(
+    client.metadataVaultRole(
+      { kind: "personal", ownerUserId: personalOwnerNpub },
+      personalMemberNpub
+    ),
+    "member"
+  );
+  assert.equal(
+    JSON.stringify(client.agentWorkspacePairingRows({
+      pairings: [
+        {
+          delegationId: "delegation-1",
+          agentNpub: client.npubFromHex("22".repeat(32)),
+          workspaceFolderId: "agent-workspace",
+          status: "active",
+          scope: { folderIds: ["agent-workspace"], permission: "read_write" },
+          audit: [{ action: "created", occurredAt: "2026-07-13T00:00:00.000Z" }],
+        },
+      ],
+    })),
+    JSON.stringify([
+    {
+      id: "delegation-1",
+      agentNpub: client.npubFromHex("22".repeat(32)),
+      folderId: "agent-workspace",
+      status: "active",
+      title: "Agent Workspace",
+      detail: "Active · read/write · explicitly paired by the Personal Vault owner",
+    },
+    ])
+  );
+  assert.equal(brainIdentityProvider.version, "finite-brain-identity-provider-v1");
+  assert.deepEqual(
+    Object.keys(brainIdentityProvider).sort(),
+    [
+      "authorizeBrainEvent",
+      "authorizeHttpRequest",
+      "identifyMember",
+      "openGrantPayload",
+      "version",
+      "wrapGrantPayload",
+    ]
+  );
+  assert.equal(brainIdentityProvider.signEvent, undefined);
+  assert.equal(brainIdentityProvider.decrypt, undefined);
+  assert.equal(brainIdentityProvider.nip44, undefined);
+  const missingBrainIdentityProvider = client.deriveBrainIdentityProviderState(null);
+  assert.equal(missingBrainIdentityProvider.status, "setup_required");
+  assert.equal(missingBrainIdentityProvider.label, "setup required");
+  assert.equal(
+    missingBrainIdentityProvider.detail,
+    "Set up your Finite Chat Hosted Device before opening Brain."
+  );
+  assert.equal(missingBrainIdentityProvider.canConnect, false);
+  assert.equal(
+    client.configureBrainIdentityProvider(brainIdentityProvider).status,
+    "ready"
+  );
+  const connectedBrainIdentity = await client.connectBrainIdentityProvider({
+    loadVisibleVaults: false,
+  });
+  assert.equal(connectedBrainIdentity.publicKeyHex, "11".repeat(32));
+  assert.match(connectedBrainIdentity.npub, /^npub1/);
+  const agentNpub = client.npubFromHex("22".repeat(32));
+  const pairingPlan = await client.buildAgentWorkspacePairingRequest({
+    vaultId: "personal",
+    ownerNpub: connectedBrainIdentity.npub,
+    agentNpub,
+    folderId: "agent-workspace",
+    name: "Agent Workspace",
+    path: "Agent Workspace",
+    rawKey: new Uint8Array(32).fill(9),
+    createdAtUnix: 1_780_000_000,
+    encrypt: async (_peerHex, plaintext) => `wrapped:${plaintext}`,
+    signEvent: rawNip07Provider.signEvent,
+  });
+  assert.equal(pairingPlan.path, "/_admin/vaults/personal/agent-workspace-pairings");
+  assert.equal(pairingPlan.body.agentNpub, agentNpub);
+  assert.equal(
+    JSON.stringify(pairingPlan.body.grants.map((grant) => grant.recipientNpub).sort()),
+    JSON.stringify([agentNpub, connectedBrainIdentity.npub].sort())
+  );
+  assert.equal(pairingPlan.body.accessChangeEvent.kind, 30078);
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeHttpRequest({
+        eventTemplate: { kind: 1, created_at: 1, tags: [], content: "" },
+      }),
+    /Brain HTTP authorization requires kind 27235/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeHttpRequest({
+        method: "GET",
+        url: "http://finite.test/not-a-brain-route",
+        bodyText: "",
+        eventTemplate: {
+          kind: 27235,
+          created_at: 1,
+          tags: [
+            ["u", "http://finite.test/not-a-brain-route"],
+            ["method", "GET"],
+            ["nonce", "ab".repeat(16)],
+          ],
+          content: "",
+        },
+      }),
+    /protected Brain route/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeHttpRequest({
+        method: "GET",
+        url: "http://attacker.test/_admin/vaults",
+        bodyText: "",
+        eventTemplate: {
+          kind: 27235,
+          created_at: 1,
+          tags: [
+            ["u", "http://attacker.test/_admin/vaults"],
+            ["method", "GET"],
+            ["nonce", "ab".repeat(16)],
+          ],
+          content: "",
+        },
+      }),
+    /official Brain origin/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeHttpRequest({
+        method: "GET",
+        url: "http://finite.test/_admin/vaults",
+        bodyText: "",
+        eventTemplate: {
+          kind: 27235,
+          created_at: 1,
+          tags: [
+            ["u", "http://attacker.test/_admin/vaults"],
+            ["method", "GET"],
+            ["nonce", "ab".repeat(16)],
+          ],
+          content: "",
+        },
+      }),
+    /URL tag/
+  );
+  const brainAuthHeader = await client.buildBrainAuthorizationHeader(
+    brainIdentityProvider,
+    { authScheme: "Nostr", publicBaseUrl: "http://finite.test" },
+    "/_admin/vaults",
+    { method: "GET" }
+  );
+  assert.match(brainAuthHeader, /^Nostr /);
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeBrainEvent({
+        intent: "arbitrary-sign",
+        eventTemplate: { kind: 1, created_at: 1, tags: [], content: "sign anything" },
+      }),
+    /unsupported Brain identity intent/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeBrainEvent({
+        intent: "vault-access-change",
+        eventTemplate: { kind: 1, created_at: 1, tags: [], content: "wrong kind" },
+      }),
+    /vault-access-change requires Nostr kind 30078/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.authorizeBrainEvent({
+        intent: "vault-access-change",
+        eventTemplate: {
+          kind: 30078,
+          created_at: 1,
+          tags: [["d", "finite-unrelated-action:anything"]],
+          content: "{}",
+        },
+      }),
+    /does not match vault-access-change/
+  );
+  await assert.rejects(
+    () =>
+      brainIdentityProvider.openGrantPayload({
+        purpose: "arbitrary-decryption",
+        peerPublicKeyHex: "22".repeat(32),
+        ciphertext: "ciphertext",
+      }),
+    /unsupported Brain grant purpose/
+  );
+  const providerAuthorizedAccessEvent = await client.buildAdminAccessChangeEvent({
+    action: "add-member",
+    adminNpub: connectedBrainIdentity.npub,
+    brainIdentityProvider,
+    changeId: "provider-bound-access-change",
+    createdAtUnix: 1_780_000_000,
+    targetNpub: connectedBrainIdentity.npub,
+    vaultId: "personal",
+  });
+  assert.equal(providerAuthorizedAccessEvent.kind, 30078);
+  assert.equal(providerAuthorizedAccessEvent.id, "signed-event");
+  const expiredBrainIdentity = client.expireBrainIdentitySession();
+  assert.equal(expiredBrainIdentity.sessionStatus, "locked");
+  assert.equal(expiredBrainIdentity.providerStatus, "setup_required");
+  assert.equal(client.deriveBrainIdentityProviderState(null).canConnect, false);
+
   await assertClipboardInvitationFeedbackContracts();
   assertNestedManageVaultReturnContract();
   assertModalFocusAndContextRouteContracts();
@@ -2211,6 +2476,7 @@ assert.doesNotMatch(
   );
   let grantSignedIndex = 0;
   context.window.nostr = {
+    getPublicKey: async () => "00".repeat(32),
     signEvent: async (template) => ({
       ...template,
       id: `signed-event-${++grantSignedIndex}`,
@@ -2222,6 +2488,8 @@ assert.doesNotMatch(
       encrypt: fakeEncrypt,
     },
   };
+  client.configureBrainIdentityProvider(client.createNip07BrainIdentityProvider(context.window.nostr));
+  await client.connectBrainIdentityProvider({ loadVisibleVaults: false });
   const accessEvent = await client.buildAdminAccessChangeEvent({
     ...accessPayload,
     createdAtUnix: Date.parse(accessPayload.createdAt) / 1000,
@@ -3816,6 +4084,11 @@ assert.doesNotMatch(
     getPublicKey() {},
     signEvent: async (event) => ({ ...event, id: "signed-event", pubkey: persistedDeletePubkey, sig: "signature" }),
   };
+  persistedDelete.context.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    persistedDelete.context.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(
+      persistedDelete.context.window.nostr
+    )
+  );
   persistedDeleteState.activeVaultId = "personal";
   persistedDeleteState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
   persistedDeleteState.pubkeyHex = persistedDeletePubkey;
@@ -3885,6 +4158,11 @@ assert.doesNotMatch(
       sig: "save-race-signature",
     }),
   };
+  saveRace.context.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    saveRace.context.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(
+      saveRace.context.window.nostr
+    )
+  );
   const makeDeferred = () => {
     let resolve;
     const promise = new Promise((nextResolve) => {
@@ -4918,8 +5196,14 @@ assert.doesNotMatch(
 
   const accessLoss = accessFailureTestSeams();
   accessLoss.context.window.nostr = {
+    getPublicKey: async () => "00".repeat(32),
     signEvent: async (event) => ({ ...event, id: "auth-event", pubkey: "00".repeat(32), sig: "signature" }),
   };
+  accessLoss.context.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    accessLoss.context.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(
+      accessLoss.context.window.nostr
+    )
+  );
   accessLoss.context.fetch = async () => ({
     ok: false,
     status: 403,

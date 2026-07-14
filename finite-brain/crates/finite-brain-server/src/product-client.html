@@ -397,6 +397,30 @@
             </div>
 
             <div class="access-state-stack" aria-label="Access details">
+              <section id="agentWorkspacePairingSection" class="vault-management-section" hidden>
+                <div class="access-section-header">
+                  <span class="section-title">Agent access</span>
+                  <span id="agentWorkspacePairingCount" class="pill muted">0</span>
+                </div>
+                <p class="access-field-hint">Pair an Agent Principal with one dedicated restricted Folder in your Personal Vault.</p>
+                <div class="access-inline-form">
+                  <label class="access-inline-field">
+                    <span class="sr-only">Agent Principal</span>
+                    <input
+                      id="agentWorkspaceNpubInput"
+                      placeholder="Agent npub… or name@domain"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <button id="pairAgentWorkspaceButton" type="button" class="access-add-button">Pair</button>
+                  </label>
+                  <p id="agentWorkspacePairingHint" class="access-field-hint">Only the Personal Vault owner can pair an agent.</p>
+                </div>
+                <ol id="agentWorkspacePairingList" class="access-who-has-list">
+                  <li class="access-empty-state">No agent is paired yet.</li>
+                </ol>
+              </section>
+
               <section id="accessWhoHasSection" class="access-who-has-section vault-management-section">
                 <div class="access-section-header">
                   <span class="section-title">Who has access</span>

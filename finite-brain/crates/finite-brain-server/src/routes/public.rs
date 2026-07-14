@@ -163,7 +163,8 @@ fn smoke_nip07_signer_script(secret_hex: &str) -> String {
   }})();
   const configuredSecretHex = fragmentSecretHex || defaultSecretHex;
   const installSmokeSigner = (secretHex) => {{
-    window.nostr = client.createLocalNip07ProviderFromSecret(secretHex);
+    const nip07Provider = client.createLocalNip07ProviderFromSecret(secretHex);
+    client.configureBrainIdentityProvider(client.createNip07BrainIdentityProvider(nip07Provider));
     const keypair = client.inviteUnwrapKeypairFromSecret(secretHex);
     window.__FINITE_BRAIN_SMOKE_NIP07__ = {{
       publicKeyHex: keypair.publicKeyHex,

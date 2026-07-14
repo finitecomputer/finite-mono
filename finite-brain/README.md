@@ -117,6 +117,17 @@ is not itself a decryption key. Brain must issue current Folder Key Grants to
 the agent npub for every Folder the delegation makes readable; revoking the
 delegation must stop future authorization without rebinding either identity.
 
+The first user-owned pairing surface is
+`POST /_admin/vaults/{vault_id}/agent-workspace-pairings`. The Personal Vault
+owner signs the HTTP request and the included Folder access-change event, and
+supplies current NIP-59 grants for both the owner and the distinct Agent
+Principal. Brain atomically records the active delegation, non-admin
+membership, dedicated restricted Agent Workspace Folder, Folder Access, and
+grants. An exact retry returns the same delegation with `duplicate: true`.
+Owners inspect the durable scope and audit record with `GET` on the same path.
+This route is Brain-specific; other services own separate adapters and
+delegations.
+
 External email redemption is recorded as email-only identity proof in
 finite-identity, but FiniteBrain folder sharing still requires an npub target
 for encrypted Folder Key Grants. Email-address folder grants are intentionally

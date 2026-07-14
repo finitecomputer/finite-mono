@@ -24,13 +24,13 @@ use finite_brain_core::{
     validate_admin_access_change_event, validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder, EncryptedVaultExport,
-    FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
-    IdentityAlias, LinkStatus, MountedFolderProjection, MountedFolderState,
-    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredShareLink,
-    StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord, StoredVault,
-    StoredVaultInvitation, SyncRecordInput, SyncRecordType, VaultInvitationTargetKind,
-    VisibleVault, VisibleVaultRole,
+    BrainEmailAccessDelegation, BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder,
+    EncryptedVaultExport, EnsurePersonalAgentWorkspaceInput, FolderKeyGrantMetadata,
+    FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord, IdentityAlias, LinkStatus,
+    MountedFolderProjection, MountedFolderState, SharedFolderConnectionStatus,
+    SharedFolderDirection, StoreError, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, StoredVault, StoredVaultInvitation,
+    SyncRecordInput, SyncRecordType, VaultInvitationTargetKind, VisibleVault, VisibleVaultRole,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -509,6 +509,10 @@ pub fn router_with_state(state: ServerState) -> Router {
         .route(
             "/_admin/vaults/{vault_id}/members/{target_npub}",
             axum::routing::delete(remove_member_handler),
+        )
+        .route(
+            "/_admin/vaults/{vault_id}/agent-workspace-pairings",
+            get(list_agent_workspace_pairings_handler).post(ensure_agent_workspace_pairing_handler),
         )
         .route("/_admin/vaults/{vault_id}/admins", post(add_admin_handler))
         .route(
@@ -1557,6 +1561,13 @@ fn append_folder_key_grant_record(
     vault_id: &VaultId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), ApiError> {
+    store.submit_sync_record(vault_id, &folder_key_grant_sync_record(grant)?)?;
+    Ok(())
+}
+
+fn folder_key_grant_sync_record(
+    grant: &FolderKeyGrantMetadata,
+) -> Result<SyncRecordInput, ApiError> {
     let event = Event::from_json(grant.wrapped_event_json.clone()).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -1565,19 +1576,15 @@ fn append_folder_key_grant_record(
     })?;
     let payload_json = serde_json::to_string(&folder_key_grant_response(grant.clone()))
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"))?;
-    store.submit_sync_record(
-        vault_id,
-        &SyncRecordInput::Control(ControlSyncRecord {
-            record_event_id: event.id.to_hex(),
-            record_type: SyncRecordType::FolderKeyGrant,
-            folder_id: Some(grant.folder_id.clone()),
-            actor_npub: grant.issuer_npub.clone(),
-            client_created_at: grant.created_at.clone(),
-            payload_json,
-            record_event_kind: event.kind.as_u16(),
-        }),
-    )?;
-    Ok(())
+    Ok(SyncRecordInput::Control(ControlSyncRecord {
+        record_event_id: event.id.to_hex(),
+        record_type: SyncRecordType::FolderKeyGrant,
+        folder_id: Some(grant.folder_id.clone()),
+        actor_npub: grant.issuer_npub.clone(),
+        client_created_at: grant.created_at.clone(),
+        payload_json,
+        record_event_kind: event.kind.as_u16(),
+    }))
 }
 
 fn append_admin_access_change_record(
@@ -1587,20 +1594,28 @@ fn append_admin_access_change_record(
     event: &Event,
     payload: &AdminAccessChangePayload,
 ) -> Result<(), ApiError> {
-    let folder_id = payload.folder_id.as_ref().map(FolderId::new).transpose()?;
     store.submit_sync_record(
         vault_id,
-        &SyncRecordInput::Control(ControlSyncRecord {
-            record_event_id: event.id.to_hex(),
-            record_type: SyncRecordType::VaultAdminAccessChange,
-            folder_id,
-            actor_npub: UserId::new(actor_npub.to_owned())?,
-            client_created_at: payload.created_at.clone(),
-            payload_json: event.content.clone(),
-            record_event_kind: event.kind.as_u16(),
-        }),
+        &admin_access_change_sync_record(actor_npub, event, payload)?,
     )?;
     Ok(())
+}
+
+fn admin_access_change_sync_record(
+    actor_npub: &str,
+    event: &Event,
+    payload: &AdminAccessChangePayload,
+) -> Result<SyncRecordInput, ApiError> {
+    let folder_id = payload.folder_id.as_ref().map(FolderId::new).transpose()?;
+    Ok(SyncRecordInput::Control(ControlSyncRecord {
+        record_event_id: event.id.to_hex(),
+        record_type: SyncRecordType::VaultAdminAccessChange,
+        folder_id,
+        actor_npub: UserId::new(actor_npub.to_owned())?,
+        client_created_at: payload.created_at.clone(),
+        payload_json: event.content.clone(),
+        record_event_kind: event.kind.as_u16(),
+    }))
 }
 
 fn resolve_user_id_set(
@@ -1865,8 +1880,10 @@ fn folder_visible(stored: &StoredVault, folder_id: &FolderId, actor_npub: &str) 
 
     match folder.access {
         FolderAccessMode::Owner => is_owner,
-        FolderAccessMode::AdminOnly => is_admin,
-        FolderAccessMode::AllMembers => is_admin || is_member,
+        FolderAccessMode::AdminOnly => is_owner || is_admin,
+        FolderAccessMode::AllMembers => {
+            is_owner || is_admin || (stored.vault.kind == VaultKind::Organization && is_member)
+        }
         FolderAccessMode::Restricted => {
             is_owner
                 || is_admin
@@ -1991,12 +2008,22 @@ fn organization_mount_id(
 fn ensure_metadata_visible(stored: &StoredVault, actor_npub: &str) -> Result<(), ApiError> {
     match stored.vault.kind {
         VaultKind::Personal => {
-            if stored
+            let is_owner = stored
                 .vault
                 .owner_user_id
                 .as_ref()
-                .is_some_and(|owner| owner.as_str() == actor_npub)
-            {
+                .is_some_and(|owner| owner.as_str() == actor_npub);
+            let is_limited_member = stored
+                .vault
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == actor_npub)
+                && stored
+                    .vault
+                    .folders
+                    .iter()
+                    .any(|folder| folder_visible(stored, &folder.id, actor_npub));
+            if is_owner || is_limited_member {
                 Ok(())
             } else {
                 Err(ApiError::new(
@@ -3087,6 +3114,512 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let metadata: VaultMetadataResponse = read_json(response).await;
         assert!(metadata.folders.iter().any(|folder| folder.id == "notes"));
+    }
+
+    #[tokio::test]
+    async fn personal_vault_member_sees_and_writes_only_their_restricted_folder() {
+        let owner_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let member_npub = npub(&member_keys);
+        let router = test_router();
+
+        let create = post_vault(
+            router.clone(),
+            &owner_keys,
+            &create_vault_body("personal", "personal"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let all_members_folder_body = serde_json::json!({
+            "folderId": "implicit-personal-share",
+            "name": "Implicit Personal Share",
+            "role": "folder",
+            "access": "all_members",
+            "parentFolderId": null,
+            "path": "Implicit Personal Share",
+            "sharedFolderSource": false,
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-implicit-personal-member-v1", 1, member_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-reject-implicit-personal-share",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("implicit-personal-share"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let all_members_folder = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/folders",
+            Some(all_members_folder_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            all_members_folder,
+            StatusCode::BAD_REQUEST,
+            "Personal Vault shared access requires a restricted Folder",
+        )
+        .await;
+
+        let create_folder_body = serde_json::json!({
+            "folderId": "member-workspace",
+            "name": "Member Workspace",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "Member Workspace",
+            "sharedFolderSource": false,
+            "accessUserIds": [member_npub],
+            "grants": [
+                folder_key_grant_value("grant-member-workspace-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-member-workspace-member-v1", 1, member_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-create-member-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("member-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_folder = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/folders",
+            Some(create_folder_body),
+            TEST_NOW,
+        )
+        .await;
+        if create_folder.status() != StatusCode::OK {
+            let error: ApiErrorBody = read_json(create_folder).await;
+            panic!("personal restricted Folder create failed: {}", error.error);
+        }
+
+        let list = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list: VisibleVaultsResponse = read_json(list).await;
+        assert_eq!(list.vaults.len(), 1);
+        assert_eq!(list.vaults[0].vault_id, "personal");
+        assert_eq!(list.vaults[0].role, "member");
+
+        let metadata = get_metadata(router.clone(), &member_keys, "personal", TEST_NOW + 2).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: VaultMetadataResponse = read_json(metadata).await;
+        assert_eq!(metadata.owner_user_id.as_deref(), Some(owner_npub.as_str()));
+        assert_eq!(metadata.members, vec![member_npub.clone()]);
+        assert!(metadata.admins.is_empty());
+        assert_eq!(metadata.folders.len(), 1);
+        assert_eq!(metadata.folders[0].id, "member-workspace");
+        assert_eq!(
+            metadata.folders[0].access_user_ids,
+            vec![member_npub.clone()]
+        );
+        assert_eq!(metadata.grant_count, 1);
+
+        let export = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/_admin/vaults/personal/export",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(export.status(), StatusCode::OK);
+        let export: EncryptedVaultExportResponse = read_json(export).await;
+        assert_eq!(export.folders.len(), 1);
+        assert_eq!(export.folders[0].id, "member-workspace");
+        assert_eq!(export.key_grants.len(), 1);
+        assert_eq!(export.key_grants[0].recipient_npub, member_npub);
+
+        let object_path =
+            "/_admin/vaults/personal/folders/member-workspace/objects/obj_000000000901";
+        let object_body = object_write_body(
+            &member_keys,
+            RevisionFixture {
+                vault_id: "personal",
+                folder_id: "member-workspace",
+                object_id: "obj_000000000901",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "member encrypted page",
+                nonce: 90,
+                record_type: false,
+            },
+        );
+        let write = authed_request(
+            router.clone(),
+            &member_keys,
+            "PUT",
+            object_path,
+            Some(object_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(write.status(), StatusCode::OK);
+
+        let owner_only = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            "/_admin/vaults/personal/folders/getting-started/objects/obj_000000000001",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(owner_only, StatusCode::FORBIDDEN, "folder access required").await;
+
+        let add_admin_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &member_keys,
+                "personal",
+                "change-member-add-admin",
+                AdminAccessAction::AddAdmin,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let add_admin = authed_request(
+            router,
+            &member_keys,
+            "POST",
+            "/_admin/vaults/personal/admins",
+            Some(add_admin_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            add_admin,
+            StatusCode::FORBIDDEN,
+            "vault admin access required",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn owner_pairs_agent_workspace_idempotently_with_audited_delegation() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
+        let router = test_router();
+        let create = post_vault(
+            router.clone(),
+            &owner_keys,
+            &create_vault_body("personal", "personal"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let pairing_path = "/_admin/vaults/personal/agent-workspace-pairings";
+        let pairing_body = serde_json::json!({
+            "agentNpub": agent_npub,
+            "folderId": "agent-workspace",
+            "name": "Agent Workspace",
+            "path": "Agent Workspace",
+            "grants": [
+                folder_key_grant_value("grant-agent-workspace-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-agent-workspace-agent-v1", 1, agent_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-pair-agent-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let paired = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            pairing_path,
+            Some(pairing_body.clone()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(paired.status(), StatusCode::OK);
+        let paired: serde_json::Value = read_json(paired).await;
+        assert_eq!(paired["vaultId"], "personal");
+        assert_eq!(paired["ownerNpub"], owner_npub);
+        assert_eq!(paired["agentNpub"], agent_npub);
+        assert_eq!(paired["workspaceFolderId"], "agent-workspace");
+        assert_eq!(paired["status"], "active");
+        assert_eq!(paired["duplicate"], false);
+        assert_eq!(
+            paired["scope"]["folderIds"],
+            serde_json::json!(["agent-workspace"])
+        );
+        assert_eq!(paired["audit"][0]["action"], "created");
+        assert_eq!(paired["audit"][0]["actorNpub"], owner_npub);
+
+        let retry = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            pairing_path,
+            Some(pairing_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry: serde_json::Value = read_json(retry).await;
+        assert_eq!(retry["delegationId"], paired["delegationId"]);
+        assert_eq!(retry["duplicate"], true);
+        assert_eq!(retry["audit"].as_array().unwrap().len(), 1);
+
+        let mismatched_retry_body = serde_json::json!({
+            "agentNpub": agent_npub,
+            "folderId": "agent-workspace",
+            "name": "Different Workspace",
+            "path": "Agent Workspace",
+            "grants": [
+                folder_key_grant_value("grant-agent-workspace-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-agent-workspace-agent-v1", 1, agent_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-pair-agent-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        });
+        let mismatched_retry = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            pairing_path,
+            Some(mismatched_retry_body.to_string()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            mismatched_retry,
+            StatusCode::BAD_REQUEST,
+            "existing Brain Email Access Delegation does not match requested pairing",
+        )
+        .await;
+
+        let listed = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            pairing_path,
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: serde_json::Value = read_json(listed).await;
+        assert_eq!(listed["pairings"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["pairings"][0]["agentNpub"], agent_npub);
+
+        let agent_metadata =
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 1).await;
+        assert_eq!(agent_metadata.status(), StatusCode::OK);
+        let agent_metadata: VaultMetadataResponse = read_json(agent_metadata).await;
+        assert_eq!(agent_metadata.folders.len(), 1);
+        assert_eq!(agent_metadata.folders[0].id, "agent-workspace");
+        assert_eq!(agent_metadata.members, vec![agent_npub.clone()]);
+        assert!(agent_metadata.admins.is_empty());
+
+        let object_path =
+            "/_admin/vaults/personal/folders/agent-workspace/objects/obj_000000000902";
+        let object_body = object_write_body(
+            &agent_keys,
+            RevisionFixture {
+                vault_id: "personal",
+                folder_id: "agent-workspace",
+                object_id: "obj_000000000902",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "agent workspace page",
+                nonce: 91,
+                record_type: false,
+            },
+        );
+        let write = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            object_path,
+            Some(object_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(write.status(), StatusCode::OK);
+
+        let pull = authed_request(
+            router.clone(),
+            &agent_keys,
+            "GET",
+            "/_admin/vaults/personal/sync/records?after=0&limit=20",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(pull.status(), StatusCode::OK);
+        let pull: SyncPullResponse = read_json(pull).await;
+        assert!(pull.records.iter().any(|record| {
+            record.record_type == "folder_object_revision"
+                && record.folder_id.as_deref() == Some("agent-workspace")
+                && record.actor_npub == agent_npub
+        }));
+
+        let broaden_body = serde_json::json!({
+            "targetNpub": agent_npub,
+            "grant": folder_key_grant_value(
+                "grant-agent-broaden-restricted-v1",
+                1,
+                agent_npub.as_str()
+            ),
+            "accessChangeEvent": admin_event(
+                &agent_keys,
+                "personal",
+                "change-agent-broaden-scope",
+                AdminAccessAction::GrantFolderAccess,
+                Some("restricted"),
+                Some(agent_npub.as_str()),
+                Some(1),
+            ),
+        })
+        .to_string();
+        let broaden = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            "/_admin/vaults/personal/folders/restricted/access",
+            Some(broaden_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            broaden,
+            StatusCode::FORBIDDEN,
+            "vault admin access required",
+        )
+        .await;
+
+        let remove_active_pairing_scope_body = serde_json::json!({
+            "newKeyVersion": 2,
+            "grants": [
+                folder_key_grant_value(
+                    "grant-agent-workspace-owner-v2",
+                    2,
+                    owner_npub.as_str()
+                )
+            ],
+            "reencryptedRecords": [
+                rotation_object_value(
+                    &owner_keys,
+                    "personal",
+                    "agent-workspace",
+                    "obj_000000000902",
+                    2,
+                    Some(1),
+                    2,
+                    "owner attempted generic agent scope removal",
+                    92,
+                )
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-owner-remove-active-agent-scope",
+                AdminAccessAction::RemoveFolderAccess,
+                Some("agent-workspace"),
+                Some(agent_npub.as_str()),
+                Some(2),
+            ),
+        })
+        .to_string();
+        let remove_active_pairing_scope = authed_request(
+            router.clone(),
+            &owner_keys,
+            "DELETE",
+            &format!("/_admin/vaults/personal/folders/agent-workspace/access/{agent_npub}"),
+            Some(remove_active_pairing_scope_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            remove_active_pairing_scope,
+            StatusCode::BAD_REQUEST,
+            "active Agent Workspace access must be removed through delegation revocation",
+        )
+        .await;
+
+        let change_membership_body = serde_json::json!({
+            "targetNpub": owner_npub,
+            "accessChangeEvent": admin_event(
+                &agent_keys,
+                "personal",
+                "change-agent-membership",
+                AdminAccessAction::AddMember,
+                None,
+                Some(owner_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let change_membership = authed_request(
+            router,
+            &agent_keys,
+            "POST",
+            "/_admin/vaults/personal/members",
+            Some(change_membership_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            change_membership,
+            StatusCode::FORBIDDEN,
+            "vault admin access required",
+        )
+        .await;
     }
 
     #[tokio::test]

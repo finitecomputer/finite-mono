@@ -60,6 +60,14 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 7)? {
+            tx.execute_batch(SCHEMA_V7)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![7, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -395,6 +403,41 @@ CREATE UNIQUE INDEX vault_invitations_pending_npub_target
 CREATE UNIQUE INDEX vault_invitations_pending_email_target
     ON vault_invitations(vault_id, invited_email)
     WHERE status = 'pending' AND target_kind = 'email_bootstrap';
+"#;
+
+const SCHEMA_V7: &str = r#"
+CREATE TABLE brain_email_access_delegations (
+    id TEXT PRIMARY KEY NOT NULL,
+    vault_id TEXT NOT NULL,
+    owner_npub TEXT NOT NULL,
+    agent_npub TEXT NOT NULL,
+    workspace_folder_id TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_by_npub TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    UNIQUE (vault_id, agent_npub),
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE,
+    FOREIGN KEY (vault_id, workspace_folder_id)
+        REFERENCES folders(vault_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE brain_email_access_delegation_audit (
+    id TEXT PRIMARY KEY NOT NULL,
+    delegation_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('created', 'revoked')),
+    actor_npub TEXT NOT NULL,
+    subject_npub TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX brain_email_access_delegation_audit_by_delegation
+    ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);
 "#;
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {

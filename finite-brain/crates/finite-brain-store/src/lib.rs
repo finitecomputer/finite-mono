@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod agent_access;
 mod folder_access;
 mod links;
 mod loading;
@@ -151,6 +152,52 @@ pub struct StoredVault {
     pub grants: Vec<FolderKeyGrantMetadata>,
     /// Folders that still need current grants.
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
+}
+
+/// Durable product-scoped delegation between a Personal Vault owner and one Agent Principal.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BrainEmailAccessDelegation {
+    pub id: String,
+    pub vault_id: VaultId,
+    pub owner_npub: UserId,
+    pub agent_npub: UserId,
+    pub workspace_folder_id: FolderId,
+    pub status: String,
+    pub created_by_npub: UserId,
+    pub created_at: String,
+    pub updated_at: String,
+    pub audit: Vec<BrainEmailAccessDelegationAudit>,
+}
+
+/// One durable explanation of a delegation lifecycle change.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BrainEmailAccessDelegationAudit {
+    pub id: String,
+    pub action: String,
+    pub actor_npub: UserId,
+    pub subject_npub: UserId,
+    pub folder_ids: Vec<FolderId>,
+    pub occurred_at: String,
+}
+
+/// Validated store input for the initial user-first Agent Workspace pairing.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EnsurePersonalAgentWorkspaceInput {
+    pub delegation_id: String,
+    pub vault_id: VaultId,
+    pub owner_npub: UserId,
+    pub agent_npub: UserId,
+    pub folder: Folder,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub sync_records: Vec<SyncRecordInput>,
+    pub created_at: String,
+}
+
+/// Result of creating or safely retrying one initial Agent Workspace pairing.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EnsurePersonalAgentWorkspaceOutcome {
+    pub delegation: BrainEmailAccessDelegation,
+    pub duplicate: bool,
 }
 
 /// Verified display metadata for one canonical Nostr identity.
@@ -951,31 +998,42 @@ impl BrainStore {
         actor_npub: &UserId,
     ) -> Result<EncryptedVaultExport, StoreError> {
         let stored = self.load_vault(vault_id)?;
-        if !vault_visible_to_actor(&stored.vault, actor_npub) {
+        let has_personal_folder_scope = stored.vault.kind != VaultKind::Personal
+            || stored.vault.owner_user_id.as_ref() == Some(actor_npub)
+            || stored
+                .folder_access
+                .values()
+                .any(|users| users.contains(actor_npub));
+        if !vault_visible_to_actor(&stored.vault, actor_npub) || !has_personal_folder_scope {
             return Err(StoreError::BrokenInvariant {
                 reason: "vault access required for encrypted export".to_owned(),
             });
         }
         let is_admin = stored.vault.admins.contains(actor_npub);
+        let is_limited_personal_member = stored.vault.kind == VaultKind::Personal
+            && stored.vault.owner_user_id.as_ref() != Some(actor_npub);
         let folders = stored
             .vault
             .folders
             .iter()
-            .map(|folder| EncryptedExportFolder {
-                id: folder.id.clone(),
-                path: folder.path.clone(),
-                access: folder.access,
-                current_key_version: folder.current_key_version,
-                shared_folder_source: folder.shared_folder_source,
-                accessible: folder_visible_to_actor(&stored, &folder.id, actor_npub),
+            .filter_map(|folder| {
+                let accessible = folder_visible_to_actor(&stored, &folder.id, actor_npub);
+                (!is_limited_personal_member || accessible).then(|| EncryptedExportFolder {
+                    id: folder.id.clone(),
+                    path: folder.path.clone(),
+                    access: folder.access,
+                    current_key_version: folder.current_key_version,
+                    shared_folder_source: folder.shared_folder_source,
+                    accessible,
+                })
             })
             .collect::<Vec<_>>();
         let objects = self
             .load_current_objects(vault_id)?
             .into_iter()
-            .map(|object| {
+            .filter_map(|object| {
                 let accessible = folder_visible_to_actor(&stored, &object.folder_id, actor_npub);
-                EncryptedExportObject {
+                (!is_limited_personal_member || accessible).then(|| EncryptedExportObject {
                     folder_id: object.folder_id,
                     object_id: object.object_id,
                     payload_json: accessible.then_some(object.payload_json),
@@ -983,7 +1041,7 @@ impl BrainStore {
                     updated_at: object.updated_at,
                     deleted: object.deleted,
                     opaque: !accessible,
-                }
+                })
             })
             .collect::<Vec<_>>();
         let key_grants = stored
@@ -1120,6 +1178,16 @@ impl BrainStore {
         access_user_ids: &BTreeSet<UserId>,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
+        if vault.kind == VaultKind::Personal
+            && !matches!(
+                folder.access,
+                FolderAccessMode::Owner | FolderAccessMode::Restricted
+            )
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Vault shared access requires a restricted Folder".to_owned(),
+            });
+        }
         validate_hierarchy(&self.conn, &vault.id, folder)?;
         validate_access_list_shape(folder, access_user_ids)?;
         validate_access_membership(vault, access_user_ids)?;
@@ -1910,12 +1978,16 @@ fn validate_bootstrap_output(output: &BootstrapOutput) -> Result<(), StoreError>
 fn validate_loaded_vault(vault: &Vault) -> Result<(), StoreError> {
     match vault.kind {
         VaultKind::Personal => {
-            if vault.owner_user_id.is_none()
-                || !vault.members.is_empty()
-                || !vault.admins.is_empty()
+            let Some(owner) = vault.owner_user_id.as_ref() else {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "personal vault must have an owner".to_owned(),
+                });
+            };
+            if !vault.admins.is_empty()
+                || vault.members.iter().any(|member| member.user_id == *owner)
             {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "personal vault must have an owner and no ordinary members/admins"
+                    reason: "personal vault owner is sole admin authority and cannot be an ordinary member"
                         .to_owned(),
                 });
             }
@@ -2350,12 +2422,6 @@ fn validate_access_membership(
     vault: &Vault,
     access_user_ids: &BTreeSet<UserId>,
 ) -> Result<(), StoreError> {
-    if vault.kind == VaultKind::Personal && !access_user_ids.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "personal vault folder access is not ordinary membership access".to_owned(),
-        });
-    }
-
     let members = vault
         .members
         .iter()
@@ -2413,10 +2479,16 @@ fn required_recipients(
 
 fn vault_visible_to_actor(vault: &Vault, actor_npub: &UserId) -> bool {
     match vault.kind {
-        VaultKind::Personal => vault
-            .owner_user_id
-            .as_ref()
-            .is_some_and(|owner| owner == actor_npub),
+        VaultKind::Personal => {
+            vault
+                .owner_user_id
+                .as_ref()
+                .is_some_and(|owner| owner == actor_npub)
+                || vault
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == *actor_npub)
+        }
         VaultKind::Organization => vault
             .members
             .iter()
@@ -2451,8 +2523,10 @@ fn folder_visible_to_actor(
 
     match folder.access {
         FolderAccessMode::Owner => is_owner,
-        FolderAccessMode::AdminOnly => is_admin,
-        FolderAccessMode::AllMembers => is_admin || is_member,
+        FolderAccessMode::AdminOnly => is_owner || is_admin,
+        FolderAccessMode::AllMembers => {
+            is_owner || is_admin || (stored.vault.kind == VaultKind::Organization && is_member)
+        }
         FolderAccessMode::Restricted => {
             is_owner
                 || is_admin
@@ -4793,23 +4867,82 @@ mod tests {
     }
 
     #[test]
-    fn rejects_personal_member_mutation() {
+    fn rejects_unscoped_personal_member_mutation() {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
         store.create_vault_bootstrap(&output, &grants).unwrap();
+        let vault_id = VaultId::new("personal").unwrap();
+        let member = UserId::new("npub-member").unwrap();
 
         assert_eq!(
-            store
-                .add_member(
-                    &VaultId::new("personal").unwrap(),
-                    &UserId::new("npub-member").unwrap(),
-                )
-                .unwrap_err(),
+            store.add_member(&vault_id, &member).unwrap_err(),
             StoreError::BrokenInvariant {
                 reason: "member/admin mutation requires an organization vault".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn personal_member_is_removed_when_their_last_folder_scope_is_removed() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let grants = grants_for_required(&output.required_key_grants, "npub-owner");
+        store.create_vault_bootstrap(&output, &grants).unwrap();
+        let vault_id = VaultId::new("personal").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let folder = strategy_folder();
+        store
+            .create_folder(
+                &vault_id,
+                &folder,
+                &BTreeSet::from([member.clone()]),
+                &[
+                    grant(
+                        "grant-personal-strategy-owner",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-owner",
+                    ),
+                    grant(
+                        "grant-personal-strategy-member",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        member.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        store
+            .rotate_folder_key_for_access_removal(
+                &vault_id,
+                &folder.id,
+                &member,
+                2,
+                &[grant(
+                    "grant-personal-strategy-owner-v2",
+                    "strategy",
+                    2,
+                    "npub-owner",
+                    "npub-owner",
+                )],
+                &[],
+                "2026-07-13T00:00:00.000Z",
+            )
+            .unwrap();
+
+        let stored = store.load_vault(&vault_id).unwrap();
+        assert!(
+            !stored
+                .vault
+                .members
+                .iter()
+                .any(|stored_member| stored_member.user_id == member)
+        );
+        assert!(store.list_visible_vaults(&member).unwrap().is_empty());
     }
 
     #[test]

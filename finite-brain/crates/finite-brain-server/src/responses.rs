@@ -27,6 +27,52 @@ pub(crate) fn metadata_response(stored: StoredVault) -> VaultMetadataResponse {
     metadata_response_with_mounts(stored, Vec::new())
 }
 
+pub(crate) fn metadata_response_for_actor(
+    mut stored: StoredVault,
+    mounted_folders: Vec<MountedFolderProjection>,
+    actor_npub: &str,
+) -> VaultMetadataResponse {
+    let is_limited_personal_member = stored.vault.kind == VaultKind::Personal
+        && stored
+            .vault
+            .owner_user_id
+            .as_ref()
+            .is_none_or(|owner| owner.as_str() != actor_npub);
+    if !is_limited_personal_member {
+        return metadata_response_with_mounts(stored, mounted_folders);
+    }
+
+    let visible_folder_ids = stored
+        .vault
+        .folders
+        .iter()
+        .filter(|folder| folder_visible(&stored, &folder.id, actor_npub))
+        .map(|folder| folder.id.clone())
+        .collect::<BTreeSet<_>>();
+    stored
+        .vault
+        .folders
+        .retain(|folder| visible_folder_ids.contains(&folder.id));
+    stored
+        .vault
+        .members
+        .retain(|member| member.user_id.as_str() == actor_npub);
+    stored.grants.retain(|grant| {
+        grant.recipient_npub.as_str() == actor_npub && visible_folder_ids.contains(&grant.folder_id)
+    });
+    stored
+        .folder_access
+        .retain(|folder_id, _| visible_folder_ids.contains(folder_id));
+    for users in stored.folder_access.values_mut() {
+        users.retain(|user| user.as_str() == actor_npub);
+    }
+    stored
+        .setup_incomplete_folder_ids
+        .retain(|folder_id| visible_folder_ids.contains(folder_id));
+
+    metadata_response_with_mounts(stored, Vec::new())
+}
+
 pub(crate) fn metadata_response_with_mounts(
     stored: StoredVault,
     mounted_folders: Vec<MountedFolderProjection>,

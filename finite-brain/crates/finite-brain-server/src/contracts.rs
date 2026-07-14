@@ -289,6 +289,63 @@ pub struct FolderKeyGrantRequest {
     pub created_at: Option<String>,
 }
 
+/// Owner-authorized creation or retry of one initial Agent Workspace pairing.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureAgentWorkspacePairingRequest {
+    pub agent_npub: String,
+    pub folder_id: String,
+    pub name: String,
+    pub path: String,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Durable Brain Email Access Delegation exposed to its Personal Vault owner.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspacePairingResponse {
+    pub delegation_id: String,
+    pub vault_id: String,
+    pub owner_npub: String,
+    pub agent_npub: String,
+    pub workspace_folder_id: String,
+    pub scope: AgentWorkspaceScopeResponse,
+    pub status: String,
+    pub created_by_npub: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub audit: Vec<AgentWorkspacePairingAuditResponse>,
+    pub duplicate: bool,
+}
+
+/// Initial and current Folder scope for an Agent Workspace delegation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspaceScopeResponse {
+    pub folder_ids: Vec<String>,
+    pub permission: String,
+}
+
+/// Durable explanation of one delegation lifecycle action.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspacePairingAuditResponse {
+    pub id: String,
+    pub action: String,
+    pub actor_npub: String,
+    pub subject_npub: String,
+    pub folder_ids: Vec<String>,
+    pub occurred_at: String,
+}
+
+/// Owner-visible current Agent Workspace pairings.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspacePairingListResponse {
+    pub pairings: Vec<AgentWorkspacePairingResponse>,
+}
+
 /// Add/remove member/admin request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
