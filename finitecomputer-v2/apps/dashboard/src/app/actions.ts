@@ -81,6 +81,11 @@ export async function recoverCoreRuntimeAction(formData: FormData) {
   if (!access || access.mode !== "core" || !access.coreProject) {
     throw new Error("Chat recovery is not available for this agent.");
   }
+  // Operator-only maintenance for now; the section is admin-gated in the UI
+  // and this keeps a hand-crafted POST from bypassing that.
+  if (!access.viewer.isAdmin) {
+    throw new Error("Chat recovery is not available for this agent.");
+  }
   if (!coreProjectSupportsHostedRecovery(access.coreProject)) {
     throw new Error("Chat recovery is not available for this agent.");
   }
