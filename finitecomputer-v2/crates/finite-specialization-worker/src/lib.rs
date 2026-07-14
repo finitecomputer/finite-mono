@@ -785,9 +785,13 @@ fn uniform_video_timestamps(duration_seconds: f64, max_frames: usize) -> Vec<f64
     if !duration_seconds.is_finite() || duration_seconds <= 0.0 || max_frames == 0 {
         return Vec::new();
     }
-    let last = (duration_seconds - 0.001).max(0.0);
+    // Long clips are sampled through the final complete one-second interval.
+    // Container duration is an end timestamp, and seeking within milliseconds
+    // of it commonly succeeds without producing a decodable frame.
+    let last = (duration_seconds - 1.0).max(0.0);
     if duration_seconds <= max_frames as f64 {
-        return (0..=last.floor() as usize)
+        let final_whole_second = (duration_seconds - 0.001).max(0.0).floor() as usize;
+        return (0..=final_whole_second)
             .map(|second| second as f64)
             .collect();
     }
@@ -2790,8 +2794,11 @@ mod tests {
         let long = uniform_video_timestamps(60.0, 16);
         assert_eq!(long.len(), 16);
         assert_eq!(long[0], 0.0);
-        assert!((long[15] - 59.999).abs() < 0.01);
+        assert!((long[15] - 59.0).abs() < 0.01);
         assert!(long.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let exact_duration = uniform_video_timestamps(72.0, 16);
+        assert!((exact_duration[15] - 71.0).abs() < 0.01);
     }
 
     #[tokio::test]
