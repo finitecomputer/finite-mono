@@ -209,7 +209,7 @@ struct CanaryObservation {
 
 #[derive(Debug)]
 struct FailureObservation {
-    request_id: String,
+    request_identifier: u64,
     duration_milliseconds: u64,
     error_code: &'static str,
     state_version: &'static str,
@@ -258,7 +258,7 @@ impl CapabilityMetrics {
             let mut errors = self.errors_by_code[capability.index()].lock().unwrap();
             *errors.entry(error_code).or_default() += 1;
             *self.last_failures[capability.index()].lock().unwrap() = Some(FailureObservation {
-                request_id: request_id.to_owned(),
+                request_identifier: bounded_request_identifier(request_id),
                 duration_milliseconds,
                 error_code,
                 state_version: capability.prompt_version(),
@@ -297,7 +297,9 @@ impl CapabilityMetrics {
             "# HELP finite_specialization_errors_total Specialization capability errors.\n",
             "# TYPE finite_specialization_errors_total counter\n",
             "# HELP finite_specialization_last_failure_duration_milliseconds Most recent failure timing and safe correlation fields for one capability.\n",
-            "# TYPE finite_specialization_last_failure_duration_milliseconds gauge\n"
+            "# TYPE finite_specialization_last_failure_duration_milliseconds gauge\n",
+            "# HELP finite_specialization_last_failure_request_identifier Numeric identifier returned with the most recent failure for one capability.\n",
+            "# TYPE finite_specialization_last_failure_request_identifier gauge\n"
         )
         .to_owned();
         for capability in Capability::ALL {
@@ -339,13 +341,20 @@ impl CapabilityMetrics {
                 .as_ref()
             {
                 rendered.push_str(&format!(
-                    "finite_specialization_last_failure_duration_milliseconds{{capability=\"{}\",error_class=\"{}\",model_alias=\"{}\",request_id=\"{}\",state_version=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                    "finite_specialization_last_failure_duration_milliseconds{{capability=\"{}\",error_class=\"{}\",model_alias=\"{}\",state_version=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
                     capability.name(),
                     prometheus_label(failure.error_code),
                     model_alias,
-                    prometheus_label(&failure.request_id),
                     failure.state_version,
                     failure.duration_milliseconds,
+                ));
+                rendered.push_str(&format!(
+                    "finite_specialization_last_failure_request_identifier{{capability=\"{}\",error_class=\"{}\",model_alias=\"{}\",state_version=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                    capability.name(),
+                    prometheus_label(failure.error_code),
+                    model_alias,
+                    failure.state_version,
+                    failure.request_identifier,
                 ));
             }
         }
@@ -510,7 +519,7 @@ async fn chat_completions(
     let request_id = correlation_request_id(&headers);
     let mut result = tokio::time::timeout(
         Duration::from_secs(state.config.request_deadline_seconds),
-        analyze_capability(&state, &input, capability),
+        analyze_capability(&state, &input, capability, &request_id),
     )
     .await
     .unwrap_or_else(|_| {
@@ -556,15 +565,25 @@ fn generated_request_id() -> String {
     )
 }
 
+fn bounded_request_identifier(request_id: &str) -> u64 {
+    let hash = request_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    (hash & ((1_u64 << 53) - 1)).max(1)
+}
+
 async fn analyze_capability(
     state: &WorkerState,
     input: &ChatCompletionRequest,
     capability: Capability,
+    correlation_id: &str,
 ) -> Result<Value, WorkerError> {
     match capability {
-        Capability::Image => analyze_image(state, input).await,
-        Capability::Audio => analyze_audio(state, input).await,
-        Capability::Video => analyze_video(state, input).await,
+        Capability::Image => analyze_image(state, input, correlation_id).await,
+        Capability::Audio => analyze_audio(state, input, correlation_id).await,
+        Capability::Video => analyze_video(state, input, correlation_id).await,
     }
 }
 
@@ -616,6 +635,7 @@ fn classify_request(input: &ChatCompletionRequest) -> Result<Capability, WorkerE
 async fn analyze_image(
     state: &WorkerState,
     input: &ChatCompletionRequest,
+    correlation_id: &str,
 ) -> Result<Value, WorkerError> {
     let started = Instant::now();
     let limits = effective_image_limits(&state.config, input)?;
@@ -634,6 +654,7 @@ async fn analyze_image(
             state.config.spark_base_url.trim_end_matches('/')
         ))
         .bearer_auth(spark_token)
+        .header("x-request-id", correlation_id)
         .json(&upstream_request)
         .send()
         .await
@@ -659,19 +680,21 @@ async fn analyze_image(
         .map_err(|_| WorkerError::bad_gateway("Spark vision response was not valid JSON"))?;
     let mut output = chat_completion_response_from_responses(&upstream, &state.config.vision_model);
     let text = truncate_chars(
-        extract_response_text(&upstream).unwrap_or_default(),
+        required_upstream_text(extract_response_text(&upstream), Capability::Image)?,
         limits.max_output_chars,
     );
     output["choices"][0]["message"]["content"] = json!(text);
-    let request_id = upstream
+    let upstream_request_id = upstream
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("resp_finite_specialization");
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| WorkerError::bad_gateway("Spark image response omitted its request ID"))?;
     output["specialization_result"] = json!({
         "capability": "image",
         "text": text,
         "model": state.config.vision_model,
-        "request_id": request_id,
+        "request_id": correlation_id,
+        "upstream_request_id": upstream_request_id,
         "duration_ms": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     });
     Ok(output)
@@ -786,6 +809,7 @@ enum MediaSource {
 async fn analyze_audio(
     state: &WorkerState,
     input: &ChatCompletionRequest,
+    correlation_id: &str,
 ) -> Result<Value, WorkerError> {
     let started = Instant::now();
     let limits = effective_media_limits(state, input, Capability::Audio)?;
@@ -803,6 +827,7 @@ async fn analyze_audio(
             state.config.spark_base_url.trim_end_matches('/')
         ))
         .bearer_auth(spark_token)
+        .header("x-request-id", correlation_id)
         .json(&upstream_request)
         .send()
         .await
@@ -827,13 +852,14 @@ async fn analyze_audio(
     let upstream: Value = serde_json::from_str(&body)
         .map_err(|_| WorkerError::bad_gateway("Spark audio response was not valid JSON"))?;
     let text = truncate_chars(
-        extract_chat_completion_text(&upstream).unwrap_or_default(),
+        required_upstream_text(extract_chat_completion_text(&upstream), Capability::Audio)?,
         limits.max_output_chars,
     );
-    let request_id = upstream
+    let upstream_request_id = upstream
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("chatcmpl_finite_specialization")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| WorkerError::bad_gateway("Spark audio response omitted its request ID"))?
         .to_owned();
     let mut output = upstream;
     if output.pointer("/choices/0/message").is_none() {
@@ -846,7 +872,8 @@ async fn analyze_audio(
         Capability::Audio,
         text,
         &state.config.vision_model,
-        &request_id,
+        correlation_id,
+        &upstream_request_id,
         started,
     );
     Ok(output)
@@ -855,6 +882,7 @@ async fn analyze_audio(
 async fn analyze_video(
     state: &WorkerState,
     input: &ChatCompletionRequest,
+    correlation_id: &str,
 ) -> Result<Value, WorkerError> {
     let started = Instant::now();
     let limits = effective_media_limits(state, input, Capability::Video)?;
@@ -872,6 +900,7 @@ async fn analyze_video(
             state.config.spark_base_url.trim_end_matches('/')
         ))
         .bearer_auth(spark_token)
+        .header("x-request-id", correlation_id)
         .json(&upstream_request)
         .send()
         .await
@@ -896,20 +925,22 @@ async fn analyze_video(
     let upstream: Value = serde_json::from_str(&body)
         .map_err(|_| WorkerError::bad_gateway("Spark video response was not valid JSON"))?;
     let text = truncate_chars(
-        extract_response_text(&upstream).unwrap_or_default(),
+        required_upstream_text(extract_response_text(&upstream), Capability::Video)?,
         limits.max_output_chars,
     );
-    let request_id = upstream
+    let upstream_request_id = upstream
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("resp_finite_specialization");
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| WorkerError::bad_gateway("Spark video response omitted its request ID"))?;
     let mut output = chat_completion_response_from_responses(&upstream, &state.config.vision_model);
     output["choices"][0]["message"]["content"] = json!(text);
     output["specialization_result"] = specialization_result(
         Capability::Video,
         text,
         &state.config.vision_model,
-        request_id,
+        correlation_id,
+        upstream_request_id,
         started,
     );
     Ok(output)
@@ -920,6 +951,7 @@ fn specialization_result(
     text: String,
     model: &str,
     request_id: &str,
+    upstream_request_id: &str,
     started: Instant,
 ) -> Value {
     json!({
@@ -927,8 +959,22 @@ fn specialization_result(
         "text": text,
         "model": model,
         "request_id": request_id,
+        "upstream_request_id": upstream_request_id,
         "duration_ms": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     })
+}
+
+fn required_upstream_text(
+    text: Option<String>,
+    capability: Capability,
+) -> Result<String, WorkerError> {
+    text.filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            WorkerError::bad_gateway(format!(
+                "Spark {} response omitted assistant text",
+                capability.name()
+            ))
+        })
 }
 
 fn effective_media_limits(
@@ -1564,7 +1610,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
             stream: Some(false),
             finite_specialization: None,
         };
-        let passed = analyze_image(&state, &request)
+        let passed = analyze_image(&state, &request, &generated_request_id())
             .await
             .ok()
             .and_then(|value| {
@@ -1587,7 +1633,7 @@ async fn run_audio_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
         interval.tick().await;
         let started = Instant::now();
         let request = audio_canary_request();
-        let passed = analyze_audio(&state, &request)
+        let passed = analyze_audio(&state, &request, &generated_request_id())
             .await
             .ok()
             .and_then(|value| {
@@ -1610,7 +1656,7 @@ async fn run_video_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
         interval.tick().await;
         let started = Instant::now();
         let passed = match video_canary_request(&state).await {
-            Ok(request) => analyze_video(&state, &request)
+            Ok(request) => analyze_video(&state, &request, &generated_request_id())
                 .await
                 .ok()
                 .and_then(|value| {
@@ -2395,6 +2441,7 @@ impl IntoResponse for WorkerError {
                     "code": self.code,
                 },
                 "request_id": request_id,
+                "request_identifier": bounded_request_identifier(&request_id),
             })),
         )
             .into_response()
@@ -2555,8 +2602,12 @@ mod tests {
             "video_url": { "url": "data:video/mp4;base64,bm90LW1lZGlh" }
         })]);
 
-        let audio_error = analyze_audio(&state, &audio).await.unwrap_err();
-        let video_error = analyze_video(&state, &video).await.unwrap_err();
+        let audio_error = analyze_audio(&state, &audio, "req-audio-corrupt")
+            .await
+            .unwrap_err();
+        let video_error = analyze_video(&state, &video, "req-video-corrupt")
+            .await
+            .unwrap_err();
 
         assert_eq!(audio_error.status, StatusCode::BAD_REQUEST);
         assert_eq!(audio_error.code, "media_decode_failed");
@@ -2966,12 +3017,23 @@ mod tests {
             "The image shows a dashboard."
         );
         assert_eq!(response["specialization_result"]["model"], "qwopus-test");
-        assert_eq!(response["specialization_result"]["request_id"], "resp_ok");
+        let request_id = response["specialization_result"]["request_id"]
+            .as_str()
+            .unwrap();
+        assert!(request_id.starts_with("req_specialization_"));
+        assert_eq!(
+            response["specialization_result"]["upstream_request_id"],
+            "resp_ok"
+        );
         assert!(response["specialization_result"]["duration_ms"].is_u64());
         let captured = captured.lock().unwrap().clone().unwrap();
         assert_eq!(
             captured.0.get("authorization").unwrap().to_str().unwrap(),
             "Bearer spark-secret"
+        );
+        assert_eq!(
+            captured.0.get("x-request-id").unwrap().to_str().unwrap(),
+            request_id
         );
         assert_eq!(captured.1["model"], "qwopus-test");
         assert_eq!(captured.1["input"][0]["role"], "developer");
@@ -2980,6 +3042,58 @@ mod tests {
             "aeon-image-analysis-v1"
         );
         assert_eq!(captured.1["input"][1]["content"][1]["type"], "input_image");
+    }
+
+    #[tokio::test]
+    async fn malformed_success_is_rejected_for_every_capability() {
+        let image = request_with_media_parts(vec![
+            json!({ "type": "text", "text": "Describe" }),
+            json!({
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
+            }),
+        ]);
+        let video_config = test_config("http://127.0.0.1:9");
+        let video = video_canary_request(&test_state(video_config))
+            .await
+            .unwrap();
+        let requests = [
+            (Capability::Image, image),
+            (Capability::Audio, audio_canary_request()),
+            (Capability::Video, video),
+        ];
+
+        for (capability, request) in requests {
+            let upstream_url = spawn_spark_mock(
+                Arc::new(Mutex::new(None::<(HeaderMap, Value)>)),
+                StatusCode::OK,
+                json!({}),
+            )
+            .await;
+            let worker = spawn_worker(test_config(&upstream_url)).await;
+            let response = reqwest::Client::new()
+                .post(format!("{worker}/v1/chat/completions"))
+                .bearer_auth("worker-secret")
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: Value = response.json().await.unwrap();
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "{}: {body}",
+                capability.name()
+            );
+            assert_eq!(
+                body["error"]["code"],
+                "upstream_error",
+                "{}: {body}",
+                capability.name()
+            );
+        }
     }
 
     #[test]
@@ -3076,6 +3190,10 @@ mod tests {
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "media_decode_failed");
         assert_eq!(body["request_id"], "req-malformed-image");
+        assert_eq!(
+            body["request_identifier"],
+            bounded_request_identifier("req-malformed-image")
+        );
         let metrics = reqwest::get(format!("{worker}/metrics"))
             .await
             .unwrap()
@@ -3083,8 +3201,12 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "finite_specialization_last_failure_duration_milliseconds{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",request_id=\"req-malformed-image\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}"
+            "finite_specialization_last_failure_duration_milliseconds{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}"
         ));
+        assert!(metrics.contains(&format!(
+            "finite_specialization_last_failure_request_identifier{{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}} {}",
+            bounded_request_identifier("req-malformed-image")
+        )));
     }
 
     #[tokio::test]

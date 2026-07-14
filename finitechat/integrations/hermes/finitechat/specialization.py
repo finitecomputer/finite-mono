@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,9 +89,17 @@ class AeonSpecialization:
         self, instruction: str, media: list[tuple[str, str, str]]
     ) -> CapabilityResult:
         capability = media[0][2]
+        request_id = f"req_hermes_{uuid.uuid4().hex}"
+        deadline = asyncio.get_running_loop().time() + self.timeout
         try:
-            parts = await asyncio.gather(
-                *(_media_part(capability, media_url, media_type) for media_url, media_type, _ in media)
+            parts = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        _media_part(capability, media_url, media_type)
+                        for media_url, media_type, _ in media
+                    )
+                ),
+                timeout=self._remaining(deadline),
             )
             payload: dict[str, Any] = {
                 "model": self.model,
@@ -110,7 +119,8 @@ class AeonSpecialization:
                 "stream": False,
             }
             payload.update(self.extra_body)
-            status, body = await self._request(payload)
+            payload["_finite_request_id"] = request_id
+            status, body = await self._request(payload, deadline)
             if 200 <= status < 300:
                 result = body.get("specialization_result")
                 if not _valid_specialization_result(result, capability):
@@ -120,6 +130,7 @@ class AeonSpecialization:
                         success=False,
                         text="worker response did not contain a valid specialization result",
                         error_code="invalid_upstream_response",
+                        request_id=str(body.get("request_id") or request_id),
                     )
                 return CapabilityResult(
                     capability=result["capability"],
@@ -129,10 +140,10 @@ class AeonSpecialization:
                     request_id=result["request_id"],
                     duration_ms=result["duration_ms"],
                 )
-            return _error_result(capability, self.model, status, body)
+            return _error_result(capability, self.model, status, body, request_id)
         except asyncio.CancelledError:
             raise
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             return CapabilityResult(
                 capability=capability,
                 model=self.model,
@@ -140,6 +151,7 @@ class AeonSpecialization:
                 text=str(exc)[:512] or "specialization request timed out",
                 error_code="request_timeout",
                 retryable=True,
+                request_id=request_id,
             )
         except OSError as exc:
             return CapabilityResult(
@@ -149,6 +161,7 @@ class AeonSpecialization:
                 text=str(exc)[:512] or "specialization transport failed",
                 error_code="upstream_error",
                 retryable=True,
+                request_id=request_id,
             )
         except Exception as exc:
             return CapabilityResult(
@@ -158,20 +171,26 @@ class AeonSpecialization:
                 text=str(exc)[:512],
                 error_code="orchestration_error",
                 retryable=False,
+                request_id=request_id,
             )
 
-    async def _request(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        deadline = asyncio.get_running_loop().time() + self.timeout
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("specialization request timed out")
+        return remaining
+
+    async def _request(
+        self, payload: dict[str, Any], deadline: float
+    ) -> tuple[int, dict[str, Any]]:
         for attempt in range(2):
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError("specialization request timed out")
+            remaining = self._remaining(deadline)
             try:
                 response = await asyncio.wait_for(
                     self._requester(self.base_url, self.api_key, payload, remaining),
                     timeout=remaining,
                 )
-            except (TimeoutError, OSError):
+            except (TimeoutError, asyncio.TimeoutError, OSError):
                 if attempt == 0 and asyncio.get_running_loop().time() < deadline:
                     continue
                 raise
@@ -185,12 +204,14 @@ def compose_for_hermes(results: list[CapabilityResult]) -> str:
         "AEON specialization results follow. Preserve capability-local failures and model provenance."
     ]
     for result in results:
+        request_id = getattr(result, "request_id", "")
+        correlation = f" [request {request_id}]" if request_id else ""
         identity = f"{result.capability} via {result.model}"
         if result.success:
-            lines.append(f"- {identity}: {result.text}")
+            lines.append(f"- {identity}: {result.text}{correlation}")
         else:
             code = result.error_code or "unknown_error"
-            lines.append(f"- {identity} FAILED ({code}): {result.text}")
+            lines.append(f"- {identity} FAILED ({code}): {result.text}{correlation}")
     return "\n".join(lines)
 
 
@@ -207,7 +228,7 @@ def _invocation_groups(
 ) -> list[list[tuple[str, str, str]]]:
     groups: list[list[tuple[str, str, str]]] = []
     image_group: list[tuple[str, str, str]] | None = None
-    for media_url, media_type in zip(media_urls, media_types, strict=False):
+    for media_url, media_type in zip(media_urls, media_types):
         capability = _capability_for_mime(media_type)
         if capability is None:
             continue
@@ -300,7 +321,11 @@ def _choice_text(body: dict[str, Any]) -> str:
 
 
 def _error_result(
-    capability: str, model: str, status: int, body: dict[str, Any]
+    capability: str,
+    model: str,
+    status: int,
+    body: dict[str, Any],
+    fallback_request_id: str,
 ) -> CapabilityResult:
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
     return CapabilityResult(
@@ -310,6 +335,7 @@ def _error_result(
         text=str(error.get("message") or f"specialization request failed with HTTP {status}")[:512],
         error_code=str(error.get("code") or f"http_{status}"),
         retryable=status in RETRYABLE_STATUS_CODES,
+        request_id=str(body.get("request_id") or fallback_request_id),
     )
 
 
@@ -318,12 +344,17 @@ async def _httpx_request(
 ) -> tuple[int, dict[str, Any]]:
     import httpx
 
+    wire_payload = dict(payload)
+    request_id = str(wire_payload.pop("_finite_request_id", ""))
+    headers = {"authorization": f"Bearer {api_key}"}
+    if request_id:
+        headers["x-request-id"] = request_id
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
-                headers={"authorization": f"Bearer {api_key}"},
-                json=payload,
+                headers=headers,
+                json=wire_payload,
             )
     except httpx.TimeoutException as exc:
         raise TimeoutError("specialization request timed out") from exc

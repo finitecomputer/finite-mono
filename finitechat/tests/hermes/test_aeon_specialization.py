@@ -139,7 +139,29 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(payloads), 2)
         self.assertEqual(payloads[0]["model"], payloads[1]["model"])
+        self.assertEqual(
+            payloads[0]["_finite_request_id"], payloads[1]["_finite_request_id"]
+        )
         self.assertTrue(results[0].success)
+
+    async def test_worker_error_request_id_is_preserved_for_hermes(self):
+        async def requester(_base_url, _api_key, _payload, _timeout):
+            return 400, {
+                "error": {"code": "media_decode_failed", "message": "bad audio"},
+                "request_id": "req-worker-error",
+            }
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        result = (
+            await client.interpret(
+                "Listen", ["https://example.com/clip.wav"], ["audio/wav"]
+            )
+        )[0]
+
+        self.assertEqual(result.request_id, "req-worker-error")
+        self.assertIn("[request req-worker-error]", compose_for_hermes([result]))
 
     async def test_timeout_is_reported_after_one_retry(self):
         calls = 0
@@ -190,6 +212,31 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertLess(time.monotonic() - started, 0.15)
         self.assertLess(observed_timeouts[1], observed_timeouts[0])
+        self.assertEqual(result.error_code, "request_timeout")
+
+    async def test_media_preparation_consumes_the_same_end_to_end_deadline(self):
+        calls = 0
+
+        async def requester(_base_url, _api_key, _payload, _timeout):
+            nonlocal calls
+            calls += 1
+            return success("image", "unreachable")
+
+        async def slow_to_thread(_function, *_args, **_kwargs):
+            await asyncio.sleep(1)
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        client.timeout = 0.05
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "image.png"
+            image.write_bytes(b"placeholder")
+            module = sys.modules[AeonSpecialization.__module__]
+            with patch.object(module.asyncio, "to_thread", slow_to_thread):
+                result = (await client.interpret("Describe", [str(image)], ["image/png"]))[0]
+
+        self.assertEqual(calls, 0)
         self.assertEqual(result.error_code, "request_timeout")
 
     async def test_success_requires_complete_normalized_result(self):
