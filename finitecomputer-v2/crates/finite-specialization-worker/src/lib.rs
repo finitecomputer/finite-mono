@@ -1729,15 +1729,15 @@ async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionReque
             "-f",
             "lavfi",
             "-i",
-            "color=c=red:s=32x32:d=2:r=1",
+            "color=c=red:s=64x64:d=1:r=4",
             "-f",
             "lavfi",
             "-i",
-            "color=c=green:s=32x32:d=2:r=1",
+            "color=c=green:s=64x64:d=1:r=4",
             "-f",
             "lavfi",
             "-i",
-            "color=c=blue:s=32x32:d=2:r=1",
+            "color=c=blue:s=64x64:d=1:r=4",
         ])
         .args([
             "-filter_complex",
@@ -1765,7 +1765,7 @@ async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionReque
     Ok(request_with_media_parts(vec![
         json!({
             "type": "text",
-            "text": "Name the three full-frame colors in chronological order. Reply with exactly: RED then GREEN then BLUE."
+            "text": "Name the three full-frame colors in chronological order. Reply with three uppercase color words separated by THEN."
         }),
         json!({
             "type": "video_url",
@@ -2843,15 +2843,18 @@ mod tests {
                     .filter(|text| text.starts_with("Frame at "))
             })
             .collect::<Vec<_>>();
+        assert_eq!(
+            frame_markers,
+            [
+                "Frame at 0.000 seconds",
+                "Frame at 1.000 seconds",
+                "Frame at 2.000 seconds"
+            ]
+        );
         let images = content
             .iter()
             .filter(|part| part["type"] == "input_image")
             .collect::<Vec<_>>();
-        assert_eq!(frame_markers.first(), Some(&"Frame at 0.000 seconds"));
-        assert!(
-            frame_markers.len() >= 5,
-            "canary did not exercise a temporal sequence"
-        );
         assert_eq!(images.len(), frame_markers.len());
         assert!(
             images[0]["image_url"]
