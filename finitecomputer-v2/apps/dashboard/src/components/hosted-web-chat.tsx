@@ -142,7 +142,9 @@ export function HostedWebChat({
   const allowedRoomIds = useMemo(() => {
     const binding = state?.hosted_agent_binding;
     if (!binding) return new Set<string>();
-    return new Set([binding.canonical_room_id, ...binding.associated_room_ids]);
+    // Associated rooms remain in the recovery model, but they are not current
+    // Agent conversations and must never become dashboard message targets.
+    return new Set([binding.canonical_room_id]);
   }, [state?.hosted_agent_binding]);
 
   const selectedRoom = useMemo(

@@ -23,3 +23,4 @@ One line per idea outside the active run. This is not a queue; an item becomes w
 - 2026-07-13 — Paul explicitly accepts or replaces the first-admitted-Principal owner-claim posture before the training cohort; do not let an implementation default make this product decision.
 - 2026-07-13 — Restrict the finite-lat-1 rsync.net archival credential to destination-enforced append-only access while preserving a separate administrative retention path; Paul accepts the current overprovisioned credential as non-blocking hardening debt.
 - 2026-07-13 — Narrow the Nix source inputs so a dashboard-only digest pin does not invalidate and rebuild unrelated Rust service derivations on finite-lat-2.
+- 2026-07-14 — Reconcile the dashboard's npm audit baseline (currently 12 reported transitive findings: 2 low, 7 moderate, 3 high) in a dependency-focused run rather than changing packages during cleanup.

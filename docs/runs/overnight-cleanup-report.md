@@ -1,12 +1,12 @@
 # Overnight Cleanup Report
 
-Status: IN PROGRESS
+Status: COMPLETE WITH BLOCKERS
 
 Run: [`overnight-cleanup.md`](overnight-cleanup.md)
 
 Branch: `overnight-cleanup-2026-07-13`
 
-Base: `ec7bb9031b138919c2696d221d631d54c8060dee`
+Base: `c18bfd88a889802fe42ed4365e301f99089b53a9` (`main`, rebased 2026-07-14)
 
 ## 1. Stale chat pane on switch — SHIPPED
 
@@ -20,7 +20,7 @@ flight.
 
 Verification evidence:
 
-- Dashboard unit tests: 174 passed.
+- Dashboard unit tests: 183 passed.
 - Dashboard lint: passed.
 - Dashboard browser suite: 2 passed, including the forced `OpenChat`/SSE race.
 
@@ -115,9 +115,7 @@ Two-minute morning verification:
    this check.
 
 Paul action: Decide separately whether the 6.8 MB compressed increase is worth
-keeping. A successful full `just dev saas-smoke` remains part of the final run
-gate; this item did not interfere with the already-running stack from the other
-worktree.
+keeping. The final full SaaS smoke passed with this image content.
 
 ## 4. Google scopes per PR #34 — SHIPPED
 
@@ -128,7 +126,7 @@ explicitly: approved Docs writes can use `gws`, while its current Python Docs
 wrapper is read-only and has no Apps Script action. No live Google setting or
 credential was touched.
 
-Verification evidence: All 174 dashboard unit tests passed, including the test
+Verification evidence: All 183 dashboard unit tests passed, including the test
 that requires the dashboard constant and managed-skill JSON to remain identical.
 
 Two-minute morning verification:
@@ -165,7 +163,7 @@ renew live activity. No protocol field or daemon revision behavior changed.
 
 Verification evidence:
 
-- Dashboard unit tests: 175 passed, including exact lease-boundary and
+- Dashboard unit tests: 183 passed, including exact lease-boundary and
   disconnected-stream cases.
 - Dashboard lint: passed.
 - The real-browser fixture passed after sending a fresh turn, removing the
@@ -192,7 +190,7 @@ hosted runtime where the evidence was exact. Full findings are in
 [`skills-audit-2026-07-13.md`](../audits/skills-audit-2026-07-13.md).
 
 Verification evidence: The source inventory found 47 skills and exactly two
-block-scalar descriptions. All 47 skills passed the static checks; all 175
+block-scalar descriptions. All 47 skills passed the static checks; all 183
 dashboard unit tests and dashboard lint passed. Runtime probes confirmed Pillow
 and `gws` present, and `xai-sdk` and `fal-client` absent.
 
@@ -233,10 +231,9 @@ Verification evidence:
   `{"success":false,"analysis":null}`. It did not pretend to see the image.
 
 Why audit-only: The AEON worker is deployed on clawland, not in local
-devfinity. This environment also has no
-`FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`, and the fixed local ports are owned by
-the already-running stack from the other worktree. Standing up a local GPU
-worker or changing an offer would be CREEP.
+devfinity. The protected local inference credential was sufficient for the
+final SaaS smoke, but it does not provide an AEON worker or an existing vision
+offer. Standing up a local GPU worker or changing an offer would be CREEP.
 
 Two-minute morning verification:
 
@@ -270,14 +267,14 @@ editing and music skills are separate direct `fal_client` workflows.
 
 Verification evidence:
 
-- All 175 dashboard unit tests and lint passed.
+- All 183 dashboard unit tests and lint passed.
 - The real-browser fixture passed with proxied image, video, and audio
   attachments and asserted visible native controls for the latter two.
 - The built Hermes image contains `image_generate` in the standard toolset and
   all six provider plugins named above.
-- Live generation was not attempted: `FAL_KEY`, `FAL_API_KEY`, and
-  `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY` are unset, and `fal_client` is absent.
-  Installing it into the image is excluded by this run's dependency fence.
+- Live generation was not attempted: `FAL_KEY` and `FAL_API_KEY` are unset,
+  and `fal_client` is absent. Installing it into the image is excluded by this
+  run's dependency fence.
 
 Two-minute morning verification:
 
@@ -338,3 +335,83 @@ Two-minute morning verification:
 Paul action: Run the disposable-bot verification after the branch image is in
 a local stack. Do not reuse a production bot token. Decide whether the 12.8 MB
 compressed image increase is acceptable for preinstalled messaging support.
+
+## 10. Previous Conversations and wrong-room replies — SHIPPED
+
+Cause: Fresh binding creation is already fail-closed: it accepts exactly the
+one intended profile-chat Room and persists an empty `associated_room_ids`.
+The regression was in dashboard presentation. A retained associated Room was
+rendered under **Previous conversations**, and the chat view treated every
+associated Room as an allowed current selection and message target. A persisted
+legacy selection could therefore keep the UI and outgoing replies in that old
+Room.
+
+What changed: The sidebar now presents only Topics and Chats from the binding's
+canonical Room. The chat view likewise accepts only that canonical Room as a
+current selection and send target. Associated Rooms remain untouched in the
+binding and state projection for recovery evidence; they are no longer
+interactive current conversations. No Sol 2 state, production data, binding,
+protocol, schema, or daemon behavior was changed.
+
+Verification evidence:
+
+- The real-browser fixture synthesized an associated legacy Room, its Topic,
+  Chat, transcript, and a persisted selection pointing into it. The dashboard
+  rendered neither the **Previous conversations** heading nor legacy Topic,
+  fell back to the current canonical Chat, hid the legacy transcript, and sent
+  the next reply to the canonical Room/Topic/Chat. Both browser tests passed.
+- All 183 dashboard unit tests, lint, and the production Next.js build passed.
+- The focused hosted-device test proved a newly created binding starts with no
+  associated Rooms, retains one canonical Room across duplicate selection and
+  restart, refuses a legacy Room as a new-chat target, and reopens canonical.
+
+Two-minute morning verification:
+
+1. Create a disposable Agent in the branch stack and open Chat. Confirm the
+   sidebar contains only its current Topics and Chats and has no **Previous
+   conversations** section.
+2. Select two current Chats in turn, send a uniquely worded message in the
+   second, and confirm it appears in that selected Chat.
+3. Run `npm --prefix finitecomputer-v2/apps/dashboard run test:browser` and
+   confirm the associated-Room regression case remains green.
+
+Paul action: After this branch is deployed, Sol 2 may be removed through the
+normal product deletion path if it has no data worth retaining. Do not manually
+rewrite its binding or associated Rooms. Any attempt to preserve or repair Sol
+2 first needs a read-only binding snapshot plus a named backup and rollback
+boundary as a separate authorized recovery task.
+
+## Final gates
+
+Passed:
+
+- Dashboard `web-check`: 183 unit tests, lint, TypeScript, and production build.
+- Dashboard real-browser suite: 2 passed.
+- Rust formatting check; focused Core, Runner, devfinity, and hosted-device
+  tests; and the canonical-binding test.
+- Managed-skills static checks: 47 skills.
+- Runtime-image contract: checker plus 7 tests.
+- Canonical arm64 runtime image build, `gws 0.22.5` proof, and Telegram 22.6
+  import proof.
+- The services-only integration smoke passed from an equivalent short state
+  root. The worktree's long path exceeds macOS's Unix-domain socket path limit,
+  so the unmodified default state path cannot bind its process-compose socket.
+- The full real SaaS smoke passed from an isolated short state root and Apple
+  container namespace without stopping or mutating the existing Paul Local 1
+  runtime. It proved dashboard form onboarding, trusted Core-side local Apple
+  placement while production remains Kata by default, digest-pinned artifact
+  registration and local digest verification, a healthy Hermes runtime, three
+  real model replies through the Hosted Web Device, Finite Chat and Hosted Web
+  Device restart recovery, Apple runtime restart, and stable Agent Principal.
+
+Remaining blockers outside the merge gate:
+
+- The production disaster-recovery restore drill still needs the named empty
+  isolated target, side-effect fence, retained-Runtime network fence, and
+  independent recovery-key custody described in item 2.
+- The Google OAuth console scope update and user re-consent described in item 4
+  remain manual deployment work; repository code cannot perform them safely.
+
+Paul action for final gates: none. Keep the recovery drill and Google OAuth
+console work as explicit post-merge operational follow-ups rather than claiming
+they were completed by this code run.

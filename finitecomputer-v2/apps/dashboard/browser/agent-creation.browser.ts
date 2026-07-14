@@ -1056,14 +1056,47 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         conversation_id: "topic_browser_legacy",
         chat_id: "chat_browser_legacy",
       });
+      hostedDevice.state.app.selected_room_id = "room_browser_legacy";
+      hostedDevice.state.app.selected_topic_id = "topic_browser_legacy";
+      hostedDevice.state.app.selected_chat_id = "chat_browser_legacy";
       hostedDevice.emit();
-      await page.getByRole("button", { name: "Previous topic", exact: true }).click();
-      await waitFor(() => hostedDevice.state.app.selected_room_id === "room_browser_legacy");
+      await waitFor(async () =>
+        (await page.getByText("Previous conversations", { exact: true }).count()) === 0
+        && (await page.getByRole("button", { name: "Previous topic", exact: true }).count()) === 0
+      );
       await page
         .locator(".finite-chat__topbar")
-        .getByText("Previous topic", { exact: true })
+        .getByText("General", { exact: true })
         .waitFor({ state: "visible" });
-      await expectVisibleText(page, "Legacy room transcript only.");
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(await page.getByText("Legacy room transcript only.", { exact: true }).count(), 0);
+
+      const actionsBeforeCanonicalReply = hostedDevice.state.actions.length;
+      const canonicalReply = "Associated rooms cannot capture this reply.";
+      await page.getByLabel("Message your agent").fill(canonicalReply);
+      await page.getByRole("button", { name: "Send message" }).click();
+      await waitFor(() => hostedDevice.state.actions
+        .slice(actionsBeforeCanonicalReply)
+        .some((action) => actionName(action) === "SendChatMessage"));
+      const canonicalSend = hostedDevice.state.actions
+        .slice(actionsBeforeCanonicalReply)
+        .find((action) => actionName(action) === "SendChatMessage");
+      assert.deepEqual(canonicalSend, {
+        SendChatMessage: {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          chat_id: "chat_browser_agent",
+          text: canonicalReply,
+        },
+      });
+      await page
+        .locator(".finite-chat__message")
+        .getByText(canonicalReply, { exact: true })
+        .waitFor({ state: "visible", timeout: 15_000 });
+
       await page.getByRole("button", { name: "New chat", exact: true }).click();
       await waitFor(() => hostedDevice.state.newChatRequests.length === 1);
       assert.deepEqual(hostedDevice.state.newChatRequests[0], {
