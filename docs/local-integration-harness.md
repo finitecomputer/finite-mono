@@ -8,6 +8,23 @@ Brain, and dashboard used by automated integration tests. This is the complete
 browser-product spine, not every unrelated service in the monorepo; Search, for
 example, is not part of this profile.
 
+Core owns provider placement in this path just as it does in production. The
+generated devfinity Core configuration supplies an Apple Container placement
+override; the browser does not choose or submit a Runner class. Production
+leaves that override unset, so Standard hosting continues to resolve to Kata.
+
+Known gap as of 2026-07-14: an Apple Container Runtime receives the local Brain
+URL as host loopback (`127.0.0.1:18790`). Inside the guest that address refers
+to the guest, not the healthy devfinity Brain service on the host. Agent-side
+Brain onboarding therefore remains unverified. A local Agent must fail closed
+when this configured endpoint is unreachable; it must not substitute the
+production Brain service.
+
+The current agent flow may also choose `/root/finitebrain/agent-workspace` for
+a Vault Working Tree. That path is outside the Runtime's durable `/data`
+contract and is not protected across replacement, upgrade, recovery, or
+reprovisioning. Agent Working Trees must default beneath `/data/workspace`.
+
 `process-compose` remains the process supervisor and log/TUI surface.
 Devfinity owns topology, generated state, prerequisite checks, and explicit
 profile selection.

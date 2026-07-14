@@ -17,6 +17,7 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
@@ -61,15 +62,10 @@ import type {
 } from "@/lib/hosted-web-device";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
-  beginPendingChatTurn,
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
-  pendingTurnIsComplete,
-  pendingTurnMatchesSelection,
   transcriptItems,
-  type ChatSelection,
-  type PendingChatTurn,
 } from "@finite/chat-ui";
 
 const TYPING_IDLE_MS = 2_200;
@@ -118,7 +114,6 @@ export function HostedWebChat({
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
@@ -179,10 +174,6 @@ export function HostedWebChat({
       ?? null,
     [selectedTopic, state?.selected_chat_id]
   );
-  const selectedChatSelection = useMemo<ChatSelection>(
-    () => ({ room: selectedRoom, topic: selectedTopic, chat: selectedChat }),
-    [selectedChat, selectedRoom, selectedTopic]
-  );
   const messages = useMemo(
     () =>
       (state?.messages ?? []).filter(
@@ -209,9 +200,6 @@ export function HostedWebChat({
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
   const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
-  const awaitingReply = pendingAgentTurns.some((turn) =>
-    pendingTurnMatchesSelection(turn, selectedChatSelection)
-  );
 
   useEffect(() => {
     if (sites.length === 0) {
@@ -228,16 +216,6 @@ export function HostedWebChat({
       setActiveSiteId(sites[0]!.id);
     }
   }, [activeSiteId, sites]);
-
-  useEffect(() => {
-    if (!state) return;
-    setPendingAgentTurns((turns) => {
-      const pending = turns.filter(
-        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
-      );
-      return pending.length === turns.length ? turns : pending;
-    });
-  }, [state]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -350,13 +328,6 @@ export function HostedWebChat({
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
-    const pendingTurn = beginPendingChatTurn(selectedChatSelection, messages);
-    if (pendingTurn) {
-      setPendingAgentTurns((turns) => [
-        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
-        pendingTurn,
-      ]);
-    }
     try {
       let next: HostedChatState;
       if (attachments.length > 0) {
@@ -379,9 +350,6 @@ export function HostedWebChat({
       });
       requestAnimationFrame(() => textareaRef.current?.focus());
     } catch (caught) {
-      if (pendingTurn) {
-        setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
-      }
       setActionError(hostedChatErrorMessage(caught));
     } finally {
       setSending(false);
@@ -451,7 +419,7 @@ export function HostedWebChat({
   }
 
   const connected = ownerClaimed && selectedRoom?.state === "Connected";
-  const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
+  const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel);
 
   return (
     <div className="finite-chat finite-chat--embedded">
@@ -869,9 +837,65 @@ function ShareAttachmentButton({ href, name }: { href: string; name: string }) {
 function MarkdownMessage({ text }: { text: string }) {
   return (
     <div className="finite-chat__assistant-text finite-chat__markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink, table: MarkdownTable }}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink, pre: MarkdownCodeBlock, table: MarkdownTable }}>{text}</ReactMarkdown>
     </div>
   );
+}
+
+function MarkdownCodeBlock({ children, ...props }: ComponentProps<"pre">) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => () => {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+  }, []);
+
+  async function copyCode() {
+    const text = preRef.current?.textContent?.replace(/\n$/, "");
+    if (!text) return;
+
+    if (await copyTextToClipboard(text)) {
+      setCopied(true);
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = setTimeout(() => setCopied(false), 2_000);
+    }
+  }
+
+  return (
+    <div className="finite-chat__code-block">
+      <button
+        type="button"
+        className="finite-chat__code-copy"
+        aria-label={copied ? "Code copied" : "Copy code block"}
+        onClick={() => void copyCode()}
+      >
+        {copied ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+      <pre {...props} ref={preRef}>{children}</pre>
+    </div>
+  );
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const activeElement = document.activeElement;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (activeElement instanceof HTMLElement) activeElement.focus();
+    return copied;
+  }
 }
 
 function MarkdownTable({ children, ...props }: ComponentProps<"table">) {

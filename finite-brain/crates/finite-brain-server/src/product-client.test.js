@@ -108,6 +108,34 @@ context.globalThis = context;
 const source = fs.readFileSync(path.join(__dirname, "product-client.js"), "utf8");
 const htmlSource = fs.readFileSync(path.join(__dirname, "product-client.html"), "utf8");
 const cssSource = fs.readFileSync(path.join(__dirname, "product-client.css"), "utf8");
+
+const hostedStartupSource = source.slice(
+  source.indexOf("async function detectSigner()"),
+  source.indexOf("async function connectBrainIdentityProvider")
+);
+assert.match(
+  hostedStartupSource,
+  /if \(hostedState\) \{[\s\S]*await resumeSession\(\);\s*return;/u,
+  "Opening hosted Brain must explicitly resume its in-memory Vault session without replacing its connected signer state"
+);
+const hostedGrantResumeSource = source.slice(
+  source.indexOf("async function openAvailableFolderKeyGrants"),
+  source.indexOf("async function loadVaultReader")
+);
+assert.match(
+  hostedGrantResumeSource,
+  /openFolderKeyGrants\([\s\S]*expectedVaultId: vaultId/u,
+  "Hosted session resume must bind exported Folder Key Grants to their known active Vault"
+);
+const hostedGrantOpenSource = source.slice(
+  source.indexOf("async function openFolderKeyGrants"),
+  source.indexOf("async function openDevelopmentFolderKeyGrants")
+);
+assert.match(
+  hostedGrantOpenSource,
+  /options\.expectedVaultId \|\| exportedVault\?\.vault\?\.id/u,
+  "Scoped grant opening must preserve an explicit Vault ID and understand the current export shape"
+);
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
@@ -2176,6 +2204,28 @@ assert.doesNotMatch(
   );
   assert.equal(
     client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
+    "ready"
+  );
+  const hostedProbeCalls = [];
+  const checkingHostedBrainIdentityProvider = client.createHostedBrainIdentityProvider({
+    sessionProof: "current-workos-session-proof",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      hostedProbeCalls.push(request.operation);
+      return Response.json({
+        publicKeyHex: "77".repeat(32),
+        npub: client.npubFromHex("77".repeat(32)),
+      });
+    },
+  });
+  client.configureBrainIdentityProvider(checkingHostedBrainIdentityProvider);
+  const connectedHostedIdentity = await client.connectBrainIdentityProvider({
+    loadVisibleVaults: false,
+  });
+  assert.equal(connectedHostedIdentity.publicKeyHex, "77".repeat(32));
+  assert.deepEqual(hostedProbeCalls, ["identifyMember"]);
+  assert.equal(
+    client.deriveBrainIdentityProviderState(checkingHostedBrainIdentityProvider).status,
     "ready"
   );
   assert.deepEqual(

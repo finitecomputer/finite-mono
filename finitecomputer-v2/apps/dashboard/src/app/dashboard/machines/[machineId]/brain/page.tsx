@@ -1,8 +1,7 @@
 import { redirect } from "next/navigation";
 import { BrainIcon } from "lucide-react";
 
-import { BrainFrame } from "@/components/brain-frame";
-import { PageHeader } from "@/components/page-header";
+import { BrainFrame, BrainHeader } from "@/components/brain-frame";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
 export default async function MachineBrainPage({
@@ -19,17 +18,19 @@ export default async function MachineBrainPage({
 
   const enabled = Boolean(process.env.FC_BRAIN_UPSTREAM_URL?.trim());
   return (
-    <div className="space-y-6">
-      <PageHeader title="Brain" description={`What ${access.displayName} remembers.`} />
-      {enabled ? (
-        <BrainFrame title={`${access.displayName} Brain`} />
-      ) : (
-        <main className="finite-product-surface__empty rounded-[var(--radius-card)] border border-border bg-card">
-          <BrainIcon className="size-10" />
-          <h2>Brain isn&apos;t available right now</h2>
-          <p>Try again in a few minutes.</p>
-        </main>
-      )}
+    <div className="finite-brain-page">
+      <BrainHeader />
+      <div className="finite-brain-page__body">
+        {enabled ? (
+          <BrainFrame title={`${access.displayName} Brain`} />
+        ) : (
+          <main className="finite-product-surface__empty">
+            <BrainIcon className="size-10" />
+            <h2>Brain isn&apos;t available right now</h2>
+            <p>Try again in a few minutes.</p>
+          </main>
+        )}
+      </div>
     </div>
   );
 }

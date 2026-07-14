@@ -140,7 +140,7 @@ impl Default for AppleHostAccess {
     }
 }
 
-const RUNTIME_ARTIFACT_ID: &str = "devfinity-runtime";
+const RUNTIME_ARTIFACT_ID_PREFIX: &str = "devfinity-runtime";
 const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
 const RUNNER_ID: &str = "devfinity-apple-runner";
 const RUNNER_CLASS: &str = "apple_container";
@@ -900,6 +900,14 @@ wait "$postgres_pid"
                     })
                     .to_string(),
                 ),
+                (
+                    "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
+                    serde_json::json!({
+                        "runnerClass": RUNNER_CLASS,
+                        "runtimeResourceClass": "vcpu4_memory8_gib",
+                    })
+                    .to_string(),
+                ),
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.core, 2, 2, 3, 45);
@@ -1049,7 +1057,7 @@ wait "$postgres_pid"
                     "FINITE_BRAIN_ADDR",
                     format!("127.0.0.1:{}", self.ports.finite_brain),
                 ),
-                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.finite_brain_url()),
+                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.dashboard_origin()),
                 (
                     "FINITE_BRAIN_DB",
                     self.finite_brain_dir()
@@ -1204,20 +1212,18 @@ wait "$postgres_pid"
 
     fn write_runtime_artifact(&self, yaml: &mut String) {
         let process = ManagedProcess::RuntimeArtifact;
-        let command = format!(
-            concat!(
-                "exec cargo run -p finite-saas-core -- runtime-artifact-upsert ",
-                "--artifact-id {} ",
-                "--kind oci_image ",
-                "--reference {} ",
-                "--version-label devfinity-worktree ",
-                "--state-schema-version runtime-state-v1 ",
-                "--hermes-source-ref hermes-agent==0.18.2 ",
-                "--promoted"
-            ),
-            shell_quote(RUNTIME_ARTIFACT_ID),
-            shell_quote(RUNTIME_IMAGE_REF),
-        );
+        let report = self.runtime_image_dir().join("build-report.json");
+        let runner_artifact_env = self.runtime_image_dir().join("runner-artifact.sh");
+        let command = format!(concat!(
+            "cargo run -p finite-saas-core -- runtime-artifact-upsert ",
+            "--artifact-id \"$artifact_id\" ",
+            "--kind oci_image ",
+            "--reference \"$reference\" ",
+            "--version-label devfinity-worktree ",
+            "--state-schema-version runtime-state-v1 ",
+            "--hermes-source-ref hermes-agent==0.18.2 ",
+            "--promoted"
+        ));
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -1225,7 +1231,29 @@ wait "$postgres_pid"
             &self.repo_root,
             process,
         );
-        self.write_managed_command(yaml, process, &[command], &[]);
+        self.write_managed_command(
+            yaml,
+            process,
+            &[
+                format!(
+                    "digest_hex=$(jq -er '.image_metadata.digest | select(test(\"^sha256:[0-9a-f]{{64}}$\")) | sub(\"^sha256:\"; \"\")' {})",
+                    shell_quote(&report.display().to_string())
+                ),
+                format!(
+                    "artifact_id={}-\"$digest_hex\"",
+                    shell_quote(RUNTIME_ARTIFACT_ID_PREFIX)
+                ),
+                String::from("digest=\"sha256:$digest_hex\""),
+                format!("reference={}@\"$digest\"", shell_quote(RUNTIME_IMAGE_REF)),
+                command,
+                String::from("umask 077"),
+                format!(
+                    "printf 'export FC_RUNNER_RUNTIME_ARTIFACT_ID=%s\\n' \"$artifact_id\" > {}",
+                    shell_quote(&runner_artifact_env.display().to_string())
+                ),
+            ],
+            &[],
+        );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
@@ -1240,10 +1268,22 @@ wait "$postgres_pid"
 
     fn write_runner(&self, yaml: &mut String) {
         let process = ManagedProcess::Runner;
-        let mut command = vec![format!(
-            ". {}",
-            shell_quote(&self.runner_auth_secret_file().display().to_string())
-        )];
+        let mut command = vec![
+            format!(
+                ". {}",
+                shell_quote(&self.runner_auth_secret_file().display().to_string())
+            ),
+            format!(
+                ". {}",
+                shell_quote(
+                    &self
+                        .runtime_image_dir()
+                        .join("runner-artifact.sh")
+                        .display()
+                        .to_string()
+                )
+            ),
+        ];
         if self.inference_mode == InferenceMode::DirectKeyOverride {
             command.push(format!(
                 ". {}",
@@ -1270,10 +1310,6 @@ wait "$postgres_pid"
             &[
                 ("FC_RUNNER_CLASS", RUNNER_CLASS.to_string()),
                 ("FC_CORE_URL", self.core_url()),
-                (
-                    "FC_RUNNER_RUNTIME_ARTIFACT_ID",
-                    RUNTIME_ARTIFACT_ID.to_string(),
-                ),
                 ("FC_RUNNER_ID", RUNNER_ID.to_string()),
                 (
                     "FC_RUNNER_SOURCE_HOST_ID",
@@ -1299,6 +1335,10 @@ wait "$postgres_pid"
                 (
                     "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",
                     "finite-devfinity".to_string(),
+                ),
+                (
+                    "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE",
+                    RUNTIME_IMAGE_REF.to_string(),
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
@@ -1383,11 +1423,6 @@ wait "$postgres_pid"
                 "FC_DASHBOARD_DEV_WORKOS_USER_ID",
                 WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
             ),
-            (
-                "FC_DASHBOARD_DEFAULT_RUNNER_CLASS",
-                RUNNER_CLASS.to_string(),
-            ),
-            ("FC_DASHBOARD_RUNNER_CLASSES", RUNNER_CLASS.to_string()),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
@@ -2053,7 +2088,7 @@ wait "$postgres_pid"
                 self.ports.runtime_agent
             );
             let _ = writeln!(urls, "runtime_image={RUNTIME_IMAGE_REF}");
-            let _ = writeln!(urls, "runtime_artifact={RUNTIME_ARTIFACT_ID}");
+            let _ = writeln!(urls, "runtime_artifact_prefix={RUNTIME_ARTIFACT_ID_PREFIX}");
         }
         urls
     }
@@ -2063,7 +2098,11 @@ wait "$postgres_pid"
     }
 
     fn dashboard_url(&self) -> String {
-        format!("http://127.0.0.1:{}/dashboard", self.ports.dashboard)
+        format!("{}/dashboard", self.dashboard_origin())
+    }
+
+    fn dashboard_origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.dashboard)
     }
 
     fn finitechat_url(&self) -> String {
@@ -2920,6 +2959,7 @@ mod tests {
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
         assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
         assert!(
@@ -2938,10 +2978,20 @@ mod tests {
         assert!(yaml.contains("apple-network-probe:"));
         assert!(yaml.contains("runtime-artifact:"));
         assert!(yaml.contains("runtime-artifact-upsert"));
+        assert!(yaml.contains(".image_metadata.digest"));
+        assert!(yaml.contains("digest_hex=$(jq"));
+        assert!(yaml.contains("artifact_id='devfinity-runtime'-\"$digest_hex\""));
+        assert!(!yaml.contains("${digest#"));
+        assert!(yaml.contains("runner-artifact.sh"));
         assert!(yaml.contains("--promoted"));
         assert!(yaml.contains("runner:"));
         assert!(yaml.contains("finite-saas-runner -- serve"));
         assert!(yaml.contains("FC_RUNNER_CLASS=apple_container"));
+        assert!(yaml.contains(
+            "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE=finite-agent-runtime:devfinity"
+        ));
+        assert!(!yaml.contains("FC_RUNNER_RUNTIME_ARTIFACT_ID=devfinity-runtime"));
+        assert!(yaml.contains("FC_CORE_AGENT_CREATION_PLACEMENT_JSON="));
         assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FC_CORE_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FINITE_SITES_API"));

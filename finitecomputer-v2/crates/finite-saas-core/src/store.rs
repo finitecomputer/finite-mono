@@ -4748,8 +4748,8 @@ where
 }
 
 /// Mirror `ensure_finite_private_limit_profile`: an existing profile is
-/// returned; the DEFAULT profile is created on demand (with its weekly limit,
-/// matching the in-memory spec); any other missing profile is an error.
+/// returned; the DEFAULT profile is created on demand matching the in-memory
+/// spec; any other missing profile is an error.
 async fn ensure_finite_private_limit_profile_row<C>(
     client: &C,
     id: &str,

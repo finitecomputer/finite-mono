@@ -822,6 +822,68 @@ button.ocean-pill-button {
   max-height: 100%;
 }
 
+.finite-agent-shell__content:has(.finite-brain-page) {
+  overflow: hidden;
+}
+
+.finite-agent-shell__content:has(.finite-brain-page) > .finite-agent-shell__mobile-trigger {
+  display: none;
+}
+
+.ocean-app-content:has(.finite-brain-page) {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.finite-brain-page {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.finite-brain-page__header {
+  display: flex;
+  min-height: 54px;
+  flex: 0 0 54px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
+}
+
+.finite-brain-page__header strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.finite-brain-page__sidebar-toggle {
+  display: none;
+}
+
+.finite-brain-page__body,
+.finite-brain-page__frame {
+  min-height: 0;
+  flex: 1;
+}
+
+.finite-brain-page__frame {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.finite-brain-page__body > .finite-product-surface__empty {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
 .ocean-app-content h1,
 .ocean-app-content h2,
 .ocean-app-content h3 {
@@ -1674,6 +1736,7 @@ button.ocean-pill-button {
 .finite-chat__markdown ul,
 .finite-chat__markdown ol,
 .finite-chat__markdown pre,
+.finite-chat__code-block,
 .finite-chat__markdown blockquote,
 .finite-chat__table-scroll {
   margin: 0 0 0.75rem;
@@ -1683,6 +1746,7 @@ button.ocean-pill-button {
 .finite-chat__markdown ul:last-child,
 .finite-chat__markdown ol:last-child,
 .finite-chat__markdown pre:last-child,
+.finite-chat__code-block:last-child,
 .finite-chat__markdown blockquote:last-child,
 .finite-chat__table-scroll:last-child {
   margin-bottom: 0;
@@ -1738,6 +1802,49 @@ button.ocean-pill-button {
 .finite-chat__markdown pre code {
   background: transparent;
   padding: 0;
+}
+
+.finite-chat__code-block {
+  position: relative;
+}
+
+.finite-chat__code-block pre {
+  margin: 0;
+  padding-right: 4.5rem;
+}
+
+.finite-chat__code-copy {
+  position: absolute;
+  z-index: 1;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 0.28rem 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.finite-chat__code-copy:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.finite-chat__code-copy:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.finite-chat__code-copy svg {
+  width: 0.8rem;
+  height: 0.8rem;
 }
 
 .finite-chat__markdown blockquote {
@@ -4870,6 +4977,10 @@ button.finite-chat__folder-summary {
   }
 
   .finite-chat__sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .finite-brain-page__sidebar-toggle {
     display: inline-flex;
   }
 

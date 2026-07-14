@@ -95,8 +95,8 @@ test("a pending turn follows its chat without leaking into another selected chat
   );
 });
 
-test("working presentation remains visible across an activity gap and outranks typing", () => {
-  assert.equal(liveActivityLabel([], "Sol", true), "Sol is working");
+test("working presentation requires live agent activity and outranks typing", () => {
+  assert.equal(liveActivityLabel([], "Sol"), null);
   assert.equal(
     liveActivityLabel(
       [
@@ -115,8 +115,7 @@ test("working presentation remains visible across an activity gap and outranks t
           activity_kind: "working",
         },
       ],
-      "Sol",
-      true
+      "Sol"
     ),
     "Sol is working"
   );

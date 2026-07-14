@@ -14,6 +14,10 @@ pub struct AppleContainerConfig {
     pub container_bin: PathBuf,
     pub source_host_id: String,
     pub image: String,
+    /// Digest from Core's immutable artifact reference. Local Apple Container
+    /// stores address freshly built images by tag, so an optional local image
+    /// reference is accepted only when its inspected descriptor matches this.
+    pub expected_image_descriptor_digest: Option<String>,
     pub runtime_artifact_id: Option<String>,
     pub runtime_artifact_kind: Option<RuntimeArtifactKind>,
     pub runtime_state_schema_version: Option<String>,
@@ -48,6 +52,20 @@ impl AppleContainerConfig {
         }
         if self.image.trim().is_empty() {
             return Err(RunnerError::MissingRuntimeArtifactReference);
+        }
+        if self
+            .expected_image_descriptor_digest
+            .as_deref()
+            .is_some_and(|digest| {
+                let Some(hex) = digest.strip_prefix("sha256:") else {
+                    return true;
+                };
+                hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Apple Container expected image descriptor must be a sha256 digest".to_string(),
+            ));
         }
         if self.work_root.as_os_str().is_empty() {
             return Err(RunnerError::MissingWorkRoot);
@@ -130,6 +148,7 @@ impl Default for AppleContainerConfig {
             container_bin: PathBuf::from("container"),
             source_host_id: String::new(),
             image: String::new(),
+            expected_image_descriptor_digest: None,
             runtime_artifact_id: None,
             runtime_artifact_kind: Some(RuntimeArtifactKind::OciImage),
             runtime_state_schema_version: None,
@@ -492,6 +511,14 @@ impl RuntimeLauncher for AppleContainerLauncher {
                 "Apple Container services are not running; run `container system start`"
                     .to_string(),
             ));
+        }
+        if let Some(expected) = self.config.expected_image_descriptor_digest.as_deref() {
+            let actual = self.desired_image_descriptor_digest()?;
+            if actual != expected {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "local Apple Container image descriptor {actual} does not match Core artifact {expected}"
+                )));
+            }
         }
         Ok(())
     }

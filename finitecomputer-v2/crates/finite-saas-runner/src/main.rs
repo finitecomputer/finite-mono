@@ -144,10 +144,14 @@ fn run_cycle() -> Result<RunOnceOutcome> {
             )?
         }
         "apple_container" => {
+            let expected_image_descriptor_digest =
+                immutable_oci_descriptor_digest(&runtime_artifact.reference)?;
             let launcher = AppleContainerLauncher::new(AppleContainerConfig {
                 container_bin: optional_path("FC_RUNNER_APPLE_CONTAINER_BIN", "container"),
                 source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
-                image: runtime_artifact.reference,
+                image: optional_env_value("FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE")
+                    .unwrap_or_else(|| runtime_artifact.reference.clone()),
+                expected_image_descriptor_digest: Some(expected_image_descriptor_digest),
                 runtime_artifact_id: Some(runtime_artifact.id),
                 runtime_artifact_kind: Some(runtime_artifact.kind),
                 runtime_state_schema_version: Some(runtime_artifact.state_schema_version),
@@ -512,6 +516,17 @@ fn optional_env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn immutable_oci_descriptor_digest(reference: &str) -> Result<String> {
+    let Some((repository, hex)) = reference.trim().rsplit_once("@sha256:") else {
+        bail!("Core runtime artifact reference is not immutable: {reference}");
+    };
+    if repository.is_empty() || hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("Core runtime artifact reference has an invalid sha256 digest: {reference}");
+    }
+    Ok(format!("sha256:{hex}"))
+}
+
 fn required_path(name: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(required_env(name)?))
 }
@@ -597,5 +612,16 @@ mod tests {
     fn phala_preflight_is_an_explicit_subcommand() {
         let args = Args::try_parse_from(["finite-saas-runner", "phala-preflight"]).unwrap();
         assert!(matches!(args.command, Some(Command::PhalaPreflight)));
+    }
+
+    #[test]
+    fn local_image_override_digest_is_derived_from_immutable_core_reference() {
+        let hex = "a".repeat(64);
+        assert_eq!(
+            immutable_oci_descriptor_digest(&format!("runtime:dev@sha256:{hex}")).unwrap(),
+            format!("sha256:{hex}")
+        );
+        assert!(immutable_oci_descriptor_digest("runtime:dev").is_err());
+        assert!(immutable_oci_descriptor_digest("runtime:dev@sha256:short").is_err());
     }
 }
