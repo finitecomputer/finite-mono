@@ -96,17 +96,15 @@ in
     '';
   };
 
-  systemd.timers.finite-hosted-web-chat-snapshot = {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnCalendar = "*:0/15";
-      Persistent = true;
-      Unit = "finite-hosted-web-chat-snapshot.service";
-    };
-  };
+  # 2026-07-14 (Paul): no calendar timer. The snapshot stops/starts the chat
+  # services for its write fence, and running that every 15 minutes broke
+  # live chat streams and cold-restarted every hosted device runtime. The
+  # snapshot service now runs only when a deploy triggers it
+  # (scripts/deploy-lat1 runs it before switching, when a restart is
+  # expected anyway) or when started manually.
 
   systemd.services.finite-hosted-web-chat-snapshot-health = {
-    description = "Fail if the Hosted Web Chat snapshot is older than 30 minutes";
+    description = "Fail if the Hosted Web Chat snapshot is older than 7 days or corrupt";
     path = [ pkgs.coreutils ];
     serviceConfig = {
       Type = "oneshot";
@@ -117,8 +115,8 @@ in
       latest=${snapshotRoot}/latest
       test -L "$latest"
       age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
-      if [ "$age" -gt 1800 ]; then
-        echo "Hosted Web Chat Recovery Snapshot is stale ($age seconds)" >&2
+      if [ "$age" -gt 604800 ]; then
+        echo "Hosted Web Chat Recovery Snapshot is stale ($age seconds); deploy or run finite-hosted-web-chat-snapshot.service" >&2
         exit 1
       fi
       (cd "$latest" && sha256sum --check manifest.sha256)
@@ -147,12 +145,13 @@ in
       compression = "auto,zstd";
       failOnWarnings = true;
       persistentTimer = true;
-      startAt = "*:07/15";
+      # Snapshots are deploy-triggered now; ship the latest one off-host
+      # daily (Borg dedup makes re-shipping an unchanged snapshot cheap).
+      startAt = "*-*-* 03:07:00";
       readWritePaths = [ borgStateRoot ];
       preHook = ''
         latest=${snapshotRoot}/latest
         test -L "$latest"
-        test $(( $(date +%s) - $(stat -Lc %Y "$latest") )) -le 1800
         (cd "$latest" && sha256sum --check manifest.sha256)
       '';
       postCreate = ''
@@ -162,7 +161,7 @@ in
 
     systemd.services.finite-hosted-web-chat-offsite-health =
       lib.mkIf (cfg.borgRepository != null) {
-        description = "Fail if the Hosted Web Chat offsite archive is older than 30 minutes";
+        description = "Fail if the Hosted Web Chat offsite archive is older than 50 hours";
         path = [ pkgs.coreutils ];
         serviceConfig = {
           Type = "oneshot";
@@ -174,7 +173,7 @@ in
           test -s "$stamp"
           last_success=$(cat "$stamp")
           age=$(( $(date +%s) - last_success ))
-          if [ "$age" -gt 1800 ]; then
+          if [ "$age" -gt 180000 ]; then
             echo "Hosted Web Chat offsite archive is stale ($age seconds)" >&2
             exit 1
           fi
