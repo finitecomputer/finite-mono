@@ -110,6 +110,7 @@ test("standard Checkout is recurring, cards-only, and automatically calculates t
       client_reference_id: "org_core_canonical",
       allow_promotion_codes: true,
       automatic_tax: { enabled: true },
+      customer_update: { address: "auto" },
       payment_method_types: ["card"],
       success_url: "https://finite.computer/dashboard?billing=success",
       cancel_url: "https://finite.computer/dashboard?billing=cancelled",
