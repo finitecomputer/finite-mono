@@ -64,6 +64,7 @@ import {
 import { stripeCheckoutAvailable } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
+  agentCreationRequiresAccess,
   draftStartedStripeCheckout,
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
@@ -271,10 +272,12 @@ export default async function DashboardPage({
             error={agentCreationError}
             draft={draft}
             returnMachineId={returnProject?.runtime?.id ?? null}
-            requiresAccess={
-              process.env.FC_DASHBOARD_RUNTIME_MODE === "canary" ||
-              !billing.billing?.can_create_agent
-            }
+            requiresAccess={agentCreationRequiresAccess({
+              runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
+              canCreateAgent: Boolean(billing.billing?.can_create_agent),
+              requiresBilling: Boolean(billing.billing?.requires_billing),
+              error: agentCreationError,
+            })}
           />
         ) : null}
         {showEmptyAccount ? (

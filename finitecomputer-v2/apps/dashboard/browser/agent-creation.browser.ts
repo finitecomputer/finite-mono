@@ -267,7 +267,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       ...chromeExecutable(),
     });
 
-    core.reset();
+    // A stale creation-capacity bit must never skip the Access step while
+    // Core still says billing is required.
+    core.reset({ canCreateAgent: true });
     await withSignedInPage(browser, paidDashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Paid Browser Proof");
@@ -405,7 +407,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("button", { name: "Continue" }).click();
       await page.getByLabel("Launch Code").fill("fresh-top-up-code");
       await page.getByRole("button", { name: "Apply" }).click();
-      await expectVisibleText(page, "billing is required before creating an agent");
+      await expectVisibleText(page, "Choose payment or enter a Launch Code to continue.");
       await new Promise((resolve) => setTimeout(resolve, 750));
       assert.equal(
         core.state.creationPosts.length,
