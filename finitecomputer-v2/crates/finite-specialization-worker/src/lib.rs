@@ -3047,54 +3047,23 @@ mod tests {
         assert_eq!(captured.1["input"][1]["content"][1]["type"], "input_image");
     }
 
-    #[tokio::test]
-    async fn malformed_success_is_rejected_for_every_capability() {
-        let image = request_with_media_parts(vec![
-            json!({ "type": "text", "text": "Describe" }),
-            json!({
-                "type": "image_url",
-                "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
-            }),
-        ]);
-        let video_config = test_config("http://127.0.0.1:9");
-        let video = video_canary_request(&test_state(video_config))
-            .await
-            .unwrap();
-        let requests = [
-            (Capability::Image, image),
-            (Capability::Audio, audio_canary_request()),
-            (Capability::Video, video),
-        ];
-
-        for (capability, request) in requests {
-            let upstream_url = spawn_spark_mock(
-                Arc::new(Mutex::new(None::<(HeaderMap, Value)>)),
-                StatusCode::OK,
-                json!({}),
-            )
-            .await;
-            let worker = spawn_worker(test_config(&upstream_url)).await;
-            let response = reqwest::Client::new()
-                .post(format!("{worker}/v1/chat/completions"))
-                .bearer_auth("worker-secret")
-                .json(&request)
-                .send()
-                .await
-                .unwrap();
-            let status = response.status();
-            let body: Value = response.json().await.unwrap();
+    #[test]
+    fn malformed_success_is_rejected_for_every_capability() {
+        for capability in [Capability::Image, Capability::Audio, Capability::Video] {
+            let error = required_upstream_text(None, capability).unwrap_err();
 
             assert_eq!(
-                status,
+                error.status,
                 StatusCode::BAD_GATEWAY,
-                "{}: {body}",
+                "{}",
                 capability.name()
             );
-            assert_eq!(
-                body["error"]["code"],
-                "upstream_error",
-                "{}: {body}",
-                capability.name()
+            assert_eq!(error.code, "upstream_error", "{}", capability.name());
+            assert!(
+                error.message.contains(capability.name()),
+                "{}: {}",
+                capability.name(),
+                error.message
             );
         }
     }

@@ -80,7 +80,10 @@ class AeonSpecialization:
         media_urls: list[str],
         media_types: list[str],
     ) -> list[CapabilityResult]:
-        requests = [self._interpret_group(instruction, group) for group in _invocation_groups(media_urls, media_types)]
+        requests = [
+            self._interpret_group(instruction, group)
+            for group in _invocation_groups(media_urls, media_types)
+        ]
         if not requests:
             return []
         return list(await asyncio.gather(*requests))
@@ -132,6 +135,7 @@ class AeonSpecialization:
                         error_code="invalid_upstream_response",
                         request_id=str(body.get("request_id") or request_id),
                     )
+                assert isinstance(result, dict)
                 return CapabilityResult(
                     capability=result["capability"],
                     model=result["model"],
@@ -143,7 +147,7 @@ class AeonSpecialization:
             return _error_result(capability, self.model, status, body, request_id)
         except asyncio.CancelledError:
             raise
-        except (TimeoutError, asyncio.TimeoutError) as exc:
+        except TimeoutError as exc:
             return CapabilityResult(
                 capability=capability,
                 model=self.model,
@@ -190,7 +194,7 @@ class AeonSpecialization:
                     self._requester(self.base_url, self.api_key, payload, remaining),
                     timeout=remaining,
                 )
-            except (TimeoutError, asyncio.TimeoutError, OSError):
+            except (TimeoutError, OSError):
                 if attempt == 0 and asyncio.get_running_loop().time() < deadline:
                     continue
                 raise
@@ -218,7 +222,11 @@ def compose_for_hermes(results: list[CapabilityResult]) -> str:
 def _capability_for_mime(media_type: str) -> str | None:
     normalized = str(media_type or "").lower()
     return next(
-        (capability for capability in SUPPORTED_CAPABILITIES if normalized.startswith(f"{capability}/")),
+        (
+            capability
+            for capability in SUPPORTED_CAPABILITIES
+            if normalized.startswith(f"{capability}/")
+        ),
         None,
     )
 
@@ -228,7 +236,7 @@ def _invocation_groups(
 ) -> list[list[tuple[str, str, str]]]:
     groups: list[list[tuple[str, str, str]]] = []
     image_group: list[tuple[str, str, str]] | None = None
-    for media_url, media_type in zip(media_urls, media_types):
+    for media_url, media_type in zip(media_urls, media_types, strict=False):
         capability = _capability_for_mime(media_type)
         if capability is None:
             continue
@@ -243,7 +251,9 @@ def _invocation_groups(
     return groups
 
 
-def unavailable_results(media_types: list[str], model: str = DEFAULT_MODEL) -> list[CapabilityResult]:
+def unavailable_results(
+    media_types: list[str], model: str = DEFAULT_MODEL
+) -> list[CapabilityResult]:
     return [
         CapabilityResult(
             capability=group[0][2],
@@ -327,7 +337,8 @@ def _error_result(
     body: dict[str, Any],
     fallback_request_id: str,
 ) -> CapabilityResult:
-    error = body.get("error") if isinstance(body.get("error"), dict) else {}
+    error_value = body.get("error")
+    error = error_value if isinstance(error_value, dict) else {}
     return CapabilityResult(
         capability=capability,
         model=model,

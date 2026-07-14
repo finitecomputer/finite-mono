@@ -6,13 +6,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
-PLUGIN_DIR = (
-    Path(__file__).resolve().parents[2] / "integrations" / "hermes" / "finitechat"
-)
-sys.path.insert(0, str(PLUGIN_DIR))
-from specialization import AeonSpecialization, compose_for_hermes  # noqa: E402
+from integrations.hermes.finitechat.specialization import AeonSpecialization, compose_for_hermes
 
 
 def success(capability: str, text: str, model: str = "aeon-test"):
@@ -139,9 +136,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(payloads), 2)
         self.assertEqual(payloads[0]["model"], payloads[1]["model"])
-        self.assertEqual(
-            payloads[0]["_finite_request_id"], payloads[1]["_finite_request_id"]
-        )
+        self.assertEqual(payloads[0]["_finite_request_id"], payloads[1]["_finite_request_id"])
         self.assertTrue(results[0].success)
 
     async def test_worker_error_request_id_is_preserved_for_hermes(self):
@@ -155,9 +150,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://worker/v1", api_key="secret", requester=requester
         )
         result = (
-            await client.interpret(
-                "Listen", ["https://example.com/clip.wav"], ["audio/wav"]
-            )
+            await client.interpret("Listen", ["https://example.com/clip.wav"], ["audio/wav"])
         )[0]
 
         self.assertEqual(result.request_id, "req-worker-error")
@@ -175,9 +168,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://worker/v1", api_key="secret", requester=requester
         )
         result = (
-            await client.interpret(
-                "Listen", ["https://example.com/clip.wav"], ["audio/wav"]
-            )
+            await client.interpret("Listen", ["https://example.com/clip.wav"], ["audio/wav"])
         )[0]
 
         self.assertEqual(calls, 2)
@@ -204,9 +195,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         client.timeout = 0.05
         started = time.monotonic()
         result = (
-            await client.interpret(
-                "Listen", ["https://example.com/clip.wav"], ["audio/wav"]
-            )
+            await client.interpret("Listen", ["https://example.com/clip.wav"], ["audio/wav"])
         )[0]
 
         self.assertEqual(calls, 2)
@@ -247,9 +236,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://worker/v1", api_key="secret", requester=requester
         )
         result = (
-            await client.interpret(
-                "Describe", ["https://example.com/red.png"], ["image/png"]
-            )
+            await client.interpret("Describe", ["https://example.com/red.png"], ["image/png"])
         )[0]
 
         self.assertFalse(result.success)
@@ -260,31 +247,37 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         config_module.load_config = lambda: {"auxiliary": {"vision": {"base_url": "http://worker"}}}
         config_module.cfg_get = lambda config, *_args, default=None: config["auxiliary"]["vision"]
         hermes_module = type(sys)("hermes_cli")
-        with patch.dict(
-            sys.modules,
-            {"hermes_cli": hermes_module, "hermes_cli.config": config_module},
+        with (
+            patch.dict(
+                sys.modules,
+                {"hermes_cli": hermes_module, "hermes_cli.config": config_module},
+            ),
+            self.assertRaisesRegex(ValueError, "requires both"),
         ):
-            with self.assertRaisesRegex(ValueError, "requires both"):
-                AeonSpecialization.from_hermes_config()
+            AeonSpecialization.from_hermes_config()
 
     async def test_cancellation_propagates_to_in_flight_capability_calls(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
-        async def requester(_base_url, _api_key, _payload, _timeout):
+        async def requester(
+            _base_url: str,
+            _api_key: str,
+            _payload: dict[str, Any],
+            _timeout: float,
+        ) -> tuple[int, dict[str, Any]]:
             started.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
+            raise AssertionError("in-flight cancellation test unexpectedly resumed")
 
         client = AeonSpecialization(
             base_url="http://worker/v1", api_key="secret", requester=requester
         )
         task = asyncio.create_task(
-            client.interpret(
-                "Describe", ["https://example.com/red.png"], ["image/png"]
-            )
+            client.interpret("Describe", ["https://example.com/red.png"], ["image/png"])
         )
         await started.wait()
         task.cancel()

@@ -623,9 +623,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         ]
         event.media_urls = [url for url, _ in remaining]
         event.media_types = [mime_type for _, mime_type in remaining]
-        event.message_type = (
-            _message_type("", event.media_types) if remaining else MessageType.TEXT
-        )
+        event.message_type = _message_type("", event.media_types) if remaining else MessageType.TEXT
         original = event.text.strip()
         composed = compose_for_hermes(results)
         event.text = f"{original}\n\n{composed}" if original else composed
