@@ -63,6 +63,7 @@ export function agentCreationRequiresAccess({
 }) {
   return (
     runtimeMode === "canary" ||
+    runtimeMode === "customer" ||
     requiresBilling ||
     !canCreateAgent ||
     recovery === "access"
