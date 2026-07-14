@@ -902,8 +902,9 @@ wait "$postgres_pid"
                     "FC_CORE_RUNTIME_ENV_JSON",
                     serde_json::json!({
                         "FINITE_SITES_API": self.finitesites_api_url(),
-                        "FINITE_BRAIN_SERVER_URL": self.finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
+                        "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
+                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+                        "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
                     })
                     .to_string(),
                 ),
@@ -1062,7 +1063,7 @@ wait "$postgres_pid"
             &[
                 (
                     "FINITE_BRAIN_ADDR",
-                    format!("127.0.0.1:{}", self.ports.finite_brain),
+                    format!("{}:{}", self.service_bind_host(), self.ports.finite_brain),
                 ),
                 ("FINITE_BRAIN_PUBLIC_BASE_URL", self.dashboard_origin()),
                 (
@@ -1074,7 +1075,16 @@ wait "$postgres_pid"
                 ),
             ],
         );
-        self.write_http_probe(yaml, "/health", self.ports.finite_brain, 1, 2, 3, 45);
+        self.write_http_probe_host(
+            yaml,
+            &self.service_bind_host(),
+            "/health",
+            self.ports.finite_brain,
+            1,
+            2,
+            3,
+            45,
+        );
     }
 
     fn write_runtime_image(&self, yaml: &mut String) {
@@ -1334,8 +1344,9 @@ wait "$postgres_pid"
                     "FC_RUNNER_RUNTIME_ENV_JSON",
                     serde_json::json!({
                         "FINITE_SITES_API": self.finitesites_api_url(),
-                        "FINITE_BRAIN_SERVER_URL": self.finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.finite_brain_url(),
+                        "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
+                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+                        "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
                     })
                     .to_string(),
                 ),
@@ -2045,7 +2056,7 @@ wait "$postgres_pid"
             ),
             check_http_service(
                 ManagedProcess::FiniteBrain,
-                "127.0.0.1",
+                &self.service_bind_host(),
                 self.ports.finite_brain,
                 "/health",
             ),
@@ -2147,7 +2158,18 @@ wait "$postgres_pid"
     }
 
     fn finite_brain_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.ports.finite_brain)
+        format!(
+            "http://{}:{}",
+            self.service_bind_host(),
+            self.ports.finite_brain
+        )
+    }
+
+    fn runtime_finite_brain_url(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.apple_host_access.runtime_host, self.ports.finite_brain
+        )
     }
 
     fn finitesites_api_url(&self) -> String {
@@ -2983,6 +3005,14 @@ mod tests {
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
+        assert!(
+            yaml.contains("FINITE_BRAIN_SERVER_URL\\\":\\\"http://host.container.internal:18790")
+        );
+        assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL\\\":\\\"http://127.0.0.1:13002"));
+        assert!(
+            yaml.contains("FINITE_BRAIN_DEVELOPMENT_HTTP_HOST\\\":\\\"host.container.internal")
+        );
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
         assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
@@ -3046,6 +3076,27 @@ mod tests {
         assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
         assert!(!yaml.contains("fpk_"));
+    }
+
+    #[test]
+    fn finite_brain_probe_uses_the_gateway_fallback_bind_host() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.apple_host_access = AppleHostAccess {
+            runtime_host: "192.168.67.1".to_string(),
+            bind_host: "192.168.67.1".to_string(),
+            source: "test gateway",
+        };
+
+        let yaml = stack.process_compose_yaml();
+        let finite_brain = yaml
+            .split("  finite-brain:\n")
+            .nth(1)
+            .and_then(|tail| tail.split("\n  runtime-image:\n").next())
+            .unwrap();
+
+        assert!(finite_brain.contains("FINITE_BRAIN_ADDR=192.168.67.1:18790"));
+        assert!(finite_brain.contains("host: \"192.168.67.1\""));
+        assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://192.168.67.1:18790"));
     }
 
     #[test]

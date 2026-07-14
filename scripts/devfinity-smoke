@@ -158,6 +158,7 @@ core_url="${FC_CORE_URL:-http://127.0.0.1:14200}"
 chat_url="${FINITECHAT_SERVER_URL:-http://127.0.0.1:18787}"
 hosted_device_url="${FC_HOSTED_WEB_DEVICE_URL:-http://127.0.0.1:38918}"
 sites_url="${FINITE_SITES_API:-http://127.0.0.1:18789}"
+brain_url="${FINITE_BRAIN_SERVER_URL:-http://127.0.0.1:18790}"
 dashboard_url="${FC_DASHBOARD_URL:-http://127.0.0.1:13002/dashboard}"
 postgres_port="${DEVFINITY_POSTGRES_PORT:-15432}"
 
@@ -166,6 +167,7 @@ check_http "core" "$core_url/healthz" '"ok":true'
 check_http "finitechat" "$chat_url/health" '"status":"ok"'
 check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
 check_http "finitesites" "$sites_url/api/v1/healthz" '"ok":true'
+check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
 check_dashboard_agent_creation
 

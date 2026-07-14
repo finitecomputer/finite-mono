@@ -66,7 +66,12 @@ const context = {
   TextDecoder,
   TextEncoder,
   Uint8Array,
+  URL,
   URLSearchParams,
+  clearInterval,
+  clearTimeout,
+  setInterval,
+  setTimeout,
   atob: (value) => Buffer.from(value, "base64").toString("binary"),
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   console,
@@ -139,6 +144,20 @@ assert.match(
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
+const suggestedAgentNpub = client.npubFromHex("77".repeat(32));
+assert.equal(
+  client.suggestedAgentNpubFromNavigation(`?agentNpub=${suggestedAgentNpub}`),
+  suggestedAgentNpub,
+  "Brain should understand the selected runtime Agent Principal as a pairing input hint"
+);
+assert.equal(
+  client.suggestedAgentNpubFromNavigation("?agentNpub=not-an-npub"),
+  null,
+  "An invalid navigation hint must not become pairing input"
+);
+context.document.getElementById("agentWorkspaceNpubInput").value = "";
+assert.equal(client.applySuggestedAgentNpub(`?agentNpub=${suggestedAgentNpub}`), true);
+assert.equal(elements.get("agentWorkspaceNpubInput").value, suggestedAgentNpub);
 
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("locked")),
@@ -2206,6 +2225,61 @@ assert.doesNotMatch(
     client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
     "ready"
   );
+  const originalParent = context.window.parent;
+  const originalAddEventListener = context.window.addEventListener;
+  const originalRemoveEventListener = context.window.removeEventListener;
+  let sessionProofMessageHandler = null;
+  let sessionProofRequestCount = 0;
+  const delayedParent = {
+    postMessage(message, origin) {
+      sessionProofRequestCount += 1;
+      if (sessionProofRequestCount !== 2) return;
+      queueMicrotask(() => {
+        sessionProofMessageHandler?.({
+          source: delayedParent,
+          origin,
+          data: {
+            type: "finite-brain-session-proof-response-v1",
+            requestId: message.requestId,
+            proof: "retried-workos-session-proof",
+          },
+        });
+      });
+    },
+  };
+  context.window.parent = delayedParent;
+  context.window.addEventListener = (type, handler) => {
+    if (type === "message") sessionProofMessageHandler = handler;
+  };
+  context.window.removeEventListener = (type, handler) => {
+    if (type === "message" && sessionProofMessageHandler === handler) {
+      sessionProofMessageHandler = null;
+    }
+  };
+  try {
+    const retriedSessionProofCalls = [];
+    const retriedSessionProofProvider = client.createHostedBrainIdentityProvider({
+      parentOrigin: "http://finite.test",
+      sessionProofRetryIntervalMs: 5,
+      fetch: async (_url, init) => {
+        retriedSessionProofCalls.push(init.headers["x-finite-brain-session-proof"]);
+        return Response.json({
+          publicKeyHex: "88".repeat(32),
+          npub: client.npubFromHex("88".repeat(32)),
+        });
+      },
+    });
+    assert.equal(
+      (await retriedSessionProofProvider.identifyMember()).publicKeyHex,
+      "88".repeat(32)
+    );
+    assert.equal(sessionProofRequestCount, 2);
+    assert.deepEqual(retriedSessionProofCalls, ["retried-workos-session-proof"]);
+  } finally {
+    context.window.parent = originalParent;
+    context.window.addEventListener = originalAddEventListener;
+    context.window.removeEventListener = originalRemoveEventListener;
+  }
   const hostedProbeCalls = [];
   const checkingHostedBrainIdentityProvider = client.createHostedBrainIdentityProvider({
     sessionProof: "current-workos-session-proof",

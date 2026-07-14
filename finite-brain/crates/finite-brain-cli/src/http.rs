@@ -9,6 +9,8 @@ use crate::{
 
 pub(crate) const FINITE_BRAIN_SERVER_URL_ENV: &str = "FINITE_BRAIN_SERVER_URL";
 pub(crate) const FINITE_BRAIN_PUBLIC_BASE_URL_ENV: &str = "FINITE_BRAIN_PUBLIC_BASE_URL";
+pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
+    "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST";
 
 pub(crate) fn check_http_health(url: &str) -> HealthCheck {
     let health_url = absolute_server_url(url, "/health");
@@ -51,10 +53,22 @@ pub(crate) fn signed_json_request_to_server(
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
-    let url = absolute_server_url(server_url, path);
+    let transport_url = absolute_server_url(server_url, path);
+    let authorization_url = authorization_url_for_request(
+        server_url,
+        path,
+        env::var(FINITE_BRAIN_PUBLIC_BASE_URL_ENV).ok().as_deref(),
+    );
+    validate_http_url(&authorization_url)?;
     let signer = load_signer(env)?;
-    let authorization = signed_http_auth_header(&signer.keys, method, &url, body.as_deref())?;
-    let response = http_request(method, &url, Some(&authorization), body.as_deref())?;
+    let authorization =
+        signed_http_auth_header(&signer.keys, method, &authorization_url, body.as_deref())?;
+    let response = http_request(
+        method,
+        &transport_url,
+        Some(&authorization),
+        body.as_deref(),
+    )?;
     if !(200..300).contains(&response.status) {
         return Err(CliError::Http(format!(
             "server returned {}: {}",
@@ -156,6 +170,14 @@ fn saved_server_url(env: &CliEnvironment) -> Option<String> {
 }
 
 pub(crate) fn validate_http_url(url: &str) -> Result<(), CliError> {
+    let development_host = env::var(FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV).ok();
+    validate_http_url_with_development_host(url, development_host.as_deref())
+}
+
+pub(crate) fn validate_http_url_with_development_host(
+    url: &str,
+    development_host: Option<&str>,
+) -> Result<(), CliError> {
     if url.starts_with("https://") {
         return Ok(());
     }
@@ -165,7 +187,7 @@ pub(crate) fn validate_http_url(url: &str) -> Result<(), CliError> {
             .next()
             .and_then(http_host_without_port)
             .unwrap_or_default();
-        if is_loopback_host(host) {
+        if is_loopback_host(host) || development_host_matches(host, development_host) {
             return Ok(());
         }
     }
@@ -173,6 +195,15 @@ pub(crate) fn validate_http_url(url: &str) -> Result<(), CliError> {
         "fbrain HTTP transport requires https:// except for localhost or loopback http:// URLs"
             .to_owned(),
     ))
+}
+
+fn development_host_matches(host: &str, configured: Option<&str>) -> bool {
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    configured.len() <= 253
+        && !configured.contains(['/', ':', '@', '[', ']'])
+        && host.eq_ignore_ascii_case(configured)
 }
 
 fn http_host_without_port(host_port: &str) -> Option<&str> {
@@ -219,6 +250,18 @@ pub(crate) fn absolute_server_url(server_url: &str, path: &str) -> String {
     )
 }
 
+fn authorization_url_for_request(
+    server_url: &str,
+    path: &str,
+    public_base_url: Option<&str>,
+) -> String {
+    let base_url = public_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(server_url);
+    absolute_server_url(base_url, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +279,45 @@ mod tests {
     }
 
     #[test]
+    fn development_http_validation_is_exact_and_fail_closed() {
+        assert!(
+            validate_http_url_with_development_host(
+                "http://host.container.internal:18790/health",
+                Some("host.container.internal"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_http_url_with_development_host(
+                "http://192.168.64.1:18790/health",
+                Some("192.168.64.1"),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_http_url_with_development_host(
+                "http://finite.computer/health",
+                Some("host.container.internal"),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_http_url_with_development_host(
+                "http://host.container.internal.attacker.test/health",
+                Some("host.container.internal"),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_http_url_with_development_host(
+                "http://host.container.internal:18790/health",
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn server_url_selection_trims_selected_candidate() {
         assert_eq!(
             select_server_url(
@@ -246,6 +328,22 @@ mod tests {
             )
             .as_deref(),
             Some("http://127.0.0.1:3015")
+        );
+    }
+
+    #[test]
+    fn signed_request_uses_public_origin_without_changing_transport() {
+        assert_eq!(
+            authorization_url_for_request(
+                "http://192.168.67.1:18790",
+                "/_admin/vaults",
+                Some(" http://127.0.0.1:13002 "),
+            ),
+            "http://127.0.0.1:13002/_admin/vaults"
+        );
+        assert_eq!(
+            authorization_url_for_request("http://192.168.67.1:18790", "/_admin/vaults", None,),
+            "http://192.168.67.1:18790/_admin/vaults"
         );
     }
 }

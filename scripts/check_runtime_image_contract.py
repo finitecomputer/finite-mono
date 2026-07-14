@@ -22,6 +22,8 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
     "COPY finite-skills/skills /runtime/finite-skills",
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
+    "ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain",
+    "ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain",
     'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
 )
 

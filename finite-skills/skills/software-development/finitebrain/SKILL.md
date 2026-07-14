@@ -21,13 +21,15 @@ not stored there: it is the current Finite Home's Local Identity Key, resolved f
 regardless of `--config-dir`.
 
 ```sh
-FBRAIN_CONFIG="$HOME/.config/finitebrain"
-SERVER="https://finite.computer"
+SERVER="${FINITE_BRAIN_SERVER_URL:?FiniteBrain server is not configured}"
+FBRAIN_CONFIG="${FBRAIN_CONFIG_DIR:-${FINITE_HOME:-$HOME/.finite}/fbrain}"
+TREE_ROOT="${FBRAIN_WORKING_TREE_ROOT:-${FINITECHAT_WORKSPACE:-$HOME/finitebrain}}"
 VAULT="replace-with-vault-id"
-TREE="$HOME/finitebrain/$VAULT"
+TREE="$TREE_ROOT/$VAULT"
 
 fbrain --config-dir "$FBRAIN_CONFIG" doctor --server "$SERVER"
 fbrain --config-dir "$FBRAIN_CONFIG" auth status --json
+fbrain --config-dir "$FBRAIN_CONFIG" vault list --server "$SERVER" --json
 fbrain --config-dir "$FBRAIN_CONFIG" open "$VAULT" "$TREE" --server "$SERVER"
 cd "$TREE"
 fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
@@ -41,6 +43,11 @@ default changes. Do not treat the servers as replicas or silently move that
 tree. Preserve it until its Vault is deliberately reconciled, then reopen the
 intended Vault with an explicit production `--server`.
 
+The configured server is authoritative. If `doctor` or sync cannot reach it,
+stop in Blocked Sync State; never substitute production, smoke, or another
+FiniteBrain server. In a hosted Agent Runtime, the image supplies durable
+`FBRAIN_CONFIG_DIR` and `FBRAIN_WORKING_TREE_ROOT` values below `/data`.
+
 Read [fbrain-cli.md](references/fbrain-cli.md) when a command fails, when using
 daemon/watch, access, vault, folder, permission, invite, or share commands, or
 when working from the Rust repo where `cargo run -p finite-brain-cli --bin
@@ -51,6 +58,9 @@ fbrain -- <args>` may be the available entrypoint.
 1. Verify runtime state with `doctor`, `auth status --json`, and `status --json`.
    Completion: acting identity, working tree path, server source, daemon state,
    sync state, and blockers are known.
+   Before creating any Vault, run `vault list --json`. An Agent Principal paired
+   by a user discovers that user's Personal Vault there with role `member`; use
+   that Vault and never create a second agent-owned Personal Vault.
 2. Sync before reading broadly with `sync now --summary`, then finish with
    `conflicts --json`.
    Completion: latest sequence is recorded, encrypted grants were reopened for
@@ -205,8 +215,9 @@ current skill name is `finitebrain`.
 - Assume identity is provisioned by the runtime or a human runbook via the
   current Finite Home identity file (`$FINITE_HOME/identity/identity.json`, else
   `~/.finite/identity/identity.json`), which Finite tools in that home share.
-  FiniteBrain does not require a human/agent key split; follow the identity
-  already provisioned for that Finite Home. Do not run `fbrain auth import`,
+  Hosted users and agents have distinct provisioned Member Identities; an
+  Agent Runtime's Finite Home contains only that Agent Principal. Follow the
+  identity already provisioned for the current Finite Home. Do not run `fbrain auth import`,
   create, replace, or ask for keypairs unless the user or runbook explicitly
   asks.
 - Use `--json` for machine inspection, but summarize sensitive results instead
