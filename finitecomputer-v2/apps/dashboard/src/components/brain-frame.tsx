@@ -1,11 +1,28 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { PanelLeftIcon } from "lucide-react";
 
 import {
   BRAIN_SESSION_PROOF_RESPONSE,
   parseBrainSessionProofRequest,
 } from "@/lib/brain-session-bridge";
+
+export function BrainHeader() {
+  return (
+    <header className="finite-brain-page__header">
+      <button
+        type="button"
+        className="ocean-icon-button finite-brain-page__sidebar-toggle"
+        aria-label="Open agent navigation"
+        onClick={() => window.dispatchEvent(new Event("finite:open-agent-sidebar"))}
+      >
+        <PanelLeftIcon className="size-4" />
+      </button>
+      <strong>Brain</strong>
+    </header>
+  );
+}
 
 export function BrainFrame({ title }: { title: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -49,7 +66,7 @@ export function BrainFrame({ title }: { title: string }) {
   }, []);
 
   return (
-    <div className="h-[calc(100vh-12rem)] min-h-[36rem] overflow-hidden rounded-[var(--radius-card)] border border-border bg-card">
+    <div className="finite-brain-page__frame">
       <iframe
         ref={frameRef}
         className="size-full border-0"

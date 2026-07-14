@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { BrainIdentityProviderRequest } from "@/lib/hosted-web-device";
+import { browserVisibleRequestOrigin } from "@/lib/http-headers";
 
 const BRAIN_IDENTITY_PROVIDER_VERSION = "finite-brain-identity-provider-v1";
 const BRAIN_CLIENT_CAPABILITY_VERSION = "finite-brain-client-v1";
@@ -103,10 +104,10 @@ export function officialBrainFrameNavigation(
   headers: Pick<Headers, "get">,
 ) {
   const referer = headers.get("referer");
-  const host = headers.get("host");
+  const publicOrigin = browserVisibleRequestOrigin({ headers, url: requestUrl });
   if (
     !referer ||
-    !host ||
+    !publicOrigin ||
     headers.get("sec-fetch-dest") !== "iframe" ||
     headers.get("sec-fetch-mode") !== "navigate" ||
     headers.get("sec-fetch-site") !== "same-origin"
@@ -114,18 +115,9 @@ export function officialBrainFrameNavigation(
     return false;
   }
   try {
-    const request = new URL(requestUrl);
     const source = new URL(referer);
-    const forwardedProtocol = headers
-      .get("x-forwarded-proto")
-      ?.split(",", 1)[0]
-      ?.trim();
-    const expectedProtocol = forwardedProtocol
-      ? `${forwardedProtocol}:`
-      : request.protocol;
     return (
-      source.host === host &&
-      source.protocol === expectedProtocol &&
+      source.origin === publicOrigin &&
       /^\/dashboard\/machines\/[^/]+\/brain$/u.test(source.pathname)
     );
   } catch {

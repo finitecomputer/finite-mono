@@ -3429,7 +3429,8 @@ const FiniteBrainProductClient = (() => {
         options.assertCurrent?.();
         const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, {
           ...options,
-          expectedVaultId: exportedVault?.vaultId,
+          expectedVaultId:
+            options.expectedVaultId || exportedVault?.vault?.id || exportedVault?.vaultId,
         });
         options.assertCurrent?.();
         await openFolderKeyGrantPlaintext(keyring, plaintext, options);
@@ -8710,7 +8711,8 @@ const FiniteBrainProductClient = (() => {
     const hostedState = hostedIdentityProviderStates.get(state.identityProvider);
     if (hostedState) {
       try {
-        await state.identityProvider.identifyMember();
+        await resumeSession();
+        return;
       } catch (error) {
         state.lastError = error.message;
       }
@@ -8724,7 +8726,8 @@ const FiniteBrainProductClient = (() => {
     const operationEpoch = options.sessionEpoch ?? state.sessionEpoch;
     const provider = state.identityProvider;
     const derived = deriveBrainIdentityProviderState(provider);
-    if (!derived.canConnect) {
+    const hostedState = hostedIdentityProviderStates.get(provider);
+    if (!derived.canConnect && hostedState?.status !== "checking") {
       state.signerStatus = derived.status;
       render();
       return null;
@@ -8950,7 +8953,10 @@ const FiniteBrainProductClient = (() => {
     const exported = await protectedRequest(`/_admin/vaults/${encodeURIComponent(vaultId)}/export`);
     assertCurrent();
     const expectedRecipient = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
-    return openFolderKeyGrants(keyring, exported, expectedRecipient, { assertCurrent });
+    return openFolderKeyGrants(keyring, exported, expectedRecipient, {
+      assertCurrent,
+      expectedVaultId: vaultId,
+    });
   }
 
   function canLoadVault() {
