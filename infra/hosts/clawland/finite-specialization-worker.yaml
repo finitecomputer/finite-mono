@@ -45,7 +45,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: worker
-          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-13.5@sha256:c58094ff9f9dd5d8ad1939be202e9c98845df25f869de6f68b9313596e920b16
+          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-14.1@sha256:e4922cb3717e261513ab7922ee3fed0ee1bd4e6f63f728d156893b059316f5c2
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
