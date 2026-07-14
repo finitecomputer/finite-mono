@@ -25,6 +25,7 @@ digest-pinned finite-mono image.
 k3s kubectl -n fc-specializations rollout status deployment/finite-specialization-worker --timeout=180s
 k3s kubectl -n fc-specializations get pod -l app.kubernetes.io/name=finite-specialization-worker
 curl --fail --silent http://127.0.0.1:30998/health
+curl --fail --silent https://specialization.finite.vip/health
 curl --fail --silent http://127.0.0.1:30998/metrics
 ```
 

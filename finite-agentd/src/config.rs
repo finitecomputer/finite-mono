@@ -14,8 +14,8 @@ pub const VISION_CONFIG_PATH: &str = "auxiliary.vision";
 pub const MODEL_CONFIG_PATH: &str = "model";
 pub const TELEGRAM_CONFIG_PATH: &str = "gateway.platforms.telegram";
 pub const DEFAULT_AEON_SPECIALIZATION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
-pub const DEFAULT_AEON_SPECIALIZATION_WORKER_URL: &str =
-    "http://finite-specialization-worker.fc-specializations.svc.cluster.local:18998/v1";
+pub const DEFAULT_AEON_SPECIALIZATION_WORKER_URL: &str = "https://specialization.finite.vip/v1";
+pub const DEFAULT_AEON_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecializationCapabilitiesV1 {
@@ -327,34 +327,7 @@ impl ConfigManager {
         let current = value_at_path(&document, VISION_CONFIG_PATH)
             .cloned()
             .unwrap_or(Value::Null);
-        let existing_api_key = desired
-            .worker_api_key
-            .as_deref()
-            .or_else(|| current.get("api_key").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AgentdError::Config(
-                    "AEON specialization requires an existing or supplied worker credential"
-                        .to_owned(),
-                )
-            })?;
-        let target = json!({
-            "provider": "custom",
-            "model": desired.model_alias,
-            "base_url": desired.worker_base_url,
-            "api_key": existing_api_key,
-            "api_mode": "chat_completions",
-            "timeout": 120,
-            "download_timeout": 30,
-            "extra_body": {
-                "finite_specialization": {
-                    "capabilities": desired.capabilities,
-                    "prompt_versions": desired.prompt_versions,
-                    "normalization_limits": desired.normalization_limits,
-                }
-            },
-        });
+        let target = aeon_specialization_target(desired, &current)?;
         let result = || SpecializationReconcileResultV1 {
             proposal_id: desired.proposal_id.clone(),
             applied: current != target,
@@ -412,6 +385,57 @@ impl ConfigManager {
         Ok(result())
     }
 
+    pub fn activate_aeon_specialization_if_unset(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+        validate: impl FnOnce() -> Result<(), AgentdError>,
+    ) -> Result<SpecializationReconcileResultV1, AgentdError> {
+        validate_aeon_desired_state(desired)?;
+        let current = self.current_value(VISION_CONFIG_PATH)?;
+        let target = aeon_specialization_provider_target(desired, &current)?;
+        if current == target {
+            return Ok(SpecializationReconcileResultV1 {
+                proposal_id: desired.proposal_id.clone(),
+                applied: false,
+                already_applied: true,
+                effective_matches_desired: true,
+                model_alias: desired.model_alias.clone(),
+                worker_base_url: desired.worker_base_url.clone(),
+                capabilities: desired.capabilities.clone(),
+                prompt_versions: desired.prompt_versions.clone(),
+                normalization_limits: desired.normalization_limits.clone(),
+            });
+        }
+
+        let offer = HermesConfigOfferV1 {
+            proposal_id: desired.proposal_id.clone(),
+            path: VISION_CONFIG_PATH.to_owned(),
+            policy: ConfigOfferPolicyV1::ApplyIfUnset,
+            approved: false,
+            value: target.clone(),
+        };
+        let applied = self.apply(&offer, || {
+            validate()?;
+            if self.current_value(VISION_CONFIG_PATH)? != target {
+                return Err(AgentdError::Config(
+                    "Hermes specialization read-back did not match desired state".to_owned(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(SpecializationReconcileResultV1 {
+            proposal_id: desired.proposal_id.clone(),
+            applied: applied.applied,
+            already_applied: applied.already_applied,
+            effective_matches_desired: true,
+            model_alias: desired.model_alias.clone(),
+            worker_base_url: desired.worker_base_url.clone(),
+            capabilities: desired.capabilities.clone(),
+            prompt_versions: desired.prompt_versions.clone(),
+            normalization_limits: desired.normalization_limits.clone(),
+        })
+    }
+
     pub fn aeon_specialization_matches(
         &self,
         desired: &AeonSpecializationDesiredStateV1,
@@ -423,6 +447,19 @@ impl ConfigManager {
             "prompt_versions": desired.prompt_versions,
             "normalization_limits": desired.normalization_limits,
         });
+        let credential_matches =
+            current
+                .get("api_key")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    desired
+                        .worker_api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|expected| !expected.is_empty())
+                        .map(|expected| value == expected)
+                        .unwrap_or_else(|| !value.trim().is_empty())
+                });
         Ok(
             current.get("provider").and_then(Value::as_str) == Some("custom")
                 && current.get("model").and_then(Value::as_str)
@@ -430,12 +467,18 @@ impl ConfigManager {
                 && current.get("base_url").and_then(Value::as_str)
                     == Some(desired.worker_base_url.as_str())
                 && current.get("api_mode").and_then(Value::as_str) == Some("chat_completions")
-                && current
-                    .get("api_key")
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty())
+                && credential_matches
                 && current.pointer("/extra_body/finite_specialization") == Some(&expected_state),
         )
+    }
+
+    pub fn startup_aeon_specialization_matches(
+        &self,
+        desired: &AeonSpecializationDesiredStateV1,
+    ) -> Result<bool, AgentdError> {
+        validate_aeon_desired_state(desired)?;
+        let current = self.current_value(VISION_CONFIG_PATH)?;
+        Ok(current == aeon_specialization_provider_target(desired, &current)?)
     }
 
     fn load_document(&self) -> Result<(Vec<u8>, Value), AgentdError> {
@@ -470,6 +513,53 @@ impl ConfigManager {
         File::open(parent)?.sync_all()?;
         Ok(())
     }
+}
+
+fn aeon_specialization_target(
+    desired: &AeonSpecializationDesiredStateV1,
+    current: &Value,
+) -> Result<Value, AgentdError> {
+    let mut target = aeon_specialization_provider_target(desired, current)?;
+    target
+        .as_object_mut()
+        .expect("provider target is an object")
+        .insert(
+            "extra_body".to_owned(),
+            json!({
+                "finite_specialization": {
+                    "capabilities": desired.capabilities,
+                    "prompt_versions": desired.prompt_versions,
+                    "normalization_limits": desired.normalization_limits,
+                }
+            }),
+        );
+    Ok(target)
+}
+
+fn aeon_specialization_provider_target(
+    desired: &AeonSpecializationDesiredStateV1,
+    current: &Value,
+) -> Result<Value, AgentdError> {
+    let existing_api_key = desired
+        .worker_api_key
+        .as_deref()
+        .or_else(|| current.get("api_key").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AgentdError::Config(
+                "AEON specialization requires an existing or supplied worker credential".to_owned(),
+            )
+        })?;
+    Ok(json!({
+        "provider": "custom",
+        "model": desired.model_alias,
+        "base_url": desired.worker_base_url,
+        "api_key": existing_api_key,
+        "api_mode": "chat_completions",
+        "timeout": 120,
+        "download_timeout": 30,
+    }))
 }
 
 fn validate_aeon_desired_state(
@@ -707,11 +797,12 @@ fn value_is_unset(path: &str, value: &Value) -> bool {
         return object.is_empty();
     }
     object.is_empty()
-        || object
-            .get("provider")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .is_none_or(|provider| provider.is_empty() || provider == "auto")
+        || (object.len() == 1
+            && object
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_none_or(|provider| provider.is_empty() || provider == "auto"))
 }
 
 fn value_at_path<'a>(document: &'a Value, path: &str) -> Option<&'a Value> {
@@ -861,6 +952,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_if_unset_preserves_auto_profiles_with_user_details() {
+        let (_directory, manager) = manager();
+        let original = "auxiliary:\n  vision:\n    provider: auto\n    model: user-selected-vision\n    timeout: 240\n";
+        fs::write(manager.path(), original).unwrap();
+
+        let preview = manager.preview(&offer("vision-auto-customized")).unwrap();
+
+        assert_eq!(preview.ownership, "custom");
+        assert!(!preview.would_apply);
+        assert!(matches!(
+            manager.apply(&offer("vision-auto-customized"), || Ok(())),
+            Err(AgentdError::ConfigConflict(_))
+        ));
+        assert_eq!(fs::read(manager.path()).unwrap(), original.as_bytes());
+    }
+
+    #[test]
     fn rollback_is_exact_but_refuses_to_clobber_later_user_edits() {
         let (_directory, manager) = manager();
         manager.apply(&offer("vision-rollback"), || Ok(())).unwrap();
@@ -932,6 +1040,79 @@ mod tests {
         assert!(repeated.already_applied);
         assert_eq!(fs::read(manager.path()).unwrap(), after_first_apply);
         drop(directory);
+    }
+
+    #[test]
+    fn startup_aeon_activation_is_idempotent_and_read_back_verified() {
+        let (_directory, manager) = manager();
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-token-1");
+        desired.worker_api_key = Some("dedicated-worker-secret".to_owned());
+
+        let first = manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap();
+        assert!(first.applied);
+        assert!(first.effective_matches_desired);
+        assert!(
+            manager
+                .startup_aeon_specialization_matches(&desired)
+                .unwrap()
+        );
+        assert!(
+            manager.current_value(VISION_CONFIG_PATH).unwrap()["extra_body"].is_null(),
+            "startup activation must remain a plain Hermes provider profile"
+        );
+
+        let after_first_apply = fs::read(manager.path()).unwrap();
+        let repeated = manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap();
+        assert!(repeated.already_applied);
+        assert!(repeated.effective_matches_desired);
+        assert_eq!(fs::read(manager.path()).unwrap(), after_first_apply);
+    }
+
+    #[test]
+    fn startup_aeon_activation_preserves_user_owned_vision_profile() {
+        let (_directory, manager) = manager();
+        let original = "model: anthropic/claude\nauxiliary:\n  vision:\n    provider: custom\n    model: user-selected-vision\n    base_url: https://vision.example/v1\n    api_key: user-secret\n";
+        fs::write(manager.path(), original).unwrap();
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-custom");
+        desired.worker_api_key = Some("dedicated-worker-secret".to_owned());
+
+        let error = manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap_err();
+
+        assert!(matches!(error, AgentdError::ConfigConflict(_)));
+        assert_eq!(fs::read(manager.path()).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn startup_aeon_activation_rotates_a_finite_owned_worker_credential() {
+        let (_directory, manager) = manager();
+        let mut first = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-token-1");
+        first.worker_api_key = Some("worker-secret-one".to_owned());
+        manager
+            .activate_aeon_specialization_if_unset(&first, || Ok(()))
+            .unwrap();
+
+        let mut rotated = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-token-2");
+        rotated.worker_api_key = Some("worker-secret-two".to_owned());
+        assert!(
+            !manager
+                .startup_aeon_specialization_matches(&rotated)
+                .unwrap()
+        );
+        let result = manager
+            .activate_aeon_specialization_if_unset(&rotated, || Ok(()))
+            .unwrap();
+
+        assert!(result.applied);
+        assert_eq!(
+            manager.current_value(VISION_CONFIG_PATH).unwrap()["api_key"],
+            "worker-secret-two"
+        );
     }
 
     #[test]

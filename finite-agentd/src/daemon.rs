@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finitechat_proto::{
@@ -22,13 +24,14 @@ use tokio::sync::mpsc;
 
 use crate::AgentdError;
 use crate::config::{
-    AeonSpecializationDesiredStateV1, ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1,
+    AeonSpecializationDesiredStateV1, ConfigManager, DEFAULT_AEON_SPECIALIZATION_BUNDLE,
+    HermesConfigOfferV1, HermesConfigRollbackV1,
 };
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
-use crate::ledger::{CommandDecision, Ledger};
+use crate::ledger::{CommandDecision, Ledger, hex_digest};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
@@ -46,6 +49,25 @@ const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
 const AEON_HERMES_PROBE_MARKER: &str = "FINITE_AEON_HERMES_PROBE ";
+const SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
+const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
+const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct StartupSpecializationBundleConfig {
+    pub bundle_id: String,
+    pub worker_api_key: String,
+}
+
+impl std::fmt::Debug for StartupSpecializationBundleConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartupSpecializationBundleConfig")
+            .field("bundle_id", &self.bundle_id)
+            .field("worker_api_key", &"<redacted>")
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -61,6 +83,14 @@ pub struct DaemonConfig {
     pub health_python: PathBuf,
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
+    pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecializationBundleStatusV1 {
+    pub bundle_id: Option<String>,
+    pub desired: bool,
+    pub effective: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +101,7 @@ pub struct AgentdStatus {
     pub device_id: String,
     pub authorized_principals: usize,
     pub processes: SupervisorStatus,
+    pub specialization: SpecializationBundleStatusV1,
     pub updated_at_ms: u64,
 }
 
@@ -140,6 +171,12 @@ impl DaemonConfig {
                     .unwrap_or_else(|_| "/opt/health_server.py".to_owned()),
             ),
             authorized_accounts,
+            specialization_bundle: startup_specialization_bundle_from_values(
+                std::env::var(SPECIALIZATION_BUNDLE_ENV).ok().as_deref(),
+                std::env::var(SPECIALIZATION_WORKER_API_KEY_ENV)
+                    .ok()
+                    .as_deref(),
+            )?,
         })
     }
 
@@ -149,6 +186,81 @@ impl DaemonConfig {
 
     pub fn status_path(&self) -> PathBuf {
         self.state_dir().join("status.json")
+    }
+}
+
+fn startup_specialization_bundle_from_values(
+    bundle_id: Option<&str>,
+    worker_api_key: Option<&str>,
+) -> Result<Option<StartupSpecializationBundleConfig>, AgentdError> {
+    let bundle_id = bundle_id.map(str::trim).filter(|value| !value.is_empty());
+    let worker_api_key = worker_api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (bundle_id, worker_api_key) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(AgentdError::Config(format!(
+            "{SPECIALIZATION_WORKER_API_KEY_ENV} requires {SPECIALIZATION_BUNDLE_ENV}"
+        ))),
+        (Some(_), None) => Err(AgentdError::Config(format!(
+            "{SPECIALIZATION_BUNDLE_ENV} requires {SPECIALIZATION_WORKER_API_KEY_ENV}"
+        ))),
+        (Some(bundle_id), Some(worker_api_key)) => {
+            if bundle_id != DEFAULT_AEON_SPECIALIZATION_BUNDLE {
+                return Err(AgentdError::Config(format!(
+                    "unsupported specialization bundle {bundle_id:?}"
+                )));
+            }
+            if worker_api_key.len() > 16 * 1024 {
+                return Err(AgentdError::Config(
+                    "specialization worker credential is oversized".to_owned(),
+                ));
+            }
+            Ok(Some(StartupSpecializationBundleConfig {
+                bundle_id: bundle_id.to_owned(),
+                worker_api_key: worker_api_key.to_owned(),
+            }))
+        }
+    }
+}
+
+fn startup_specialization_desired_state(
+    bundle: &StartupSpecializationBundleConfig,
+) -> AeonSpecializationDesiredStateV1 {
+    let credential_fingerprint = hex_digest(bundle.worker_api_key.as_bytes());
+    let mut desired = AeonSpecializationDesiredStateV1::canonical(format!(
+        "runtime-bundle-{}-{}",
+        bundle.bundle_id,
+        &credential_fingerprint[..16]
+    ));
+    // Hermes owns transcript-first audio handling today. The startup bundle
+    // activates only its native image and sampled-video capability profile.
+    desired.capabilities.audio = false;
+    desired.worker_api_key = Some(bundle.worker_api_key.clone());
+    desired
+}
+
+fn specialization_bundle_status(
+    manager: &ConfigManager,
+    desired: Option<&AeonSpecializationDesiredStateV1>,
+    verified_hermes_generation: &AtomicU64,
+    processes: &SupervisorStatus,
+) -> SpecializationBundleStatusV1 {
+    let Some(desired) = desired else {
+        return SpecializationBundleStatusV1 {
+            bundle_id: None,
+            desired: false,
+            effective: false,
+        };
+    };
+    let running_generation = running_hermes_identity(processes).map(|(generation, _)| generation);
+    SpecializationBundleStatusV1 {
+        bundle_id: Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE.to_owned()),
+        desired: true,
+        effective: running_generation == Some(verified_hermes_generation.load(Ordering::Relaxed))
+            && manager
+                .startup_aeon_specialization_matches(desired)
+                .unwrap_or(false),
     }
 }
 
@@ -162,6 +274,23 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         ledger.authorize_principal(account_id)?;
     }
     let config_manager = ConfigManager::new(config.hermes_home.join("config.yaml"), ledger.clone());
+    let startup_specialization_desired = config
+        .specialization_bundle
+        .as_ref()
+        .map(startup_specialization_desired_state);
+    if let Some(desired) = startup_specialization_desired.as_ref() {
+        match config_manager.activate_aeon_specialization_if_unset(desired, || {
+            validate_hermes_config(&config.hermes_home)
+        }) {
+            Ok(_) => {}
+            Err(AgentdError::ConfigConflict(_)) => {
+                eprintln!(
+                    "finite-agentd: specialization bundle remains desired but a user-owned Hermes profile was preserved"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
     let connection_manager = ConnectionManager::new(
         config.agent_home.clone(),
         config.hermes_home.clone(),
@@ -173,11 +302,24 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         health_spec(&config),
         hermes_spec(&config),
     );
+    let verified_hermes_generation = Arc::new(AtomicU64::new(UNVERIFIED_HERMES_GENERATION));
+    spawn_startup_specialization_verifier(
+        config_manager.clone(),
+        startup_specialization_desired.clone(),
+        supervisor.clone(),
+        config.hermes_probe_python.clone(),
+        config.hermes_probe_script.clone(),
+        config.hermes_home.clone(),
+        Arc::clone(&verified_hermes_generation),
+    );
     spawn_status_writer(
         config.status_path(),
         identity.clone(),
         ledger.clone(),
         supervisor.clone(),
+        config_manager.clone(),
+        startup_specialization_desired.clone(),
+        Arc::clone(&verified_hermes_generation),
     );
 
     wait_for_bridge(&bridge).await?;
@@ -193,6 +335,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         hermes_probe_script: config.hermes_probe_script,
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
+        startup_specialization_desired,
+        verified_hermes_generation,
     };
 
     let delivery_worker =
@@ -289,6 +433,74 @@ async fn probe_hermes_vision(
     Ok(())
 }
 
+fn spawn_startup_specialization_verifier(
+    manager: ConfigManager,
+    desired: Option<AeonSpecializationDesiredStateV1>,
+    supervisor: SupervisorHandle,
+    python: PathBuf,
+    script: PathBuf,
+    hermes_home: PathBuf,
+    verified_hermes_generation: Arc<AtomicU64>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            let before = supervisor.status().await;
+            let Some((generation, pid)) = running_hermes_identity(&before) else {
+                verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            };
+            if !manager
+                .startup_aeon_specialization_matches(&desired)
+                .unwrap_or(false)
+            {
+                verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            if verified_hermes_generation.load(Ordering::Relaxed) == generation {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            let probe_result = if desired.capabilities.image {
+                probe_hermes_vision(&python, &script, &hermes_home).await
+            } else {
+                Ok(())
+            };
+            let after = supervisor.status().await;
+            let same_process = running_hermes_identity(&after) == Some((generation, pid));
+            let config_matches = manager
+                .startup_aeon_specialization_matches(&desired)
+                .unwrap_or(false);
+            if probe_result.is_ok() && same_process && config_matches {
+                verified_hermes_generation.store(generation, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+            if let Err(error) = probe_result {
+                eprintln!(
+                    "finite-agentd: specialization bundle is configured but not effective: {}",
+                    error.public_message()
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+}
+
+fn running_hermes_identity(status: &SupervisorStatus) -> Option<(u64, u32)> {
+    let hermes = status.processes.get("hermes")?;
+    (hermes.state == "running")
+        .then(|| hermes.pid.map(|pid| (hermes.restart_count, pid)))
+        .flatten()
+}
+
 #[derive(Clone)]
 struct CommandExecutor {
     identity: DeviceRef,
@@ -300,6 +512,8 @@ struct CommandExecutor {
     hermes_probe_script: PathBuf,
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
+    startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
+    verified_hermes_generation: Arc<AtomicU64>,
 }
 
 impl CommandExecutor {
@@ -584,13 +798,20 @@ impl CommandExecutor {
     }
 
     async fn current_status(&self) -> AgentdStatus {
+        let processes = self.supervisor.status().await;
         AgentdStatus {
             service: "finite-agentd".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             account_id: self.identity.account_id.clone(),
             device_id: self.identity.device_id.clone(),
             authorized_principals: self.ledger.authorized_principal_count().unwrap_or(0),
-            processes: self.supervisor.status().await,
+            processes: processes.clone(),
+            specialization: specialization_bundle_status(
+                &self.config_manager,
+                self.startup_specialization_desired.as_ref(),
+                &self.verified_hermes_generation,
+                &processes,
+            ),
             updated_at_ms: now_ms(),
         }
     }
@@ -774,18 +995,28 @@ fn spawn_status_writer(
     identity: DeviceRef,
     ledger: Ledger,
     supervisor: SupervisorHandle,
+    config_manager: ConfigManager,
+    startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
+    verified_hermes_generation: Arc<AtomicU64>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
+            let processes = supervisor.status().await;
             let status = AgentdStatus {
                 service: "finite-agentd".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 account_id: identity.account_id.clone(),
                 device_id: identity.device_id.clone(),
                 authorized_principals: ledger.authorized_principal_count().unwrap_or(0),
-                processes: supervisor.status().await,
+                processes: processes.clone(),
+                specialization: specialization_bundle_status(
+                    &config_manager,
+                    startup_specialization_desired.as_ref(),
+                    &verified_hermes_generation,
+                    &processes,
+                ),
                 updated_at_ms: now_ms(),
             };
             let _ = write_private_json(&path, &status);
@@ -830,6 +1061,105 @@ mod tests {
     use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
 
     use super::*;
+
+    #[test]
+    fn startup_specialization_bundle_requires_an_explicit_pair() {
+        assert!(
+            startup_specialization_bundle_from_values(None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            startup_specialization_bundle_from_values(
+                Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE),
+                None,
+            )
+            .is_err()
+        );
+        assert!(startup_specialization_bundle_from_values(None, Some("worker-secret")).is_err());
+        assert!(
+            startup_specialization_bundle_from_values(Some("unknown"), Some("worker-secret"))
+                .is_err()
+        );
+
+        let bundle = startup_specialization_bundle_from_values(
+            Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE),
+            Some("worker-secret"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(bundle.bundle_id, DEFAULT_AEON_SPECIALIZATION_BUNDLE);
+        assert!(!format!("{bundle:?}").contains("worker-secret"));
+    }
+
+    #[test]
+    fn specialization_status_exposes_desired_and_effective_without_secrets() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.yaml");
+        fs::write(&config_path, "auxiliary: {}\n").unwrap();
+        let manager = ConfigManager::new(
+            config_path,
+            Ledger::open(home.path().join("agentd.sqlite3")).unwrap(),
+        );
+        let bundle = StartupSpecializationBundleConfig {
+            bundle_id: DEFAULT_AEON_SPECIALIZATION_BUNDLE.to_owned(),
+            worker_api_key: "worker-secret".to_owned(),
+        };
+        let desired = startup_specialization_desired_state(&bundle);
+        assert!(!desired.capabilities.audio);
+        let verified_generation = AtomicU64::new(UNVERIFIED_HERMES_GENERATION);
+        let mut processes = SupervisorStatus::default();
+        processes.processes.insert(
+            "hermes".to_owned(),
+            crate::supervisor::ProcessStatus {
+                state: "running".to_owned(),
+                pid: Some(42),
+                restart_count: 7,
+                last_exit: None,
+                updated_at_ms: 0,
+            },
+        );
+
+        let before = specialization_bundle_status(
+            &manager,
+            Some(&desired),
+            &verified_generation,
+            &processes,
+        );
+        assert!(before.desired);
+        assert!(!before.effective);
+        manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap();
+        let configured = specialization_bundle_status(
+            &manager,
+            Some(&desired),
+            &verified_generation,
+            &processes,
+        );
+        assert!(!configured.effective);
+        verified_generation.store(7, Ordering::Relaxed);
+        let after = specialization_bundle_status(
+            &manager,
+            Some(&desired),
+            &verified_generation,
+            &processes,
+        );
+        assert!(after.effective);
+        processes.processes.get_mut("hermes").unwrap().restart_count = 8;
+        let restarted = specialization_bundle_status(
+            &manager,
+            Some(&desired),
+            &verified_generation,
+            &processes,
+        );
+        assert!(!restarted.effective);
+        assert!(
+            !serde_json::to_string(&after)
+                .unwrap()
+                .contains("worker-secret")
+        );
+    }
 
     #[tokio::test]
     async fn aeon_reconciliation_probe_runs_through_hermes_with_its_home() {

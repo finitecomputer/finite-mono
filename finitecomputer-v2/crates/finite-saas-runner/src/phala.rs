@@ -9,9 +9,10 @@
 use super::{
     DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
-    RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
-    RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
-    docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
+    FINITE_SPECIALIZATION_WORKER_API_KEY_ENV, RunnerError, RuntimeLaunchFacts,
+    RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
+    control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
+    state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use crate::phala_inventory::{
     AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
@@ -619,7 +620,9 @@ fn phala_compose(
     for (key, value) in &mut environment {
         if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
             *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
-        } else if options.secret_environment.contains_key(key) {
+        } else if key == FINITE_SPECIALIZATION_WORKER_API_KEY_ENV
+            || options.secret_environment.contains_key(key)
+        {
             *value = format!("${{{key}:?{key} is required}}");
         }
     }
@@ -2370,6 +2373,10 @@ mod tests {
                 base_url: "https://inference.example.invalid/v1".to_string(),
                 model: "fixture-model".to_string(),
                 revoke_on_launch_failure: true,
+                specialization_bundle: crate::SpecializationBundleRuntimeDefaults {
+                    bundle_id: crate::DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
+                    worker_api_key: "fixture-plaintext-specialization-key".to_owned(),
+                },
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -2390,6 +2397,7 @@ mod tests {
         assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
         assert!(!compose.contains("fixture-plaintext-inference-key"));
         assert!(!compose.contains("fixture-plaintext-provider-key"));
+        assert!(!compose.contains("fixture-plaintext-specialization-key"));
         assert!(!compose.contains(FIXTURE_API_KEY));
         assert_eq!(
             phala_cvm_name_for_request_id(&lease.request.id),

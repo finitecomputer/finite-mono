@@ -9,12 +9,16 @@ use thiserror::Error;
 
 pub use config::{
     AeonSpecializationDesiredStateV1, ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1,
-    ConfigPreviewV1, DEFAULT_AEON_SPECIALIZATION_MODEL, DEFAULT_AEON_SPECIALIZATION_WORKER_URL,
-    HermesConfigOfferV1, HermesConfigRollbackV1, SpecializationCapabilitiesV1,
-    SpecializationNormalizationLimitsV1, SpecializationPromptVersionsV1,
-    SpecializationReconcileResultV1, VISION_CONFIG_PATH, redact_value,
+    ConfigPreviewV1, DEFAULT_AEON_SPECIALIZATION_BUNDLE, DEFAULT_AEON_SPECIALIZATION_MODEL,
+    DEFAULT_AEON_SPECIALIZATION_WORKER_URL, HermesConfigOfferV1, HermesConfigRollbackV1,
+    SpecializationCapabilitiesV1, SpecializationNormalizationLimitsV1,
+    SpecializationPromptVersionsV1, SpecializationReconcileResultV1, VISION_CONFIG_PATH,
+    redact_value,
 };
-pub use daemon::{AgentdStatus, DaemonConfig, read_status, run_daemon};
+pub use daemon::{
+    AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, StartupSpecializationBundleConfig,
+    read_status, run_daemon,
+};
 pub use ledger::{CommandDecision, Ledger};
 pub use supervisor::{ProcessStatus, SupervisorStatus};
 
