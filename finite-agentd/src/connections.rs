@@ -194,9 +194,15 @@ impl ConnectionManager {
             Value::Bool(false),
         );
         value.insert("typing_indicator".to_owned(), Value::Bool(true));
-        value
+        let extra = value
             .entry("extra".to_owned())
             .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(extra) = extra {
+            // Unknown DMs must enter Hermes' pairing handshake (bot replies
+            // with the eight-character code the dashboard approves) instead
+            // of relying on any gateway-wide authorization default.
+            extra.insert("dm_policy".to_owned(), Value::String("pairing".to_owned()));
+        }
         Ok(approved_offer(
             request_id,
             TELEGRAM_CONFIG_PATH,
