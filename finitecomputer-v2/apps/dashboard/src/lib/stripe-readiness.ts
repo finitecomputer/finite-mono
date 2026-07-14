@@ -5,6 +5,7 @@ export const FINITE_STRIPE_EVENTS = [
   "customer.subscription.updated",
   "customer.subscription.deleted",
 ] as const;
+export const FINITE_LEGACY_WEBHOOK_API_VERSION = "2024-06-20";
 
 export type StripeReadinessSnapshot = {
   account: {
@@ -147,7 +148,9 @@ export function evaluateStripeReadiness(
   check("webhook.url", webhook?.url === FINITE_STRIPE_WEBHOOK_URL, webhook?.url ?? "missing");
   check(
     "webhook.api_version",
-    webhook?.snapshotApiVersion === expected.apiVersion,
+    [expected.apiVersion, FINITE_LEGACY_WEBHOOK_API_VERSION].includes(
+      webhook?.snapshotApiVersion ?? ""
+    ),
     webhook?.snapshotApiVersion ?? "missing"
   );
   check(

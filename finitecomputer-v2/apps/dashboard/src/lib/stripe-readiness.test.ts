@@ -14,6 +14,18 @@ test("production readiness accepts the exact live billing contract", () => {
   assert.equal(result.ready, true, result.checks.filter((check) => !check.passed).map((check) => check.name).join(", "));
 });
 
+test("production readiness accepts the existing immutable live webhook version", () => {
+  const snapshot = readySnapshot();
+  snapshot.webhook!.snapshotApiVersion = "2024-06-20";
+
+  const result = evaluateStripeReadiness(snapshot, expected);
+  assert.equal(
+    result.ready,
+    true,
+    result.checks.filter((check) => !check.passed).map((check) => check.name).join(", ")
+  );
+});
+
 test("production readiness fails closed on account, Price, Portal, webhook, and tax drift", () => {
   const snapshot = readySnapshot();
   snapshot.account.id = "acct_sibling";
@@ -21,6 +33,7 @@ test("production readiness fails closed on account, Price, Portal, webhook, and 
   snapshot.taxDefaultBehavior = "inclusive";
   snapshot.portal!.subscriptionCancelMode = "immediately";
   snapshot.webhook!.eventsFrom = ["@organization_members"];
+  snapshot.webhook!.snapshotApiVersion = "2023-10-16";
   snapshot.webhook!.enabledEvents.push("invoice.paid");
 
   const result = evaluateStripeReadiness(snapshot, expected);
@@ -33,6 +46,7 @@ test("production readiness fails closed on account, Price, Portal, webhook, and 
       "price.tax_behavior",
       "portal.period_end_cancel",
       "webhook.scope",
+      "webhook.api_version",
       "webhook.events",
     ]
   );

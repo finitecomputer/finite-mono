@@ -11,6 +11,11 @@ and its run deleted on `main`; the separately proposed Hosted Web Chat
 Disaster Recovery empty-target proof remains a hard gate before paid customer
 admission.
 
+On 2026-07-13 Paul confirmed the earlier sandbox pass was completed and
+directed this run not to repeat a second sandbox cycle. The remaining Stripe
+acceptance is the inspection-only live audit followed by the separately
+authorized first invited live charge.
+
 Owner: Paul
 
 Opened: 2026-07-13
@@ -163,21 +168,14 @@ Work top-down after this run is explicitly made ACTIVE. Every item is retained.
 
 ### P0 — Finish test-mode readiness
 
-- Resume and exhaust [`Stripe Checkout Readiness`](stripe-checkout-readiness.md):
-  dashboard unit tests, browser product flow, root gates, opt-in test-clock E2E,
-  and Paul's real test-mode browser Checkout. Synthetic events alone do not
-  close it.
-- In the official account sandbox, create the same one-product/one-Price
-  contract, sandbox Portal configuration, and sandbox webhook destination used
-  below. Record sandbox object ids only in ephemeral evidence, not deployment
-  config.
-- Create a sandbox restricted API key starting from no permissions. Exercise
-  every application call and use its request logs to prove the minimum live
-  permission set. The test-clock harness uses a separate, test-only key because
-  it creates clocks and synthetic subscriptions that production never may.
+- Treat Paul's confirmed earlier sandbox pass as the retained test-mode
+  acceptance. Do not create another sandbox, sandbox Product, test clock, or
+  synthetic subscription solely to repeat it.
 - Pin and test the Stripe API version used by `stripe@22.1.1`, currently
-  `2026-04-22.dahlia`. If the SDK changes before activation, update this plan
-  and the webhook destination to the newly tested pinned version.
+  `2026-04-22.dahlia`. The existing live snapshot webhook is immutable at
+  `2024-06-20`; its four handlers use the stable Checkout/Subscription fields
+  covered by the suite, so readiness accepts that exact legacy version without
+  rotating the signing secret. New destinations use the pinned SDK version.
 
 ### P0 — Close production code and disclosure gaps
 
@@ -429,8 +427,9 @@ proved the permissions.
       verified member account and live mode.
 - [ ] Select **Your account** (not Connected accounts and not an organization-
       wide destination), **snapshot events**, and API version
-      `2026-04-22.dahlia` unless the accepted implementation records a newer
-      tested pin.
+      `2026-04-22.dahlia`. The already-created production destination remains
+      at its immutable, explicitly supported `2024-06-20` version; do not
+      replace it merely to rotate versions.
 - [ ] Select only:
       - `checkout.session.completed`;
       - `customer.subscription.created`;
