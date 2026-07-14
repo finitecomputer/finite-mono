@@ -36,6 +36,13 @@ nixos-build-lat1 rev:
     set -euo pipefail
     exec scripts/nix-build-lat2 {{ quote(rev) }}
 
+# Full lat1 deploy for a committed main rev: prebuild on lat2, copy/switch
+# lat1, then verify the running closure and dashboard digest by state.
+deploy-lat1 rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec scripts/deploy-lat1 {{ quote(rev) }}
+
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
