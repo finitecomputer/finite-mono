@@ -194,7 +194,16 @@ export function CoreAgentCreationForm({
               <li>Cancel in the billing portal; cancellation takes effect at period end.</li>
             </ul>
             <p className="text-xs text-muted-foreground">
-              Refund requests are reviewed individually.{" "}
+              Refund requests are reviewed individually. Read our{" "}
+              <a
+                href="/privacy.txt"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                privacy policy and terms
+              </a>
+              .{" "}
               <a
                 href="https://docs.google.com/forms/d/e/1FAIpQLSePGnux9EVHRGZf30q7MPEMdMmTb7djJxAPCM0hCf-wRTGv3w/viewform"
                 target="_blank"
