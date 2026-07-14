@@ -35,7 +35,7 @@ Do NOT guess imgflip URLs — they are unreliable and often serve the wrong imag
 
 1. **DuckDuckGo image search** — use terminal heredoc (NOT execute_code, which can't see venv packages):
    ```bash
-   ~/.hermes/venv/bin/python3 << 'PYEOF'
+   python3 << 'PYEOF'
    from ddgs import DDGS
    with DDGS() as ddgs:
        results = list(ddgs.images("MEME NAME template", max_results=5))
@@ -66,7 +66,7 @@ head -c 4 /tmp/template.jpg | od -A x -t x1z | head -1
 
 ```python
 # Use the venv python via heredoc (avoids timeout issues with -c flag)
-~/.hermes/venv/bin/python3 << 'PYEOF'
+python3 << 'PYEOF'
 from PIL import Image, ImageDraw, ImageFont
 
 # Load template and overlay
@@ -103,9 +103,9 @@ PYEOF
 
 1. **Wrong template from imgflip**: imgflip's URL scheme (`i.imgflip.com/{id}.png`) often serves HTML pages or unrelated memes. Always check magic bytes AND verify with vision_analyze.
 2. **cairosvg broken**: This runtime lacks libcairo.so.2. Don't try to convert SVGs with cairosvg — find PNG/JPG alternatives instead.
-3. **Python -c timeouts**: Running `~/.hermes/venv/bin/python3 -c "..."` with complex imports consistently times out. ALWAYS use heredoc (`<< 'PYEOF'`) instead.
-4. **execute_code sandbox isolation**: The `execute_code` tool runs in a separate Python environment that CANNOT import packages from `~/.hermes/venv`. For Pillow/ddgs/etc, use `terminal` with heredoc instead.
-5. **Pillow not installed**: Install with `~/.hermes/venv/bin/pip install Pillow` first.
+3. **Python -c timeouts**: Running `python3 -c "..."` with complex imports can time out. Use a heredoc (`<< 'PYEOF'`) instead.
+4. **execute_code sandbox isolation**: The `execute_code` tool can use a separate Python environment. For runtime packages, use `terminal` with `python3` and a heredoc instead.
+5. **Pillow missing**: Hosted Finite runtimes include Pillow. Treat an import failure there as an image packaging problem; do not mutate the managed Hermes environment.
 6. **Transparency**: Always convert to RGBA before compositing. Convert to RGB before saving as JPEG.
 7. **Positioning**: Use `vision_analyze` on the template FIRST to understand where elements need to go, rather than guessing coordinates.
 8. **Verify before compositing**: After downloading any image, verify it's a real image file (check magic bytes with `od`). Many meme sites serve HTML redirects or 404 pages that look like successful downloads.
@@ -113,6 +113,6 @@ PYEOF
 
 ## Dependencies
 
-- Pillow (`~/.hermes/venv/bin/pip install Pillow`)
+- Pillow (preinstalled in the hosted Finite runtime)
 - curl for downloading templates
 - vision_analyze for verifying results

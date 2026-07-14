@@ -74,8 +74,10 @@ function splitFrontmatter(raw: string) {
 
 function parseSimpleFrontmatter(block: string) {
   const result: Record<string, string> = {};
+  const lines = block.split("\n");
 
-  for (const line of block.split("\n")) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || /^\s/.test(line)) {
       continue;
@@ -86,8 +88,25 @@ function parseSimpleFrontmatter(block: string) {
       continue;
     }
 
-    const [, key, value] = match;
-    result[key] = value.replace(/^['"]|['"]$/g, "").trim();
+    const [, key, rawValue] = match;
+    const blockScalar = rawValue.match(/^([>|])[-+]?$/);
+    if (blockScalar) {
+      const content: string[] = [];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1]!;
+        if (next.trim() && !/^\s/u.test(next)) break;
+        index += 1;
+        content.push(next.trim());
+      }
+      const value = blockScalar[1] === ">"
+        ? content.filter(Boolean).join(" ")
+        : content.join("\n").trim();
+      if (value) result[key] = value;
+      continue;
+    }
+
+    const value = rawValue.replace(/^['"]|['"]$/g, "").trim();
+    if (value) result[key] = value;
   }
 
   return result;

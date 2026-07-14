@@ -182,3 +182,31 @@ Two-minute morning verification:
    the label normally.
 
 Paul action: none beyond the morning local-stack browser verification.
+
+## 6. Skills audit — SHIPPED
+
+What changed: The dashboard catalog now parses valid folded/literal YAML
+descriptions instead of showing `>`/`|` or an empty description. Google
+Workspace, meme, FAL editing, and X search skill text was reconciled with the
+hosted runtime where the evidence was exact. Full findings are in
+[`skills-audit-2026-07-13.md`](../audits/skills-audit-2026-07-13.md).
+
+Verification evidence: The source inventory found 47 skills and exactly two
+block-scalar descriptions. All 47 skills passed the static checks; all 175
+dashboard unit tests and dashboard lint passed. Runtime probes confirmed Pillow
+and `gws` present, and `xai-sdk` and `fal-client` absent.
+
+Two-minute morning verification:
+
+1. Open the branch dashboard Skills page and search for `tufte-viz-finite` and
+   `llm-wiki-finite`.
+2. Confirm each card shows its real multi-line description rather than `|`,
+   `>`, blank text, or “No description yet.”
+3. Inspect Google Workspace and confirm its card says the pinned `gws` CLI is
+   available.
+
+Paul action: Loudly: production still falls back to the archived
+`finitecomputer/finite-skills` GitHub repository because infra does not set
+`FC_FINITE_SKILLS_SOURCE_DIR`. The correct mono tree is baked into the runtime,
+but the dashboard source contract is not wired to it. Keep the existing
+parking-lot item and schedule the infra/image-layout reconciliation separately.
