@@ -34,3 +34,51 @@ Two-minute morning verification:
    clicked Chat without another click or message.
 
 Paul action: none beyond the morning browser verification.
+
+## 2. Disaster recovery drill — BLOCKED
+
+What ran locally: A disposable synthetic Recovery Set containing 17 opaque
+Account, Device, Room, Topic, Chat, message, attachment, Project, Runtime, and
+Agent identifiers was built from two valid SQLite databases and a Postgres 16
+custom-format dump. `restore-hosted-web-chat-snapshot` installed the verified
+set atomically onto an empty target in 306 ms. The installed databases and dump
+were readable and their manifest reverified. The source remained unchanged.
+
+Negative evidence: six attempts were refused before target mutation: missing
+isolated-mode acknowledgement, unsupported format, hash-modified artifact,
+missing database, corrupt SQLite with a recomputed manifest, and non-empty
+target. The non-empty target's sentinel remained intact.
+
+Read-only remote evidence on 2026-07-14 UTC:
+
+- Both production snapshot/off-site timers were active; both health services'
+  latest results were successful.
+- The latest service-consistent snapshot was 293 seconds old and its manifest
+  verified.
+- The recovery credential directory was mode `0700`; its three named files
+  were root-owned mode `0600`.
+- The off-site success stamp was 764 seconds old.
+- The three newest Borg archives listed successfully. The selected candidate
+  is `finite-lat-1-hosted-web-chat-2026-07-14T02:37:00`; an archives-only Borg
+  check of the newest archive passed.
+
+Why blocked: No empty external isolated target was named or proven to have
+public ingress, email, webhook, push, billing, and other side effects disabled.
+There is also no observed fence proving the retained Agent Runtime cannot
+contact both source and restored stacks. Extracting the production archive on
+finite-lat-1 would write to the live production host; extracting it onto this
+Mac would handle the complete production Recovery Set outside a named isolated
+target. Both violate the drill boundary. Wrong-key and truncated-Borg-archive
+proofs therefore remain unrun, as do service startup, identifier comparison,
+attachment decryption, Runtime reconnect, and a fresh Agent turn.
+
+Two-minute morning verification:
+
+1. Review this entry and confirm the selected archive and timings are
+   acceptable as preflight evidence only.
+2. Confirm that no restore target or traffic switch was created by this run.
+
+Paul action: Name/provision the empty isolated target, confirm its outbound
+side-effect fence, name the retained Runtime and its source/restored-stack
+network fence, and confirm independent Borg passphrase/key-export custody.
+Then the remote drill can resume without redoing the local verifier work.
