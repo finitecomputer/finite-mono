@@ -1,0 +1,38 @@
+FINITE SUPPLY — PRIVACY AND TERMS
+
+Effective: July 13, 2026
+
+PRIVACY
+
+We do not sell your data.
+
+We do not look at the contents of your private data during normal operation.
+
+We use the account, billing, security, and service-operational data needed to
+provide and protect Finite Computer. Stripe processes payments, and WorkOS
+processes account sign-in information, under their own privacy policies.
+
+We may access content only when you ask us to help with it, when reasonably
+necessary to investigate a security threat or abuse, or when required by law.
+
+You own your data. You may ask us to delete account data, subject to records we
+must retain for billing, security, or legal reasons.
+
+TERMS
+
+Finite Computer Hosted Agent costs $200 USD per month, plus applicable tax.
+There is no trial. The subscription renews automatically each month until you
+cancel it. You may cancel in the billing portal; cancellation takes effect at
+the end of the current billing period.
+
+Service setup begins after payment and subscription confirmation. Refund
+requests are reviewed individually.
+
+Do not use the service to break the law, harm others, or interfere with the
+service. The service is provided as available and may change or be interrupted.
+
+By purchasing or using the service, you agree to these terms.
+
+CONTACT
+
+https://docs.google.com/forms/d/e/1FAIpQLSePGnux9EVHRGZf30q7MPEMdMmTb7djJxAPCM0hCf-wRTGv3w/viewform

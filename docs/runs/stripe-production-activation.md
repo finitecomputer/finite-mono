@@ -103,7 +103,9 @@ must not invent them:
 1. the exact Finite Supply merchant `acct_...` account to use;
 2. a monitored support email, support URL, and support phone/address that are
    safe to show customers;
-3. the public Terms, Privacy, cancellation, refund, and service-delivery URLs;
+3. the public Terms, Privacy, cancellation, refund, and service-delivery URLs
+   (Paul supplied one combined launch policy URL:
+   `https://finite.computer/privacy.txt`);
 4. whether customers are business-use, personal-use, or mixed for Stripe Tax
    product classification, plus every jurisdiction where Finite is registered
    to collect tax; and
