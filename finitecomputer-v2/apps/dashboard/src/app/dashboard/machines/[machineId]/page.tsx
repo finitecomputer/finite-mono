@@ -79,8 +79,13 @@ async function ImportedMachineOverview({
   );
   const prismState = prismStateForRelay(overview);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
-  const canRecoverRuntime = coreProjectSupportsHostedRecovery(access.coreProject);
   const canStopRuntime = coreProjectSupportsHostedStop(access.coreProject);
+  // Chat recovery and agent removal are operator maintenance surfaces for
+  // now; a first-run customer should never meet them on their new agent.
+  const isAdminViewer = Boolean(access.viewer.isAdmin);
+  const canRecoverRuntime =
+    isAdminViewer && coreProjectSupportsHostedRecovery(access.coreProject);
+  const canRemoveRuntime = isAdminViewer && access.canRetireRuntime;
 
   return (
     <div className="space-y-6">
@@ -156,7 +161,7 @@ async function ImportedMachineOverview({
           </form>
         </section>
       ) : null}
-      {access.canRetireRuntime ? (
+      {canRemoveRuntime ? (
         <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
           <h2 className="font-semibold">Remove this agent</h2>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
