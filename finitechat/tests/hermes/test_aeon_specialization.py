@@ -4,13 +4,16 @@ import asyncio
 import sys
 import tempfile
 import time
-import types
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from integrations.hermes.finitechat.specialization import AeonSpecialization, compose_for_hermes
+from integrations.hermes.finitechat.specialization import (
+    AeonSpecialization,
+    CapabilityResult,
+    compose_for_hermes,
+)
 
 
 def success(capability: str, text: str, model: str = "aeon-test"):
@@ -199,7 +202,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"request_id":"req-worker-error"', compose_for_hermes([result]))
 
     def test_composed_result_cannot_escape_its_structured_record(self):
-        result = types.SimpleNamespace(
+        result = CapabilityResult(
             capability="image",
             model="aeon-test",
             success=True,
@@ -216,7 +219,7 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(composed.count("\n{"), 1)
 
     def test_success_without_provenance_is_failed_closed(self):
-        result = types.SimpleNamespace(
+        result = CapabilityResult(
             capability="video",
             model="aeon-test",
             success=True,
