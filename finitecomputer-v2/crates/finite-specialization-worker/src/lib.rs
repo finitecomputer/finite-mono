@@ -30,10 +30,11 @@ const VIDEO_CAPABILITY_PROMPT: &str = "Interpret the chronological timestamped f
 const DEFAULT_MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MAX_INLINE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 32 * 1024;
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 1024;
 const DEFAULT_MAX_IMAGES: usize = 8;
 const DEFAULT_MAX_AUDIO_DURATION_SECONDS: u64 = 900;
 const DEFAULT_MAX_VIDEO_DURATION_SECONDS: u64 = 600;
-const DEFAULT_MAX_VIDEO_FRAMES: usize = 16;
+const DEFAULT_MAX_VIDEO_FRAMES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -775,19 +776,29 @@ fn chat_request_for_audio(
         "stream": false,
         "temperature": input.temperature.clone().unwrap_or_else(|| json!(0)),
     });
-    if let Some(max_tokens) = input.max_tokens.or(input.max_completion_tokens) {
-        request["max_tokens"] = json!(max_tokens);
-    }
+    request["max_tokens"] = json!(bounded_output_tokens(input));
     Ok(request)
+}
+
+fn bounded_output_tokens(input: &ChatCompletionRequest) -> u64 {
+    input
+        .max_tokens
+        .or(input.max_completion_tokens)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+        .clamp(1, DEFAULT_MAX_OUTPUT_TOKENS)
 }
 
 fn uniform_video_timestamps(duration_seconds: f64, max_frames: usize) -> Vec<f64> {
     if !duration_seconds.is_finite() || duration_seconds <= 0.0 || max_frames == 0 {
         return Vec::new();
     }
-    let last = (duration_seconds - 0.001).max(0.0);
+    // Long clips are sampled through the final complete one-second interval.
+    // Container duration is an end timestamp, and seeking within milliseconds
+    // of it commonly succeeds without producing a decodable frame.
+    let last = (duration_seconds - 1.0).max(0.0);
     if duration_seconds <= max_frames as f64 {
-        return (0..=last.floor() as usize)
+        let final_whole_second = (duration_seconds - 0.001).max(0.0).floor() as usize;
+        return (0..=final_whole_second)
             .map(|second| second as f64)
             .collect();
     }
@@ -1841,9 +1852,7 @@ pub fn responses_request_from_chat(
     if let Some(temperature) = input.temperature.as_ref() {
         request["temperature"] = temperature.clone();
     }
-    if let Some(max_tokens) = input.max_tokens.or(input.max_completion_tokens) {
-        request["max_output_tokens"] = json!(max_tokens);
-    }
+    request["max_output_tokens"] = json!(bounded_output_tokens(input));
     Ok(request)
 }
 
@@ -2517,6 +2526,7 @@ mod tests {
 
         assert_eq!(upstream["model"], "aeon-test");
         assert_eq!(upstream["stream"], false);
+        assert_eq!(upstream["max_tokens"], 32);
         assert_eq!(upstream["messages"][0]["role"], "developer");
         assert_eq!(
             upstream["messages"][1]["content"][1],
@@ -2785,13 +2795,17 @@ mod tests {
 
     #[test]
     fn uniform_video_sampling_covers_short_and_long_clips() {
+        assert_eq!(DEFAULT_MAX_VIDEO_FRAMES, 4);
         assert_eq!(uniform_video_timestamps(3.2, 16), vec![0.0, 1.0, 2.0, 3.0]);
 
         let long = uniform_video_timestamps(60.0, 16);
         assert_eq!(long.len(), 16);
         assert_eq!(long[0], 0.0);
-        assert!((long[15] - 59.999).abs() < 0.01);
+        assert!((long[15] - 59.0).abs() < 0.01);
         assert!(long.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let exact_duration = uniform_video_timestamps(72.0, 16);
+        assert!((exact_duration[15] - 71.0).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -2922,6 +2936,19 @@ mod tests {
                 { "type": "input_image", "image_url": "data:image/png;base64,abc123" }
             ])
         );
+
+        let mut unbounded = request_with_media_parts(vec![json!({
+            "type": "image_url",
+            "image_url": { "url": "data:image/png;base64,abc123" }
+        })]);
+        unbounded.max_tokens = None;
+        unbounded.max_completion_tokens = None;
+        let bounded = responses_request_from_chat(&unbounded, "qwopus-test").unwrap();
+        assert_eq!(bounded["max_output_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
+
+        unbounded.max_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS * 2);
+        let clamped = responses_request_from_chat(&unbounded, "qwopus-test").unwrap();
+        assert_eq!(clamped["max_output_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
     }
 
     #[test]

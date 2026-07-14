@@ -424,8 +424,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(adapter.handled_messages), 1)
         event = adapter.handled_messages[0]
         self.assertIn("please build", event.text)
-        self.assertIn("image via aeon-gemma-4-12b-k4-nvfp4-unified-fast FAILED", event.text)
-        self.assertIn("capability_unavailable", event.text)
+        self.assertIn('"capability":"image"', event.text)
+        self.assertIn('"status":"FAIL"', event.text)
+        self.assertIn('"error_code":"capability_unavailable"', event.text)
+        self.assertIn("project prompt", event.channel_prompt)
+        self.assertIn("AEON not tested", event.channel_prompt)
+        self.assertIn("Do not substitute", event.channel_prompt)
         self.assertEqual(event.message_type, MessageType.TEXT)
         self.assertEqual(event.source.chat_id, "room-agent-1")
         self.assertEqual(event.source.thread_id, "chat-build-1")
@@ -462,6 +466,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                         success=True,
                         text="A red chart.",
                         error_code="",
+                        retryable=False,
+                        request_id="req-image",
+                        duration_ms=123,
                     ),
                     types.SimpleNamespace(
                         capability="audio",
@@ -469,6 +476,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                         success=False,
                         text="Audio was corrupt.",
                         error_code="media_decode_failed",
+                        retryable=False,
+                        request_id="req-audio",
+                        duration_ms=45,
                     ),
                 ]
 
@@ -498,8 +508,32 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         event = adapter.handled_messages[0]
         self.assertEqual(event.message_type, MessageType.TEXT)
         self.assertEqual(event.media_urls, [])
-        self.assertIn("image via aeon-test: A red chart.", event.text)
-        self.assertIn("audio via aeon-test FAILED (media_decode_failed)", event.text)
+        self.assertIn('"capability":"image"', event.text)
+        self.assertIn('"model":"aeon-test"', event.text)
+        self.assertIn('"status":"PASS"', event.text)
+        self.assertIn('"capability":"audio"', event.text)
+        self.assertIn('"status":"FAIL"', event.text)
+        self.assertIn('"error_code":"media_decode_failed"', event.text)
+
+    def test_text_only_event_receives_aeon_acceptance_contract(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 21,
+            "message_id": "msg-21",
+            "text": "Test the updated multimodal tools using files already on disk",
+            "attachments": [],
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        event = adapter.handled_messages[0]
+        self.assertEqual(event.text, raw_event["text"])
+        self.assertIn("AEON not tested", event.channel_prompt)
+        self.assertIn("actual inbound Finite Chat attachments", event.channel_prompt)
+        self.assertIn("request_id", event.channel_prompt)
 
     def test_unavailable_encrypted_attachment_delivers_caption_as_text_then_acks(self):
         adapter = self.adapter()
