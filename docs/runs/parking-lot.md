@@ -14,7 +14,6 @@ One line per idea outside the active run. This is not a queue; an item becomes w
 - 2026-07-10 — Reduce the manual burden of provider/runtime credential rotation with a deliberate issue/revoke/replace workflow; do not make retrospective rotation of the currently named low-sensitivity keys an internal-canary blocker.
 - 2026-07-10 — Finish the paused, two-generation production rollout and evidence for the runtime-upgrade compatibility path after CI is green.
 - 2026-07-10 — Quarantine or remove the legacy `finite-core/src/control_plane.rs` anti-pattern crate.
-- 2026-07-10 — Make the deployed skills catalog source the monorepo `finite-skills` tree rather than the archived GitHub fallback.
 - 2026-07-10 — Add a Kata-path equivalent of SaaS smoke coverage to automated CI.
 - 2026-07-10 — Revisit rich remote-Markdown image cards in chat after the launch path is stable.
 - 2026-07-10 — Audit the WorkOS AuthKit lifecycle around expired/reused login state without changing identity architecture in a launch-blocker run.
@@ -24,3 +23,4 @@ One line per idea outside the active run. This is not a queue; an item becomes w
 - 2026-07-13 — Restrict the finite-lat-1 rsync.net archival credential to destination-enforced append-only access while preserving a separate administrative retention path; Paul accepts the current overprovisioned credential as non-blocking hardening debt.
 - 2026-07-13 — Narrow the Nix source inputs so a dashboard-only digest pin does not invalidate and rebuild unrelated Rust service derivations on finite-lat-2.
 - 2026-07-14 — Reconcile the dashboard's npm audit baseline (currently 12 reported transitive findings: 2 low, 7 moderate, 3 high) in a dependency-focused run rather than changing packages during cleanup.
+- 2026-07-14 — Remote half of the hosted-web-chat disaster-recovery restore drill (empty isolated target, outbound side-effect fence, retained-Runtime network fence, independent Borg key custody) is parked; Paul accepts the verified off-site backups and passing local restore verifier as sufficient for launch. Local half and read-only prod evidence: `overnight-cleanup-report.md` item 2.
