@@ -5,6 +5,7 @@ export const AGENT_DRAFT_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_AGENT_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exhausted";
+const AGENT_CREATION_BILLING_REQUIRED = "billing is required before creating an agent";
 
 export type AgentOnboardingDraft = {
   version: 1;
@@ -45,10 +46,32 @@ export function draftStartedStripeCheckout(
   return Boolean(draft && Number.isFinite(draft.stripeCheckoutStartedAtMs));
 }
 
+export function agentCreationRequiresAccess({
+  runtimeMode,
+  canCreateAgent,
+  requiresBilling,
+  error,
+}: {
+  runtimeMode: string | undefined;
+  canCreateAgent: boolean;
+  requiresBilling: boolean;
+  error?: string | null;
+}) {
+  return (
+    runtimeMode === "canary" ||
+    requiresBilling ||
+    !canCreateAgent ||
+    Boolean(error?.toLowerCase().includes(AGENT_CREATION_BILLING_REQUIRED))
+  );
+}
+
 export function agentCreationErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "Could not create agent.";
   if (message.toLowerCase().includes(AGENT_CREATION_ENTITLEMENT_EXHAUSTED)) {
     return "This account already has an agent. Open it from your dashboard, or ask an operator to remove it before creating another.";
+  }
+  if (message.toLowerCase().includes(AGENT_CREATION_BILLING_REQUIRED)) {
+    return "Choose payment or enter a Launch Code to continue.";
   }
   return message;
 }

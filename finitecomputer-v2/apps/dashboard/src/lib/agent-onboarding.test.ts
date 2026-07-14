@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   agentCreationErrorMessage,
+  agentCreationRequiresAccess,
   draftStartedStripeCheckout,
   normalizeAgentDisplayName,
   normalizeAgentReturnMachineId,
@@ -18,6 +19,34 @@ test("agent access follows the explicitly submitted path", () => {
   assert.equal(resolveAgentCreationAccessPath("entitled", true, false), "denied");
   assert.equal(resolveAgentCreationAccessPath("entitled", false), "denied");
   assert.equal(resolveAgentCreationAccessPath(null, true), "denied");
+});
+
+test("billing stays after profile when Core still requires it", () => {
+  assert.equal(
+    agentCreationRequiresAccess({
+      runtimeMode: "customer",
+      canCreateAgent: true,
+      requiresBilling: true,
+    }),
+    true
+  );
+  assert.equal(
+    agentCreationRequiresAccess({
+      runtimeMode: "customer",
+      canCreateAgent: true,
+      requiresBilling: false,
+    }),
+    false
+  );
+  assert.equal(
+    agentCreationRequiresAccess({
+      runtimeMode: "customer",
+      canCreateAgent: true,
+      requiresBilling: false,
+      error: "billing is required before creating an agent",
+    }),
+    true
+  );
 });
 
 test("only a signed draft that initiated Stripe is eligible for checkout completion", () => {
@@ -52,6 +81,10 @@ test("agent creation exhaustion is explained in customer language", () => {
 
 test("other agent creation errors remain useful", () => {
   assert.equal(agentCreationErrorMessage(new Error("Enter your Launch Code.")), "Enter your Launch Code.");
+  assert.equal(
+    agentCreationErrorMessage(new Error("billing is required before creating an agent")),
+    "Choose payment or enter a Launch Code to continue."
+  );
   assert.equal(agentCreationErrorMessage(null), "Could not create agent.");
 });
 

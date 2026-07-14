@@ -90,7 +90,10 @@ export async function POST(request: Request) {
     const access = formData.get("access");
     const accessPath = resolveAgentCreationAccessPath(
       access,
-      Boolean(billing.billing?.can_create_agent),
+      Boolean(
+        billing.billing?.can_create_agent &&
+          !billing.billing.requires_billing
+      ),
       process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
     );
 
