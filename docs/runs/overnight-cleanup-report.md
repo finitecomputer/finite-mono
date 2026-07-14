@@ -82,3 +82,39 @@ Paul action: Name/provision the empty isolated target, confirm its outbound
 side-effect fence, name the retained Runtime and its source/restored-stack
 network fence, and confirm independent Borg passphrase/key-export custody.
 Then the remote drill can resume without redoing the local verifier work.
+
+## 3. Runtime image preinstalls and launch-time audit — SHIPPED
+
+What changed: The canonical runtime image now installs the official `gws`
+0.22.5 binary for both amd64 and arm64. The build selects the architecture,
+verifies its pinned SHA-256 digest before extraction, and proves the installed
+version during the build. The preinstall and launch findings are recorded in
+[`preinstall-audit-2026-07-13.md`](../audits/preinstall-audit-2026-07-13.md)
+and [`launch-time-audit-2026-07-13.md`](../audits/launch-time-audit-2026-07-13.md).
+
+Verification evidence:
+
+- The canonical Apple Container arm64 build passed; an ephemeral container
+  reports `gws 0.22.5`.
+- Runtime image contract tests: 7 passed.
+- Same-source compressed arm64 size: 211,616,285 bytes before and 218,447,047
+  after, an increase of 6,830,762 bytes (3.23%).
+- Matched cached lower-bound launch probes improved from a noisy 1.05-second
+  median to 0.74 seconds. This is not evidence of a launch improvement; it is
+  evidence that the added binary caused no material cached-start regression.
+- Existing production journal evidence shows one successful cached launch in
+  about 3.45 seconds, but lacks phase markers. No package install or build
+  occurs in the launch script.
+
+Two-minute morning verification:
+
+1. Build or use the branch's local runtime image.
+2. Run `gws --version` in an ephemeral runtime container and confirm 0.22.5.
+3. Ask a test Agent to check `gws auth status`; confirm it finds the binary and
+   does not attempt a download. Do not authorize a production credential for
+   this check.
+
+Paul action: Decide separately whether the 6.8 MB compressed increase is worth
+keeping. A successful full `just dev saas-smoke` remains part of the final run
+gate; this item did not interfere with the already-running stack from the other
+worktree.

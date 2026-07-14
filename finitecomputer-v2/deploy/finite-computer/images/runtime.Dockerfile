@@ -25,6 +25,8 @@ RUN cargo build --locked --release \
 FROM python:3.13-slim-trixie
 ARG HERMES_AGENT_VERSION=0.18.2
 ARG FINITE_MONO_REV=unknown
+ARG GWS_VERSION=0.22.5
+ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="Finite Computer v2 Agent Runtime"
 LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono"
@@ -41,6 +43,27 @@ RUN apt-get update \
       restic \
       ripgrep \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) \
+        gws_arch=x86_64; \
+        gws_sha256=de78ecdbd2f1a84cca0063a7ecbc440240fc14b6ebccbb17f4646b792a8c5c1f \
+        ;; \
+      arm64) \
+        gws_arch=aarch64; \
+        gws_sha256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 \
+        ;; \
+      *) echo "unsupported gws architecture: ${TARGETARCH}" >&2; exit 64 ;; \
+    esac; \
+    archive="google-workspace-cli-${gws_arch}-unknown-linux-gnu.tar.gz"; \
+    curl -fsSLo "/tmp/${archive}" \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/${archive}"; \
+    echo "${gws_sha256}  /tmp/${archive}" | sha256sum --check -; \
+    tar -xzf "/tmp/${archive}" -C /tmp ./gws; \
+    install -m 0755 /tmp/gws /usr/local/bin/gws; \
+    rm -f "/tmp/${archive}" /tmp/gws; \
+    gws --version
 
 RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
