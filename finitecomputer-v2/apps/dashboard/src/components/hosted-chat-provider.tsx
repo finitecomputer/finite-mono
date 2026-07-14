@@ -30,6 +30,13 @@ import {
   shouldRetryHostedChatRequest,
   type HostedChatRetryAttempt,
 } from "@/lib/hosted-web-chat-retry";
+import {
+  applyHostedChatSelectionIntent,
+  hostedChatSelectionFromState,
+  hostedChatSelectionIntentTarget,
+  type HostedChatSelection,
+  type HostedChatSelectionIntent,
+} from "@/lib/hosted-web-chat-selection";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 
@@ -80,14 +87,24 @@ export function HostedChatProvider({
   const nextMutationSequenceRef = useRef(0);
   const latestAppliedMutationSequenceRef = useRef(0);
   const snapshotSequenceRef = useRef(0);
+  const selectionIntentRef = useRef<HostedChatSelectionIntent | null>(null);
+  const selectionIntentTokenRef = useRef(0);
+  const serverSelectionRef = useRef<HostedChatSelection | null>(null);
   const hasState = state !== null;
 
+  // Every applied snapshot funnels through here. While a navigation click is
+  // pending, snapshots keep their content but present the clicked selection:
+  // selection-only actions do not bump the daemon rev, so stream snapshots
+  // generated before the click persists otherwise yank the highlight back.
   const setMergedState = useCallback((next: HostedChatState) => {
+    serverSelectionRef.current = hostedChatSelectionFromState(next);
+    const applied = applyHostedChatSelectionIntent(selectionIntentRef.current, next);
+    if (applied.confirmed) selectionIntentRef.current = null;
     setState((current) => ({
-      ...next,
-      hosted_agent_binding: next.hosted_agent_binding === undefined
+      ...applied.state,
+      hosted_agent_binding: applied.state.hosted_agent_binding === undefined
         ? current?.hosted_agent_binding ?? null
-        : next.hosted_agent_binding,
+        : applied.state.hosted_agent_binding,
     }));
   }, []);
 
@@ -241,14 +258,34 @@ export function HostedChatProvider({
 
     if (!navigationAction) return request();
 
+    // Pin the clicked selection immediately. The pin clears when a snapshot
+    // confirms it (setMergedState); if the request fails or the server
+    // refuses the selection, fall back to the server's own selection so the
+    // UI never sticks on a selection the daemon rejected.
+    const target = hostedChatSelectionIntentTarget(action);
+    let token: number | null = null;
+    if (target) {
+      token = ++selectionIntentTokenRef.current;
+      selectionIntentRef.current = { ...target, token };
+      setState((current) => (current ? { ...current, ...target } : current));
+    }
+    const releaseIntent = () => {
+      if (token === null || selectionIntentRef.current?.token !== token) return;
+      selectionIntentRef.current = null;
+      const serverSelection = serverSelectionRef.current;
+      if (serverSelection) {
+        setState((current) => (current ? { ...current, ...serverSelection } : current));
+      }
+    };
+
     // Send selection-changing actions in click order so delayed network
     // arrival cannot make the server persist an older intent as the final
     // selection. This is intentionally not a global mutation queue: messages,
     // typing, reads, and uploads still run independently of navigation.
     const pending = navigationMutationTailRef.current.then(request, request);
     navigationMutationTailRef.current = pending.then(
-      () => undefined,
-      () => undefined
+      releaseIntent,
+      releaseIntent
     );
     return pending;
   }, [requestMutationSnapshot]);

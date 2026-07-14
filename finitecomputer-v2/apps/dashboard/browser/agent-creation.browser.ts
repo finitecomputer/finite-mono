@@ -1129,15 +1129,19 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
       await expectVisibleText(page, "Remembered transcript only.");
-      assert.equal(
-        hostedDevice.state.app.selected_chat_id,
-        "chat_browser_remembered"
+      // The pinned selection updates the pane before the daemon confirms, so
+      // wait for the daemon-side selection rather than asserting it directly.
+      await waitFor(
+        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        5_000,
+        () => "the daemon never persisted the Remembered work selection"
       );
 
       // Hold a selection-only OpenChat while a newer stream revision lands.
-      // The mutation response then has the same revision as the stream event,
-      // but is the only response carrying the new selection. The dashboard
-      // must refetch a full state snapshot instead of leaving the old pane up.
+      // The clicked selection is pinned client-side immediately, so the pane
+      // switches at once, the stale-selection stream snapshot applies its
+      // content without yanking the selection back, and the equal-revision
+      // mutation response still triggers a full state refetch to reconcile.
       const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
         (request) => request.path === "/v1/app/agent-bindings/open"
       ).length;
@@ -1146,6 +1150,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .locator(".finite-chat__folder-body")
         .getByRole("button", { name: "Browser QA", exact: true })
         .click();
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
       await waitFor(
         () => hostedDevice.state.navigationActionGate === null,
         5_000,
@@ -1154,9 +1162,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.state.app.messages.push({
         ...hostedMessage("Concurrent stream update.", false, 14),
         message_id: "message_selection_race",
-        chat_id: "chat_browser_remembered",
+        chat_id: "chat_browser_agent",
       });
       hostedDevice.emit();
+      // The stream snapshot still carries the previous selection while the
+      // OpenChat is held; its message is only visible if the pinned Browser QA
+      // pane stayed put instead of fighting back to Remembered work.
       await expectVisibleText(page, "Concurrent stream update.");
       hostedDevice.releaseNavigationAction();
       await waitFor(
@@ -1180,6 +1191,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
+      // The pinned selection presents instantly; let the daemon confirm before
+      // reading mutation counters so the next section starts quiescent.
+      await waitFor(
+        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        5_000,
+        () => "the daemon never persisted the Remembered work selection"
+      );
 
       // New chat also changes the selected Room/Topic/Chat. Hold it before it
       // mutates the fake daemon, then click an existing chat. If New chat is
@@ -1218,7 +1236,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           hostedDevice.state.completedSelectionMutations
             === completedSelectionMutations + 2,
         5_000,
-        () => "New chat and the subsequent navigation did not both finish"
+        () => `New chat and the subsequent navigation did not both finish (completed=${hostedDevice.state.completedSelectionMutations}, expected=${completedSelectionMutations + 2})`
       );
       assert.equal(
         hostedDevice.state.app.selected_chat_id,
