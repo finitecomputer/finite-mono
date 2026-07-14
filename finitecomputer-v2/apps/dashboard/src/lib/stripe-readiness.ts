@@ -37,8 +37,8 @@ export type StripeReadinessSnapshot = {
     livemode: boolean;
     isDefault: boolean;
     defaultReturnUrl: string | null;
-    hasTermsUrl: boolean;
-    hasPrivacyUrl: boolean;
+    termsSource: "portal" | "public_business_information" | "missing";
+    privacySource: "portal" | "public_business_information" | "missing";
     customerUpdateEnabled: boolean;
     customerAllowedUpdates: string[];
     invoiceHistoryEnabled: boolean;
@@ -118,8 +118,16 @@ export function evaluateStripeReadiness(
     portal?.defaultReturnUrl === "https://finite.computer/dashboard",
     portal?.defaultReturnUrl ?? "missing"
   );
-  check("portal.terms", Boolean(portal?.hasTermsUrl), String(portal?.hasTermsUrl ?? false));
-  check("portal.privacy", Boolean(portal?.hasPrivacyUrl), String(portal?.hasPrivacyUrl ?? false));
+  check(
+    "portal.terms",
+    Boolean(portal) && portal?.termsSource !== "missing",
+    portal?.termsSource ?? "missing"
+  );
+  check(
+    "portal.privacy",
+    Boolean(portal) && portal?.privacySource !== "missing",
+    portal?.privacySource ?? "missing"
+  );
   check(
     "portal.customer_update",
     Boolean(portal?.customerUpdateEnabled) &&

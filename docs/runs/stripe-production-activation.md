@@ -16,6 +16,13 @@ directed this run not to repeat a second sandbox cycle. The remaining Stripe
 acceptance is the inspection-only live audit followed by the separately
 authorized first invited live charge.
 
+Paul also confirmed in the live Customer Portal UI that Terms and Privacy both
+inherit `https://finite.computer/privacy.txt` from Public business information.
+Stripe's restricted Account and Portal APIs omit those inherited URLs, so the
+readiness command accepts `STRIPE_PORTAL_PUBLIC_LEGAL_LINKS_CONFIRMED=1` only
+with that operator evidence; it does not silently infer that missing fields are
+configured.
+
 Owner: Paul
 
 Opened: 2026-07-13
