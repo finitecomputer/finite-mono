@@ -1342,7 +1342,7 @@ async function startFakeBrain() {
   const server = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/client") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><html><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
+      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
       return;
     }
     if (request.method === "GET" && request.url === "/_admin/browser-proof") {
