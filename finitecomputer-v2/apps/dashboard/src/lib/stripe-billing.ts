@@ -137,6 +137,9 @@ export function standardAgentCheckoutParams(input: {
     client_reference_id: metadata.clientReferenceId,
     allow_promotion_codes: true,
     automatic_tax: { enabled: true },
+    // Automatic tax needs a Customer address; save the billing address the
+    // customer enters in Checkout instead of collecting one in our own UI.
+    customer_update: { address: "auto" },
     payment_method_types: ["card"],
     success_url: successUrl,
     cancel_url: cancelUrl,

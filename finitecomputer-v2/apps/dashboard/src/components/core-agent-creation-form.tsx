@@ -187,21 +187,17 @@ export function CoreAgentCreationForm({
                 $200 USD <span className="text-sm font-normal text-muted-foreground">/ month</span>
               </div>
             </div>
-            <ul className="grid gap-1 text-xs text-muted-foreground">
-              <li>No trial. Renews automatically each month until canceled.</li>
-              <li>Stripe calculates tax at checkout and adds it when applicable.</li>
-              <li>Service setup begins after payment and subscription confirmation.</li>
-              <li>Cancel in the billing portal; cancellation takes effect at period end.</li>
-            </ul>
             <p className="text-xs text-muted-foreground">
-              Refund requests are reviewed individually. Read our{" "}
+              Renews monthly until you cancel in the billing portal. Tax is added at
+              checkout where applicable, setup begins after payment, and refunds are
+              handled per our{" "}
               <a
                 href="/privacy.txt"
                 target="_blank"
                 rel="noreferrer"
                 className="underline underline-offset-2 hover:text-foreground"
               >
-                privacy policy and terms
+                terms
               </a>
               .{" "}
               <a
@@ -212,8 +208,7 @@ export function CoreAgentCreationForm({
               >
                 Contact Finite
               </a>{" "}
-              before paying if you have questions about service delivery, cancellation,
-              or refunds.
+              with questions.
             </p>
             <Button type="submit" name="access" value="stripe" className="w-fit">
               <CreditCardIcon />
