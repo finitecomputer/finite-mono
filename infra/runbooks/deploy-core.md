@@ -47,6 +47,13 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 
 ### STEPS
 
+> **Automated path:** `just deploy-lat1 <exact-40-hex-rev>` performs steps 1-2
+> end-to-end (lat2 prebuild, closure copy, switch, state verification) and is
+> the preferred way to run them. It stages the switch script on lat2 as a file
+> — running it over ssh stdin fails silently with exit 0 because the inner ssh
+> calls consume the remaining script. The manual steps below remain the
+> reference for what it does and for break-glass situations.
+
 1. **Core (and any config/module change):** From the reviewed checkout, select
    the full commit, prove it is on `origin/main`, and prebuild it on lat2. The
    helper's stdout is the exact, GC-rooted system closure path:
@@ -163,8 +170,9 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
    ```
 
 2. Through the edge: `curl -fsS https://finite.computer/` (dashboard) and
-   `curl -fsS https://finite.computer/internal/finite-private/` → 401
-   (core alive + gated — the limiter path).
+   `curl -s https://finite.computer/internal/finite-private/v1/health` → 401
+   with an invalid-token error (core alive + gated — the limiter path; the
+   bare `/internal/finite-private/` prefix 404s, only `/v1/*` routes exist).
 3. Units are up: `ssh root@64.34.82.77 'systemctl status finite-saas-core
    finite-saas-dashboard'` (`podman-finite-saas-dashboard.service` for the
    container unit name if querying journald).
