@@ -2183,7 +2183,22 @@ const FiniteBrainProductClient = (() => {
       }
       const requestId = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
       return new Promise((resolve, reject) => {
+        const configuredRetryIntervalMs = Number(options.sessionProofRetryIntervalMs);
+        const retryIntervalMs =
+          Number.isFinite(configuredRetryIntervalMs) && configuredRetryIntervalMs > 0
+            ? configuredRetryIntervalMs
+            : 250;
+        const proofRequest = {
+          type: BRAIN_SESSION_PROOF_REQUEST,
+          requestId,
+          requestHash,
+        };
+        const sendProofRequest = () => {
+          window.parent.postMessage(proofRequest, trustedParentOrigin);
+        };
+        let retry = null;
         const timeout = setTimeout(() => {
+          if (retry) clearInterval(retry);
           window.removeEventListener("message", handleProof);
           reject(new Error("Your dashboard session could not be verified."));
         }, 5000);
@@ -2197,6 +2212,7 @@ const FiniteBrainProductClient = (() => {
             return;
           }
           clearTimeout(timeout);
+          if (retry) clearInterval(retry);
           window.removeEventListener("message", handleProof);
           if (typeof event.data.proof === "string" && event.data.proof) {
             resolve(event.data.proof);
@@ -2205,10 +2221,8 @@ const FiniteBrainProductClient = (() => {
           }
         }
         window.addEventListener("message", handleProof);
-        window.parent.postMessage(
-          { type: BRAIN_SESSION_PROOF_REQUEST, requestId, requestHash },
-          trustedParentOrigin
-        );
+        sendProofRequest();
+        retry = setInterval(sendProofRequest, retryIntervalMs);
       });
     };
     const providerRequest = async (operation, input = null) => {
@@ -9502,6 +9516,24 @@ const FiniteBrainProductClient = (() => {
     return `/_admin/vaults/${encodeURIComponent(vaultId)}/agent-workspace-pairings`;
   }
 
+  function suggestedAgentNpubFromNavigation(search = window.location?.search || "") {
+    let candidate = "";
+    try {
+      candidate = new URLSearchParams(search).get("agentNpub")?.trim() || "";
+    } catch (_) {
+      return null;
+    }
+    return publicKeyIdentityFromInput(candidate)?.npub || null;
+  }
+
+  function applySuggestedAgentNpub(search = window.location?.search || "") {
+    const input = $("agentWorkspaceNpubInput");
+    const candidate = suggestedAgentNpubFromNavigation(search);
+    if (!input || input.value.trim() || !candidate) return false;
+    input.value = candidate;
+    return true;
+  }
+
   function agentWorkspacePairingRows(response) {
     return (response?.pairings || []).map((pairing) => ({
       id: pairing.delegationId,
@@ -11736,6 +11768,7 @@ const FiniteBrainProductClient = (() => {
     mountAccessPanelInSettings();
     mountInvitationPanelInSettings();
     bind();
+    applySuggestedAgentNpub();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();
     await loadConfig();
@@ -11750,6 +11783,7 @@ const FiniteBrainProductClient = (() => {
     accessPeopleSummary,
     agentWorkspacePairingRows,
     agentWorkspacePairingsPath,
+    applySuggestedAgentNpub,
     buildAgentWorkspacePairingRequest,
     adminAccessChangeTags,
     buildAdminAccessChangeEvent,
@@ -11870,6 +11904,7 @@ const FiniteBrainProductClient = (() => {
     sessionGrantOpeningAllowed,
     sessionOperationIsCurrent,
     sessionStatusView,
+    suggestedAgentNpubFromNavigation,
     signedEventMatchesPinnedIdentity,
     signerIdentityChanged,
     hasOrganizationVaultControls,

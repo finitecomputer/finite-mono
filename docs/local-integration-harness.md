@@ -15,7 +15,11 @@ leaves that override unset, so Standard hosting continues to resolve to Kata.
 
 `process-compose` remains the process supervisor and log/TUI surface.
 Devfinity owns topology, generated state, prerequisite checks, and explicit
-profile selection.
+profile selection. The Runtime receives Brain's host-reachable Apple bridge URL
+as its transport plus the dashboard's browser-visible Brain origin as the one
+canonical signed authorization origin. It also receives an exact development
+HTTP-host allowlist; it never substitutes production when that configured local
+Brain endpoint is unavailable.
 
 ## Real local SaaS
 
@@ -54,6 +58,21 @@ export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=<finite-private-key>
 Devfinity fails before starting the stack when neither credential is present.
 It will not present a chat UI whose model calls are known to fail.
 
+For Brain integration work that has no operator inference credential, an
+explicit one-run exception can exercise Hosted Device identity, owner pairing,
+the Agent Working Tree, and Apple Container restart persistence without making
+an LLM request:
+
+```sh
+DEVFINITY_BRAIN_ONLY_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-brain-smoke-unused \
+  just dev saas-smoke
+```
+
+This does not pass or replace the canonical real-chat acceptance. It only
+skips the three inference reply assertions; the Hosted Web Device must still
+connect, and all Brain/Apple assertions still run.
+
 Rerun the real launch/chat/restart acceptance test at any time with:
 
 ```sh
@@ -61,9 +80,12 @@ just dev saas-smoke
 ```
 
 That check creates or reuses the local Project, waits for the Apple runtime,
-opens the real Hosted Web Device chat, requires a real Hermes response, restarts
-the chat server and Hosted Web Device, requires another response, restarts the
-Agent Runtime through Core and Runner, and requires a final response.
+opens the real Hosted Web Device chat, requires a real Hermes response, has the
+owner explicitly pair the runtime Agent Principal with the Personal Vault,
+proves the agent can discover and write only its Agent Workspace through a
+Working Tree under `/data/workspace`, reads the note back as the owner, restarts
+the chat services and Agent Runtime, and repeats the identity, access, Working
+Tree, and readback checks before requiring the final chat response.
 
 `just dev up` does not silently grant an empty account agent admission; use the
 fresh-checkout sequence above instead.
@@ -97,7 +119,7 @@ Devfinity never runs that privileged command itself. Apple notes that enabling
 the localhost domain disables Private Relay and that its packet-filter rule is
 lost on restart. When the domain is not configured, Devfinity reads the current
 default vmnet gateway from `container network inspect default`, binds only the
-container-facing Chat/limiter sockets to that address (not every LAN interface),
+container-facing Chat, Brain, and limiter sockets to that address (not every LAN interface),
 and runs a disposable canonical-image probe before registering the artifact or
 starting Runner. If neither route works, startup fails before an agent is
 leased.

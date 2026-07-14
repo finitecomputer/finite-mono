@@ -130,6 +130,13 @@ and the explicitly authorized Agent Principal can use. It is the narrow shared
 starting place for an agent, not a second Vault and not a change to Personal
 Vault ownership.
 
+In Hosted Web, the selected Runtime's public Agent Principal may prefill the
+owner's pairing input, but that navigation context carries no authority. The
+owner must still explicitly pair it from an unlocked Personal Vault. After
+pairing, the Agent Principal discovers the user-owned Personal Vault through
+the signed visible-Vault list and opens its restricted Folder in a durable
+Vault Working Tree below the Runtime's `/data/workspace` boundary.
+
 ### Local Data Security Baseline
 
 The FiniteBrain-wide policy for how trusted clients and Agent Runtimes handle

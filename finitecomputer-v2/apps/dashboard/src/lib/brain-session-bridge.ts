@@ -8,6 +8,19 @@ export type BrainSessionProofRequest = {
   requestHash: string;
 };
 
+export function brainClientPath(agentNpub: string | null | undefined) {
+  const candidate = agentNpub?.trim();
+  if (
+    !candidate ||
+    !candidate.toLowerCase().startsWith("npub1") ||
+    candidate.length > 256 ||
+    !/^[a-z0-9]+$/iu.test(candidate)
+  ) {
+    return "/client";
+  }
+  return `/client?agentNpub=${encodeURIComponent(candidate)}`;
+}
+
 export function parseBrainSessionProofRequest(value: unknown): BrainSessionProofRequest | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;

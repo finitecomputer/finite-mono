@@ -105,14 +105,22 @@ if not brain_path.is_file():
 else:
     brain_text = brain_path.read_text(encoding="utf-8")
     for marker in (
-        'SERVER="https://finite.computer"',
+        'SERVER="${FINITE_BRAIN_SERVER_URL:?',
+        'FBRAIN_CONFIG_DIR',
+        'FBRAIN_WORKING_TREE_ROOT',
         'VAULT="replace-with-vault-id"',
         "A Working Tree remembers the server",
     ):
         if marker not in brain_text:
-            errors.append(f"{brain_path}: missing production routing marker {marker!r}")
-    if 'SERVER="https://brain.smoke.finite.computer"' in brain_text:
-        errors.append(f"{brain_path}: active server default must not target smoke")
+            errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
+    for forbidden_server in (
+        'SERVER="https://finite.computer"',
+        'SERVER="https://brain.smoke.finite.computer"',
+    ):
+        if forbidden_server in brain_text:
+            errors.append(
+                f"{brain_path}: active server must come from the runtime, not {forbidden_server!r}"
+            )
 
 compat_path = root / "software-development/publish-web-apps-finite/SKILL.md"
 if not compat_path.is_file():

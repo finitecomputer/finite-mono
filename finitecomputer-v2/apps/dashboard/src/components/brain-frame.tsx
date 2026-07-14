@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { PanelLeftIcon } from "lucide-react";
 
 import {
+  brainClientPath,
   BRAIN_SESSION_PROOF_RESPONSE,
   parseBrainSessionProofRequest,
 } from "@/lib/brain-session-bridge";
@@ -24,7 +25,13 @@ export function BrainHeader() {
   );
 }
 
-export function BrainFrame({ title }: { title: string }) {
+export function BrainFrame({
+  title,
+  agentNpub,
+}: {
+  title: string;
+  agentNpub?: string | null;
+}) {
   const frameRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
@@ -70,7 +77,7 @@ export function BrainFrame({ title }: { title: string }) {
       <iframe
         ref={frameRef}
         className="size-full border-0"
-        src="/client"
+        src={brainClientPath(agentNpub)}
         title={title}
         allow="clipboard-read; clipboard-write"
         sandbox="allow-downloads allow-forms allow-scripts"

@@ -104,8 +104,9 @@ Useful commands:
 ```sh
 fbrain doctor --server "$FINITE_BRAIN_SERVER_URL"
 fbrain auth status --json
-fbrain open <vault-id> ./vault-tree
-cd ./vault-tree
+fbrain vault list --json
+fbrain open <vault-id>
+cd "${FBRAIN_WORKING_TREE_ROOT:-.}/<vault-id>"
 fbrain sync now --summary
 fbrain conflicts --json
 fbrain status --json
@@ -128,15 +129,21 @@ fbrain --config-dir "$HOME/.config/finitebrain" auth status --json
 3. `FINITE_BRAIN_SERVER_URL`
 4. legacy `FINITE_BRAIN_PUBLIC_BASE_URL`
 
-The CLI accepts `https://` endpoints and `http://` only for localhost or
-loopback addresses.
+The CLI accepts `https://` endpoints and `http://` only for localhost,
+loopback addresses, or the exact development host explicitly named by
+`FINITE_BRAIN_DEVELOPMENT_HTTP_HOST`.
 
 ## Environment Variables
 
 - `FINITE_BRAIN_ADDR`: server bind address, default `127.0.0.1:3015`.
-- `FINITE_BRAIN_SERVER_URL`: agent/CLI transport base URL.
-- `FINITE_BRAIN_PUBLIC_BASE_URL`: browser-visible Product Client origin and
-  legacy CLI fallback.
+- `FINITE_BRAIN_SERVER_URL`: agent/CLI transport base URL. This may be an
+  internal or host-bridge address.
+- `FINITE_BRAIN_PUBLIC_BASE_URL`: browser-visible canonical Brain origin. The
+  CLI signs this origin into Nostr HTTP authorization events even when it sends
+  the request through a different `FINITE_BRAIN_SERVER_URL`; it is also the
+  legacy transport fallback when no server URL is configured.
+- `FINITE_BRAIN_DEVELOPMENT_HTTP_HOST`: local-harness-only exact HTTP host
+  allowlist entry for an Apple Container host bridge.
 - `FINITE_BRAIN_DB`: SQLite database path, default `finite-brain.sqlite3`.
 - `FINITE_IDENTITY_AUTHORITY`: finite-identity Authority base URL used by
   email-targeted Vault Invitation claims to verify current email proof.
@@ -145,6 +152,8 @@ loopback addresses.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend` or `postmark`.
 - `FBRAIN_CONFIG_DIR`: local `fbrain` config directory for prototype signer
   state. Prefer global `--config-dir` in scripts and agent runtimes.
+- `FBRAIN_WORKING_TREE_ROOT`: optional default parent for `fbrain open`; hosted
+  Agent Runtimes set this below `/data/workspace`.
 
 ## Test Expectations
 

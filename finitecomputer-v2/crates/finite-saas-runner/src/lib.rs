@@ -4425,9 +4425,25 @@ mod tests {
         assert!(dockerfile.contains("ENV FINITE_HOME=/data/agent"));
         assert!(dockerfile.contains("ENV HERMES_HOME=/data/agent/hermes-home"));
         assert!(dockerfile.contains("ENV FINITECHAT_WORKSPACE=/data/workspace"));
+        assert!(dockerfile.contains("ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain"));
+        assert!(dockerfile.contains("ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain"));
         assert!(dockerfile.contains("ENTRYPOINT [\"/opt/agent-entrypoint.sh\"]"));
         assert!(!dockerfile.contains("finitechat-entrypoint.sh"));
         assert!(!dockerfile.contains("/finite-state"));
+    }
+
+    #[test]
+    fn bundled_finitebrain_skill_uses_runtime_brain_and_durable_paths() {
+        let bundled =
+            read_repo_file("../finite-skills/skills/software-development/finitebrain/SKILL.md");
+        let package = read_repo_file("../finite-brain/skills/finitebrain/SKILL.md");
+
+        assert_eq!(bundled, package);
+        assert!(bundled.contains("FINITE_BRAIN_SERVER_URL"));
+        assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
+        assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
+        assert!(!bundled.contains("SERVER=\"https://finite.computer\""));
+        assert!(!bundled.contains("TREE=\"$HOME/finitebrain/$VAULT\""));
     }
 
     #[test]
