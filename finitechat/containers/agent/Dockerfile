@@ -11,7 +11,7 @@ ARG HERMES_AGENT_VERSION=0.18.2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates restic \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir "hermes-agent==${HERMES_AGENT_VERSION}"
+RUN pip install --no-cache-dir "hermes-agent[messaging]==${HERMES_AGENT_VERSION}"
 COPY --from=builder /build/finitechat/target/release/finitechat /usr/local/bin/finitechat
 COPY finitechat/integrations/hermes/finitechat /root/.hermes/plugins/finitechat
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh

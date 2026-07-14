@@ -18,6 +18,7 @@ CANONICAL_WORKFLOW = Path(".github/workflows/runtime-image.yml")
 PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
+    '"hermes-agent[messaging]==${HERMES_AGENT_VERSION}"',
     "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
     "COPY finite-skills/skills /runtime/finite-skills",
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",

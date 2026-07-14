@@ -2,8 +2,13 @@
 set -euo pipefail
 
 declare -a sensitive_files=()
+updates_pid=""
 
 cleanup_sensitive_files() {
+  if [[ -n "$updates_pid" ]]; then
+    kill "$updates_pid" >/dev/null 2>&1 || true
+    wait "$updates_pid" >/dev/null 2>&1 || true
+  fi
   if (( ${#sensitive_files[@]} > 0 )); then
     rm -f -- "${sensitive_files[@]}"
   fi
@@ -64,12 +69,30 @@ const visible = (me.projects || []).find((entry) => entry.runtime);
 if (!visible) process.exit(1);
 const project = visible.project;
 const runtime = visible.runtime;
+const contact = new URL(runtime.contact_endpoint);
+contact.pathname = contact.pathname.replace(/\/contact\/?$/, "");
 process.stdout.write([
   project.id,
-  runtime.source_machine_id,
-  runtime.host_facts?.runtime_host || "",
+  runtime.id,
+  contact.toString().replace(/\/$/, ""),
 ].join("\t"));
 JS
+}
+
+runtime_container_id() {
+  container list --format json | node -e '
+    const projectId = process.argv[1];
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const containers = JSON.parse(body);
+      const runtime = containers.find((entry) =>
+        entry?.configuration?.labels?.["computer.finite.v2.project_id"] === projectId
+      );
+      if (!runtime?.configuration?.id) process.exit(1);
+      process.stdout.write(runtime.configuration.id);
+    });
+  ' "$project_id"
 }
 
 wait_for_runtime() {
@@ -109,6 +132,17 @@ chat_state() {
   curl -fsS --max-time 30 \
     "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/state" \
     >"$chat_state_json"
+}
+
+start_chat_updates() {
+  if [[ -n "$updates_pid" ]]; then
+    kill "$updates_pid" >/dev/null 2>&1 || true
+    wait "$updates_pid" >/dev/null 2>&1 || true
+  fi
+  curl -fsS --no-buffer \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/updates" \
+    >/dev/null 2>&1 &
+  updates_pid=$!
 }
 
 wait_for_connected_chat() {
@@ -267,7 +301,7 @@ restart_process() {
 }
 
 container_started_at() {
-  container inspect "$machine_id" 2>/dev/null | node -e '
+  container inspect "$container_machine_id" 2>/dev/null | node -e '
     let body = "";
     process.stdin.on("data", (chunk) => body += chunk);
     process.stdin.on("end", () => {
@@ -356,8 +390,10 @@ JS
 fi
 
 wait_for_runtime
+container_machine_id="$(runtime_container_id)"
 wait_http "Agent Runtime" "$runtime_url/healthz" 180
 wait_http "Agent contact" "$runtime_url/contact" 180
+start_chat_updates
 wait_for_connected_chat
 send_and_require_reply "Reply briefly with: devfinity apple chat works"
 
@@ -365,6 +401,7 @@ restart_process finitechat
 wait_http "Finite Chat after restart" "$chat_url/health" 120
 restart_process hosted-web-device
 wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
+start_chat_updates
 wait_for_connected_chat
 send_and_require_reply "Reply briefly with: chat services healed"
 
@@ -383,7 +420,7 @@ while true; do
     break
   fi
   if (( "$(date +%s)" - restart_started >= 180 )); then
-    echo "Runner did not restart Apple Container $machine_id within 180s" >&2
+    echo "Runner did not restart Apple Container $container_machine_id within 180s" >&2
     exit 1
   fi
   sleep 2
@@ -399,4 +436,5 @@ send_and_require_reply "Reply briefly with: runtime restart healed"
 
 echo "devfinity real SaaS smoke passed"
 echo "project_id=$project_id"
-echo "source_machine_id=$machine_id"
+echo "runtime_id=$machine_id"
+echo "source_machine_id=$container_machine_id"

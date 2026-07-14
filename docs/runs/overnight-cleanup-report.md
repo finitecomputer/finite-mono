@@ -294,3 +294,47 @@ existing devfinity environment, then run the morning verification. Do not use
 or rotate production credentials for this UI proof. If FAL editing is expected
 to work without a task-time install, schedule the separately pinned
 `fal-client` image addition identified in the preinstall audit.
+
+## 9. Telegram audit — SHIPPED
+
+What changed: Both runtime image definitions now install the pinned
+`hermes-agent[messaging]` 0.18.2 extra instead of bare `hermes-agent`. This
+supplies Hermes' Telegram, Discord, and Slack gateway dependencies at image
+build time. The runtime-image contract now rejects either Dockerfile if the
+messaging extra is dropped. No Telegram token, bot, config offer, or live Agent
+was created.
+
+Configuration boundary: mono configures Telegram through agentd config offers,
+not the legacy environment-variable path. Only `enabled`, `token`,
+`home_channel`, `reply_to_mode`, `gateway_restart_notification`,
+`typing_indicator`, and `extra` pass the current allowlist. Any Hermes setting
+outside that set must be placed under the reviewed `extra` map or handled by a
+separately reviewed config change.
+
+Verification evidence:
+
+- The canonical Apple Container arm64 build passed in 82.5 seconds.
+- An ephemeral container imported `telegram` and
+  `telegram.ext.Application`; the installed version reported 22.6. The
+  same-source pre-change runtime reported the module absent.
+- Runtime image contract tests: 7 passed.
+- The focused `finite-agentd` Telegram config test passed.
+- Compressed arm64 size increased from 218,447,047 to 231,225,520 bytes:
+  12,778,473 bytes (5.85%) for the complete Hermes messaging extra.
+
+Two-minute morning verification:
+
+1. In BotFather, run `/newbot` and create a disposable test bot.
+2. Open the disposable Agent's **Connections**, paste that token, and click
+   **Connect**.
+3. Message the bot in Telegram and copy the eight-character pairing code.
+4. Back in **Connections**, click **Refresh**, enter the code, and click
+   **Approve**.
+5. Click **Use this chat** for the approved person.
+6. Send one message in each direction; confirm typing/final delivery and the
+   selected reply-to mode.
+7. Disconnect the connection and delete the disposable bot in BotFather.
+
+Paul action: Run the disposable-bot verification after the branch image is in
+a local stack. Do not reuse a production bot token. Decide whether the 12.8 MB
+compressed image increase is acceptable for preinstalled messaging support.

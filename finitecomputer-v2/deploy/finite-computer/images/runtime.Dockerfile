@@ -69,7 +69,7 @@ RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
     && test "${HERMES_AGENT_VERSION}" = "0.18.2" \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir \
-      "hermes-agent==${HERMES_AGENT_VERSION}" \
+      "hermes-agent[messaging]==${HERMES_AGENT_VERSION}" \
       "google-api-python-client==2.198.0" \
       "google-auth-oauthlib==1.4.0" \
       "google-auth-httplib2==0.4.0" \
