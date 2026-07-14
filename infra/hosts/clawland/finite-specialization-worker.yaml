@@ -19,6 +19,23 @@ spec:
       targetPort: http
       nodePort: 30998
 ---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: finite-specialization-worker
+  namespace: fc-specializations
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`specialization.finite.vip`)
+      services:
+        - name: finite-specialization-worker
+          port: 18998
+  tls:
+    certResolver: letsencrypt
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -4,9 +4,10 @@ use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AppleContainerConfig, AppleContainerLauncher, CoreHttpAgentCreationQueue,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
-    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
-    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
-    PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher,
+    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
+    DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher, EnclaviaConfig, EnclaviaLauncher,
+    FinitePrivateRuntimeDefaults, KataConfig, KataLauncher, PhalaConfig, PhalaLauncher,
+    RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -82,6 +83,8 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     );
     let finite_private_api_key_override =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
+    let finite_private_specialization_worker_api_key =
+        optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY");
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_environment = optional_runtime_secret_environment()?;
     // This identifies the adapter offered by this worker. Placement remains
@@ -138,6 +141,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
+                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                 },
@@ -200,6 +204,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
+                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                 },
@@ -258,6 +263,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
+                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                 },
@@ -298,6 +304,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
+                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                 },
@@ -348,6 +355,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
+                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                 },
@@ -414,6 +422,7 @@ struct RunOnceConfig {
     finite_private_base_url: String,
     finite_private_model: String,
     finite_private_api_key_override: Option<String>,
+    finite_private_specialization_worker_api_key: Option<String>,
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
 }
@@ -437,6 +446,12 @@ where
         base_url: config.finite_private_base_url,
         model: config.finite_private_model,
         api_key_override: config.finite_private_api_key_override,
+        specialization_bundle: config.finite_private_specialization_worker_api_key.map(
+            |worker_api_key| SpecializationBundleRuntimeDefaults {
+                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
+                worker_api_key,
+            },
+        ),
     })
     .with_runtime_environment(config.runtime_environment)?
     .with_runtime_secret_environment(config.runtime_secret_environment)?

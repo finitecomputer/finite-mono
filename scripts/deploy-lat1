@@ -108,6 +108,12 @@ ssh -n -o BatchMode=yes root@64.34.82.77 systemctl stop "$UNIT"
 echo "SWITCHED: $ACTUAL"
 SCRIPT
 
+# Deploys are when recovery snapshots happen (no calendar timer since
+# 2026-07-14): capture pre-upgrade state while a service blip is expected.
+echo "==> taking pre-deploy recovery snapshot on lat1"
+ssh -n -o BatchMode=yes "$LAT1" \
+  'systemctl start finite-hosted-web-chat-snapshot.service && readlink /data/recovery-snapshots/hosted-web-chat/latest'
+
 REMOTE_SCRIPT="/tmp/lat1-switch-${REV}.sh"
 echo "==> staging switch script on lat2"
 scp -q -o BatchMode=yes "$SWITCH_SCRIPT" "$LAT2:$REMOTE_SCRIPT"

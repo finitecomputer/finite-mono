@@ -2440,6 +2440,78 @@ async fn git_http_clone_and_push_with_minted_credential() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn git_push_can_change_spa_fallback_per_version() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let public_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("public".into()),
+            confirm_public: true,
+            add_emails: vec![],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
+                Some(&public_body),
+            )
+            .unwrap();
+
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>not an spa</h1>")],
+            "Publish static version",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        let missing = server.site_get("finitechat-native-mockup", "/app/route", port);
+        assert!(matches!(missing, Err(ureq::Error::Status(404, _))));
+
+        let spa_config = created.finite_toml.replace("spa = false", "spa = true");
+        push_project_files(
+            &server,
+            &credential,
+            &spa_config,
+            "main",
+            &[("index.html", "<h1>spa shell</h1>")],
+            "Enable SPA fallback",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(2));
+        let fallback = server
+            .site_get("finitechat-native-mockup", "/app/route", port)
+            .unwrap();
+        assert_eq!(fallback.into_string().unwrap(), "<h1>spa shell</h1>");
+
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>static again</h1>")],
+            "Disable SPA fallback",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(3));
+        let missing_again = server.site_get("finitechat-native-mockup", "/app/route", port);
+        assert!(matches!(missing_again, Err(ureq::Error::Status(404, _))));
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn app_output_publishes_from_project_git_and_documents_runtime_contract() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
