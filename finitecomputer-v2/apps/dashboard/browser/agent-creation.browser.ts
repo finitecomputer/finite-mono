@@ -1064,6 +1064,53 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "chat_browser_remembered"
       );
 
+      // Hold a selection-only OpenChat while a newer stream revision lands.
+      // The mutation response then has the same revision as the stream event,
+      // but is the only response carrying the new selection. The dashboard
+      // must refetch a full state snapshot instead of leaving the old pane up.
+      const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
+        (request) => request.path === "/v1/app/agent-bindings/open"
+      ).length;
+      hostedDevice.holdNextNavigationAction();
+      await page
+        .locator(".finite-chat__folder-body")
+        .getByRole("button", { name: "Browser QA", exact: true })
+        .click();
+      await waitFor(
+        () => hostedDevice.state.navigationActionGate === null,
+        5_000,
+        () => "the selection race request did not reach the daemon"
+      );
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Concurrent stream update.", false, 11),
+        message_id: "message_selection_race",
+        chat_id: "chat_browser_remembered",
+      });
+      hostedDevice.emit();
+      await expectVisibleText(page, "Concurrent stream update.");
+      hostedDevice.releaseNavigationAction();
+      await waitFor(
+        () =>
+          hostedDevice.state.authRequests.filter(
+            (request) => request.path === "/v1/app/agent-bindings/open"
+          ).length > stateFetchesBeforeSelectionRace,
+        5_000,
+        () => "a rejected selection response did not trigger state reconciliation"
+      );
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
+
+      await page
+        .getByRole("button", { name: "Remembered work", exact: true })
+        .click();
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
+
       // New chat also changes the selected Room/Topic/Chat. Hold it before it
       // mutates the fake daemon, then click an existing chat. If New chat is
       // outside the navigation lane, that later click arrives first and the
@@ -1919,7 +1966,7 @@ function applyHostedAction(
     device.active = false;
     device.revoked = true;
   }
-  state.rev += 1;
+  if (operation !== "OpenChat") state.rev += 1;
 }
 
 function hostedMessage(

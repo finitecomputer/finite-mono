@@ -186,18 +186,30 @@ export function HostedChatProvider({
   const requestMutationSnapshot = useCallback(async (
     path: string,
     init: RequestInit,
-    allowEqualRevision = true
+    allowEqualRevision = true,
+    reconcileRejectedSnapshot = false
   ) => {
-    const source = snapshotSourceRef.current;
-    const request = {
-      generation: source.generation,
-      highestRev: source.highestRev,
-      sequence: ++nextMutationSequenceRef.current,
-      allowEqualRevision,
+    const captureRequest = (): MutationSnapshotRequest => {
+      const source = snapshotSourceRef.current;
+      return {
+        generation: source.generation,
+        highestRev: source.highestRev,
+        sequence: ++nextMutationSequenceRef.current,
+        allowEqualRevision,
+      };
     };
+    const request = captureRequest();
     const next = await hostedChatRequest<HostedChatState>(`${apiBase}${path}`, init);
-    applyMutationSnapshot(next, request);
-    return next;
+    const applied = applyMutationSnapshot(next, request);
+    if (applied || !reconcileRejectedSnapshot) return next;
+
+    // A selection-only action can return an older revision after a concurrent
+    // stream event advanced the client. Refetch after the server applied the
+    // selection so an equal-revision full snapshot can reconcile it.
+    const reconciliationRequest = captureRequest();
+    const reconciled = await hostedChatRequest<HostedChatState>(`${apiBase}/state`);
+    applyMutationSnapshot(reconciled, reconciliationRequest);
+    return reconciled;
   }, [apiBase, applyMutationSnapshot]);
 
   const recoverBinding = useCallback(async (): Promise<HostedChatRetryAttempt> => {
@@ -221,12 +233,13 @@ export function HostedChatProvider({
     action: HostedChatAction,
     allowEqualRevision = true
   ) => {
+    const navigationAction = isHostedChatNavigationAction(action);
     const request = () => requestMutationSnapshot("/actions", {
       method: "POST",
       body: JSON.stringify(action),
-    }, allowEqualRevision);
+    }, allowEqualRevision, navigationAction);
 
-    if (!isHostedChatNavigationAction(action)) return request();
+    if (!navigationAction) return request();
 
     // Send selection-changing actions in click order so delayed network
     // arrival cannot make the server persist an older intent as the final
