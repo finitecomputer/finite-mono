@@ -61,6 +61,7 @@ jobs:
           ../finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$RUNTIME_IMAGE_REF" \
             --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
+            --platform linux/amd64 \
             --report target/hermes-docker-smoke/image-build.json
 
       - name: Durable home Docker smoke
