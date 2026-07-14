@@ -8,6 +8,11 @@ Brain, and dashboard used by automated integration tests. This is the complete
 browser-product spine, not every unrelated service in the monorepo; Search, for
 example, is not part of this profile.
 
+Core owns provider placement in this path just as it does in production. The
+generated devfinity Core configuration supplies an Apple Container placement
+override; the browser does not choose or submit a Runner class. Production
+leaves that override unset, so Standard hosting continues to resolve to Kata.
+
 `process-compose` remains the process supervisor and log/TUI surface.
 Devfinity owns topology, generated state, prerequisite checks, and explicit
 profile selection.
@@ -125,6 +130,19 @@ generic Stop operation when the runtime itself should stop.
 - If port 13002 is busy, stop the web-design loop or other devfinity instance.
   The design fixture can instead use
   `FC_WEB_DESIGN_PORT=13003 just dev web-design`.
+- A preserved Apple runtime from another worktree can keep the default
+  `finite-devfinity` container slot and port 18080 occupied after its host stack
+  stops. Keep that runtime intact and give the isolated smoke its own identity:
+
+  ```sh
+  DEVFINITY_STATE_DIR="$HOME/.finite-devfinity-overnight" \
+  DEVFINITY_APPLE_CONTAINER_NAME_PREFIX=finite-overnight \
+  DEVFINITY_RUNTIME_AGENT_PORT=18081 \
+  just dev saas-smoke
+  ```
+
+  The alternate state root must also keep the generated process-compose Unix
+  socket below macOS's path-length limit.
 - If a previous full stack exited badly, run `just dev status`, inspect
   `.local-state/devfinity/runs/default/logs/`, then run `just dev cleanup` and
   start it again. Cleanup preserves databases, chat state, and Runtime data.

@@ -1,6 +1,6 @@
 ---
 name: google-workspace-finite
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration via Python. Uses OAuth2 with automatic token refresh. No external binaries needed — runs entirely with Google's Python client libraries in the Hermes venv.
+description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration through the pinned gws CLI or the bundled Python helper, with OAuth2 token refresh.
 version: 1.1.0
 author: Nous Research
 license: MIT
@@ -18,7 +18,9 @@ metadata:
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs — all through Python scripts in this skill. No external binaries to install.
+Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the pinned `gws`
+0.22.5 CLI or the Python scripts in this skill. Hosted Finite runtimes already
+contain `gws`; do not download or replace it at task time.
 
 On finitecomputer, prefer the dashboard Google Workspace connect flow first.
 If the machine page already shows Google Workspace as connected, do not tell the
@@ -29,6 +31,11 @@ client setup when the dashboard flow is unavailable or explicitly broken.
 
 - `references/gmail-search-syntax.md` — Gmail search operators (is:unread, from:, newer_than:, etc.)
 - `references/google-workspace-scopes.json` — the OAuth scope contract shipped atomically with this skill
+
+The managed scope contract includes Docs read/write so approved `gws` Docs
+operations can be used, and deliberately requests no Apps Script scope. The
+Python wrapper below currently exposes Docs read only; do not imply that it can
+write a Doc or use Apps Script.
 
 ## Scripts
 
@@ -252,7 +259,8 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## gws CLI (Alternative / Preferred)
 
-There is also a standalone `gws` CLI that may already be installed and authenticated independently of the Python skill above. **Always check `gws` first** — it may be ready to use even when the Python setup is not.
+Hosted Finite runtimes include the pinned `gws` CLI. **Always check `gws`
+first** — it may already be authenticated even when the Python setup is not.
 
 ```bash
 gws auth status

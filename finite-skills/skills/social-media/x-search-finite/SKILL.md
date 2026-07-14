@@ -9,21 +9,20 @@ Search and analyze X/Twitter content using Grok + x_search. Adapted from [OpenUn
 
 ## Setup
 
-Requires `XAI_API_KEY` in the Hermes environment.
-
-The finite runtime bootstraps the required Python dependency into `~/.hermes/venv`:
-
-- `xai-sdk`
+Requires `XAI_API_KEY` and the `xai-sdk` Python package. The current hosted
+runtime does not promise that package; if its import fails, report the runtime
+packaging gap instead of claiming this skill is ready.
 
 ## Commands
 
 Use the local helper directly:
 
 ```bash
-python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite/x-search.py search "bitcoin etf" --limit 5
-python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite/x-search.py topic "AI regulation" --sides "Pro-regulation|Anti-regulation" --limit 10
-python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite/x-search.py account @elonmusk --topics "AI,Bitcoin,Free speech,Mars"
-python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite/x-search.py ask @jack "What does he think about Nostr?"
+SKILL_ROOT="${FINITECHAT_HOME:-/data/agent}/managed-skills/finite/current/social-media/x-search-finite"
+python3 "$SKILL_ROOT/x-search.py" search "bitcoin etf" --limit 5
+python3 "$SKILL_ROOT/x-search.py" topic "AI regulation" --sides "Pro-regulation|Anti-regulation" --limit 10
+python3 "$SKILL_ROOT/x-search.py" account @elonmusk --topics "AI,Bitcoin,Free speech,Mars"
+python3 "$SKILL_ROOT/x-search.py" ask @jack "What does he think about Nostr?"
 ```
 
 ## Output
@@ -31,7 +30,7 @@ python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite
 All output is markdown. Pipe to a file to save reports:
 
 ```bash
-python3 /profile-assets/hermes-local/managed-skills/social-media/x-search-finite/x-search.py account @jack --topics "Bitcoin,Nostr,Bluesky" > reports/jack-analysis.md
+python3 "$SKILL_ROOT/x-search.py" account @jack --topics "Bitcoin,Nostr,Bluesky" > reports/jack-analysis.md
 ```
 
 ## How It Works

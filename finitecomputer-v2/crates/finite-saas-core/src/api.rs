@@ -24,10 +24,11 @@ use crate::{
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
-    RuntimeCapabilitiesV1, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, SyncStripeSubscriptionInput,
-    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput, normalize_owner_email,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
+    SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
+    UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
+    normalize_source_host_id,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -67,6 +68,7 @@ pub struct CoreApiState {
     store: CoreStore,
     auth: CoreAuth,
     standard_stripe_price_id: Option<String>,
+    agent_creation_placement: Option<RuntimePlacement>,
     /// First-use deployment gate. Persisting `kind = 'upgrade'` crosses the
     /// rollback boundary for Core generations that predate that value.
     runtime_upgrades_enabled: bool,
@@ -672,6 +674,27 @@ pub fn router(store: CoreStore, auth: CoreAuth) -> Router {
     router_with_relay_state_dir(store, auth, default_relay_state_dir())
 }
 
+/// Build the public API with a trusted deployment-level placement override.
+///
+/// This exists for local/provider conformance environments such as devfinity.
+/// User request bodies remain unable to select a Runner provider.
+pub fn router_with_agent_creation_placement(
+    store: CoreStore,
+    auth: CoreAuth,
+    agent_creation_placement: Option<RuntimePlacement>,
+) -> Router {
+    let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    router_with_runtime_upgrades_and_agent_creation_placement(
+        store,
+        auth,
+        default_relay_state_dir(),
+        runtime_upgrades_enabled,
+        agent_creation_placement,
+    )
+}
+
 pub fn router_with_relay_state_dir(
     store: CoreStore,
     auth: CoreAuth,
@@ -689,12 +712,29 @@ pub fn router_with_runtime_upgrades(
     relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
 ) -> Router {
+    router_with_runtime_upgrades_and_agent_creation_placement(
+        store,
+        auth,
+        relay_state_dir,
+        runtime_upgrades_enabled,
+        None,
+    )
+}
+
+fn router_with_runtime_upgrades_and_agent_creation_placement(
+    store: CoreStore,
+    auth: CoreAuth,
+    relay_state_dir: impl Into<PathBuf>,
+    runtime_upgrades_enabled: bool,
+    agent_creation_placement: Option<RuntimePlacement>,
+) -> Router {
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
         .or_else(|| optional_env_value("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"));
     let state = CoreApiState {
         store,
         auth,
         standard_stripe_price_id,
+        agent_creation_placement,
         runtime_upgrades_enabled,
         relay_store: RelayStore::new(relay_state_dir.into()),
         result_waiters: RelayWaiters::default(),
@@ -1652,7 +1692,7 @@ async fn create_agent_request(
                     now: None,
                 },
                 AgentCreationConfiguration {
-                    placement: None,
+                    placement: state.agent_creation_placement,
                     profile_picture_url: input.profile_picture_url,
                 },
             )
@@ -5356,6 +5396,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trusted_server_configuration_can_place_local_agent_creation() {
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::AppleContainer,
+            runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        let app = router_with_agent_creation_placement(store, test_auth(), Some(placement));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/me/agent-creation-requests")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_local",
+                                "local@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "displayName": "Local Agent",
+                            "launchCode": launch_code,
+                            "idempotencyKey": "local-browser-submit"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result.project.hosting_tier, Some(HostingTier::Standard));
+        assert_eq!(result.project.placement, Some(placement));
+        assert_eq!(result.request.runner_class, RunnerClass::AppleContainer);
+        assert_eq!(result.request.placement, Some(placement));
     }
 
     #[tokio::test]

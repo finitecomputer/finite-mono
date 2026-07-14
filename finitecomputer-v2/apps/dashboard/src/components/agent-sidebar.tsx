@@ -66,19 +66,6 @@ export function AgentSidebar({
       }),
     [canonicalRoomId, state?.topics]
   );
-  const previousRoomIds = useMemo(
-    () => new Set(
-      (state?.hosted_agent_binding?.associated_room_ids ?? [])
-        .filter((roomId) => roomId !== canonicalRoomId)
-    ),
-    [canonicalRoomId, state?.hosted_agent_binding?.associated_room_ids]
-  );
-  const previousTopics = useMemo(
-    () => (state?.topics ?? [])
-      .filter((topic) => previousRoomIds.has(topic.room_id) && !topic.archived)
-      .sort((left, right) => right.updated_seq - left.updated_seq || left.title.localeCompare(right.title)),
-    [previousRoomIds, state?.topics]
-  );
   const selectedTopicId = state?.selected_topic_id ?? null;
   const selectedChatId = state?.selected_chat_id ?? null;
   const defaultNewChatTopic = canonicalNewChatTopic(topics);
@@ -238,48 +225,6 @@ export function AgentSidebar({
               </div>
             </div>
           ))}
-          {previousTopics.length > 0 ? (
-            <>
-              <div className="finite-chat__sidebar-section-row">
-                <span className="finite-chat__sidebar-section">Previous conversations</span>
-              </div>
-              {previousTopics.map((topic) => (
-                <div className="finite-chat__folder" key={`previous:${topic.room_id}:${topic.topic_id}`}>
-                  <div className="finite-chat__folder-header">
-                    <button type="button" className="finite-chat__folder-summary" onClick={() => openTopic(topic)}>
-                      <span className="finite-chat__folder-main">
-                        <span className="finite-chat__folder-icon" style={topicColorStyle(topic.title)} aria-hidden>
-                          <HashIcon className="size-3.5" />
-                        </span>
-                        <span className="finite-chat__folder-label">{topic.title}</span>
-                      </span>
-                    </button>
-                  </div>
-                  <div className="finite-chat__folder-body">
-                    {topic.chats.map((chat) => {
-                      const active = topic.room_id === state?.selected_room_id
-                        && topic.topic_id === selectedTopicId
-                        && chat.chat_id === selectedChatId;
-                      return (
-                        <button
-                          key={chat.chat_id}
-                          type="button"
-                          className={active ? "is-active" : ""}
-                          aria-current={active ? "page" : undefined}
-                          onClick={() => openChat(topic, chat)}
-                        >
-                          <span className="finite-chat__thread-indicator" aria-hidden />
-                          <span className="finite-chat__thread-main">
-                            <span className="finite-chat__thread-title">{chat.title || "New chat"}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </>
-          ) : null}
         </nav>
 
         <button

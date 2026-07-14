@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use finite_saas_core::api::router;
+use finite_saas_core::api::router_with_agent_creation_placement;
 use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
@@ -8,8 +8,8 @@ use finite_saas_core::{
     FinitePrivateGrant, IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeArtifactKind, SourceHostRelayEndpoint, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput,
+    RuntimeArtifact, RuntimeArtifactKind, RuntimePlacement, SourceHostRelayEndpoint,
+    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -461,7 +461,9 @@ async fn serve() -> Result<()> {
     let addr: SocketAddr = bind.parse()?;
 
     let store = postgres_store_from_env().await?;
-    let app = router(store, auth).layer(TraceLayer::new_for_http());
+    let agent_creation_placement = optional_agent_creation_placement()?;
+    let app = router_with_agent_creation_placement(store, auth, agent_creation_placement)
+        .layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
     axum::serve(listener, app).await?;
@@ -867,6 +869,19 @@ fn optional_runtime_environment() -> Result<BTreeMap<String, String>> {
     };
     serde_json::from_str(&raw)
         .context("FC_CORE_RUNTIME_ENV_JSON must be a JSON object of string values")
+}
+
+fn optional_agent_creation_placement() -> Result<Option<RuntimePlacement>> {
+    let raw = match env::var("FC_CORE_AGENT_CREATION_PLACEMENT_JSON") {
+        Ok(raw) if !raw.trim().is_empty() => raw,
+        Ok(_) | Err(env::VarError::NotPresent) => return Ok(None),
+        Err(error) => {
+            return Err(error).context("failed to read FC_CORE_AGENT_CREATION_PLACEMENT_JSON");
+        }
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .context("FC_CORE_AGENT_CREATION_PLACEMENT_JSON must be a RuntimePlacement JSON object")
 }
 
 fn optional_duration_secs(name: &str, default: u64) -> Result<Duration> {

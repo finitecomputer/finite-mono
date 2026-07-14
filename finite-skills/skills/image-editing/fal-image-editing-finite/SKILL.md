@@ -18,9 +18,12 @@ import os
 if "FAL_KEY" not in os.environ:
     os.environ["FAL_KEY"] = os.environ.get("FAL_API_KEY", "")
 ```
-If that still fails, hardcode from `grep FAL ~/.hermes/.env` and pass via `export FAL_KEY=... && ~/.hermes/venv/bin/python script.py`
-- `uv pip install --python ~/.hermes/venv/bin/python fal-client Pillow`
-- Run scripts with `~/.hermes/venv/bin/python`
+If neither variable is available, stop and ask the user to configure the
+managed credential. Never print, grep, copy, or hardcode a key from a runtime
+file into a command or script.
+- Hosted Finite currently requires `fal-client` to be installed for the task;
+  use `python -m pip install fal-client` and do not replace Pillow.
+- Run scripts with `python`; the hosted runtime places its managed venv first on `PATH`.
 
 ## Key APIs
 

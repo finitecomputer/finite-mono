@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activityLeaseIsFresh,
   activitiesForChat,
   attachmentSendError,
   beginPendingChatTurn,
@@ -9,6 +10,7 @@ import {
   liveActivityLabel,
   messagesForChat,
   pendingTurnIsComplete,
+  pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
   selectedChat,
   transcriptItems,
@@ -93,6 +95,20 @@ test("a pending turn follows its chat without leaking into another selected chat
     }),
     false
   );
+});
+
+test("working signals expire at the adapter lease and fail closed off-stream", () => {
+  const state = appState();
+  const selection = selectedChat(state);
+  const turn = beginPendingChatTurn(selection, messagesForChat(state, selection), 10_000);
+  assert(turn);
+
+  assert.equal(activityLeaseIsFresh(true, 10_000, 24_999), true);
+  assert.equal(activityLeaseIsFresh(true, 10_000, 25_000), false);
+  assert.equal(activityLeaseIsFresh(false, 10_000, 10_001), false);
+  assert.equal(pendingTurnLeaseIsFresh(turn, true, 24_999), true);
+  assert.equal(pendingTurnLeaseIsFresh(turn, true, 25_000), false);
+  assert.equal(pendingTurnLeaseIsFresh(turn, false, 10_001), false);
 });
 
 test("working presentation remains visible across an activity gap and outranks typing", () => {

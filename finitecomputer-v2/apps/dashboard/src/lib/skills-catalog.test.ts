@@ -18,7 +18,9 @@ test("skills catalog can load from the GitHub-style finite-skills checkout", asy
       [
         "---",
         "name: ui-polish",
-        "description: Tighten dashboard UI details.",
+        "description: >",
+        "  Tighten dashboard",
+        "  UI details.",
         "---",
         "",
         "Use this skill for UI polish.",
@@ -33,6 +35,7 @@ test("skills catalog can load from the GitHub-style finite-skills checkout", asy
     assert.equal(catalog.totalSkillCount, 1);
     assert.equal(catalog.categoryCount, 1);
     assert.equal(catalog.skills[0]?.name, "ui-polish");
+    assert.equal(catalog.skills[0]?.description, "Tighten dashboard UI details.");
     assert.equal(catalog.skills[0]?.category, "Browser");
     assert.equal(catalog.skills[0]?.managedRelpath, ".hermes/skills/browser/ui-polish");
   } finally {

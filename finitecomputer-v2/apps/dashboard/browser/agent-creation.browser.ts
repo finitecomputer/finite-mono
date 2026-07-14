@@ -124,7 +124,7 @@ type FakeHostedChatState = {
       attachment_id: string;
       mime_type: string;
       filename: string;
-      kind: "Image" | "File";
+      kind: "Image" | "VoiceNote" | "Video" | "File";
       width: number | null;
       height: number | null;
     }>;
@@ -920,6 +920,20 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "attachment bytes must traverse the authenticated hosted-device route"
       );
 
+      hostedDevice.state.app.messages.push(
+        hostedPlayableMessage("Video returned by agent.", 5, "agent-proof.mp4", "Video", "video/mp4")
+      );
+      hostedDevice.state.app.messages.push(
+        hostedPlayableMessage("Audio returned by agent.", 6, "agent-proof.mp3", "VoiceNote", "audio/mpeg")
+      );
+      hostedDevice.emit();
+      const video = page.locator('video[aria-label="agent-proof.mp4"]');
+      const audio = page.locator('audio[aria-label="agent-proof.mp3"]');
+      await video.waitFor({ state: "visible" });
+      await audio.waitFor({ state: "visible" });
+      assert.equal(await video.getAttribute("controls"), "");
+      assert.equal(await audio.getAttribute("controls"), "");
+
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
@@ -936,18 +950,17 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("💻 Running browser QA", false, 5),
+        ...hostedMessage("💻 Running browser QA", false, 7),
         kind: "tool",
         status: "running",
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
-      await expectVisibleText(page, "Completed Oslo Bot is working");
 
       hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
         "complete";
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Browser QA complete.", false, 6),
+        ...hostedMessage("Browser QA complete.", false, 8),
         final_delivery: true,
       });
       hostedDevice.emit();
@@ -956,12 +969,35 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByText("Completed Oslo Bot is working", { exact: true })
         .waitFor({ state: "hidden", timeout: 15_000 });
 
+      await page.getByLabel("Message your agent").fill("Working lease browser proof.");
+      await page.getByRole("button", { name: "Send message" }).click();
+      await expectVisibleText(page, "Working lease browser proof.");
+      hostedDevice.state.app.typing_members = [
+        {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          chat_id: "chat_browser_agent",
+          account_id: "agent-account-browser",
+          device_id: "agent",
+          display_name: "Completed Oslo Bot",
+          activity_kind: "working",
+        },
+      ];
+      hostedDevice.emit();
+      await expectVisibleText(page, "Completed Oslo Bot is working");
+      hostedDevice.state.app.typing_members = [];
+      hostedDevice.emit();
+      await expectVisibleText(page, "Completed Oslo Bot is working");
+      await page
+        .getByText("Completed Oslo Bot is working", { exact: true })
+        .waitFor({ state: "hidden", timeout: 20_000 });
+
       const localSiteUrl = sites.siteUrl;
       hostedDevice.state.app.messages.push(
-        hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 7)
+        hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 10)
       );
       hostedDevice.state.app.messages.push(
-        hostedMessage(`Published your site: ${localSiteUrl}`, false, 8)
+        hostedMessage(`Published your site: ${localSiteUrl}`, false, 11)
       );
       hostedDevice.emit();
       await page.getByRole("button", { name: "Preview" }).click();
@@ -1014,20 +1050,53 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         }],
       });
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Legacy room transcript only.", false, 9),
+        ...hostedMessage("Legacy room transcript only.", false, 12),
         room_id: "room_browser_legacy",
         message_id: "message_legacy_only",
         conversation_id: "topic_browser_legacy",
         chat_id: "chat_browser_legacy",
       });
+      hostedDevice.state.app.selected_room_id = "room_browser_legacy";
+      hostedDevice.state.app.selected_topic_id = "topic_browser_legacy";
+      hostedDevice.state.app.selected_chat_id = "chat_browser_legacy";
       hostedDevice.emit();
-      await page.getByRole("button", { name: "Previous topic", exact: true }).click();
-      await waitFor(() => hostedDevice.state.app.selected_room_id === "room_browser_legacy");
+      await waitFor(async () =>
+        (await page.getByText("Previous conversations", { exact: true }).count()) === 0
+        && (await page.getByRole("button", { name: "Previous topic", exact: true }).count()) === 0
+      );
       await page
         .locator(".finite-chat__topbar")
-        .getByText("Previous topic", { exact: true })
+        .getByText("General", { exact: true })
         .waitFor({ state: "visible" });
-      await expectVisibleText(page, "Legacy room transcript only.");
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(await page.getByText("Legacy room transcript only.", { exact: true }).count(), 0);
+
+      const actionsBeforeCanonicalReply = hostedDevice.state.actions.length;
+      const canonicalReply = "Associated rooms cannot capture this reply.";
+      await page.getByLabel("Message your agent").fill(canonicalReply);
+      await page.getByRole("button", { name: "Send message" }).click();
+      await waitFor(() => hostedDevice.state.actions
+        .slice(actionsBeforeCanonicalReply)
+        .some((action) => actionName(action) === "SendChatMessage"));
+      const canonicalSend = hostedDevice.state.actions
+        .slice(actionsBeforeCanonicalReply)
+        .find((action) => actionName(action) === "SendChatMessage");
+      assert.deepEqual(canonicalSend, {
+        SendChatMessage: {
+          room_id: "room_browser_agent",
+          topic_id: "topic_browser_agent",
+          chat_id: "chat_browser_agent",
+          text: canonicalReply,
+        },
+      });
+      await page
+        .locator(".finite-chat__message")
+        .getByText(canonicalReply, { exact: true })
+        .waitFor({ state: "visible", timeout: 15_000 });
+
       await page.getByRole("button", { name: "New chat", exact: true }).click();
       await waitFor(() => hostedDevice.state.newChatRequests.length === 1);
       assert.deepEqual(hostedDevice.state.newChatRequests[0], {
@@ -1047,7 +1116,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
 
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Remembered transcript only.", false, 10),
+        ...hostedMessage("Remembered transcript only.", false, 13),
         message_id: "message_remembered_only",
         chat_id: "chat_browser_remembered",
       });
@@ -1063,6 +1132,53 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         hostedDevice.state.app.selected_chat_id,
         "chat_browser_remembered"
       );
+
+      // Hold a selection-only OpenChat while a newer stream revision lands.
+      // The mutation response then has the same revision as the stream event,
+      // but is the only response carrying the new selection. The dashboard
+      // must refetch a full state snapshot instead of leaving the old pane up.
+      const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
+        (request) => request.path === "/v1/app/agent-bindings/open"
+      ).length;
+      hostedDevice.holdNextNavigationAction();
+      await page
+        .locator(".finite-chat__folder-body")
+        .getByRole("button", { name: "Browser QA", exact: true })
+        .click();
+      await waitFor(
+        () => hostedDevice.state.navigationActionGate === null,
+        5_000,
+        () => "the selection race request did not reach the daemon"
+      );
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Concurrent stream update.", false, 14),
+        message_id: "message_selection_race",
+        chat_id: "chat_browser_remembered",
+      });
+      hostedDevice.emit();
+      await expectVisibleText(page, "Concurrent stream update.");
+      hostedDevice.releaseNavigationAction();
+      await waitFor(
+        () =>
+          hostedDevice.state.authRequests.filter(
+            (request) => request.path === "/v1/app/agent-bindings/open"
+          ).length > stateFetchesBeforeSelectionRace,
+        5_000,
+        () => "a rejected selection response did not trigger state reconciliation"
+      );
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
+
+      await page
+        .getByRole("button", { name: "Remembered work", exact: true })
+        .click();
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Remembered work", { exact: true })
+        .waitFor({ state: "visible" });
 
       // New chat also changes the selected Room/Topic/Chat. Hold it before it
       // mutates the fake daemon, then click an existing chat. If New chat is
@@ -1919,7 +2035,7 @@ function applyHostedAction(
     device.active = false;
     device.revoked = true;
   }
-  state.rev += 1;
+  if (operation !== "OpenChat") state.rev += 1;
 }
 
 function hostedMessage(
@@ -1965,6 +2081,29 @@ function hostedImageMessage(
         kind: "Image",
         width: 1,
         height: 1,
+      },
+    ],
+  };
+}
+
+function hostedPlayableMessage(
+  text: string,
+  seq: number,
+  filename: string,
+  kind: "VoiceNote" | "Video",
+  mimeType: string
+): FakeHostedChatState["messages"][number] {
+  return {
+    ...hostedMessage(text, false, seq),
+    kind: "media",
+    media: [
+      {
+        attachment_id: `attachment_${seq}`,
+        mime_type: mimeType,
+        filename,
+        kind,
+        width: kind === "Video" ? 640 : null,
+        height: kind === "Video" ? 360 : null,
       },
     ],
   };
