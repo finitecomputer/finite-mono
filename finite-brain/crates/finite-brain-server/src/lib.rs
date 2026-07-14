@@ -3928,6 +3928,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_first_bootstrap_rejects_malformed_expired_or_mismatched_authority() {
+        let owner_keys = Keys::generate();
+        let other_owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let other_agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let other_agent_npub = npub(&other_agent_keys);
+
+        for (case, authorization, access_change) in [
+            (
+                "expired",
+                serde_json::to_value(personal_vault_bootstrap_authorization_event(
+                    &owner_keys,
+                    "bootstrap-expired",
+                    "personal",
+                    agent_npub.as_str(),
+                    "agent-workspace",
+                    TEST_NOW - 1,
+                ))
+                .unwrap(),
+                None,
+            ),
+            (
+                "agent-mismatch",
+                serde_json::to_value(personal_vault_bootstrap_authorization_event(
+                    &owner_keys,
+                    "bootstrap-agent-mismatch",
+                    "personal",
+                    other_agent_npub.as_str(),
+                    "agent-workspace",
+                    TEST_NOW + 60,
+                ))
+                .unwrap(),
+                None,
+            ),
+            (
+                "folder-mismatch",
+                serde_json::to_value(personal_vault_bootstrap_authorization_event(
+                    &owner_keys,
+                    "bootstrap-folder-mismatch",
+                    "personal",
+                    agent_npub.as_str(),
+                    "another-workspace",
+                    TEST_NOW + 60,
+                ))
+                .unwrap(),
+                None,
+            ),
+            (
+                "vault-mismatch",
+                serde_json::to_value(personal_vault_bootstrap_authorization_event(
+                    &owner_keys,
+                    "bootstrap-vault-mismatch",
+                    "another-personal",
+                    agent_npub.as_str(),
+                    "agent-workspace",
+                    TEST_NOW + 60,
+                ))
+                .unwrap(),
+                None,
+            ),
+            (
+                "owner-mismatch",
+                serde_json::to_value(personal_vault_bootstrap_authorization_event(
+                    &owner_keys,
+                    "bootstrap-owner-mismatch",
+                    "personal",
+                    agent_npub.as_str(),
+                    "agent-workspace",
+                    TEST_NOW + 60,
+                ))
+                .unwrap(),
+                Some(admin_event(
+                    &other_owner_keys,
+                    "personal",
+                    "change-wrong-owner-workspace",
+                    AdminAccessAction::SetFolderAccessMode,
+                    Some("agent-workspace"),
+                    None,
+                    Some(1),
+                )),
+            ),
+            ("malformed", serde_json::json!({ "kind": 30_078 }), None),
+        ] {
+            let router = test_router();
+            let mut body: serde_json::Value = serde_json::from_str(&agent_first_bootstrap_body(
+                &owner_keys,
+                &agent_keys,
+                &format!("bootstrap-base-{case}"),
+                TEST_NOW + 60,
+            ))
+            .unwrap();
+            body["bootstrapAuthorization"] = authorization;
+            if let Some(access_change) = access_change {
+                body["accessChangeEvent"] = serde_json::to_value(access_change).unwrap();
+            }
+
+            let rejected = authed_request(
+                router.clone(),
+                &agent_keys,
+                "POST",
+                "/_admin/personal-vault-bootstrap",
+                Some(body.to_string()),
+                TEST_NOW,
+            )
+            .await;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "case {case}");
+
+            for actor in [&owner_keys, &agent_keys] {
+                let visible = authed_request(
+                    router.clone(),
+                    actor,
+                    "GET",
+                    "/_admin/vaults",
+                    None,
+                    TEST_NOW + 1,
+                )
+                .await;
+                assert_eq!(visible.status(), StatusCode::OK, "case {case}");
+                let visible: VisibleVaultsResponse = read_json(visible).await;
+                assert!(visible.vaults.is_empty(), "case {case}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn personal_vault_owner_expands_and_revokes_a_paired_agents_folder_scope() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
@@ -3975,6 +4101,41 @@ mod tests {
         )
         .await;
         assert_eq!(paired.status(), StatusCode::OK);
+
+        let generic_expansion = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/folders/restricted/access",
+            Some(
+                serde_json::json!({
+                    "targetNpub": agent_npub,
+                    "grant": folder_key_grant_value(
+                        "grant-generic-agent-restricted-v1",
+                        1,
+                        agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &owner_keys,
+                        "personal",
+                        "change-generic-expand-agent-restricted",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("restricted"),
+                        Some(agent_npub.as_str()),
+                        Some(1),
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            generic_expansion,
+            StatusCode::BAD_REQUEST,
+            "active Agent Workspace access must be expanded through delegation expansion",
+        )
+        .await;
 
         let expansion_path = format!(
             "/_admin/vaults/personal/agent-workspace-pairings/{agent_npub}/folders/restricted"
@@ -4086,6 +4247,52 @@ mod tests {
             .await;
             assert_eq!(write.status(), StatusCode::OK);
         }
+
+        let generic_expanded_scope_removal = authed_request(
+            router.clone(),
+            &owner_keys,
+            "DELETE",
+            &format!("/_admin/vaults/personal/folders/restricted/access/{agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "newKeyVersion": 2,
+                    "grants": [folder_key_grant_value(
+                        "grant-generic-restricted-owner-v2",
+                        2,
+                        owner_npub.as_str(),
+                    )],
+                    "reencryptedRecords": [rotation_object_value(
+                        &owner_keys,
+                        "personal",
+                        "restricted",
+                        "obj_000000000904",
+                        2,
+                        Some(1),
+                        2,
+                        "generic removal must not drift delegation scope",
+                        97,
+                    )],
+                    "accessChangeEvent": admin_event(
+                        &owner_keys,
+                        "personal",
+                        "change-generic-expanded-scope-removal",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("restricted"),
+                        Some(agent_npub.as_str()),
+                        Some(2),
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_error(
+            generic_expanded_scope_removal,
+            StatusCode::BAD_REQUEST,
+            "active Agent Workspace access must be removed through delegation revocation",
+        )
+        .await;
 
         let revoke_value = serde_json::json!({
             "folders": [
@@ -4216,7 +4423,53 @@ mod tests {
         )
         .await;
 
-        let owner_metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 5).await;
+        for (path, reason) in [
+            (
+                "/_admin/vaults/personal/folders/agent-workspace/objects/obj_000000000903",
+                "folder access required",
+            ),
+            (
+                "/_admin/vaults/personal/sync/bootstrap",
+                "vault access required",
+            ),
+            ("/_admin/vaults/personal/export", "vault access required"),
+        ] {
+            let denied =
+                authed_request(router.clone(), &agent_keys, "GET", path, None, TEST_NOW + 5).await;
+            assert_error(denied, StatusCode::FORBIDDEN, reason).await;
+        }
+        let denied_write = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            "/_admin/vaults/personal/folders/agent-workspace/objects/obj_000000000905",
+            Some(object_write_body(
+                &agent_keys,
+                RevisionFixture {
+                    vault_id: "personal",
+                    folder_id: "agent-workspace",
+                    object_id: "obj_000000000905",
+                    operation: FolderObjectOperation::Create,
+                    revision: 1,
+                    base_revision: None,
+                    key_version: 2,
+                    content: "revoked agent cannot write",
+                    nonce: 98,
+                    record_type: false,
+                },
+            )),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(
+            denied_write,
+            StatusCode::FORBIDDEN,
+            "folder access required",
+        )
+        .await;
+
+        let owner_metadata =
+            get_metadata(router.clone(), &owner_keys, "personal", TEST_NOW + 5).await;
         assert_eq!(owner_metadata.status(), StatusCode::OK);
         let owner_metadata: VaultMetadataResponse = read_json(owner_metadata).await;
         for folder_id in ["agent-workspace", "restricted"] {
@@ -4229,6 +4482,31 @@ mod tests {
                 Some(2),
             );
         }
+        for path in [
+            "/_admin/vaults/personal/folders/agent-workspace/objects/obj_000000000903",
+            "/_admin/vaults/personal/folders/restricted/objects/obj_000000000904",
+            "/_admin/vaults/personal/sync/bootstrap",
+        ] {
+            let retained =
+                authed_request(router.clone(), &owner_keys, "GET", path, None, TEST_NOW + 5).await;
+            assert_eq!(retained.status(), StatusCode::OK, "path {path}");
+        }
+        let owner_export = authed_request(
+            router,
+            &owner_keys,
+            "GET",
+            "/_admin/vaults/personal/export",
+            None,
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(owner_export.status(), StatusCode::OK);
+        let owner_export: serde_json::Value = read_json(owner_export).await;
+        assert!(owner_export["keyGrants"].as_array().is_some_and(|grants| {
+            grants
+                .iter()
+                .all(|grant| grant["recipientNpub"].as_str() == Some(owner_npub.as_str()))
+        }));
     }
 
     #[tokio::test]

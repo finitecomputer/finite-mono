@@ -4,12 +4,19 @@ Status: accepted, 2026-07-13.
 
 Implementation note: the hosted phase uses the versioned
 `finite-brain-identity-provider-v1` contract. The Product Client calls the
-WorkOS-protected dashboard bridge at `POST /api/brain/identity-provider`; that
-bridge forwards only the named Brain operations to the Hosted Device's
+dashboard bridge at `POST /api/brain/identity-provider`; the server-sandboxed
+Brain frame receives a signed, expiring capability after WorkOS verification,
+and each operation also carries a short-lived proof for its exact request,
+minted by the authenticated parent dashboard. The frame keeps the capability;
+the parent proves its WorkOS session is still live, so neither alone can invoke
+custody. The bridge forwards only the named Brain operations to the Hosted Device's
 `POST /v1/brain/identity-provider` executor with the verified WorkOS user and
 trusted public Brain origin. The executor loads an existing Hosted Device User
 Key without generating one, applies validation owned by `finite-brain-core`,
-and returns only signed events or bounded NIP-44 results. Missing Chat setup
+and returns only signed events or complete, resource-bound grant results. A
+grant open validates the NIP-59 wrapper, recipient, issuer, Vault, Folder, key
+version, payload, and tags; grant wrapping accepts typed grant or invite
+metadata rather than arbitrary NIP-44 plaintext. Missing Chat setup
 returns setup-required, and arbitrary sign/decrypt operations are not routes.
 
 ## Context

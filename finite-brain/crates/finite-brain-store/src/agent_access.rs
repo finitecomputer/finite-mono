@@ -1,7 +1,8 @@
 use crate::*;
 
 const MAX_AGENT_WORKSPACE_PAIRINGS_PER_VAULT: i64 = 100;
-const MAX_DELEGATION_AUDIT_ROWS: i64 = 100;
+const MAX_AGENT_DELEGATED_FOLDERS: usize = 100;
+const MAX_DELEGATION_AUDIT_ROWS: i64 = MAX_AGENT_DELEGATED_FOLDERS as i64 + 2;
 
 impl BrainStore {
     /// Atomically consume an owner authorization and create the user-owned Personal Vault plus
@@ -77,6 +78,18 @@ impl BrainStore {
         {
             return Err(StoreError::BrokenInvariant {
                 reason: "agent-first bootstrap names a different Personal Vault".to_owned(),
+            });
+        }
+        let pairing_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM brain_email_access_delegations WHERE vault_id = ?1",
+            params![input.pairing.vault_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if pairing_count >= MAX_AGENT_WORKSPACE_PAIRINGS_PER_VAULT {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "Personal Vault Agent Workspace pairing count exceeds limit {MAX_AGENT_WORKSPACE_PAIRINGS_PER_VAULT}"
+                ),
             });
         }
 
@@ -429,9 +442,11 @@ impl BrainStore {
                 reason: "active Brain Email Access Delegation is required".to_owned(),
             });
         }
-        if delegation.folder_ids.len() >= MAX_AGENT_WORKSPACE_PAIRINGS_PER_VAULT as usize {
+        if delegation.folder_ids.len() >= MAX_AGENT_DELEGATED_FOLDERS {
             return Err(StoreError::BrokenInvariant {
-                reason: "Agent Workspace Folder scope exceeds limit 100".to_owned(),
+                reason: format!(
+                    "Agent Workspace Folder scope exceeds limit {MAX_AGENT_DELEGATED_FOLDERS}"
+                ),
             });
         }
         if delegation.folder_ids.contains(&input.folder_id) {

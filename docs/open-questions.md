@@ -93,7 +93,16 @@ Notes:
 - 2026-07-10: the Dashboard currently shows an unbounded waiting state for `requested`/`launching` and exposes reset only after `failed`; Core's cancellation route is service-authenticated rather than owner-scoped.
 - 2026-07-10T19:03Z: read-only Kata preflight on `finite-lat-1` found the runner timer enabled/active and configured capacity/artifact state, but the selected `finite-agent-runtime-2026-07-10.5` returned `503` from `/healthz` and `/contact`; `finite-agentd` reported a Finite Chat inbound `stream_error`. Follow-up isolated this to one historical attachment reference using the Chat server's loopback blob origin from inside the Kata guest; the canonical public blob is present, and the repository already contains the public-origin write fix plus safe historical-reference read repair. The live runner still has only shared `FC_CORE_API_TOKEN`, not the required route-scoped `FC_CORE_RUNNER_API_TOKEN`. No canary launch was attempted; publish the fixed Runtime and use a fresh launch rather than making repair of this old guest a canary prerequisite.
 
-## Brain access when a new Device meets existing encrypted Vaults (opened 2026-07-10)
+## Brain access when a new Device meets existing encrypted Vaults (closed 2026-07-13)
+
+Resolution: Brain is Greenfield, so no legacy Vault/key migration is required
+for this phase. ADR 0004 defines the bounded Brain Identity Provider and ADR
+0020 defines distinct user/agent keys plus Folder-scoped delegation. Hosted
+Brain now uses a server-sandboxed opaque-origin frame with a signed, expiring
+WorkOS-bound capability plus a short-lived, request-bound proof from the live
+parent session; its Hosted Device executor signs canonical typed Brain events
+and opens or wraps complete resource-bound grants, never arbitrary Nostr or
+NIP-44 input. Native Device custody and future recovery remain separate decisions.
 
 Wrong: Dashboard account access and encrypted Brain access are different boundaries. A new Hosted Web Device may open the Brain surface while existing Vault and Folder grants remain tied to a different Principal, leaving a person unable to demonstrate usable access to their existing encrypted knowledge.
 

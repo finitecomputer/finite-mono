@@ -217,9 +217,11 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   not described as browser E2EE even though the room server stores ciphertext.
 - The **Hosted Web Device** is also the hosted custody location for the human's
   existing **User Key**. Its Brain executor implements only Brain's versioned,
-  typed identity-provider operations after a verified WorkOS bridge call. It
-  is not a generic Chat signer, does not define Brain access policy, and does
-  not expose arbitrary signing or decryption.
+  typed identity-provider operations after a capability-bound WorkOS bridge
+  call. Folder Key operations consume or produce complete resource-bound
+  grants rather than arbitrary NIP-44 plaintext/ciphertext. It is not a generic
+  Chat signer, does not define Brain access policy, and does not expose
+  arbitrary signing or decryption.
 - A Brain provider request never initializes Chat identity state. If the User
   Key and Hosted Web Device store do not already exist, it returns
   setup-required; normal Chat setup remains the only hosted key-creation entry

@@ -11,7 +11,10 @@ use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use finite_nostr::{NostrPublicKey, build_rumor, verify_event_integrity, wrap_rumor};
+use finite_nostr::{
+    GiftWrapValidation, NostrPublicKey, build_rumor, open_gift_wrap, validate_gift_wrap,
+    verify_event_integrity, wrap_rumor,
+};
 use nostr::event::FinalizeEvent;
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -25,6 +28,7 @@ const APP_SPECIFIC_KIND: u16 = 30_078;
 const MAX_USER_ID_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 128;
 const MAX_SAFE_RELATIVE_PATH_LEN: usize = 1024;
+const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS: usize = 100;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -57,12 +61,53 @@ pub struct BrainEventAuthorizationIntent {
     pub event_template: BrainEventTemplate,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrainEmailInviteAuthorizationPayload {
+    version: String,
+    vault_id: String,
+    invited_email: String,
+    invite_unwrap_npub: String,
+    bootstrap_payload_hash: String,
+    expires_at: String,
+    folders: Vec<BrainEmailInviteAuthorizationFolder>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrainEmailInviteAuthorizationFolder {
+    folder_id: String,
+    access: FolderAccessMode,
+    key_version: u32,
+}
+
+impl BrainEmailInviteAuthorizationPayload {
+    fn canonical_json(&self) -> String {
+        format!(
+            "{{\"version\":{},\"vaultId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"bootstrapPayloadHash\":{},\"expiresAt\":{},\"folders\":{}}}",
+            json_string(&self.version),
+            json_string(&self.vault_id),
+            json_string(&self.invited_email),
+            json_string(&self.invite_unwrap_npub),
+            json_string(&self.bootstrap_payload_hash),
+            json_string(&self.expires_at),
+            serde_json::to_string(&self.folders)
+                .expect("serializing invite Folder scope cannot fail"),
+        )
+    }
+}
+
 /// Typed NIP-44 operation for a Brain-owned Folder Key or invitation grant.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrainGrantIntent {
     pub purpose: String,
-    pub peer_public_key_hex: String,
+    pub vault_id: String,
+    pub recipient_npub: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub key_version: Option<u32>,
 }
 
 /// Default markdown Page materialized in a starter Vault Folder.
@@ -1170,6 +1215,14 @@ impl fmt::Display for CryptoRecordError {
 
 impl Error for CryptoRecordError {}
 
+impl From<CoreError> for CryptoRecordError {
+    fn from(error: CoreError) -> Self {
+        Self::EventMismatch {
+            reason: error.to_string(),
+        }
+    }
+}
+
 /// AES-256-GCM Folder Key.
 #[derive(Clone, Eq, PartialEq)]
 pub struct FolderKey([u8; 32]);
@@ -1851,6 +1904,40 @@ pub fn validate_admin_access_change_event(
     Ok(payload)
 }
 
+/// Issue one canonical Vault admin access-change event from its typed validation contract.
+pub fn issue_admin_access_change_event(
+    admin_keys: &Keys,
+    input: &AdminAccessChangeValidation,
+    created_at_unix_seconds: u64,
+) -> Result<Event, CryptoRecordError> {
+    let signer_npub = NostrPublicKey::from_protocol(admin_keys.public_key())
+        .to_npub()
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })?;
+    if signer_npub != input.admin_npub {
+        return brain_identity_provider_error(
+            "access-change signer does not match the named Vault admin",
+        );
+    }
+    let payload = AdminAccessChangePayload::new(input);
+    let tags = admin_access_change_tags(input)?
+        .into_iter()
+        .map(|parts| {
+            Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
+                reason: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    EventBuilder::new(Kind::ApplicationSpecificData, payload.canonical_json())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(created_at_unix_seconds))
+        .finalize(admin_keys)
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: format!("access-change event could not be signed: {error}"),
+        })
+}
+
 /// Validate an official Product Client request-signing intent before the user key signs it.
 pub fn validate_brain_http_authorization_intent(
     input: &BrainHttpAuthorizationIntent,
@@ -1921,45 +2008,194 @@ pub fn validate_brain_http_authorization_intent(
 /// Validate one named Brain application-event intent before signing it.
 pub fn validate_brain_event_authorization_intent(
     input: &BrainEventAuthorizationIntent,
+    signer_npub: &str,
 ) -> Result<(), CryptoRecordError> {
-    let (expected_kind, d_prefix) = match input.intent.as_str() {
-        "folder-key-grant-seal" => (13, None),
-        "folder-key-grant-wrap" => (1_059, None),
-        "folder-object-revision" => (APP_SPECIFIC_KIND, Some("finite-folder-object-revision:")),
-        "folder-object-tombstone" => (APP_SPECIFIC_KIND, Some("finite-folder-object-tombstone:")),
-        "vault-access-change" => (APP_SPECIFIC_KIND, Some("finite-vault-admin-access-change:")),
-        "vault-invite-authorization" => (
-            APP_SPECIFIC_KIND,
-            Some("finite-email-invite-bootstrap-authorization:"),
-        ),
-        "vault-invite-bootstrap-seal" => (13, None),
-        "vault-invite-bootstrap-wrap" => (1_059, None),
-        _ => return brain_identity_provider_error("unsupported Brain identity intent"),
-    };
     let template = &input.event_template;
-    if template.kind != expected_kind || template.content.is_empty() {
+    if template.kind != APP_SPECIFIC_KIND || template.content.is_empty() {
         return brain_identity_provider_error(
             "Brain event kind or content does not match its named intent",
         );
     }
-    if let Some(prefix) = d_prefix {
-        if !single_template_tag(template, "d")?.starts_with(prefix) {
-            return brain_identity_provider_error("Brain event does not match its named intent");
+    match input.intent.as_str() {
+        "folder-object-revision" => {
+            let payload: FolderObjectRevisionPayload = serde_json::from_str(&template.content)
+                .map_err(|_| CryptoRecordError::EventMismatch {
+                    reason: "Brain revision payload did not parse".to_owned(),
+                })?;
+            let operation = FolderObjectOperation::try_from(payload.operation.as_str())?;
+            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let folder_id = FolderId::new(payload.folder_id.clone())?;
+            let object_id = ObjectId::new(payload.object_id.clone())?;
+            if payload.version != "finite-folder-object-revision-v1"
+                || payload.cipher != CIPHER_AES_256_GCM
+                || payload.revision == 0
+                || payload.key_version == 0
+                || payload.ciphertext_hash.len() != 64
+                || !payload
+                    .ciphertext_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || payload.author_npub != signer_npub
+                || payload.canonical_json() != template.content
+            {
+                return brain_identity_provider_error("Brain revision payload is invalid");
+            }
+            require_exact_template_tags(
+                template,
+                vec![
+                    vec![
+                        "d".to_owned(),
+                        format!(
+                            "finite-folder-object-revision:{vault_id}:{folder_id}:{}:{}",
+                            object_id.as_str(),
+                            payload.revision
+                        ),
+                    ],
+                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["folder".to_owned(), folder_id.to_string()],
+                    vec!["object".to_owned(), object_id.as_str().to_owned()],
+                    vec!["operation".to_owned(), operation.as_str().to_owned()],
+                    vec!["keyVersion".to_owned(), payload.key_version.to_string()],
+                ],
+            )?;
         }
-    } else if input.intent.ends_with("-seal") {
-        if !template.tags.is_empty() {
-            return brain_identity_provider_error("Brain seal intent cannot include tags");
+        "folder-object-tombstone" => {
+            let payload: FolderObjectTombstonePayload = serde_json::from_str(&template.content)
+                .map_err(|_| CryptoRecordError::EventMismatch {
+                    reason: "Brain tombstone payload did not parse".to_owned(),
+                })?;
+            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let folder_id = FolderId::new(payload.folder_id.clone())?;
+            let object_id = ObjectId::new(payload.object_id.clone())?;
+            if payload.version != "finite-folder-object-tombstone-v1"
+                || payload.operation != "delete"
+                || payload.revision == 0
+                || payload.author_npub != signer_npub
+                || payload.canonical_json() != template.content
+            {
+                return brain_identity_provider_error("Brain tombstone payload is invalid");
+            }
+            require_exact_template_tags(
+                template,
+                vec![
+                    vec![
+                        "d".to_owned(),
+                        format!(
+                            "finite-folder-object-tombstone:{vault_id}:{folder_id}:{}:{}",
+                            object_id.as_str(),
+                            payload.revision
+                        ),
+                    ],
+                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["folder".to_owned(), folder_id.to_string()],
+                    vec!["object".to_owned(), object_id.as_str().to_owned()],
+                    vec!["operation".to_owned(), "delete".to_owned()],
+                ],
+            )?;
         }
-    } else {
-        let recipient = single_template_tag(template, "p")?;
-        if template.tags.len() != 1
-            || recipient.len() != 64
-            || !recipient.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return brain_identity_provider_error(
-                "Brain wrap intent requires exactly one valid recipient tag",
-            );
+        "vault-access-change" => {
+            let payload: AdminAccessChangePayload = serde_json::from_str(&template.content)
+                .map_err(|_| CryptoRecordError::EventMismatch {
+                    reason: "Brain access-change payload did not parse".to_owned(),
+                })?;
+            let action = AdminAccessAction::try_from(payload.action.as_str())?;
+            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let folder_id = payload
+                .folder_id
+                .as_ref()
+                .map(|value| FolderId::new(value.clone()))
+                .transpose()?;
+            if let Some(target_npub) = &payload.target_npub {
+                NostrPublicKey::parse(target_npub).map_err(|error| {
+                    CryptoRecordError::EventMismatch {
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
+            if payload.version != "finite-vault-admin-access-change-v1"
+                || payload.admin_npub != signer_npub
+                || payload.canonical_json() != template.content
+            {
+                return brain_identity_provider_error("Brain access-change payload is invalid");
+            }
+            let expected = AdminAccessChangeValidation {
+                vault_id,
+                change_id: payload.change_id,
+                action,
+                admin_npub: payload.admin_npub,
+                folder_id,
+                target_npub: payload.target_npub,
+                key_version: payload.key_version,
+                note: payload.note,
+                created_at: payload.created_at,
+            };
+            require_exact_template_tags(template, admin_access_change_tags(&expected)?)?;
         }
+        "vault-invite-authorization" => {
+            let payload: BrainEmailInviteAuthorizationPayload =
+                serde_json::from_str(&template.content).map_err(|_| {
+                    CryptoRecordError::EventMismatch {
+                        reason: "Brain email-invite authorization payload did not parse".to_owned(),
+                    }
+                })?;
+            if payload.folders.len() > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS {
+                return brain_identity_provider_error(
+                    "Brain email-invite Folder scope exceeds the supported limit",
+                );
+            }
+            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            NostrPublicKey::parse(&payload.invite_unwrap_npub).map_err(|error| {
+                CryptoRecordError::EventMismatch {
+                    reason: error.to_string(),
+                }
+            })?;
+            for folder in &payload.folders {
+                FolderId::new(folder.folder_id.clone())?;
+                if folder.key_version == 0 {
+                    return brain_identity_provider_error(
+                        "Brain email-invite Folder Key version is invalid",
+                    );
+                }
+            }
+            if payload.version != "finite-email-invite-bootstrap-authorization-v1"
+                || payload.invited_email.trim().is_empty()
+                || payload.bootstrap_payload_hash.len() != "sha256:".len() + 64
+                || !payload.bootstrap_payload_hash.starts_with("sha256:")
+                || !payload.bootstrap_payload_hash["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || payload.canonical_json() != template.content
+            {
+                return brain_identity_provider_error(
+                    "Brain email-invite authorization payload is invalid",
+                );
+            }
+            require_exact_template_tags(
+                template,
+                vec![
+                    vec![
+                        "d".to_owned(),
+                        format!(
+                            "finite-email-invite-bootstrap-authorization:{vault_id}:{}",
+                            payload.invited_email
+                        ),
+                    ],
+                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["email".to_owned(), payload.invited_email],
+                ],
+            )?;
+        }
+        _ => return brain_identity_provider_error("unsupported Brain identity intent"),
+    }
+    Ok(())
+}
+
+fn require_exact_template_tags(
+    template: &BrainEventTemplate,
+    expected: Vec<Vec<String>>,
+) -> Result<(), CryptoRecordError> {
+    if template.tags != expected {
+        return brain_identity_provider_error("Brain event tags differ from its typed payload");
     }
     Ok(())
 }
@@ -1968,17 +2204,38 @@ pub fn validate_brain_event_authorization_intent(
 pub fn validate_brain_grant_intent(
     input: &BrainGrantIntent,
 ) -> Result<NostrPublicKey, CryptoRecordError> {
-    if !matches!(
-        input.purpose.as_str(),
-        "folder-key-grant" | "vault-invite-bootstrap"
-    ) {
-        return brain_identity_provider_error("unsupported Brain grant purpose");
-    }
-    NostrPublicKey::from_hex(&input.peer_public_key_hex).map_err(|_| {
+    VaultId::new(input.vault_id.clone())?;
+    let recipient = NostrPublicKey::parse(&input.recipient_npub).map_err(|error| {
         CryptoRecordError::EventMismatch {
-            reason: "Brain grant peer public key is invalid".to_owned(),
+            reason: error.to_string(),
         }
-    })
+    })?;
+    match input.purpose.as_str() {
+        "folder-key-grant" => {
+            let folder_id =
+                input
+                    .folder_id
+                    .as_ref()
+                    .ok_or_else(|| CryptoRecordError::EventMismatch {
+                        reason: "Brain Folder Key Grant requires a Folder id".to_owned(),
+                    })?;
+            FolderId::new(folder_id.clone())?;
+            if input.key_version.is_none_or(|version| version == 0) {
+                return brain_identity_provider_error(
+                    "Brain Folder Key Grant requires a positive key version",
+                );
+            }
+        }
+        "vault-invite-bootstrap" => {
+            if input.folder_id.is_some() || input.key_version.is_some() {
+                return brain_identity_provider_error(
+                    "Brain invite bootstrap cannot name one Folder Key",
+                );
+            }
+        }
+        _ => return brain_identity_provider_error("unsupported Brain grant purpose"),
+    }
+    Ok(recipient)
 }
 
 /// Sign an already validated event template without exposing a general signer API.
@@ -2086,6 +2343,253 @@ pub struct IssuedFolderKeyGrant {
     pub created_at: String,
 }
 
+/// Decrypted, fully validated Folder Key Grant payload returned to a trusted client.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FolderKeyGrantPayload {
+    pub version: String,
+    pub vault_id: String,
+    pub folder_id: String,
+    pub key_version: u32,
+    pub folder_key: String,
+    pub issuer_npub: String,
+    pub recipient_npub: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrainInviteBootstrapPayload {
+    version: String,
+    vault_id: String,
+    invited_email: String,
+    invite_unwrap_npub: String,
+    folders: Vec<BrainEmailInviteAuthorizationFolder>,
+    grants: Vec<BrainInviteBootstrapGrant>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrainInviteBootstrapGrant {
+    folder_id: String,
+    grant: IssuedFolderKeyGrant,
+}
+
+impl BrainInviteBootstrapPayload {
+    fn canonical_json(&self) -> String {
+        format!(
+            "{{\"version\":{},\"vaultId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"folders\":{},\"grants\":{}}}",
+            json_string(&self.version),
+            json_string(&self.vault_id),
+            json_string(&self.invited_email),
+            json_string(&self.invite_unwrap_npub),
+            serde_json::to_string(&self.folders)
+                .expect("serializing invite Folder scope cannot fail"),
+            serde_json::to_string(&self.grants).expect("serializing invite grants cannot fail"),
+        )
+    }
+}
+
+impl FolderKeyGrantPayload {
+    /// Canonical JSON signed inside the NIP-59 rumor.
+    pub fn canonical_json(&self) -> String {
+        format!(
+            "{{\"version\":{},\"vaultId\":{},\"folderId\":{},\"keyVersion\":{},\"folderKey\":{},\"issuerNpub\":{},\"recipientNpub\":{},\"createdAt\":{}}}",
+            json_string(&self.version),
+            json_string(&self.vault_id),
+            json_string(&self.folder_id),
+            self.key_version,
+            json_string(&self.folder_key),
+            json_string(&self.issuer_npub),
+            json_string(&self.recipient_npub),
+            json_string(&self.created_at),
+        )
+    }
+}
+
+/// Open one complete NIP-59 Folder Key Grant bound to the exact requested resource and recipient.
+pub fn open_folder_key_grant(
+    recipient_keys: &Keys,
+    intent: &BrainGrantIntent,
+    wrapped_event_json: &str,
+) -> Result<FolderKeyGrantPayload, CryptoRecordError> {
+    if intent.purpose != "folder-key-grant" {
+        return brain_identity_provider_error("only Folder Key Grants can be opened");
+    }
+    let recipient = validate_brain_grant_intent(intent)?;
+    if recipient != NostrPublicKey::from_protocol(recipient_keys.public_key()) {
+        return brain_identity_provider_error(
+            "Folder Key Grant recipient does not match the hosted member key",
+        );
+    }
+    let wrapped: Event =
+        serde_json::from_str(wrapped_event_json).map_err(|_| CryptoRecordError::EventMismatch {
+            reason: "Folder Key Grant wrapper did not parse".to_owned(),
+        })?;
+    let opened = open_gift_wrap(
+        recipient_keys,
+        &wrapped,
+        &GiftWrapValidation::new(recipient),
+    )
+    .map_err(|error| CryptoRecordError::EventMismatch {
+        reason: format!("Folder Key Grant wrapper is invalid: {error}"),
+    })?;
+    if opened.rumor.kind != Kind::ApplicationSpecificData {
+        return brain_identity_provider_error("Folder Key Grant rumor kind is invalid");
+    }
+    let payload: FolderKeyGrantPayload =
+        serde_json::from_str(&opened.rumor.content).map_err(|_| {
+            CryptoRecordError::EventMismatch {
+                reason: "Folder Key Grant payload did not parse".to_owned(),
+            }
+        })?;
+    let expected_folder_id = intent.folder_id.as_deref().expect("validated Folder id");
+    let expected_key_version = intent.key_version.expect("validated key version");
+    let issuer_npub =
+        opened
+            .sender
+            .to_npub()
+            .map_err(|error| CryptoRecordError::EventMismatch {
+                reason: error.to_string(),
+            })?;
+    if payload.version != "finite-folder-key-grant-v1"
+        || payload.vault_id != intent.vault_id
+        || payload.folder_id != expected_folder_id
+        || payload.key_version != expected_key_version
+        || payload.recipient_npub != intent.recipient_npub
+        || payload.issuer_npub != issuer_npub
+        || payload.canonical_json() != opened.rumor.content
+    {
+        return brain_identity_provider_error(
+            "Folder Key Grant payload does not match its requested resource",
+        );
+    }
+    FolderKey::from_base64(&payload.folder_key)?;
+    let actual_tags = opened
+        .rumor
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect::<Vec<_>>();
+    let expected_tags = vec![
+        vec![
+            "d".to_owned(),
+            format!(
+                "finite-folder-key-grant:{}:{expected_folder_id}:{expected_key_version}",
+                intent.vault_id
+            ),
+        ],
+        vec!["vault".to_owned(), intent.vault_id.clone()],
+        vec!["folder".to_owned(), expected_folder_id.to_owned()],
+        vec!["keyVersion".to_owned(), expected_key_version.to_string()],
+    ];
+    if actual_tags != expected_tags {
+        return brain_identity_provider_error("Folder Key Grant tags differ from its payload");
+    }
+    Ok(payload)
+}
+
+/// Validate and wrap one complete Email Invite Bootstrap payload for its one-use unwrap key.
+pub fn wrap_brain_invite_bootstrap(
+    issuer_keys: &Keys,
+    intent: &BrainGrantIntent,
+    plaintext: &str,
+    created_at_unix_seconds: u64,
+) -> Result<Event, CryptoRecordError> {
+    if intent.purpose != "vault-invite-bootstrap" {
+        return brain_identity_provider_error("only an Email Invite Bootstrap can be wrapped");
+    }
+    let recipient = validate_brain_grant_intent(intent)?;
+    let payload: BrainInviteBootstrapPayload =
+        serde_json::from_str(plaintext).map_err(|_| CryptoRecordError::EventMismatch {
+            reason: "Email Invite Bootstrap payload did not parse".to_owned(),
+        })?;
+    if payload.folders.len() > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS
+        || payload.grants.len() > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS
+    {
+        return brain_identity_provider_error(
+            "Email Invite Bootstrap Folder scope exceeds the supported limit",
+        );
+    }
+    if payload.version != "finite-email-invite-bootstrap-payload-v1"
+        || payload.vault_id != intent.vault_id
+        || payload.invite_unwrap_npub != intent.recipient_npub
+        || payload.invited_email.trim().is_empty()
+        || payload.folders.len() != payload.grants.len()
+        || payload.canonical_json() != plaintext
+    {
+        return brain_identity_provider_error(
+            "Email Invite Bootstrap payload does not match its requested resource",
+        );
+    }
+    let mut grants_by_folder = BTreeMap::new();
+    for entry in &payload.grants {
+        let folder_id = FolderId::new(entry.folder_id.clone())?;
+        if grants_by_folder
+            .insert(folder_id.to_string(), entry)
+            .is_some()
+        {
+            return brain_identity_provider_error(
+                "Email Invite Bootstrap contains duplicate Folder Key Grants",
+            );
+        }
+    }
+    let mut seen_folders = BTreeSet::new();
+    for folder in &payload.folders {
+        let folder_id = FolderId::new(folder.folder_id.clone())?;
+        if folder.key_version == 0 || !seen_folders.insert(folder_id.to_string()) {
+            return brain_identity_provider_error("Email Invite Bootstrap Folder scope is invalid");
+        }
+        let entry = grants_by_folder.get(folder_id.as_str()).ok_or_else(|| {
+            CryptoRecordError::EventMismatch {
+                reason: "Email Invite Bootstrap is missing a scoped Folder Key Grant".to_owned(),
+            }
+        })?;
+        if entry.grant.id.is_empty()
+            || entry.grant.key_version != folder.key_version
+            || entry.grant.recipient_npub != intent.recipient_npub
+        {
+            return brain_identity_provider_error(
+                "Email Invite Bootstrap Folder Key Grant metadata is invalid",
+            );
+        }
+        let wrapped: Event =
+            serde_json::from_str(&entry.grant.wrapped_event_json).map_err(|_| {
+                CryptoRecordError::EventMismatch {
+                    reason: "Email Invite Bootstrap Folder Key Grant did not parse".to_owned(),
+                }
+            })?;
+        validate_gift_wrap(&wrapped, recipient).map_err(|error| {
+            CryptoRecordError::EventMismatch {
+                reason: format!("Email Invite Bootstrap Folder Key Grant is invalid: {error}"),
+            }
+        })?;
+    }
+    let issuer = NostrPublicKey::from_protocol(issuer_keys.public_key());
+    let tags = vec![
+        Tag::parse(vec![
+            "d".to_owned(),
+            format!("finite-email-invite-bootstrap:{}", intent.vault_id),
+        ]),
+        Tag::parse(vec!["vault".to_owned(), intent.vault_id.clone()]),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| CryptoRecordError::EventMismatch {
+        reason: error.to_string(),
+    })?;
+    let rumor = build_rumor(
+        issuer,
+        Kind::ApplicationSpecificData,
+        tags,
+        plaintext,
+        created_at_unix_seconds,
+    );
+    wrap_rumor(issuer_keys, recipient, rumor).map_err(|error| CryptoRecordError::EventMismatch {
+        reason: error.to_string(),
+    })
+}
+
 /// Wrap a Folder Key for one recipient without exposing the key in the returned contract.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_folder_key_grant(
@@ -2111,17 +2615,17 @@ pub fn issue_folder_key_grant(
         }
     })?;
     let created_at = created_at.into();
-    let content = serde_json::json!({
-        "version": "finite-folder-key-grant-v1",
-        "vaultId": vault_id,
-        "folderId": folder_id,
-        "keyVersion": key_version,
-        "folderKey": folder_key.to_base64(),
-        "issuerNpub": issuer_npub,
-        "recipientNpub": recipient_npub,
-        "createdAt": created_at,
-    })
-    .to_string();
+    let content = FolderKeyGrantPayload {
+        version: "finite-folder-key-grant-v1".to_owned(),
+        vault_id: vault_id.to_string(),
+        folder_id: folder_id.to_string(),
+        key_version,
+        folder_key: folder_key.to_base64(),
+        issuer_npub,
+        recipient_npub: recipient_npub.clone(),
+        created_at: created_at.clone(),
+    }
+    .canonical_json();
     let tags = vec![
         vec![
             "d".to_owned(),
@@ -3197,6 +3701,90 @@ mod tests {
         assert_eq!(
             validate_admin_access_change_event(&event, &expected).unwrap(),
             payload
+        );
+    }
+
+    #[test]
+    fn bounds_brain_invite_authorization_and_bootstrap_fanout() {
+        let issuer = Keys::generate();
+        let recipient = Keys::generate();
+        let recipient_npub = npub(&recipient);
+        let folders = (0..=MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS)
+            .map(|index| BrainEmailInviteAuthorizationFolder {
+                folder_id: format!("folder-{index}"),
+                access: FolderAccessMode::Restricted,
+                key_version: 1,
+            })
+            .collect::<Vec<_>>();
+        let authorization = BrainEmailInviteAuthorizationPayload {
+            version: "finite-email-invite-bootstrap-authorization-v1".to_owned(),
+            vault_id: "personal".to_owned(),
+            invited_email: "invitee@example.com".to_owned(),
+            invite_unwrap_npub: recipient_npub.clone(),
+            bootstrap_payload_hash: format!("sha256:{}", "1".repeat(64)),
+            expires_at: "2026-07-14T00:00:00.000Z".to_owned(),
+            folders: folders.clone(),
+        };
+        let authorization_error = validate_brain_event_authorization_intent(
+            &BrainEventAuthorizationIntent {
+                intent: "vault-invite-authorization".to_owned(),
+                event_template: BrainEventTemplate {
+                    kind: APP_SPECIFIC_KIND,
+                    created_at: 1_784_000_000,
+                    tags: Vec::new(),
+                    content: authorization.canonical_json(),
+                },
+            },
+            &npub(&issuer),
+        )
+        .unwrap_err();
+        assert!(
+            authorization_error
+                .to_string()
+                .contains("Folder scope exceeds the supported limit")
+        );
+
+        let grants = folders
+            .iter()
+            .map(|folder| {
+                serde_json::json!({
+                    "folderId": folder.folder_id,
+                    "grant": {
+                        "id": format!("grant-{}", folder.folder_id),
+                        "keyVersion": 1,
+                        "recipientNpub": recipient_npub,
+                        "wrappedEventJson": "{}",
+                        "createdAt": "2026-07-13T00:00:00.000Z"
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let bootstrap = serde_json::json!({
+            "version": "finite-email-invite-bootstrap-payload-v1",
+            "vaultId": "personal",
+            "invitedEmail": "invitee@example.com",
+            "inviteUnwrapNpub": recipient_npub,
+            "folders": folders,
+            "grants": grants,
+        })
+        .to_string();
+        let bootstrap_error = wrap_brain_invite_bootstrap(
+            &issuer,
+            &BrainGrantIntent {
+                purpose: "vault-invite-bootstrap".to_owned(),
+                vault_id: "personal".to_owned(),
+                recipient_npub,
+                folder_id: None,
+                key_version: None,
+            },
+            &bootstrap,
+            1_784_000_000,
+        )
+        .unwrap_err();
+        assert!(
+            bootstrap_error
+                .to_string()
+                .contains("Folder scope exceeds the supported limit")
         );
     }
 

@@ -35,8 +35,8 @@ time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-finite-brain-server = { path = "../../../finite-brain/crates/finite-brain-server" }
-finite-brain-store = { path = "../../../finite-brain/crates/finite-brain-store" }
+finite-brain-server.workspace = true
+finite-brain-store.workspace = true
 finitechat-server = { path = "../finitechat-server" }
 http-body-util.workspace = true
 tempfile.workspace = true

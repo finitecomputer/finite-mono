@@ -106,15 +106,14 @@ const FiniteBrainProductClient = (() => {
   const TOMBSTONE_VERSION = "finite-folder-object-tombstone-v1";
   const APP_EVENT_KIND = 30078;
   const BRAIN_IDENTITY_PROVIDER_VERSION = "finite-brain-identity-provider-v1";
+  const BRAIN_SESSION_PROOF_REQUEST = "finite-brain-session-proof-request-v1";
+  const BRAIN_SESSION_PROOF_RESPONSE = "finite-brain-session-proof-response-v1";
+  const BRAIN_SESSION_ENDED = "finite-brain-session-ended-v1";
   const BRAIN_EVENT_KIND_BY_INTENT = Object.freeze({
-    "folder-key-grant-seal": 13,
-    "folder-key-grant-wrap": 1059,
     "folder-object-revision": APP_EVENT_KIND,
     "folder-object-tombstone": APP_EVENT_KIND,
     "vault-access-change": APP_EVENT_KIND,
     "vault-invite-authorization": APP_EVENT_KIND,
-    "vault-invite-bootstrap-seal": 13,
-    "vault-invite-bootstrap-wrap": 1059,
   });
   const BRAIN_EVENT_D_PREFIX_BY_INTENT = Object.freeze({
     "folder-object-revision": "finite-folder-object-revision:",
@@ -122,11 +121,8 @@ const FiniteBrainProductClient = (() => {
     "vault-access-change": "finite-vault-admin-access-change:",
     "vault-invite-authorization": "finite-email-invite-bootstrap-authorization:",
   });
-  const BRAIN_GRANT_PURPOSES = new Set([
-    "folder-key-grant",
-    "vault-invite-bootstrap",
-  ]);
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
+  const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS = 100;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
   const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
   const VAULT_ACCESS_CHANGED_NOTICE =
@@ -1884,6 +1880,7 @@ const FiniteBrainProductClient = (() => {
     const brainOrigin = String(options.brainOrigin || window.location?.origin || "").replace(/\/$/, "");
     return Object.freeze({
       version: BRAIN_IDENTITY_PROVIDER_VERSION,
+      grantOperationMode: "scoped",
       async identifyMember() {
         const publicKeyHex = await provider.getPublicKey();
         return { publicKeyHex, npub: npubFromHex(publicKeyHex) };
@@ -1893,51 +1890,355 @@ const FiniteBrainProductClient = (() => {
         return provider.signEvent.call(provider, input?.eventTemplate);
       },
       async authorizeBrainEvent(input) {
-        validateBrainEventAuthorizationIntent(input);
+        const publicKeyHex = await provider.getPublicKey();
+        validateBrainEventAuthorizationIntent(input, npubFromHex(publicKeyHex));
         return provider.signEvent.call(provider, input?.eventTemplate);
       },
       async openGrantPayload(input) {
-        validateBrainGrantIntent(input, "ciphertext");
-        return invokeNip44ProviderMethod(
-          provider,
-          "decrypt",
-          input?.peerPublicKeyHex,
-          input?.ciphertext
-        );
+        return openNip07FolderKeyGrant(provider, input);
       },
       async wrapGrantPayload(input) {
-        validateBrainGrantIntent(input, "plaintext");
-        return invokeNip44ProviderMethod(
-          provider,
-          "encrypt",
-          input?.peerPublicKeyHex,
-          input?.plaintext
-        );
+        return wrapNip07BrainGrant(provider, input, options);
       },
     });
+  }
+
+  function scopedBrainGrantRecipient(input, expectedPurpose) {
+    if (input?.purpose !== expectedPurpose || !String(input?.vaultId || "").trim()) {
+      throw new Error(`Brain ${expectedPurpose} request is invalid`);
+    }
+    const recipientNpub = String(input?.recipientNpub || "");
+    const recipientHex = npubToHex(recipientNpub);
+    if (expectedPurpose === "folder-key-grant") {
+      if (
+        !String(input?.folderId || "").trim() ||
+        !Number.isSafeInteger(input?.keyVersion) ||
+        input.keyVersion < 1
+      ) {
+        throw new Error("Brain Folder Key Grant scope is invalid");
+      }
+    }
+    return { recipientHex, recipientNpub };
+  }
+
+  function canonicalFolderKeyGrantPayload(payload) {
+    return JSON.stringify({
+      version: payload.version,
+      vaultId: payload.vaultId,
+      folderId: payload.folderId,
+      keyVersion: payload.keyVersion,
+      folderKey: payload.folderKey,
+      issuerNpub: payload.issuerNpub,
+      recipientNpub: payload.recipientNpub,
+      createdAt: payload.createdAt,
+    });
+  }
+
+  function exactFolderKeyGrantTags(input) {
+    return [
+      ["d", `finite-folder-key-grant:${input.vaultId}:${input.folderId}:${input.keyVersion}`],
+      ["vault", input.vaultId],
+      ["folder", input.folderId],
+      ["keyVersion", String(input.keyVersion)],
+    ];
+  }
+
+  async function openNip07FolderKeyGrant(provider, input) {
+    const { recipientNpub } = scopedBrainGrantRecipient(input, "folder-key-grant");
+    if (typeof input?.wrappedEventJson !== "string" || !input.wrappedEventJson) {
+      throw new Error("Brain Folder Key Grant wrapper is required");
+    }
+    const connectedNpub = npubFromHex(await provider.getPublicKey());
+    if (connectedNpub !== recipientNpub) {
+      throw new Error("Brain Folder Key Grant recipient is not the connected signer");
+    }
+    const { rumor } = await openGiftWrappedRumorContent(
+      input.wrappedEventJson,
+      recipientNpub,
+      { provider },
+      "Folder Key Grant"
+    );
+    const plaintext = parseJsonObject(rumor.content, "Folder Key Grant plaintext");
+    const issuerNpub = npubFromHex(requireHex64(rumor.pubkey, "Folder Key Grant issuer"));
+    if (
+      plaintext.version !== "finite-folder-key-grant-v1" ||
+      plaintext.vaultId !== input.vaultId ||
+      plaintext.folderId !== input.folderId ||
+      Number(plaintext.keyVersion) !== input.keyVersion ||
+      plaintext.recipientNpub !== recipientNpub ||
+      plaintext.issuerNpub !== issuerNpub ||
+      canonicalFolderKeyGrantPayload(plaintext) !== rumor.content ||
+      JSON.stringify(rumor.tags) !== JSON.stringify(exactFolderKeyGrantTags(input))
+    ) {
+      throw new Error("Folder Key Grant does not match its requested resource");
+    }
+    if (base64ToBytes(plaintext.folderKey).length !== 32) {
+      throw new Error("Folder Key Grant Folder Key must be 32 bytes");
+    }
+    return plaintext;
+  }
+
+  async function nip07GiftWrapRumor(provider, recipientHex, rumor, createdAtUnix, options = {}) {
+    const sealContent = await invokeNip44ProviderMethod(
+      provider,
+      "encrypt",
+      recipientHex,
+      JSON.stringify(rumor)
+    );
+    const seal = await provider.signEvent.call(provider, {
+      kind: 13,
+      created_at: createdAtUnix,
+      tags: [],
+      content: sealContent,
+    });
+    const ephemeralSecret = bytesToHex(randomInviteSecretBytes());
+    const wrappedContent = await nip44EncryptWithSecret(
+      ephemeralSecret,
+      recipientHex,
+      JSON.stringify(seal),
+      options
+    );
+    return signEventWithInviteSecret(
+      {
+        kind: 1059,
+        created_at: createdAtUnix,
+        tags: [["p", recipientHex]],
+        content: wrappedContent,
+      },
+      ephemeralSecret,
+      options
+    );
+  }
+
+  async function wrapNip07BrainGrant(provider, input, options = {}) {
+    if (input?.purpose === "folder-key-grant") {
+      const { recipientHex, recipientNpub } = scopedBrainGrantRecipient(
+        input,
+        "folder-key-grant"
+      );
+      if (
+        !String(input?.id || "").trim() ||
+        typeof input?.createdAt !== "string" ||
+        !input.createdAt ||
+        !Number.isSafeInteger(input?.createdAtUnixSeconds) ||
+        input.createdAtUnixSeconds < 0 ||
+        typeof input?.folderKey !== "string" ||
+        base64ToBytes(input.folderKey).length !== 32
+      ) {
+        throw new Error("Brain Folder Key Grant payload is invalid");
+      }
+      const issuerHex = requireHex64(await provider.getPublicKey(), "Folder Key Grant issuer");
+      const payload = {
+        version: "finite-folder-key-grant-v1",
+        vaultId: input.vaultId,
+        folderId: input.folderId,
+        keyVersion: input.keyVersion,
+        folderKey: input.folderKey,
+        issuerNpub: npubFromHex(issuerHex),
+        recipientNpub,
+        createdAt: input.createdAt,
+      };
+      const rumor = {
+        pubkey: issuerHex,
+        created_at: input.createdAtUnixSeconds,
+        kind: APP_EVENT_KIND,
+        tags: exactFolderKeyGrantTags(input),
+        content: canonicalFolderKeyGrantPayload(payload),
+      };
+      rumor.id = await sha256Hex(canonicalNostrEventIdInput(rumor));
+      const wrapped = await nip07GiftWrapRumor(
+        provider,
+        recipientHex,
+        rumor,
+        input.createdAtUnixSeconds,
+        options
+      );
+      return {
+        id: input.id,
+        keyVersion: input.keyVersion,
+        recipientNpub,
+        wrappedEventJson: JSON.stringify(wrapped),
+        createdAt: input.createdAt,
+      };
+    }
+    if (input?.purpose === "vault-invite-bootstrap") {
+      const { recipientHex } = scopedBrainGrantRecipient(input, "vault-invite-bootstrap");
+      if (
+        typeof input?.plaintext !== "string" ||
+        !input.plaintext ||
+        !Number.isSafeInteger(input?.createdAtUnixSeconds) ||
+        input.createdAtUnixSeconds < 0
+      ) {
+        throw new Error("Brain Email Invite Bootstrap payload is invalid");
+      }
+      const payload = parseJsonObject(input.plaintext, "Email Invite Bootstrap payload");
+      if (
+        payload.version !== "finite-email-invite-bootstrap-payload-v1" ||
+        payload.vaultId !== input.vaultId ||
+        payload.inviteUnwrapNpub !== input.recipientNpub ||
+        !String(payload.invitedEmail || "").trim() ||
+        !Array.isArray(payload.folders) ||
+        !Array.isArray(payload.grants) ||
+        payload.folders.length !== payload.grants.length ||
+        payload.folders.length > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS ||
+        JSON.stringify(payload) !== input.plaintext
+      ) {
+        throw new Error("Email Invite Bootstrap does not match its requested resource");
+      }
+      const grants = new Map();
+      for (const entry of payload.grants) {
+        if (!entry?.folderId || grants.has(entry.folderId)) {
+          throw new Error("Email Invite Bootstrap Folder Key Grant scope is invalid");
+        }
+        grants.set(entry.folderId, entry.grant);
+      }
+      const seen = new Set();
+      for (const folder of payload.folders) {
+        const grant = grants.get(folder?.folderId);
+        if (
+          !folder?.folderId ||
+          seen.has(folder.folderId) ||
+          !Number.isSafeInteger(folder.keyVersion) ||
+          folder.keyVersion < 1 ||
+          !grant?.id ||
+          Number(grant.keyVersion) !== folder.keyVersion ||
+          grant.recipientNpub !== input.recipientNpub ||
+          typeof grant.wrappedEventJson !== "string" ||
+          !grant.wrappedEventJson
+        ) {
+          throw new Error("Email Invite Bootstrap Folder Key Grant metadata is invalid");
+        }
+        validateGiftWrapShell(
+          parseJsonObject(
+            grant.wrappedEventJson,
+            "Email Invite Bootstrap Folder Key Grant wrapper"
+          ),
+          recipientHex
+        );
+        seen.add(folder.folderId);
+      }
+      const issuerHex = requireHex64(await provider.getPublicKey(), "Email Invite issuer");
+      const rumor = {
+        pubkey: issuerHex,
+        created_at: input.createdAtUnixSeconds,
+        kind: APP_EVENT_KIND,
+        tags: [
+          ["d", `finite-email-invite-bootstrap:${input.vaultId}`],
+          ["vault", input.vaultId],
+        ],
+        content: input.plaintext,
+      };
+      rumor.id = await sha256Hex(canonicalNostrEventIdInput(rumor));
+      return nip07GiftWrapRumor(
+        provider,
+        recipientHex,
+        rumor,
+        input.createdAtUnixSeconds,
+        options
+      );
+    }
+    throw new Error("unsupported Brain grant purpose");
   }
 
   function createHostedBrainIdentityProvider(options = {}) {
     const endpoint = String(options.endpoint || "/api/brain/identity-provider");
     const fetchImpl = options.fetch || fetch;
+    const clientCapability = String(
+      options.clientCapability ||
+        (typeof document !== "undefined"
+          ? document
+              .querySelector('meta[name="finite-brain-client-capability"]')
+              ?.getAttribute("content")
+          : "") ||
+        ""
+    );
     const providerState = {
       status: "checking",
       detail: "Checking the hosted Brain identity.",
     };
+    const parentOrigin = String(
+      options.parentOrigin ||
+        (typeof document !== "undefined"
+          ? document.querySelector('meta[name="finite-brain-parent-origin"]')?.getAttribute("content")
+          : "") ||
+        ""
+    ).replace(/\/$/, "");
+    const trustedParentOrigin = (() => {
+      try {
+        const parsed = new URL(parentOrigin);
+        return parsed.origin === parentOrigin ? parentOrigin : "";
+      } catch (_) {
+        return "";
+      }
+    })();
+    const requestSessionProof = async (requestHash) => {
+      if (typeof options.sessionProofProvider === "function") {
+        return options.sessionProofProvider(requestHash);
+      }
+      if (typeof options.sessionProof === "string" && options.sessionProof) {
+        return options.sessionProof;
+      }
+      if (!trustedParentOrigin || !window.parent || window.parent === window) {
+        throw new Error("Open Brain from the signed-in dashboard.");
+      }
+      const requestId = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          window.removeEventListener("message", handleProof);
+          reject(new Error("Your dashboard session could not be verified."));
+        }, 5000);
+        function handleProof(event) {
+          if (
+            event.source !== window.parent ||
+            event.origin !== trustedParentOrigin ||
+            event.data?.type !== BRAIN_SESSION_PROOF_RESPONSE ||
+            event.data?.requestId !== requestId
+          ) {
+            return;
+          }
+          clearTimeout(timeout);
+          window.removeEventListener("message", handleProof);
+          if (typeof event.data.proof === "string" && event.data.proof) {
+            resolve(event.data.proof);
+          } else {
+            reject(new Error("Your dashboard session expired. Sign in and open Brain again."));
+          }
+        }
+        window.addEventListener("message", handleProof);
+        window.parent.postMessage(
+          { type: BRAIN_SESSION_PROOF_REQUEST, requestId, requestHash },
+          trustedParentOrigin
+        );
+      });
+    };
     const providerRequest = async (operation, input = null) => {
+      const requestBody = JSON.stringify({
+        version: BRAIN_IDENTITY_PROVIDER_VERSION,
+        operation,
+        input,
+      });
+      let sessionProof;
+      try {
+        sessionProof = await requestSessionProof(await sha256Hex(requestBody));
+      } catch (error) {
+        providerState.status = "setup_required";
+        providerState.detail = "Your hosted Brain session expired. Sign in and open Brain again.";
+        if (state.identityProvider === provider) expireBrainIdentitySession();
+        throw error;
+      }
       const response = await fetchImpl(endpoint, {
         method: "POST",
-        credentials: "same-origin",
+        credentials: "omit",
         cache: "no-store",
         headers: {
           "content-type": "application/json",
+          ...(clientCapability
+            ? { "x-finite-brain-client-capability": clientCapability }
+            : {}),
+          "x-finite-brain-session-proof": sessionProof,
           "x-finite-brain-provider-version": BRAIN_IDENTITY_PROVIDER_VERSION,
         },
-        body: JSON.stringify({
-          version: BRAIN_IDENTITY_PROVIDER_VERSION,
-          operation,
-          input,
-        }),
+        body: requestBody,
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -1957,6 +2258,7 @@ const FiniteBrainProductClient = (() => {
     };
     const provider = Object.freeze({
       version: BRAIN_IDENTITY_PROVIDER_VERSION,
+      grantOperationMode: "scoped",
       identifyMember() {
         return providerRequest("identifyMember");
       },
@@ -1972,9 +2274,24 @@ const FiniteBrainProductClient = (() => {
       },
       async wrapGrantPayload(input) {
         const result = await providerRequest("wrapGrantPayload", input);
-        return result.ciphertext;
+        if (input?.purpose === "folder-key-grant") return result.grant;
+        if (input?.purpose === "vault-invite-bootstrap") return result.wrappedEventJson;
+        throw new Error("Unsupported hosted Brain grant purpose");
       },
     });
+    if (trustedParentOrigin && window.parent && window.parent !== window) {
+      window.addEventListener("message", (event) => {
+        if (
+          event.source === window.parent &&
+          event.origin === trustedParentOrigin &&
+          event.data?.type === BRAIN_SESSION_ENDED
+        ) {
+          providerState.status = "setup_required";
+          providerState.detail = "Your hosted Brain session expired. Sign in and open Brain again.";
+          if (state.identityProvider === provider) expireBrainIdentitySession();
+        }
+      });
+    }
     hostedIdentityProviderStates.set(provider, providerState);
     return provider;
   }
@@ -2054,7 +2371,13 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  function validateBrainEventAuthorizationIntent(input) {
+  function requireExactBrainEventTags(eventTemplate, expected, intent) {
+    if (JSON.stringify(eventTemplate.tags) !== JSON.stringify(expected)) {
+      throw new Error(`${intent} tags differ from its typed payload`);
+    }
+  }
+
+  function validateBrainEventAuthorizationIntent(input, signerNpub = null) {
     const intent = input?.intent;
     const eventTemplate = input?.eventTemplate;
     const expectedKind = BRAIN_EVENT_KIND_BY_INTENT[intent];
@@ -2068,37 +2391,90 @@ const FiniteBrainProductClient = (() => {
 
     const expectedDPrefix = BRAIN_EVENT_D_PREFIX_BY_INTENT[intent];
     if (expectedDPrefix) {
-      const dTag = requireSingleEventTag(eventTemplate, "d", intent);
-      if (!dTag.startsWith(expectedDPrefix)) {
-        throw new Error(`Brain event does not match ${intent}`);
+      let payload;
+      try {
+        payload = JSON.parse(eventTemplate.content);
+      } catch (_) {
+        throw new Error(`${intent} payload is not JSON`);
       }
-      return;
+      if (intent === "folder-object-revision") {
+        if (
+          payload.version !== REVISION_VERSION ||
+          payload.cipher !== CIPHER ||
+          payload.revision < 1 ||
+          payload.keyVersion < 1 ||
+          !/^[0-9a-f]{64}$/i.test(String(payload.ciphertextHash || "")) ||
+          (signerNpub && payload.authorNpub !== signerNpub) ||
+          canonicalRevisionPayload(payload) !== eventTemplate.content
+        ) {
+          throw new Error("Brain revision payload is invalid");
+        }
+        requireExactBrainEventTags(eventTemplate, revisionTags(payload), intent);
+        return;
+      }
+      if (intent === "folder-object-tombstone") {
+        if (
+          payload.version !== TOMBSTONE_VERSION ||
+          payload.operation !== "delete" ||
+          payload.revision < 1 ||
+          (signerNpub && payload.authorNpub !== signerNpub) ||
+          canonicalTombstonePayload(payload) !== eventTemplate.content
+        ) {
+          throw new Error("Brain tombstone payload is invalid");
+        }
+        requireExactBrainEventTags(eventTemplate, tombstoneTags(payload), intent);
+        return;
+      }
+      if (intent === "vault-access-change") {
+        if (
+          payload.version !== "finite-vault-admin-access-change-v1" ||
+          (signerNpub && payload.adminNpub !== signerNpub) ||
+          canonicalAdminAccessChangePayload(payload) !== eventTemplate.content
+        ) {
+          throw new Error("Brain access-change payload is invalid");
+        }
+        requireExactBrainEventTags(eventTemplate, adminAccessChangeTags(payload), intent);
+        return;
+      }
+      if (intent === "vault-invite-authorization") {
+        const canonical = JSON.stringify({
+          version: payload.version,
+          vaultId: payload.vaultId,
+          invitedEmail: payload.invitedEmail,
+          inviteUnwrapNpub: payload.inviteUnwrapNpub,
+          bootstrapPayloadHash: payload.bootstrapPayloadHash,
+          expiresAt: payload.expiresAt,
+          folders: payload.folders,
+        });
+        if (
+          payload.version !== "finite-email-invite-bootstrap-authorization-v1" ||
+          !payload.invitedEmail ||
+          !Array.isArray(payload.folders) ||
+          payload.folders.length > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS ||
+          payload.folders.some(
+            (folder) =>
+              !String(folder?.folderId || "").trim() ||
+              !["all_members", "restricted"].includes(folder?.access) ||
+              !Number.isSafeInteger(folder?.keyVersion) ||
+              folder.keyVersion < 1
+          ) ||
+          new Set(payload.folders.map((folder) => folder.folderId)).size !==
+            payload.folders.length ||
+          !/^sha256:[0-9a-f]{64}$/i.test(String(payload.bootstrapPayloadHash || "")) ||
+          canonical !== eventTemplate.content
+        ) {
+          throw new Error("Brain email-invite authorization payload is invalid");
+        }
+        npubToHex(payload.inviteUnwrapNpub);
+        requireExactBrainEventTags(eventTemplate, emailInviteAuthorizationTags({
+          vaultId: payload.vaultId,
+          invitedEmail: payload.invitedEmail,
+        }), intent);
+        return;
+      }
+      throw new Error(`Brain event does not match ${intent}`);
     }
 
-    if (intent.endsWith("-seal")) {
-      if (!Array.isArray(eventTemplate.tags) || eventTemplate.tags.length !== 0) {
-        throw new Error(`${intent} cannot include tags`);
-      }
-      return;
-    }
-    if (intent.endsWith("-wrap")) {
-      const recipient = requireSingleEventTag(eventTemplate, "p", intent);
-      if (!/^[0-9a-f]{64}$/i.test(recipient) || eventTemplate.tags.length !== 1) {
-        throw new Error(`${intent} requires exactly one valid recipient tag`);
-      }
-    }
-  }
-
-  function validateBrainGrantIntent(input, payloadField) {
-    if (!BRAIN_GRANT_PURPOSES.has(input?.purpose)) {
-      throw new Error("unsupported Brain grant purpose");
-    }
-    if (!/^[0-9a-f]{64}$/i.test(String(input?.peerPublicKeyHex || ""))) {
-      throw new Error("Brain grant peer public key is invalid");
-    }
-    if (typeof input?.[payloadField] !== "string" || !input[payloadField]) {
-      throw new Error(`Brain grant ${payloadField} is required`);
-    }
   }
 
   function convertBits(data, fromBits, toBits, pad) {
@@ -2936,6 +3312,7 @@ const FiniteBrainProductClient = (() => {
         invokeNip44ProviderMethod(options.provider, "decrypt", pubkeyHex, ciphertext);
     }
     const provider = options.brainIdentityProvider || state.identityProvider;
+    if (provider?.grantOperationMode === "scoped") return null;
     if (typeof provider?.openGrantPayload === "function") {
       return (peerPublicKeyHex, ciphertext) =>
         provider.openGrantPayload({
@@ -2954,6 +3331,7 @@ const FiniteBrainProductClient = (() => {
         invokeNip44ProviderMethod(options.provider, "encrypt", pubkeyHex, plaintext);
     }
     const provider = options.brainIdentityProvider || state.identityProvider;
+    if (provider?.grantOperationMode === "scoped") return null;
     if (typeof provider?.wrapGrantPayload === "function") {
       return (peerPublicKeyHex, plaintext) =>
         provider.wrapGrantPayload({
@@ -3016,6 +3394,23 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub = null, options = {}) {
+    const identityProvider = options.brainIdentityProvider || state.identityProvider;
+    if (
+      identityProvider?.grantOperationMode === "scoped" &&
+      !options.decrypt &&
+      !options.provider
+    ) {
+      const plaintext = await identityProvider.openGrantPayload({
+        purpose: "folder-key-grant",
+        vaultId: options.expectedVaultId || grant?.vaultId,
+        folderId: grant?.folderId,
+        keyVersion: Number(grant?.keyVersion),
+        recipientNpub: expectedRecipientNpub || grant?.recipientNpub,
+        wrappedEventJson: grant?.wrappedEventJson,
+      });
+      options.assertCurrent?.();
+      return validateFolderKeyGrantPlaintext(plaintext, expectedRecipientNpub, grant);
+    }
     const { rumor } = await openGiftWrappedRumorContent(
       grant?.wrappedEventJson,
       expectedRecipientNpub,
@@ -3032,7 +3427,10 @@ const FiniteBrainProductClient = (() => {
     for (const grant of exportedVault?.keyGrants || []) {
       try {
         options.assertCurrent?.();
-        const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, options);
+        const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, {
+          ...options,
+          expectedVaultId: exportedVault?.vaultId,
+        });
         options.assertCurrent?.();
         await openFolderKeyGrantPlaintext(keyring, plaintext, options);
         options.assertCurrent?.();
@@ -9378,15 +9776,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function buildFolderKeyGrantRequest(input) {
-    const signSeal = requireBrainEventAuthorizer("folder-key-grant-seal", input);
-    const signWrap = requireBrainEventAuthorizer("folder-key-grant-wrap", input);
-    const encrypt = nip44EncryptAdapter(input);
-    if (!encrypt && !input.allowPlaintextDevelopmentGrant) {
-      throw new Error("NIP-44 encryption is unavailable");
-    }
-    const recipientHex = npubToHex(input.recipientNpub);
     const issuerNpub = input.issuerNpub || currentActorNpub();
-    const issuerHex = npubToHex(issuerNpub);
     const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
     const createdAt = revisionCreatedAt(createdAtUnix);
     const folderKey = input.folderKey || bytesToBase64(input.rawKey);
@@ -9399,6 +9789,43 @@ const FiniteBrainProductClient = (() => {
         input.recipientNpub,
         createdAt,
       ]));
+    const identityProvider = input.brainIdentityProvider || state.identityProvider;
+    if (
+      identityProvider?.grantOperationMode === "scoped" &&
+      !input.encrypt &&
+      !input.provider
+    ) {
+      const grant = await identityProvider.wrapGrantPayload({
+        purpose: "folder-key-grant",
+        vaultId: input.vaultId,
+        folderId: input.folderId,
+        keyVersion: Number(input.keyVersion),
+        recipientNpub: input.recipientNpub,
+        id: grantId,
+        folderKey,
+        createdAt,
+        createdAtUnixSeconds: createdAtUnix,
+      });
+      if (
+        grant?.id !== grantId ||
+        Number(grant?.keyVersion) !== Number(input.keyVersion) ||
+        grant?.recipientNpub !== input.recipientNpub ||
+        typeof grant?.wrappedEventJson !== "string" ||
+        !grant.wrappedEventJson ||
+        grant?.createdAt !== createdAt
+      ) {
+        throw new Error("Hosted Folder Key Grant does not match the requested resource");
+      }
+      return grant;
+    }
+    const signSeal = requireBrainEventAuthorizer("folder-key-grant-seal", input);
+    const signWrap = requireBrainEventAuthorizer("folder-key-grant-wrap", input);
+    const encrypt = nip44EncryptAdapter(input);
+    if (!encrypt && !input.allowPlaintextDevelopmentGrant) {
+      throw new Error("NIP-44 encryption is unavailable");
+    }
+    const recipientHex = npubToHex(input.recipientNpub);
+    const issuerHex = npubToHex(issuerNpub);
     const plaintextGrant = {
       version: "finite-folder-key-grant-v1",
       vaultId: input.vaultId,
@@ -9551,11 +9978,25 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function buildEmailInviteBootstrapWrappedEvent(input) {
+    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
+    const identityProvider = input.brainIdentityProvider || state.identityProvider;
+    if (
+      identityProvider?.grantOperationMode === "scoped" &&
+      !input.encrypt &&
+      !input.provider
+    ) {
+      return identityProvider.wrapGrantPayload({
+        purpose: "vault-invite-bootstrap",
+        vaultId: input.vaultId,
+        recipientNpub: input.inviteUnwrapNpub,
+        plaintext: input.bootstrapPayloadJson,
+        createdAtUnixSeconds: createdAtUnix,
+      });
+    }
     const signSeal = requireBrainEventAuthorizer("vault-invite-bootstrap-seal", input);
     const signWrap = requireBrainEventAuthorizer("vault-invite-bootstrap-wrap", input);
     const encrypt = nip44EncryptAdapter(input);
     if (!encrypt) throw new Error("NIP-44 encryption is unavailable");
-    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
     const issuerNpub = input.issuerNpub || currentActorNpub();
     const issuerHex = npubToHex(issuerNpub);
     const recipientHex = npubToHex(input.inviteUnwrapNpub);
@@ -10039,6 +10480,7 @@ const FiniteBrainProductClient = (() => {
           recipientNpub,
           createdAtUnix,
           brainIdentityProvider: input.brainIdentityProvider,
+          encrypt: input.encrypt,
           provider: input.provider,
           signEvent: input.signEvent,
         })

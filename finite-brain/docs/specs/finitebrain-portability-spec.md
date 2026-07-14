@@ -120,9 +120,13 @@ use it as a general signing/decryption capability.
 The hosted phase exposes the exact `finite-brain-identity-provider-v1`
 operations `identifyMember`, `authorizeHttpRequest`, `authorizeBrainEvent`,
 `openGrantPayload`, and `wrapGrantPayload`. The WorkOS-protected dashboard
-bridge accepts them only from the same-origin `/client` document and binds the
-internal custody call to the verified WorkOS user plus the trusted public Brain
-origin. The Hosted Device executor loads an already-created User Key; it MUST
+bridge injects a signed, expiring capability only into a genuine `/client`
+iframe navigation, and the response CSP plus iframe sandbox give that client
+an opaque browser origin. Every provider request also requires a short-lived
+proof bound to its exact body and minted by the authenticated parent dashboard.
+The frame keeps the capability, the parent proves its WorkOS session is still
+live, and neither alone can invoke custody. The internal call remains bound to
+the verified WorkOS user plus the trusted public Brain origin. The Hosted Device executor loads an already-created User Key; it MUST
 return setup-required rather than generate a key when Chat setup is absent.
 Account logout or expiry makes the bridge unavailable and the Product Client
 locks its in-memory session. That does not revoke an Agent Principal's separate
@@ -130,8 +134,12 @@ Brain grants.
 
 The hosted compatibility adapter MUST bind HTTP authorization to the official
 Brain origin, a protected Brain route, the exact method, and the exact request
-body. Event authorization MUST validate the named Brain intent and its event
-shape; grant open/wrap operations MUST reject unknown purposes.
+body. Event authorization MUST validate canonical typed payloads and exact tags,
+not only an event kind or `d` prefix. `openGrantPayload` MUST open a complete
+NIP-59 Folder Key Grant only when its recipient, issuer, Vault, Folder, key
+version, payload, and tags agree. `wrapGrantPayload` MUST accept a typed Folder
+Key Grant or Email Invite Bootstrap contract, never arbitrary peer/ciphertext
+input.
 
 ### 3.3 HTTP Authorization
 
@@ -531,7 +539,11 @@ Personal Vault bootstrap:
 - The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
   Chat's explicit setup action obtains the bounded request bundle from
   `POST /v1/brain/personal-vault-bootstrap-authorizations`; the Agent Principal
-  forwards that bundle and signs the protected Brain request as itself.
+  forwards that bundle and signs the protected Brain request as itself. The
+  bundle includes both the one-use bootstrap authorization and the owner's
+  canonical Agent Workspace access-change event; Brain verifies that both name
+  the same owner, Vault, Folder, key version, and Agent Principal before any
+  state is written.
 - Seed ordinary encrypted Folder Objects for default Pages:
   - `AGENTS.md`, `HUMANS.md`, `README.md`, and orientation Pages in
     `getting-started`

@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use finite_brain_core::{
-    BRAIN_IDENTITY_PROVIDER_VERSION, FolderId, VaultId,
+    BRAIN_IDENTITY_PROVIDER_VERSION, FolderId, FolderKey, VaultId,
     validate_personal_vault_bootstrap_authorization_event,
 };
 use finite_brain_server::{ServerState as BrainServerState, router_with_state as brain_router};
@@ -639,14 +639,63 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     verify_event_integrity(&event).unwrap();
     assert_eq!(event.pubkey.to_hex(), public_key_hex);
 
+    let member_npub = identify["npub"].as_str().unwrap().to_owned();
+    let access_change_content = format!(
+        "{{\"version\":\"finite-vault-admin-access-change-v1\",\"vaultId\":\"personal\",\"changeId\":\"provider-access-change\",\"action\":\"add-member\",\"adminNpub\":\"{member_npub}\",\"targetNpub\":\"{member_npub}\",\"createdAt\":\"2026-07-13T12:00:00Z\"}}"
+    );
+    let access_change_input = serde_json::json!({
+        "intent": "vault-access-change",
+        "eventTemplate": {
+            "kind": 30_078,
+            "created_at": now,
+            "tags": [
+                ["d", "finite-vault-admin-access-change:personal:provider-access-change"],
+                ["vault", "personal"],
+                ["action", "add-member"],
+                ["p", public_key_hex],
+            ],
+            "content": access_change_content,
+        },
+    });
+    let access_change = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeBrainEvent",
+            access_change_input.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(access_change.status(), StatusCode::OK);
+    let mut overbroad_access_change = access_change_input;
+    overbroad_access_change["eventTemplate"]["tags"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(["extra", "ambient-authority"]));
+    let overbroad_access_change = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeBrainEvent",
+            overbroad_access_change,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(overbroad_access_change.status(), StatusCode::BAD_REQUEST);
+
+    let folder_key = FolderKey::generate().to_base64();
     let wrapped = hosted
         .clone()
         .oneshot(provider_request(
             "wrapGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "peerPublicKeyHex": public_key_hex,
-                "plaintext": "session-folder-key",
+                "vaultId": "personal",
+                "folderId": "restricted",
+                "keyVersion": 1,
+                "recipientNpub": member_npub.clone(),
+                "id": "grant-restricted-owner-v1",
+                "folderKey": folder_key.clone(),
+                "createdAt": "2026-07-13T12:00:00Z",
+                "createdAtUnixSeconds": now,
             }),
         ))
         .await
@@ -660,8 +709,11 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "peerPublicKeyHex": public_key_hex,
-                "ciphertext": wrapped["ciphertext"],
+                "vaultId": "personal",
+                "folderId": "restricted",
+                "keyVersion": 1,
+                "recipientNpub": member_npub.clone(),
+                "wrappedEventJson": wrapped["grant"]["wrappedEventJson"],
             }),
         ))
         .await
@@ -669,7 +721,27 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert_eq!(opened.status(), StatusCode::OK);
     let opened: Value =
         serde_json::from_slice(&opened.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(opened["plaintext"], "session-folder-key");
+    assert_eq!(opened["plaintext"]["vaultId"], "personal");
+    assert_eq!(opened["plaintext"]["folderId"], "restricted");
+    assert_eq!(opened["plaintext"]["keyVersion"], 1);
+    assert_eq!(opened["plaintext"]["recipientNpub"], member_npub);
+    assert_eq!(opened["plaintext"]["folderKey"], folder_key);
+    let wrong_scope = hosted
+        .clone()
+        .oneshot(provider_request(
+            "openGrantPayload",
+            serde_json::json!({
+                "purpose": "folder-key-grant",
+                "vaultId": "personal",
+                "folderId": "getting-started",
+                "keyVersion": 1,
+                "recipientNpub": member_npub.clone(),
+                "wrappedEventJson": wrapped["grant"]["wrappedEventJson"],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_scope.status(), StatusCode::BAD_REQUEST);
 
     for (operation, input) in [
         ("signEvent", serde_json::json!({ "kind": 1 })),
@@ -688,9 +760,12 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
         (
             "openGrantPayload",
             serde_json::json!({
-                "purpose": "sites-secret",
-                "peerPublicKeyHex": public_key_hex,
-                "ciphertext": "arbitrary",
+                "purpose": "folder-key-grant",
+                "vaultId": "personal",
+                "folderId": "restricted",
+                "keyVersion": 1,
+                "recipientNpub": member_npub.clone(),
+                "wrappedEventJson": "arbitrary",
             }),
         ),
     ] {

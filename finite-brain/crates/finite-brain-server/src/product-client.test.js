@@ -2121,6 +2121,7 @@ assert.doesNotMatch(
     [
       "authorizeBrainEvent",
       "authorizeHttpRequest",
+      "grantOperationMode",
       "identifyMember",
       "openGrantPayload",
       "version",
@@ -2131,8 +2132,13 @@ assert.doesNotMatch(
   assert.equal(brainIdentityProvider.decrypt, undefined);
   assert.equal(brainIdentityProvider.nip44, undefined);
   const hostedCalls = [];
+  const hostedSessionProofHashes = [];
   const hostedBrainIdentityProvider = client.createHostedBrainIdentityProvider({
     endpoint: "/api/brain/identity-provider",
+    sessionProofProvider: async (requestHash) => {
+      hostedSessionProofHashes.push(requestHash);
+      return "current-workos-session-proof";
+    },
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
       hostedCalls.push({ request, init });
@@ -2140,10 +2146,18 @@ assert.doesNotMatch(
         return Response.json({ publicKeyHex: "55".repeat(32), npub: client.npubFromHex("55".repeat(32)) });
       }
       if (request.operation === "openGrantPayload") {
-        return Response.json({ plaintext: "opened-session-key" });
+        return Response.json({ plaintext: { version: "finite-folder-key-grant-v1", folderKey: "opened-session-key" } });
       }
       if (request.operation === "wrapGrantPayload") {
-        return Response.json({ ciphertext: "wrapped-session-key" });
+        return Response.json({
+          grant: {
+            id: "grant-1",
+            keyVersion: 1,
+            recipientNpub: client.npubFromHex("66".repeat(32)),
+            wrappedEventJson: "wrapped-session-key",
+            createdAt: "2026-07-13T12:00:00Z",
+          },
+        });
       }
       return Response.json({ id: "signed-event" });
     },
@@ -2164,26 +2178,47 @@ assert.doesNotMatch(
     client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
     "ready"
   );
-  assert.equal(
+  assert.deepEqual(
     await hostedBrainIdentityProvider.openGrantPayload({
       purpose: "folder-key-grant",
-      peerPublicKeyHex: "66".repeat(32),
-      ciphertext: "wrapped",
+      vaultId: "personal",
+      folderId: "restricted",
+      keyVersion: 1,
+      recipientNpub: client.npubFromHex("66".repeat(32)),
+      wrappedEventJson: "wrapped",
     }),
-    "opened-session-key"
+    { version: "finite-folder-key-grant-v1", folderKey: "opened-session-key" }
   );
-  assert.equal(
+  assert.deepEqual(
     await hostedBrainIdentityProvider.wrapGrantPayload({
       purpose: "folder-key-grant",
-      peerPublicKeyHex: "66".repeat(32),
-      plaintext: "session-key",
+      vaultId: "personal",
+      folderId: "restricted",
+      keyVersion: 1,
+      recipientNpub: client.npubFromHex("66".repeat(32)),
+      id: "grant-1",
+      folderKey: "session-key",
+      createdAt: "2026-07-13T12:00:00Z",
+      createdAtUnixSeconds: 1_784_000_000,
     }),
-    "wrapped-session-key"
+    {
+      id: "grant-1",
+      keyVersion: 1,
+      recipientNpub: client.npubFromHex("66".repeat(32)),
+      wrappedEventJson: "wrapped-session-key",
+      createdAt: "2026-07-13T12:00:00Z",
+    }
   );
   assert.equal(hostedCalls[0].request.version, "finite-brain-identity-provider-v1");
   assert.equal(hostedCalls[0].request.operation, "identifyMember");
-  assert.equal(hostedCalls[0].init.credentials, "same-origin");
+  assert.equal(hostedCalls[0].init.credentials, "omit");
+  assert.match(hostedSessionProofHashes[0], /^[0-9a-f]{64}$/u);
+  assert.equal(
+    hostedCalls[0].init.headers["x-finite-brain-session-proof"],
+    "current-workos-session-proof"
+  );
   const setupRequiredProvider = client.createHostedBrainIdentityProvider({
+    sessionProof: "current-workos-session-proof",
     fetch: async () => Response.json({ error: "setup required" }, { status: 428 }),
   });
   await assert.rejects(() => setupRequiredProvider.identifyMember(), /setup required/u);
@@ -2326,7 +2361,7 @@ assert.doesNotMatch(
           content: "{}",
         },
       }),
-    /does not match vault-access-change/
+    /Brain access-change payload is invalid/
   );
   await assert.rejects(
     () =>
@@ -2335,7 +2370,47 @@ assert.doesNotMatch(
         peerPublicKeyHex: "22".repeat(32),
         ciphertext: "ciphertext",
       }),
-    /unsupported Brain grant purpose/
+    /Brain folder-key-grant request is invalid/
+  );
+  const localIssuer = client.createNip07BrainIdentityProvider(
+    client.createLocalNip07ProviderFromSecret(`${"00".repeat(31)}01`)
+  );
+  const localRecipient = client.createNip07BrainIdentityProvider(
+    client.createLocalNip07ProviderFromSecret(`${"00".repeat(31)}02`)
+  );
+  const localRecipientIdentity = await localRecipient.identifyMember();
+  const locallyWrappedGrant = await localIssuer.wrapGrantPayload({
+    purpose: "folder-key-grant",
+    vaultId: "personal",
+    folderId: "restricted",
+    keyVersion: 1,
+    recipientNpub: localRecipientIdentity.npub,
+    id: "grant-local-roundtrip",
+    folderKey: Buffer.alloc(32, 7).toString("base64"),
+    createdAt: "2026-07-13T12:00:00Z",
+    createdAtUnixSeconds: 1_784_000_000,
+  });
+  const locallyOpenedGrant = await localRecipient.openGrantPayload({
+    purpose: "folder-key-grant",
+    vaultId: "personal",
+    folderId: "restricted",
+    keyVersion: 1,
+    recipientNpub: localRecipientIdentity.npub,
+    wrappedEventJson: locallyWrappedGrant.wrappedEventJson,
+  });
+  assert.equal(locallyOpenedGrant.folderId, "restricted");
+  assert.equal(locallyOpenedGrant.folderKey, Buffer.alloc(32, 7).toString("base64"));
+  await assert.rejects(
+    () =>
+      localRecipient.openGrantPayload({
+        purpose: "folder-key-grant",
+        vaultId: "personal",
+        folderId: "different-folder",
+        keyVersion: 1,
+        recipientNpub: localRecipientIdentity.npub,
+        wrappedEventJson: locallyWrappedGrant.wrappedEventJson,
+      }),
+    /does not match its requested resource/
   );
   const providerAuthorizedAccessEvent = await client.buildAdminAccessChangeEvent({
     action: "add-member",
@@ -3101,6 +3176,8 @@ assert.doesNotMatch(
     issuerNpub: authorNpub,
     recipientNpub: authorNpub,
     createdAtUnix: 1780000000,
+    encrypt: fakeEncrypt,
+    signEvent: context.window.nostr.signEvent,
   });
   assert.equal(accessGrant.id, "grant-test");
   assert.equal(accessGrant.recipientNpub, authorNpub);
@@ -3701,6 +3778,7 @@ assert.doesNotMatch(
     newRawKey: new Uint8Array(32).fill(9),
     createdAtUnix: 1780000100,
     actorNpub: authorNpub,
+    encrypt: fakeEncrypt,
     signEvent: signDeterministically,
   });
   assert.equal(removal.newKeyVersion, 2);

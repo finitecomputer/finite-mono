@@ -148,6 +148,15 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: folder_id.to_string(),
             })?;
+        if active_agent_delegation_scope(&self.conn, vault_id, user_id)?
+            .is_some_and(|folder_ids| !folder_ids.iter().any(|delegated| delegated == folder_id))
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason:
+                    "active Agent Workspace access must be expanded through delegation expansion"
+                        .to_owned(),
+            });
+        }
         let adds_personal_member = stored.vault.kind == VaultKind::Personal
             && !stored
                 .vault
@@ -304,25 +313,11 @@ impl BrainStore {
                 reason: "folder access target does not currently have access".to_owned(),
             });
         }
-        let is_active_agent_workspace = self.conn.query_row(
-            r#"
-            SELECT EXISTS(
-                SELECT 1
-                FROM brain_email_access_delegations
-                WHERE vault_id = ?1
-                  AND agent_npub = ?2
-                  AND workspace_folder_id = ?3
-                  AND status = 'active'
-            )
-            "#,
-            params![
-                vault_id.as_str(),
-                removed_user_id.as_str(),
-                folder_id.as_str()
-            ],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if is_active_agent_workspace {
+        let is_active_agent_scope =
+            active_agent_delegation_scope(&self.conn, vault_id, removed_user_id)?.is_some_and(
+                |folder_ids| folder_ids.iter().any(|delegated| delegated == folder_id),
+            );
+        if is_active_agent_scope {
             return Err(StoreError::BrokenInvariant {
                 reason:
                     "active Agent Workspace access must be removed through delegation revocation"
@@ -385,4 +380,37 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn active_agent_delegation_scope(
+    conn: &Connection,
+    vault_id: &VaultId,
+    agent_npub: &UserId,
+) -> Result<Option<Vec<FolderId>>, StoreError> {
+    let scope_json = conn
+        .query_row(
+            r#"
+            SELECT scope_json
+            FROM brain_email_access_delegations
+            WHERE vault_id = ?1
+              AND agent_npub = ?2
+              AND status = 'active'
+            "#,
+            params![vault_id.as_str(), agent_npub.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    scope_json
+        .map(|scope_json| {
+            let folder_ids = serde_json::from_str::<Vec<String>>(&scope_json).map_err(|error| {
+                StoreError::InvalidRecord {
+                    reason: format!("delegation scope did not parse: {error}"),
+                }
+            })?;
+            folder_ids
+                .into_iter()
+                .map(|folder_id| FolderId::new(folder_id).map_err(StoreError::from))
+                .collect::<Result<Vec<_>, StoreError>>()
+        })
+        .transpose()
 }

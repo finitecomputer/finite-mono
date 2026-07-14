@@ -138,9 +138,14 @@ the pairing resource. Revocation requires next-version grants and complete
 live-object re-encryption for every Folder in the current delegated scope.
 
 Hosted `/client` uses `finite-brain-identity-provider-v1` through the
-WorkOS-bound dashboard bridge. The custody executor loads the existing Chat
-Hosted Device User Key and never returns it; without prior Chat setup, Brain
-shows setup-required and does not mint a replacement identity.
+WorkOS-bound dashboard bridge. The dashboard injects a signed, expiring
+capability into a server-sandboxed Brain frame. For every operation, the parent
+dashboard supplies a short-lived proof bound to that exact request and its live
+WorkOS session; the parent never receives the frame capability, and ordinary
+dashboard code has no ambient signer route. The custody executor loads the existing Chat Hosted
+Device User Key and never returns it or performs arbitrary NIP-44 operations;
+without prior Chat setup, Brain shows setup-required and does not mint a
+replacement identity.
 
 External email redemption is recorded as email-only identity proof in
 finite-identity, but FiniteBrain folder sharing still requires an npub target

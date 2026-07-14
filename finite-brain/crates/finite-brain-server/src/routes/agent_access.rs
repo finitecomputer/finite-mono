@@ -32,6 +32,15 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
     let owner_identity = resolve_and_record_identity(&state, &authorization.owner_npub)?;
     let owner_npub = UserId::new(owner_identity.npub)?;
     let agent_npub = UserId::new(agent_actor.clone())?;
+    let (access_change_event, access_change_payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &vault_id,
+        owner_npub.as_str(),
+        AdminAccessAction::SetFolderAccessMode,
+        Some(&folder.id),
+        None,
+        Some(1),
+    )?;
     let output = bootstrap_personal_vault(vault_id.as_str(), request.name, owner_npub.to_string())?;
     validate_bootstrap_grant_requests(&request.bootstrap_grants, &output.required_key_grants)?;
     let created_at = server_timestamp(&state);
@@ -44,22 +53,18 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
         &request.workspace_grants,
         &folder.id,
         owner_npub.as_str(),
-        Some(authorization_event.as_json()),
+        Some(access_change_event.as_json()),
         &created_at,
     )?;
     let mut sync_records = workspace_grants
         .iter()
         .map(folder_key_grant_sync_record)
         .collect::<Result<Vec<_>, _>>()?;
-    sync_records.push(SyncRecordInput::Control(ControlSyncRecord {
-        record_event_id: authorization_event.id.to_hex(),
-        record_type: SyncRecordType::VaultAdminAccessChange,
-        folder_id: Some(folder.id.clone()),
-        actor_npub: owner_npub.clone(),
-        client_created_at: expected_created_at(&authorization_event)?,
-        payload_json: authorization_event.content.clone(),
-        record_event_kind: authorization_event.kind.as_u16(),
-    }));
+    sync_records.push(admin_access_change_sync_record(
+        owner_npub.as_str(),
+        &access_change_event,
+        &access_change_payload,
+    )?);
     let delegation_id = generated_link_id(
         "brain-email-access-delegation",
         &[vault_id.as_str(), owner_npub.as_str(), agent_npub.as_str()],

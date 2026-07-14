@@ -71,9 +71,9 @@ implementation follows separately.
   Vault Member to see only the Personal Vault metadata and Folders in its
   explicit scope.
 - Personal Vault bootstrap, member/access mutation, grant-recipient validation,
-  audit, one-use authorization consumption, and revocation need implementation
-  and conformance tests before this behavior ships. Until then, Brain must
-  continue to fail closed rather than treating an agent's Project, email
+  audit, one-use authorization consumption, and complete-scope revocation are
+  enforced by the phase-one implementation and public conformance tests. Brain
+  continues to fail closed rather than treating an agent's Project, email
   session, or user key as authority.
 - Finite Sites needs its own future product delegation and policy. It does not
   inherit this Brain access.

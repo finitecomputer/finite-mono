@@ -95,6 +95,8 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/signup"), true);
   assert.equal(workosProxyBypassPath("/callback"), true);
   assert.equal(workosProxyBypassPath("/logout"), true);
+  assert.equal(workosProxyBypassPath("/api/brain/identity-provider"), true);
+  assert.equal(workosProxyBypassPath("/api/brain/session-proof"), false);
   assert.equal(workosProxyBypassPath("/health"), true);
   assert.equal(workosProxyBypassPath("/_admin"), true);
   assert.equal(workosProxyBypassPath("/_admin/vaults"), true);

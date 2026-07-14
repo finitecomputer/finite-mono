@@ -358,6 +358,7 @@ pub struct BootstrapPersonalVaultForAgentRequest {
     pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
     pub workspace_grants: Vec<FolderKeyGrantRequest>,
     pub bootstrap_authorization: serde_json::Value,
+    pub access_change_event: serde_json::Value,
 }
 
 /// The converged user-owned Personal Vault and its initial Agent Workspace pairing.
