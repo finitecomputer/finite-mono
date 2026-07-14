@@ -31,6 +31,7 @@ try:
         AeonSpecialization,
         _capability_for_mime,
         compose_for_hermes,
+        unavailable_results,
     )
 except ImportError:  # The regression harness loads adapter.py as a standalone module.
     _plugin_dir = str(Path(__file__).resolve().parent)
@@ -40,6 +41,7 @@ except ImportError:  # The regression harness loads adapter.py as a standalone m
             AeonSpecialization,
             _capability_for_mime,
             compose_for_hermes,
+            unavailable_results,
         )
     finally:
         sys.path.remove(_plugin_dir)
@@ -607,12 +609,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not supported:
             return event
         if self._aeon_specialization is None:
-            return event
-        results = await self._aeon_specialization.interpret(
-            event.text,
-            [url for url, _ in supported],
-            [mime_type for _, mime_type in supported],
-        )
+            results = unavailable_results([mime_type for _, mime_type in supported])
+        else:
+            results = await self._aeon_specialization.interpret(
+                event.text,
+                [url for url, _ in supported],
+                [mime_type for _, mime_type in supported],
+            )
         remaining = [
             (url, mime_type)
             for url, mime_type in zip(event.media_urls, event.media_types, strict=False)

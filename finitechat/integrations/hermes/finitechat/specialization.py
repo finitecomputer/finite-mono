@@ -25,6 +25,8 @@ class CapabilityResult:
     text: str = ""
     error_code: str = ""
     retryable: bool = False
+    request_id: str = ""
+    duration_ms: int = 0
 
 
 Requester = Callable[[str, str, dict[str, Any], float], Awaitable[tuple[int, dict[str, Any]]]]
@@ -52,21 +54,24 @@ class AeonSpecialization:
     def from_hermes_config(cls) -> AeonSpecialization | None:
         try:
             from hermes_cli.config import cfg_get, load_config
-
-            config = cfg_get(load_config(), "auxiliary", "vision", default={})
-            base_url = str(config.get("base_url") or "").strip()
-            api_key = str(config.get("api_key") or "").strip()
-            if not base_url or not api_key:
-                return None
-            return cls(
-                base_url=base_url,
-                api_key=api_key,
-                model=str(config.get("model") or DEFAULT_MODEL),
-                extra_body=config.get("extra_body") or {},
-                timeout=float(config.get("timeout") or 120),
-            )
-        except Exception:
+        except ImportError:
             return None
+        config = cfg_get(load_config(), "auxiliary", "vision", default={})
+        if not isinstance(config, dict):
+            raise ValueError("AEON specialization configuration must be a mapping")
+        base_url = str(config.get("base_url") or "").strip()
+        api_key = str(config.get("api_key") or "").strip()
+        if not base_url and not api_key:
+            return None
+        if not base_url or not api_key:
+            raise ValueError("AEON specialization requires both base_url and api_key")
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=str(config.get("model") or DEFAULT_MODEL),
+            extra_body=config.get("extra_body") or {},
+            timeout=float(config.get("timeout") or 120),
+        )
 
     async def interpret(
         self,
@@ -74,23 +79,19 @@ class AeonSpecialization:
         media_urls: list[str],
         media_types: list[str],
     ) -> list[CapabilityResult]:
-        requests = [
-            self._interpret_one(instruction, media_url, media_type)
-            for media_url, media_type in zip(media_urls, media_types, strict=False)
-            if _capability_for_mime(media_type) is not None
-        ]
+        requests = [self._interpret_group(instruction, group) for group in _invocation_groups(media_urls, media_types)]
         if not requests:
             return []
         return list(await asyncio.gather(*requests))
 
-    async def _interpret_one(
-        self, instruction: str, media_url: str, media_type: str
+    async def _interpret_group(
+        self, instruction: str, media: list[tuple[str, str, str]]
     ) -> CapabilityResult:
-        capability = _capability_for_mime(media_type)
-        if capability is None:
-            raise ValueError(f"unsupported specialization media type: {media_type}")
+        capability = media[0][2]
         try:
-            part = await _media_part(capability, media_url, media_type)
+            parts = await asyncio.gather(
+                *(_media_part(capability, media_url, media_type) for media_url, media_type, _ in media)
+            )
             payload: dict[str, Any] = {
                 "model": self.model,
                 "messages": [
@@ -102,7 +103,7 @@ class AeonSpecialization:
                                 "text": instruction.strip()
                                 or f"Interpret this {capability} for the user.",
                             },
-                            part,
+                            *parts,
                         ],
                     }
                 ],
@@ -111,12 +112,22 @@ class AeonSpecialization:
             payload.update(self.extra_body)
             status, body = await self._request(payload)
             if 200 <= status < 300:
-                result = body.get("specialization_result") or {}
+                result = body.get("specialization_result")
+                if not _valid_specialization_result(result, capability):
+                    return CapabilityResult(
+                        capability=capability,
+                        model=self.model,
+                        success=False,
+                        text="worker response did not contain a valid specialization result",
+                        error_code="invalid_upstream_response",
+                    )
                 return CapabilityResult(
-                    capability=str(result.get("capability") or capability),
-                    model=str(result.get("model") or self.model),
+                    capability=result["capability"],
+                    model=result["model"],
                     success=True,
-                    text=str(result.get("text") or _choice_text(body)),
+                    text=result["text"],
+                    request_id=result["request_id"],
+                    duration_ms=result["duration_ms"],
                 )
             return _error_result(capability, self.model, status, body)
         except asyncio.CancelledError:
@@ -150,13 +161,23 @@ class AeonSpecialization:
             )
 
     async def _request(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        try:
-            response = await self._requester(self.base_url, self.api_key, payload, self.timeout)
-        except (TimeoutError, OSError):
-            return await self._requester(self.base_url, self.api_key, payload, self.timeout)
-        if response[0] not in RETRYABLE_STATUS_CODES:
-            return response
-        return await self._requester(self.base_url, self.api_key, payload, self.timeout)
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        for attempt in range(2):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("specialization request timed out")
+            try:
+                response = await asyncio.wait_for(
+                    self._requester(self.base_url, self.api_key, payload, remaining),
+                    timeout=remaining,
+                )
+            except (TimeoutError, OSError):
+                if attempt == 0 and asyncio.get_running_loop().time() < deadline:
+                    continue
+                raise
+            if response[0] not in RETRYABLE_STATUS_CODES or attempt == 1:
+                return response
+        raise AssertionError("bounded retry loop exhausted")
 
 
 def compose_for_hermes(results: list[CapabilityResult]) -> str:
@@ -178,6 +199,54 @@ def _capability_for_mime(media_type: str) -> str | None:
     return next(
         (capability for capability in SUPPORTED_CAPABILITIES if normalized.startswith(f"{capability}/")),
         None,
+    )
+
+
+def _invocation_groups(
+    media_urls: list[str], media_types: list[str]
+) -> list[list[tuple[str, str, str]]]:
+    groups: list[list[tuple[str, str, str]]] = []
+    image_group: list[tuple[str, str, str]] | None = None
+    for media_url, media_type in zip(media_urls, media_types, strict=False):
+        capability = _capability_for_mime(media_type)
+        if capability is None:
+            continue
+        item = (media_url, media_type, capability)
+        if capability == "image":
+            if image_group is None:
+                image_group = []
+                groups.append(image_group)
+            image_group.append(item)
+        else:
+            groups.append([item])
+    return groups
+
+
+def unavailable_results(media_types: list[str], model: str = DEFAULT_MODEL) -> list[CapabilityResult]:
+    return [
+        CapabilityResult(
+            capability=group[0][2],
+            model=model,
+            success=False,
+            text="AEON specialization is not configured",
+            error_code="capability_unavailable",
+            retryable=False,
+        )
+        for group in _invocation_groups([""] * len(media_types), media_types)
+    ]
+
+
+def _valid_specialization_result(result: Any, expected_capability: str) -> bool:
+    return (
+        isinstance(result, dict)
+        and result.get("capability") == expected_capability
+        and isinstance(result.get("text"), str)
+        and isinstance(result.get("model"), str)
+        and bool(result["model"])
+        and isinstance(result.get("request_id"), str)
+        and bool(result["request_id"])
+        and isinstance(result.get("duration_ms"), int)
+        and result["duration_ms"] >= 0
     )
 
 

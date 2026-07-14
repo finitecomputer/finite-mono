@@ -207,6 +207,14 @@ struct CanaryObservation {
     last_latency_milliseconds: u64,
 }
 
+#[derive(Debug)]
+struct FailureObservation {
+    request_id: String,
+    duration_milliseconds: u64,
+    error_code: &'static str,
+    state_version: &'static str,
+}
+
 impl Default for CanaryObservation {
     fn default() -> Self {
         Self {
@@ -223,6 +231,7 @@ struct CapabilityMetrics {
     canaries: [Mutex<CanaryObservation>; 3],
     requests: [AtomicU64; 3],
     errors_by_code: [Mutex<BTreeMap<&'static str, u64>>; 3],
+    last_failures: [Mutex<Option<FailureObservation>>; 3],
 }
 
 impl Default for CapabilityMetrics {
@@ -231,16 +240,29 @@ impl Default for CapabilityMetrics {
             canaries: std::array::from_fn(|_| Mutex::new(CanaryObservation::default())),
             requests: std::array::from_fn(|_| AtomicU64::new(0)),
             errors_by_code: std::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            last_failures: std::array::from_fn(|_| Mutex::new(None)),
         }
     }
 }
 
 impl CapabilityMetrics {
-    fn observe_request(&self, capability: Capability, error_code: Option<&'static str>) {
+    fn observe_request(
+        &self,
+        capability: Capability,
+        error_code: Option<&'static str>,
+        request_id: &str,
+        duration_milliseconds: u64,
+    ) {
         self.requests[capability.index()].fetch_add(1, Ordering::Relaxed);
         if let Some(error_code) = error_code {
             let mut errors = self.errors_by_code[capability.index()].lock().unwrap();
             *errors.entry(error_code).or_default() += 1;
+            *self.last_failures[capability.index()].lock().unwrap() = Some(FailureObservation {
+                request_id: request_id.to_owned(),
+                duration_milliseconds,
+                error_code,
+                state_version: capability.prompt_version(),
+            });
         }
     }
 
@@ -273,7 +295,9 @@ impl CapabilityMetrics {
             "# HELP finite_specialization_requests_total Specialization capability requests.\n",
             "# TYPE finite_specialization_requests_total counter\n",
             "# HELP finite_specialization_errors_total Specialization capability errors.\n",
-            "# TYPE finite_specialization_errors_total counter\n"
+            "# TYPE finite_specialization_errors_total counter\n",
+            "# HELP finite_specialization_last_failure_duration_milliseconds Most recent failure timing and safe correlation fields for one capability.\n",
+            "# TYPE finite_specialization_last_failure_duration_milliseconds gauge\n"
         )
         .to_owned();
         for capability in Capability::ALL {
@@ -308,6 +332,21 @@ impl CapabilityMetrics {
                         capability.name(), prometheus_label(code), model_alias, count
                     ));
                 }
+            }
+            if let Some(failure) = self.last_failures[capability.index()]
+                .lock()
+                .unwrap()
+                .as_ref()
+            {
+                rendered.push_str(&format!(
+                    "finite_specialization_last_failure_duration_milliseconds{{capability=\"{}\",error_class=\"{}\",model_alias=\"{}\",request_id=\"{}\",state_version=\"{}\",surface=\"tyk-public-frontdoor\"}} {}\n",
+                    capability.name(),
+                    prometheus_label(failure.error_code),
+                    model_alias,
+                    prometheus_label(&failure.request_id),
+                    failure.state_version,
+                    failure.duration_milliseconds,
+                ));
             }
         }
         rendered
@@ -467,7 +506,9 @@ async fn chat_completions(
 ) -> Result<Json<Value>, WorkerError> {
     authenticate_worker_request(&state.config, &headers)?;
     let capability = classify_request(&input)?;
-    let result = tokio::time::timeout(
+    let started = Instant::now();
+    let request_id = correlation_request_id(&headers);
+    let mut result = tokio::time::timeout(
         Duration::from_secs(state.config.request_deadline_seconds),
         analyze_capability(&state, &input, capability),
     )
@@ -478,10 +519,41 @@ async fn chat_completions(
             capability.name()
         )))
     });
-    state
-        .metrics
-        .observe_request(capability, result.as_ref().err().map(|error| error.code));
+    if let Err(error) = &mut result {
+        error.request_id = Some(request_id.clone());
+    }
+    state.metrics.observe_request(
+        capability,
+        result.as_ref().err().map(|error| error.code),
+        &request_id,
+        started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
     result.map(Json)
+}
+
+fn correlation_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(generated_request_id)
+}
+
+fn generated_request_id() -> String {
+    format!(
+        "req_specialization_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    )
 }
 
 async fn analyze_capability(
@@ -1240,7 +1312,7 @@ async fn normalize_audio_bytes(
         .map_err(|_| WorkerError::unavailable("audio input could not be staged"))?;
     let duration = probe_media(state, &input, Capability::Audio).await?;
     if duration > state.config.max_audio_duration_seconds as f64 {
-        return Err(WorkerError::payload_too_large(
+        return Err(WorkerError::duration_exceeded(
             "audio duration exceeds the specialization limit",
         ));
     }
@@ -1299,7 +1371,7 @@ async fn sample_video_frames(
         .map_err(|_| WorkerError::unavailable("video input could not be staged"))?;
     let duration = probe_media(state, &input, Capability::Video).await?;
     if duration > state.config.max_video_duration_seconds as f64 {
-        return Err(WorkerError::payload_too_large(
+        return Err(WorkerError::duration_exceeded(
             "video duration exceeds the specialization limit",
         ));
     }
@@ -1544,7 +1616,7 @@ async fn run_video_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
                 .and_then(|value| {
                     value["specialization_result"]["text"]
                         .as_str()
-                        .map(|text| text.to_ascii_lowercase().contains("red"))
+                        .map(video_canary_passed)
                 })
                 .unwrap_or(false),
             Err(_) => false,
@@ -1611,9 +1683,25 @@ async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionReque
             "-f",
             "lavfi",
             "-i",
-            "color=c=red:s=32x32:d=1",
+            "color=c=red:s=32x32:d=2:r=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=32x32:d=2:r=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=32x32:d=2:r=1",
         ])
-        .args(["-an", "-c:v", "mpeg4", "-pix_fmt", "yuv420p"])
+        .args([
+            "-filter_complex",
+            "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]",
+            "-map",
+            "[v]",
+            "-an",
+            "-c:v",
+            "mpeg4",
+        ])
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1631,13 +1719,25 @@ async fn video_canary_request(state: &WorkerState) -> Result<ChatCompletionReque
     Ok(request_with_media_parts(vec![
         json!({
             "type": "text",
-            "text": "What is the dominant color in this video? Reply with one uppercase color word."
+            "text": "Name the three full-frame colors in chronological order. Reply with exactly: RED then GREEN then BLUE."
         }),
         json!({
             "type": "video_url",
             "video_url": { "url": format!("data:video/mp4;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)) }
         }),
     ]))
+}
+
+fn video_canary_passed(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    let Some(red) = normalized.find("red") else {
+        return false;
+    };
+    let Some(green) = normalized[red + 3..].find("green") else {
+        return false;
+    };
+    let green = red + 3 + green;
+    normalized[green + 5..].contains("blue")
 }
 
 fn request_with_media_parts(parts: Vec<Value>) -> ChatCompletionRequest {
@@ -2185,6 +2285,7 @@ pub struct WorkerError {
     error_type: &'static str,
     code: &'static str,
     param: Option<&'static str>,
+    request_id: Option<String>,
 }
 
 impl WorkerError {
@@ -2200,6 +2301,7 @@ impl WorkerError {
             error_type,
             code,
             param: None,
+            request_id: None,
         }
     }
 
@@ -2252,6 +2354,15 @@ impl WorkerError {
         )
     }
 
+    fn duration_exceeded(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            message,
+            "invalid_request_error",
+            "media_duration_exceeded",
+        )
+    }
+
     fn request_timeout(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::GATEWAY_TIMEOUT,
@@ -2273,13 +2384,7 @@ impl WorkerError {
 
 impl IntoResponse for WorkerError {
     fn into_response(self) -> Response {
-        let request_id = format!(
-            "req_specialization_{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        );
+        let request_id = self.request_id.unwrap_or_else(generated_request_id);
         (
             self.status,
             Json(json!({
@@ -2476,6 +2581,36 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn decoded_duration_limits_use_the_shared_duration_error_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let probe = directory.path().join("long-ffprobe.sh");
+        std::fs::write(
+            &probe,
+            "#!/bin/sh\ncase \"$*\" in *finite-audio-*) codec=audio ;; *) codec=video ;; esac\nprintf '{\"format\":{\"duration\":\"30\"},\"streams\":[{\"codec_type\":\"%s\"}]}' \"$codec\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = test_config("http://127.0.0.1:9");
+        config.ffprobe_path = probe;
+        config.max_audio_duration_seconds = 1;
+        config.max_video_duration_seconds = 1;
+        let state = test_state(config);
+
+        let audio_error = normalize_audio_bytes(&state, vec![0; 16], 1024)
+            .await
+            .unwrap_err();
+        let video_error = sample_video_frames(&state, vec![0; 16]).await.unwrap_err();
+
+        assert_eq!(audio_error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(audio_error.code, "media_duration_exceeded");
+        assert_eq!(video_error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(video_error.code, "media_duration_exceeded");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn audio_deadline_kills_in_flight_media_probe() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2493,7 +2628,7 @@ mod tests {
         std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut config = test_config("http://127.0.0.1:9");
         config.ffprobe_path = probe;
-        config.request_deadline_seconds = 1;
+        config.request_deadline_seconds = 2;
         let worker = spawn_worker(config).await;
 
         let response = reqwest::Client::new()
@@ -2508,7 +2643,16 @@ mod tests {
 
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(body["error"]["code"], "request_timeout");
-        let pid = tokio::fs::read_to_string(&pid_file).await.unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&pid_file).await {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ffprobe fixture never started");
         let mut stopped = false;
         for _ in 0..20 {
             if !Command::new("kill")
@@ -2652,8 +2796,12 @@ mod tests {
             .iter()
             .filter(|part| part["type"] == "input_image")
             .collect::<Vec<_>>();
-        assert_eq!(frame_markers, vec!["Frame at 0.000 seconds"]);
-        assert_eq!(images.len(), 1);
+        assert_eq!(frame_markers.first(), Some(&"Frame at 0.000 seconds"));
+        assert!(
+            frame_markers.len() >= 5,
+            "canary did not exercise a temporal sequence"
+        );
+        assert_eq!(images.len(), frame_markers.len());
         assert!(
             images[0]["image_url"]
                 .as_str()
@@ -2908,6 +3056,7 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("{worker}/v1/chat/completions"))
             .bearer_auth("worker-secret")
+            .header("x-request-id", "req-malformed-image")
             .json(&json!({
                 "messages": [{
                     "role": "user",
@@ -2926,7 +3075,16 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "media_decode_failed");
-        assert!(body["request_id"].as_str().is_some());
+        assert_eq!(body["request_id"], "req-malformed-image");
+        let metrics = reqwest::get(format!("{worker}/metrics"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(metrics.contains(
+            "finite_specialization_last_failure_duration_milliseconds{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",request_id=\"req-malformed-image\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}"
+        ));
     }
 
     #[tokio::test]
@@ -3054,6 +3212,16 @@ mod tests {
         assert!(rendered.contains(
             "finite_specialization_canary_latency_milliseconds{capability=\"image\",model_alias=\"model-test\",surface=\"tyk-public-frontdoor\"} 900"
         ));
+    }
+
+    #[test]
+    fn video_canary_requires_the_complete_chronological_marker() {
+        assert!(video_canary_passed("RED then GREEN then BLUE"));
+        assert!(video_canary_passed(
+            "The sequence is red, green, and then blue."
+        ));
+        assert!(!video_canary_passed("blue, green, red"));
+        assert!(!video_canary_passed("red and blue"));
     }
 
     #[tokio::test]

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PLUGIN_DIR = (
     Path(__file__).resolve().parents[2] / "integrations" / "hermes" / "finitechat"
@@ -21,6 +23,8 @@ def success(capability: str, text: str, model: str = "aeon-test"):
                 "capability": capability,
                 "model": model,
                 "text": text,
+                "request_id": "req-test",
+                "duration_ms": 10,
             }
         },
     )
@@ -54,6 +58,29 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
                 "image_url": {"url": "https://example.com/red.png"},
             },
         )
+
+    async def test_multiple_images_produce_one_comparison_invocation(self):
+        calls = []
+
+        async def requester(_base_url, _api_key, payload, _timeout):
+            calls.append(payload)
+            return success("image", "The first image is red and the second is blue.")
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        results = await client.interpret(
+            "Compare the images",
+            ["https://example.com/red.png", "https://example.com/blue.png"],
+            ["image/png", "image/png"],
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 1)
+        content = calls[0]["messages"][0]["content"]
+        self.assertEqual([part["type"] for part in content], ["text", "image_url", "image_url"])
+        self.assertEqual(content[1]["image_url"]["url"], "https://example.com/red.png")
+        self.assertEqual(content[2]["image_url"]["url"], "https://example.com/blue.png")
 
     async def test_mixed_media_composes_success_and_capability_local_failure(self):
         calls = []
@@ -134,6 +161,64 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "request_timeout")
+
+    async def test_retry_shares_one_end_to_end_deadline(self):
+        calls = 0
+        observed_timeouts = []
+
+        async def requester(_base_url, _api_key, _payload, timeout):
+            nonlocal calls
+            calls += 1
+            observed_timeouts.append(timeout)
+            if calls == 1:
+                await asyncio.sleep(0.03)
+                raise OSError("connection reset")
+            await asyncio.sleep(1)
+            return success("audio", "A tone.")
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        client.timeout = 0.05
+        started = time.monotonic()
+        result = (
+            await client.interpret(
+                "Listen", ["https://example.com/clip.wav"], ["audio/wav"]
+            )
+        )[0]
+
+        self.assertEqual(calls, 2)
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertLess(observed_timeouts[1], observed_timeouts[0])
+        self.assertEqual(result.error_code, "request_timeout")
+
+    async def test_success_requires_complete_normalized_result(self):
+        async def requester(_base_url, _api_key, _payload, _timeout):
+            return 200, {"choices": [{"message": {"content": "raw fallback"}}]}
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        result = (
+            await client.interpret(
+                "Describe", ["https://example.com/red.png"], ["image/png"]
+            )
+        )[0]
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "invalid_upstream_response")
+
+    def test_partial_configuration_fails_closed(self):
+        config_module = type(sys)("hermes_cli.config")
+        config_module.load_config = lambda: {"auxiliary": {"vision": {"base_url": "http://worker"}}}
+        config_module.cfg_get = lambda config, *_args, default=None: config["auxiliary"]["vision"]
+        hermes_module = type(sys)("hermes_cli")
+        with patch.dict(
+            sys.modules,
+            {"hermes_cli": hermes_module, "hermes_cli.config": config_module},
+        ):
+            with self.assertRaisesRegex(ValueError, "requires both"):
+                AeonSpecialization.from_hermes_config()
 
     async def test_cancellation_propagates_to_in_flight_capability_calls(self):
         started = asyncio.Event()
