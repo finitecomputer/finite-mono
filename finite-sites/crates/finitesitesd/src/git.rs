@@ -481,12 +481,14 @@ fn reconcile_ref_event(
             || output_config.path != output_record.path
             || output_config.normalized_entry().map(str::to_string) != output_record.entry
             || output_config.normalized_start().map(str::to_string) != output_record.start_command
-            || output_config.spa != output_record.spa
         {
             let message = "finite.toml output config does not match the registry";
             let _ = engine.mark_git_ref_event_failed(event_id, message, now);
             return Err(message.to_string());
         }
+        // SPA fallback is Version state, not immutable Project Output identity.
+        // The pushed config is recorded by the Version commit below, so a
+        // Project Output can switch routing modes without registry mutation.
         let outcome = if output_config.kind.as_str() == "app" {
             let bundle = match app_bundle_from_git_archive(repo, new_sha, &output_config.path) {
                 Ok(bundle) => bundle,
