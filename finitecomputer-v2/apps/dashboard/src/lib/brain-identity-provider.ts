@@ -103,18 +103,29 @@ export function officialBrainFrameNavigation(
   headers: Pick<Headers, "get">,
 ) {
   const referer = headers.get("referer");
+  const host = headers.get("host");
   if (
     !referer ||
+    !host ||
     headers.get("sec-fetch-dest") !== "iframe" ||
-    headers.get("sec-fetch-mode") !== "navigate"
+    headers.get("sec-fetch-mode") !== "navigate" ||
+    headers.get("sec-fetch-site") !== "same-origin"
   ) {
     return false;
   }
   try {
     const request = new URL(requestUrl);
     const source = new URL(referer);
+    const forwardedProtocol = headers
+      .get("x-forwarded-proto")
+      ?.split(",", 1)[0]
+      ?.trim();
+    const expectedProtocol = forwardedProtocol
+      ? `${forwardedProtocol}:`
+      : request.protocol;
     return (
-      source.origin === request.origin &&
+      source.host === host &&
+      source.protocol === expectedProtocol &&
       /^\/dashboard\/machines\/[^/]+\/brain$/u.test(source.pathname)
     );
   } catch {

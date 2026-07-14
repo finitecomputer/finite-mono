@@ -13,11 +13,17 @@ import {
 } from "@/lib/brain-identity-provider";
 
 test("only a same-origin Brain iframe navigation can receive a client capability", () => {
-  const frameHeaders = (referer: string | null, destination = "iframe") =>
+  const frameHeaders = (
+    referer: string | null,
+    destination = "iframe",
+    host = "finite.computer",
+  ) =>
     new Headers({
       ...(referer ? { referer } : {}),
+      host,
       "sec-fetch-dest": destination,
       "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
     });
   assert.equal(
     officialBrainFrameNavigation(
@@ -25,6 +31,13 @@ test("only a same-origin Brain iframe navigation can receive a client capability
       frameHeaders("https://finite.computer/dashboard/machines/machine-1/brain"),
     ),
     true
+  );
+  assert.equal(
+    officialBrainFrameNavigation(
+      "https://internal-proxy:3000/client",
+      frameHeaders("https://finite.computer/dashboard/machines/machine-1/brain"),
+    ),
+    true,
   );
   assert.equal(
     officialBrainFrameNavigation(
@@ -46,6 +59,17 @@ test("only a same-origin Brain iframe navigation can receive a client capability
       frameHeaders("https://finite.computer/dashboard/machines/machine-1/brain", "empty"),
     ),
     false
+  );
+  assert.equal(
+    officialBrainFrameNavigation(
+      "https://finite.computer/client",
+      frameHeaders(
+        "https://finite.computer/dashboard/machines/machine-1/brain",
+        "iframe",
+        "other.finite.computer",
+      ),
+    ),
+    false,
   );
 });
 
