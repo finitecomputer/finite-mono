@@ -885,21 +885,46 @@ function MessageAttachments({ apiBase, compact = false, message }: { apiBase: st
 
 function AttachmentCard({ apiBase, attachment, compact, message }: { apiBase: string; attachment: HostedChatMediaAttachment; compact: boolean; message: HostedChatMessage }) {
   const href = `${apiBase}/attachments/${encodeURIComponent(message.room_id)}/${encodeURIComponent(message.message_id)}/${encodeURIComponent(attachment.attachment_id)}`;
+  const cardClassName = compact
+    ? "finite-chat__image-card is-compact"
+    : "finite-chat__image-card";
+  if (attachment.kind === "Video" || attachment.mime_type.startsWith("video/")) {
+    return (
+      <span className={`${cardClassName} finite-chat__playable-card`}>
+        <video src={href} controls preload="metadata" aria-label={attachment.filename} />
+        <AttachmentCaption href={href} name={attachment.filename} />
+      </span>
+    );
+  }
+  if (attachment.kind === "VoiceNote" || attachment.mime_type.startsWith("audio/")) {
+    return (
+      <span className={`${cardClassName} finite-chat__playable-card is-audio`}>
+        <audio src={href} controls preload="metadata" aria-label={attachment.filename} />
+        <AttachmentCaption href={href} name={attachment.filename} />
+      </span>
+    );
+  }
   if (attachment.kind !== "Image") {
     return <a href={href} className="finite-chat__file-card"><FileTextIcon className="size-4" /><span>{attachment.filename}</span></a>;
   }
   return (
-    <span className={compact ? "finite-chat__image-card is-compact" : "finite-chat__image-card"}>
+    <span className={cardClassName}>
       <a className="finite-chat__image-link" href={href} target="_blank" rel="noreferrer">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={href} alt={attachment.filename} />
       </a>
-      <span className="finite-chat__image-caption">
-        <span>{attachment.filename}</span>
-        <span className="finite-chat__image-actions">
-          <a href={href} download={attachment.filename} aria-label={`Download ${attachment.filename}`}><DownloadIcon className="size-3.5" /></a>
-          <ShareAttachmentButton href={href} name={attachment.filename} />
-        </span>
+      <AttachmentCaption href={href} name={attachment.filename} />
+    </span>
+  );
+}
+
+function AttachmentCaption({ href, name }: { href: string; name: string }) {
+  return (
+    <span className="finite-chat__image-caption">
+      <span>{name}</span>
+      <span className="finite-chat__image-actions">
+        <a href={href} download={name} aria-label={`Download ${name}`}><DownloadIcon className="size-3.5" /></a>
+        <ShareAttachmentButton href={href} name={name} />
       </span>
     </span>
   );

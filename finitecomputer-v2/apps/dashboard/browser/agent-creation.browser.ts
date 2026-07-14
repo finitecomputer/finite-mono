@@ -124,7 +124,7 @@ type FakeHostedChatState = {
       attachment_id: string;
       mime_type: string;
       filename: string;
-      kind: "Image" | "File";
+      kind: "Image" | "VoiceNote" | "Video" | "File";
       width: number | null;
       height: number | null;
     }>;
@@ -920,6 +920,20 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "attachment bytes must traverse the authenticated hosted-device route"
       );
 
+      hostedDevice.state.app.messages.push(
+        hostedPlayableMessage("Video returned by agent.", 5, "agent-proof.mp4", "Video", "video/mp4")
+      );
+      hostedDevice.state.app.messages.push(
+        hostedPlayableMessage("Audio returned by agent.", 6, "agent-proof.mp3", "VoiceNote", "audio/mpeg")
+      );
+      hostedDevice.emit();
+      const video = page.locator('video[aria-label="agent-proof.mp4"]');
+      const audio = page.locator('audio[aria-label="agent-proof.mp3"]');
+      await video.waitFor({ state: "visible" });
+      await audio.waitFor({ state: "visible" });
+      assert.equal(await video.getAttribute("controls"), "");
+      assert.equal(await audio.getAttribute("controls"), "");
+
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
@@ -936,7 +950,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("💻 Running browser QA", false, 5),
+        ...hostedMessage("💻 Running browser QA", false, 7),
         kind: "tool",
         status: "running",
       });
@@ -946,7 +960,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
         "complete";
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Browser QA complete.", false, 6),
+        ...hostedMessage("Browser QA complete.", false, 8),
         final_delivery: true,
       });
       hostedDevice.emit();
@@ -980,10 +994,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       const localSiteUrl = sites.siteUrl;
       hostedDevice.state.app.messages.push(
-        hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 8)
+        hostedMessage("Repository: https://git.finite.chat/browser-proof.git", false, 10)
       );
       hostedDevice.state.app.messages.push(
-        hostedMessage(`Published your site: ${localSiteUrl}`, false, 9)
+        hostedMessage(`Published your site: ${localSiteUrl}`, false, 11)
       );
       hostedDevice.emit();
       await page.getByRole("button", { name: "Preview" }).click();
@@ -1036,7 +1050,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         }],
       });
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Legacy room transcript only.", false, 10),
+        ...hostedMessage("Legacy room transcript only.", false, 12),
         room_id: "room_browser_legacy",
         message_id: "message_legacy_only",
         conversation_id: "topic_browser_legacy",
@@ -1069,7 +1083,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
 
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Remembered transcript only.", false, 11),
+        ...hostedMessage("Remembered transcript only.", false, 13),
         message_id: "message_remembered_only",
         chat_id: "chat_browser_remembered",
       });
@@ -1104,7 +1118,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         () => "the selection race request did not reach the daemon"
       );
       hostedDevice.state.app.messages.push({
-        ...hostedMessage("Concurrent stream update.", false, 12),
+        ...hostedMessage("Concurrent stream update.", false, 14),
         message_id: "message_selection_race",
         chat_id: "chat_browser_remembered",
       });
@@ -2034,6 +2048,29 @@ function hostedImageMessage(
         kind: "Image",
         width: 1,
         height: 1,
+      },
+    ],
+  };
+}
+
+function hostedPlayableMessage(
+  text: string,
+  seq: number,
+  filename: string,
+  kind: "VoiceNote" | "Video",
+  mimeType: string
+): FakeHostedChatState["messages"][number] {
+  return {
+    ...hostedMessage(text, false, seq),
+    kind: "media",
+    media: [
+      {
+        attachment_id: `attachment_${seq}`,
+        mime_type: mimeType,
+        filename,
+        kind,
+        width: kind === "Video" ? 640 : null,
+        height: kind === "Video" ? 360 : null,
       },
     ],
   };

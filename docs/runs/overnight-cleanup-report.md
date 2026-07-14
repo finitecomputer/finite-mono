@@ -252,3 +252,45 @@ Paul action: Name a disposable canary Agent whose existing offer already has
 healthy, then run the three steps above. If no such Agent exists, applying an
 offer is a production mutation and needs a separately authorized test. Do not
 use Sol 2 or customer state for this proof.
+
+## 8. FAL generation and media display — SHIPPED
+
+What changed: Chat attachment cards now render `Video`/`video/*` media with a
+native video player and `VoiceNote`/`audio/*` media with a native audio player.
+Both retain the authenticated attachment proxy, filename, download, and share
+controls. Other files still use the file card.
+
+Actual dispatch behavior: A generic “draw me …” request reaches Hermes'
+standard `image_generate` tool. Hermes 0.18.2 ships registered image providers
+for FAL, Krea, OpenAI, OpenAI Codex, OpenRouter, and xAI; explicit
+`image_gen.provider` configuration wins, otherwise the registry chooses an
+available single provider or its legacy FAL fallback. Therefore “default” is
+not intrinsically FAL and is not guaranteed to be OpenAI/xAI. The FAL image
+editing and music skills are separate direct `fal_client` workflows.
+
+Verification evidence:
+
+- All 175 dashboard unit tests and lint passed.
+- The real-browser fixture passed with proxied image, video, and audio
+  attachments and asserted visible native controls for the latter two.
+- The built Hermes image contains `image_generate` in the standard toolset and
+  all six provider plugins named above.
+- Live generation was not attempted: `FAL_KEY`, `FAL_API_KEY`, and
+  `FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY` are unset, and `fal_client` is absent.
+  Installing it into the image is excluded by this run's dependency fence.
+
+Two-minute morning verification:
+
+1. With a disposable local Agent and configured test credentials, ask “draw me
+   a red square”; confirm the resulting image appears inline and record which
+   configured provider handled it.
+2. Ask the FAL editing skill to make a harmless edit to that image; confirm the
+   edited image appears inline.
+3. Attach known tiny MP4 and MP3 fixtures and confirm each has inline playback,
+   plus working download controls.
+
+Paul action: Supply test-only local inference/FAL credentials through the
+existing devfinity environment, then run the morning verification. Do not use
+or rotate production credentials for this UI proof. If FAL editing is expected
+to work without a task-time install, schedule the separately pinned
+`fal-client` image addition identified in the preinstall audit.

@@ -3166,6 +3166,22 @@ button.ocean-pill-button {
   max-height: 160px;
 }
 
+.finite-chat__playable-card video {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  background: #000;
+}
+
+.finite-chat__playable-card audio {
+  width: calc(100% - 20px);
+  margin: 14px 10px;
+}
+
+.finite-chat__playable-card.is-audio {
+  width: min(360px, 100%);
+}
+
 .finite-chat__image-caption {
   display: flex;
   min-width: 0;
