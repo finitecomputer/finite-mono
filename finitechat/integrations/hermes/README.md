@@ -55,21 +55,14 @@ gateway:
 Then `hermes gateway start` makes the Agent Principal reachable. The dashboard
 Hosted Web Device, Electron, or a native client starts the room independently.
 
-## Optional AEON media capability
+## Native Hermes specialization profiles
 
-When Hermes `auxiliary.vision` contains an OpenAI-compatible `base_url`,
-`api_key`, and AEON `model`, the plugin registers an `aeon_interpret` tool in
-the `finitechat_media` toolset. The main model sees that tool alongside its
-other configured capabilities and decides whether an image, audio clip, or
-video needs interpretation for the current request.
-
-The platform adapter does not invoke AEON automatically and does not add an
-AEON policy to the channel prompt. For supported inbound media it gives the
-model a short inventory of opaque attachment IDs. A tool call may resolve only
-those IDs to the authenticated files materialized by the Finite Chat sidecar;
-arbitrary paths are rejected. Handles expire after one hour and the process
-retains at most 256. If AEON is not configured, attachments remain on Hermes's
-normal native vision, auxiliary vision, and transcription paths.
+Finite Chat conveys authenticated attachments to Hermes without choosing a
+model, rewriting the channel prompt, or registering Finite-specific agent
+tools. Specializations are runtime configuration behind Hermes's existing
+tools. For example, an `auxiliary.vision` profile can route Hermes's built-in
+`vision_analyze` and `video_analyze` tools to the AEON worker while the main
+model remains responsible for deciding whether those tools are useful.
 
 ```yaml
 auxiliary:
@@ -80,10 +73,12 @@ auxiliary:
     timeout: 120
 ```
 
-`aeon_interpret` returns ordinary JSON with capability-local content, model,
-request ID, duration, and error information. Benchmark verdicts and strict
-acceptance rules belong to external test harnesses, not the agent prompt or
-tool response.
+The same rule applies to other specialization families: prefer a model or
+provider profile behind a Hermes-native capability. Add a new generic Hermes
+capability only when Hermes has no suitable surface; do not add product- or
+model-named tools to this transport plugin. Semantic audio interpretation is
+currently such a Hermes capability gap and is not represented as a custom
+Finite Chat tool.
 
 `finitechat hermes install` writes the embedded `finitechat` plugin into
 `$HERMES_PLUGINS_DIR/finitechat`, `$HERMES_HOME/plugins/finitechat`, or

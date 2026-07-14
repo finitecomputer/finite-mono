@@ -77,8 +77,6 @@ const HERMES_PLUGIN_INIT: &str =
     include_str!("../../../integrations/hermes/finitechat/__init__.py");
 const HERMES_PLUGIN_ADAPTER: &str =
     include_str!("../../../integrations/hermes/finitechat/adapter.py");
-const HERMES_PLUGIN_SPECIALIZATION: &str =
-    include_str!("../../../integrations/hermes/finitechat/specialization.py");
 const HERMES_PLUGIN_YAML: &str =
     include_str!("../../../integrations/hermes/finitechat/plugin.yaml");
 const HERMES_PLUGIN_ENV_FILE: &str = "finitechat.env";
@@ -247,12 +245,6 @@ fn cmd_install<W: Write>(
     write_managed_plugin_file(
         &plugin_dir.join("adapter.py"),
         HERMES_PLUGIN_ADAPTER,
-        force,
-        &mut installed,
-    )?;
-    write_managed_plugin_file(
-        &plugin_dir.join("specialization.py"),
-        HERMES_PLUGIN_SPECIALIZATION,
         force,
         &mut installed,
     )?;
@@ -3556,7 +3548,7 @@ mod tests {
         assert_eq!(summary["warnings"].as_array().unwrap().len(), 0);
         assert!(plugin_dir.join("__init__.py").exists());
         assert!(plugin_dir.join("adapter.py").exists());
-        assert!(plugin_dir.join("specialization.py").exists());
+        assert!(!plugin_dir.join("specialization.py").exists());
         assert!(plugin_dir.join("plugin.yaml").exists());
         assert!(plugin_dir.join(HERMES_PLUGIN_ENV_FILE).exists());
 

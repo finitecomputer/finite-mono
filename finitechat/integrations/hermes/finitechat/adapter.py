@@ -14,7 +14,6 @@ import logging
 import os
 import shlex
 import shutil
-import sys
 import threading
 import time
 import urllib.error
@@ -25,28 +24,6 @@ from typing import Any
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
-
-try:
-    from .specialization import (
-        AEON_INTERPRET_SCHEMA,
-        _capability_for_mime,
-        aeon_interpret_tool,
-        check_aeon_requirements,
-        register_attachment,
-    )
-except ImportError:  # The regression harness loads adapter.py as a standalone module.
-    _plugin_dir = str(Path(__file__).resolve().parent)
-    sys.path.insert(0, _plugin_dir)
-    try:
-        from specialization import (  # type: ignore[no-redef]
-            AEON_INTERPRET_SCHEMA,
-            _capability_for_mime,
-            aeon_interpret_tool,
-            check_aeon_requirements,
-            register_attachment,
-        )
-    finally:
-        sys.path.remove(_plugin_dir)
 
 logger = logging.getLogger(__name__)
 
@@ -588,7 +565,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
             channel_prompt=_string_or_none(raw_event.get("channel_prompt")),
             internal=bool(raw_event.get("internal") or False),
         )
-        event = self._expose_event_media_tools(event)
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
@@ -600,38 +576,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
-
-    def _expose_event_media_tools(self, event: MessageEvent) -> MessageEvent:
-        if not check_aeon_requirements():
-            return event
-        available: list[dict[str, str]] = []
-        remaining = [
-            (url, mime_type)
-            for url, mime_type in zip(event.media_urls, event.media_types, strict=False)
-            if _capability_for_mime(mime_type) is None
-        ]
-        for media_ref, media_type in zip(event.media_urls, event.media_types, strict=False):
-            if _capability_for_mime(media_type) is None:
-                continue
-            name = Path(media_ref).name or "attachment"
-            available.append(
-                {
-                    "attachment_id": register_attachment(media_ref, media_type, name),
-                    "name": name,
-                    "mime_type": media_type,
-                }
-            )
-        if not available:
-            return event
-        event.media_urls = [url for url, _ in remaining]
-        event.media_types = [mime_type for _, mime_type in remaining]
-        event.message_type = _message_type("", event.media_types) if remaining else MessageType.TEXT
-        original = event.text.strip()
-        inventory = "[Finite Chat attachments available to media tools]\n" + json.dumps(
-            available, ensure_ascii=True, separators=(",", ":")
-        )
-        event.text = f"{original}\n\n{inventory}" if original else inventory
-        return event
 
     async def _set_processing_activity(
         self,
@@ -1441,13 +1385,4 @@ def register(ctx) -> None:
             "boundary and the thread is the conversation/topic. Use normal "
             "markdown and native attachments when available."
         ),
-    )
-    ctx.register_tool(
-        name="aeon_interpret",
-        toolset="finitechat_media",
-        schema=AEON_INTERPRET_SCHEMA,
-        handler=aeon_interpret_tool,
-        check_fn=check_aeon_requirements,
-        is_async=True,
-        description="Interpret authenticated Finite Chat media with AEON when useful.",
     )

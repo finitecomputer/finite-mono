@@ -53,6 +53,17 @@ failure restores the exact previous bytes, and later user/Hermes drift blocks
 automatic rollback. Remote commands fail closed unless the sending Finite Chat
 Principal is in the durable authorization ledger.
 
+Specialization reconciliation is deliberately a model-profile operation. It
+does not register model-named tools, intercept attachments, or add behavioral
+instructions to the main agent. Hermes keeps its normal tool catalog and the
+main model decides when to use a native capability. The current AEON profile
+backs Hermes's `vision_analyze` and `video_analyze` tools through
+`auxiliary.vision`. The capability flags constrain requests accepted by the
+worker; they do not create a missing Hermes tool surface. Semantic audio
+interpretation therefore remains unavailable to the agent until Hermes has a
+generic instruction-preserving audio-analysis capability. This profile-first
+rule applies to every Finite specialization, not only AEON or vision.
+
 An AEON image reconciliation becomes effective only after Hermes restarts and
 its installed `vision_analyze_tool` returns exact semantic output for a fixed
 image through `auxiliary.vision`. The packaged probe uses the same
