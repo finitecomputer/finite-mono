@@ -30,6 +30,11 @@ client setup when the dashboard flow is unavailable or explicitly broken.
 - `references/gmail-search-syntax.md` — Gmail search operators (is:unread, from:, newer_than:, etc.)
 - `references/google-workspace-scopes.json` — the OAuth scope contract shipped atomically with this skill
 
+The managed scope contract includes Docs read/write so approved `gws` Docs
+operations can be used, and deliberately requests no Apps Script scope. The
+Python wrapper below currently exposes Docs read only; do not imply that it can
+write a Doc or use Apps Script.
+
 ## Scripts
 
 - `scripts/setup.py` — OAuth2 setup (run once to authorize)

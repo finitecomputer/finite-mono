@@ -118,3 +118,38 @@ Paul action: Decide separately whether the 6.8 MB compressed increase is worth
 keeping. A successful full `just dev saas-smoke` remains part of the final run
 gate; this item did not interfere with the already-running stack from the other
 worktree.
+
+## 4. Google scopes per PR #34 — SHIPPED
+
+What changed: The dashboard OAuth constant, installed dashboard contract, and
+managed-skill contract now request Google Docs read/write and no longer request
+Apps Script project or deployment scopes. The skill states the boundary
+explicitly: approved Docs writes can use `gws`, while its current Python Docs
+wrapper is read-only and has no Apps Script action. No live Google setting or
+credential was touched.
+
+Verification evidence: All 174 dashboard unit tests passed, including the test
+that requires the dashboard constant and managed-skill JSON to remain identical.
+
+Two-minute morning verification:
+
+1. Inspect a branch OAuth URL and confirm it contains
+   `https://www.googleapis.com/auth/documents`.
+2. Confirm it contains neither `script.projects`, `script.deployments`, nor
+   `documents.readonly`.
+3. Do not complete the flow with a production account until the console-side
+   scope configuration is reconciled.
+
+Paul action:
+
+1. In the Google Cloud OAuth consent screen's Data Access configuration, remove
+   the Apps Script project and deployment scopes and add the Google Docs
+   read/write scope (`.../auth/documents`). Leave the other current scopes as
+   listed in the branch contract.
+2. Expect the next dashboard Connect flow to show consent again: the route
+   deliberately uses `prompt=select_account consent` and does not include prior
+   grants.
+3. Every existing authorized Google Workspace connection must disconnect and
+   reconnect after the console change. Existing refresh tokens do not acquire
+   the new Docs write grant merely because the repository list changed; this is
+   also how the obsolete Apps Script grants are removed from the active token.
