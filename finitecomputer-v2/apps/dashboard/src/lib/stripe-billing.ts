@@ -12,6 +12,7 @@ const REQUIRED_STRIPE_ENV = [
   "STRIPE_WEBHOOK_SECRET",
 ] as const;
 const STRIPE_RETURN_ORIGIN_ENV = "FC_DASHBOARD_BASE_URL";
+export const STRIPE_API_VERSION = "2026-04-22.dahlia" as const;
 
 let stripeClient: Stripe | null = null;
 
@@ -28,6 +29,12 @@ export function stripeBillingStatus(env: Record<string, string | undefined> = pr
   };
 }
 
+export function stripeCheckoutAvailable(
+  env: Record<string, string | undefined> = process.env
+) {
+  return env.FC_DASHBOARD_RUNTIME_MODE === "customer" && stripeBillingStatus(env).configured;
+}
+
 export function requireStripeClient() {
   const status = stripeBillingStatus();
   if (!status.configured) {
@@ -35,6 +42,7 @@ export function requireStripeClient() {
   }
   if (!stripeClient) {
     stripeClient = new Stripe(requiredEnv("STRIPE_SECRET_KEY"), {
+      apiVersion: STRIPE_API_VERSION,
       appInfo: {
         name: "finitecomputer-v2",
       },
@@ -110,6 +118,36 @@ export function standardAgentCheckoutMetadata(customerOrgId: string) {
   };
 }
 
+export function standardAgentCheckoutParams(input: {
+  stripeCustomerId: string;
+  customerOrgId: string;
+  priceId: string;
+  successUrl: string;
+  cancelUrl: string;
+}): Stripe.Checkout.SessionCreateParams {
+  const customer = requiredInput(input.stripeCustomerId, "Stripe customer id");
+  const price = requiredInput(input.priceId, "Stripe Price id");
+  const successUrl = requiredAbsoluteUrl(input.successUrl, "Stripe success URL");
+  const cancelUrl = requiredAbsoluteUrl(input.cancelUrl, "Stripe cancel URL");
+  const metadata = standardAgentCheckoutMetadata(input.customerOrgId);
+
+  return {
+    mode: "subscription",
+    customer,
+    client_reference_id: metadata.clientReferenceId,
+    allow_promotion_codes: true,
+    automatic_tax: { enabled: true },
+    payment_method_types: ["card"],
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    line_items: [{ price, quantity: 1 }],
+    metadata: metadata.checkout,
+    subscription_data: {
+      metadata: metadata.subscription,
+    },
+  };
+}
+
 export function billingSubscriptionShouldUsePortal(
   subscriptionStatus: string | null | undefined,
   subscriptionId: string | null | undefined
@@ -130,4 +168,21 @@ function requiredEnv(name: string) {
     throw new Error(`${name} is required.`);
   }
   return value;
+}
+
+function requiredInput(value: string, label: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${label} is required.`);
+  }
+  return normalized;
+}
+
+function requiredAbsoluteUrl(value: string, label: string) {
+  const normalized = requiredInput(value, label);
+  const url = new URL(normalized);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error(`${label} must use http or https.`);
+  }
+  return url.toString();
 }

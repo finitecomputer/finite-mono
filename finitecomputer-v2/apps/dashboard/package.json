@@ -12,7 +12,8 @@
     "design": "node --import tsx scripts/web-design-fixture.ts serve",
     "design:reset": "node --import tsx scripts/web-design-fixture.ts reset",
     "design:state": "node --import tsx scripts/web-design-fixture.ts set-scenario",
-    "test:stripe-billing-clock": "tsx scripts/stripe-billing-test-clock-e2e.ts"
+    "test:stripe-billing-clock": "tsx scripts/stripe-billing-test-clock-e2e.ts",
+    "stripe:readiness": "tsx scripts/stripe-production-readiness.ts"
   },
   "dependencies": {
     "@finite/chat-ui": "file:../../../finitechat/packages/finitechat-chat-ui",

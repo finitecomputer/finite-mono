@@ -29,7 +29,7 @@
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
-      STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
+      STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s

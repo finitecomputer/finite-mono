@@ -24,7 +24,7 @@ import {
   hostedDeviceConfig,
   hostedDeviceProfileImage,
 } from "@/lib/hosted-web-device";
-import { stripeBillingStatus } from "@/lib/stripe-billing";
+import { stripeCheckoutAvailable } from "@/lib/stripe-billing";
 import { workosBaseUrl } from "@/lib/workos-auth";
 
 function dashboardRedirect(
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     }
 
     if (accessPath === "stripe") {
-      if (!stripeBillingStatus().configured) {
+      if (!stripeCheckoutAvailable()) {
         throw new Error("Payment is unavailable right now.");
       }
       const response = NextResponse.redirect(

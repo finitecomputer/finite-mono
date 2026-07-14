@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   billingSubscriptionShouldUsePortal,
+  standardAgentCheckoutParams,
   standardAgentCheckoutMetadata,
   stripeBillingStatus,
+  stripeCheckoutAvailable,
   stripeDashboardOnboardingReturnPath,
   stripeDashboardReturnUrl,
   stripeIdempotencyKey,
@@ -53,6 +55,25 @@ test("stripeBillingStatus fails closed without checkout, webhook, and return con
   );
 });
 
+test("canary mode hides Checkout even when every live integration input is present", () => {
+  const configured = {
+    STRIPE_SECRET_KEY: "rk_live_fixture",
+    STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: "price_live_fixture",
+    STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+    FC_DASHBOARD_BASE_URL: "https://finite.computer",
+  };
+
+  assert.equal(
+    stripeCheckoutAvailable({ ...configured, FC_DASHBOARD_RUNTIME_MODE: "canary" }),
+    false
+  );
+  assert.equal(stripeCheckoutAvailable(configured), false);
+  assert.equal(
+    stripeCheckoutAvailable({ ...configured, FC_DASHBOARD_RUNTIME_MODE: "customer" }),
+    true
+  );
+});
+
 test("Stripe retry keys are stable, endpoint-scoped, and do not disclose the attempt", () => {
   const attempt = "draft-personal-onboarding-123";
   const customer = stripeIdempotencyKey("customer", attempt);
@@ -72,6 +93,33 @@ test("standard Checkout stamps only the canonical Core organization id", () => {
     subscription: { finite_customer_org_id: "org_core_canonical" },
   });
   assert.throws(() => standardAgentCheckoutMetadata("  "), /organization id is required/);
+});
+
+test("standard Checkout is recurring, cards-only, and automatically calculates tax", () => {
+  assert.deepEqual(
+    standardAgentCheckoutParams({
+      stripeCustomerId: "cus_standard",
+      customerOrgId: "org_core_canonical",
+      priceId: "price_standard",
+      successUrl: "https://finite.computer/dashboard?billing=success",
+      cancelUrl: "https://finite.computer/dashboard?billing=cancelled",
+    }),
+    {
+      mode: "subscription",
+      customer: "cus_standard",
+      client_reference_id: "org_core_canonical",
+      allow_promotion_codes: true,
+      automatic_tax: { enabled: true },
+      payment_method_types: ["card"],
+      success_url: "https://finite.computer/dashboard?billing=success",
+      cancel_url: "https://finite.computer/dashboard?billing=cancelled",
+      line_items: [{ price: "price_standard", quantity: 1 }],
+      metadata: { finite_customer_org_id: "org_core_canonical" },
+      subscription_data: {
+        metadata: { finite_customer_org_id: "org_core_canonical" },
+      },
+    }
+  );
 });
 
 test("stripeDashboardReturnUrl uses the public app URL", () => {

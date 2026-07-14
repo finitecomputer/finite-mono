@@ -273,9 +273,16 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByLabel("Agent name").fill("Paid Browser Proof");
       await page.getByRole("button", { name: "Continue" }).click();
       await page
-        .getByRole("button", { name: "Continue to payment" })
+        .getByRole("button", { name: "Continue to secure payment" })
         .waitFor({ state: "visible" });
       await expectVisibleText(page, "Pay securely or use a Launch Code.");
+      await expectVisibleText(page, "Finite Computer Hosted Agent");
+      await expectVisibleText(page, "$200 USD / month");
+      await expectVisibleText(page, "No trial. Renews automatically each month until canceled.");
+      await expectVisibleText(
+        page,
+        "Cancel in the billing portal; cancellation takes effect at period end."
+      );
     });
 
     core.reset();
@@ -297,7 +304,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
       await page.getByRole("button", { name: "Continue" }).click();
       assert.equal(
-        await page.getByRole("button", { name: "Continue to payment" }).count(),
+        await page.getByRole("button", { name: "Continue to secure payment" }).count(),
         0,
         "payment must stay hidden when the webhook/return path is not fully configured"
       );

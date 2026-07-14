@@ -4,7 +4,7 @@ Status: PROPOSED
 
 One line per idea outside the active run. This is not a queue; an item becomes work only in a later proposed and blessed run doc.
 
-- 2026-07-10 — After the explicitly prioritized Electron Device Parity Alpha, propose the paid invited-customer-cohort launch run; retain `infra/README.md`'s off-host, service-consistent backup and empty-target restore gate, and require real Stripe Checkout plus webhook-to-Core entitlement without prematurely choosing final key custody.
+- 2026-07-10 — After the explicitly prioritized Electron Device Parity Alpha, propose the paid invited-customer-cohort launch run; retained in the 2026-07-13 [`Stripe Production Activation`](stripe-production-activation.md) draft without changing the ACTIVE run. It keeps `infra/README.md`'s off-host, service-consistent backup and empty-target restore gate and requires real Stripe Checkout plus webhook-to-Core entitlement.
 - 2026-07-10 — In the customer-facing run, replace the canary landing posture with the explicitly blessed paid/self-serve entry path only after Stripe and customer-admission gates pass.
 - 2026-07-10 — In the customer-facing run, define and implement honest end-to-end cancellation for a queued or active Hermes turn without using compute restart as a substitute; see `docs/open-questions.md`.
 - 2026-07-10 — In the customer-facing run, add Finite Sites list/share only after deciding whose Projects or Outputs appear and which Principal may mutate sharing; see `docs/open-questions.md`.

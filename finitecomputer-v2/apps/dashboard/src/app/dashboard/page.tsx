@@ -61,7 +61,7 @@ import {
   getAccountAuthContext,
   loadOptionalViewerContext,
 } from "@/lib/dashboard-auth";
-import { stripeBillingStatus } from "@/lib/stripe-billing";
+import { stripeCheckoutAvailable } from "@/lib/stripe-billing";
 import {
   AGENT_DRAFT_COOKIE,
   draftStartedStripeCheckout,
@@ -900,7 +900,7 @@ function CoreAgentCreationPanel({
         initialPictureUrl={draft?.profilePictureUrl}
         returnMachineId={returnMachineId}
         requiresAccess={requiresAccess}
-        stripeConfigured={stripeBillingStatus().configured}
+        stripeConfigured={stripeCheckoutAvailable()}
       />
     </section>
   );

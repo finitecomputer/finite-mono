@@ -32,7 +32,7 @@
         FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
       };
       # Public Stripe price id (ConfigMap value; not a secret).
-      STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TouEuFwiFww4itkeTQNPYR6";
+      STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
     };
 
     serviceConfig = {
