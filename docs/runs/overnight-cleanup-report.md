@@ -153,3 +153,32 @@ Paul action:
    reconnect after the console change. Existing refresh tokens do not acquire
    the new Docs write grant merely because the repository list changed; this is
    also how the obsolete Apps Script grants are removed from the active token.
+
+## 5. Honest working indicator — SHIPPED
+
+What changed: Client-side Agent-turn and activity state are now 15-second
+leases, matching the Finite Chat adapter's activity TTL. A pending turn carries
+its local start time. It stops presenting as “working” when its lease expires
+without a final response, and both pending and server-projected activity fail
+closed whenever the update stream is disconnected. Fresh stream snapshots
+renew live activity. No protocol field or daemon revision behavior changed.
+
+Verification evidence:
+
+- Dashboard unit tests: 175 passed, including exact lease-boundary and
+  disconnected-stream cases.
+- Dashboard lint: passed.
+- The real-browser fixture passed after sending a fresh turn, removing the
+  synthetic server activity without delivering a final response, and requiring
+  “is working” to disappear at the lease boundary.
+
+Two-minute morning verification:
+
+1. Send a harmless request to a local test Agent and confirm “is working”
+   appears while activity refreshes.
+2. Stop or disconnect the local test stream and confirm the label disappears
+   rather than remaining latched.
+3. Reconnect, send another request, and confirm a final Agent response clears
+   the label normally.
+
+Paul action: none beyond the morning local-stack browser verification.

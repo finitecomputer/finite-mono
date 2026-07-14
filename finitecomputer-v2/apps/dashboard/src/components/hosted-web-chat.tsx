@@ -61,11 +61,13 @@ import type {
 } from "@/lib/hosted-web-device";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
+  activityLeaseIsFresh,
   beginPendingChatTurn,
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
   pendingTurnIsComplete,
+  pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
   transcriptItems,
   type ChatSelection,
@@ -119,6 +121,8 @@ export function HostedWebChat({
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
+  const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
+  const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
   const [isDragOver, setIsDragOver] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
@@ -199,19 +203,51 @@ export function HostedWebChat({
   );
   const liveMembers = useMemo(
     () =>
-      (state?.typing_members ?? []).filter(
+      activityLeaseIsFresh(streamConnected, activityObservedAtMs, leaseNowMs)
+        ? (state?.typing_members ?? []).filter(
         (member) =>
           member.room_id === selectedRoom?.room_id
           && (!member.topic_id || member.topic_id === selectedTopic?.topic_id)
           && (!member.chat_id || member.chat_id === selectedChat?.chat_id)
-      ),
-    [selectedChat?.chat_id, selectedRoom?.room_id, selectedTopic?.topic_id, state?.typing_members]
+        )
+        : [],
+    [
+      activityObservedAtMs,
+      leaseNowMs,
+      selectedChat?.chat_id,
+      selectedRoom?.room_id,
+      selectedTopic?.topic_id,
+      state?.typing_members,
+      streamConnected,
+    ]
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
   const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
-  const awaitingReply = pendingAgentTurns.some((turn) =>
-    pendingTurnMatchesSelection(turn, selectedChatSelection)
+  const awaitingReply = pendingAgentTurns.some(
+    (turn) =>
+      pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
+      && pendingTurnMatchesSelection(turn, selectedChatSelection)
   );
+
+  useEffect(() => {
+    if (!streamConnected) {
+      setActivityObservedAtMs(null);
+      return;
+    }
+    if ((state?.typing_members.length ?? 0) === 0) {
+      setActivityObservedAtMs(null);
+      return;
+    }
+    const nowMs = Date.now();
+    setActivityObservedAtMs(nowMs);
+    setLeaseNowMs(nowMs);
+  }, [state, streamConnected]);
+
+  useEffect(() => {
+    if (activityObservedAtMs === null && pendingAgentTurns.length === 0) return;
+    const timer = window.setInterval(() => setLeaseNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [activityObservedAtMs, pendingAgentTurns.length]);
 
   useEffect(() => {
     if (sites.length === 0) {
@@ -233,11 +269,13 @@ export function HostedWebChat({
     if (!state) return;
     setPendingAgentTurns((turns) => {
       const pending = turns.filter(
-        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+        (turn) =>
+          pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
+          && !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
       );
       return pending.length === turns.length ? turns : pending;
     });
-  }, [state]);
+  }, [leaseNowMs, state, streamConnected]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -350,8 +388,14 @@ export function HostedWebChat({
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
-    const pendingTurn = beginPendingChatTurn(selectedChatSelection, messages);
+    const pendingTurnStartedAtMs = Date.now();
+    const pendingTurn = beginPendingChatTurn(
+      selectedChatSelection,
+      messages,
+      pendingTurnStartedAtMs
+    );
     if (pendingTurn) {
+      setLeaseNowMs(pendingTurnStartedAtMs);
       setPendingAgentTurns((turns) => [
         ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
         pendingTurn,

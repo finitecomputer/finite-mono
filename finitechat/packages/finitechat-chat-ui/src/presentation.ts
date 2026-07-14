@@ -22,6 +22,7 @@ export type PendingChatTurn = {
   topic_id: string | null;
   chat_id: string | null;
   after_seq: number;
+  started_at_ms: number;
 };
 
 export type TranscriptItem =
@@ -29,6 +30,8 @@ export type TranscriptItem =
   | { type: "tools"; id: string; messages: ChatMessage[] };
 
 const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
+
+export const LIVE_ACTIVITY_LEASE_MS = 15_000;
 
 export function selectedChat(state: AppState | null, preferAgentRoom = false): ChatSelection {
   if (!state) return { room: null, topic: null, chat: null };
@@ -195,7 +198,8 @@ export function hasFinalRemoteResponse(
 
 export function beginPendingChatTurn(
   selection: ChatSelection,
-  visibleMessages: ChatMessage[]
+  visibleMessages: ChatMessage[],
+  nowMs = Date.now()
 ): PendingChatTurn | null {
   if (!selection.room) return null;
   return {
@@ -203,7 +207,29 @@ export function beginPendingChatTurn(
     topic_id: selection.topic?.topic_id ?? null,
     chat_id: selection.chat?.chat_id ?? null,
     after_seq: Math.max(0, ...visibleMessages.map((message) => message.seq)),
+    started_at_ms: nowMs,
   };
+}
+
+export function activityLeaseIsFresh(
+  streamConnected: boolean,
+  observedAtMs: number | null,
+  nowMs = Date.now(),
+  leaseMs = LIVE_ACTIVITY_LEASE_MS
+) {
+  return streamConnected
+    && observedAtMs !== null
+    && nowMs >= observedAtMs
+    && nowMs - observedAtMs < leaseMs;
+}
+
+export function pendingTurnLeaseIsFresh(
+  turn: PendingChatTurn,
+  streamConnected: boolean,
+  nowMs = Date.now(),
+  leaseMs = LIVE_ACTIVITY_LEASE_MS
+) {
+  return activityLeaseIsFresh(streamConnected, turn.started_at_ms, nowMs, leaseMs);
 }
 
 export function pendingTurnMatchesSelection(
