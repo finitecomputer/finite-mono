@@ -43,10 +43,13 @@ const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 pub const DEFAULT_FINITE_PRIVATE_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
 pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "glm-5-2";
+pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
 pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
     "https://avatars.githubusercontent.com/u/274919006?v=4";
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
+const FINITE_SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
+const FINITE_SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
@@ -772,6 +775,27 @@ where
                 "RuntimeSpec omitted the Finite Private secret reference".to_string(),
             ));
         }
+        let mut specialization_bundle = defaults.specialization_bundle.ok_or_else(|| {
+            RunnerError::InvalidRuntimeEnvironment(
+                "Finite Private specialization bundle credential is unavailable".to_string(),
+            )
+        })?;
+        if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
+            return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                "unsupported Finite Private specialization bundle {:?}",
+                specialization_bundle.bundle_id
+            )));
+        }
+        specialization_bundle.worker_api_key =
+            specialization_bundle.worker_api_key.trim().to_owned();
+        if specialization_bundle.worker_api_key.is_empty()
+            || specialization_bundle.worker_api_key.len()
+                > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "Finite Private specialization worker credential is empty or oversized".to_string(),
+            ));
+        }
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -784,6 +808,7 @@ where
                 base_url: defaults.base_url,
                 model: defaults.model,
                 revoke_on_launch_failure: false,
+                specialization_bundle,
             });
             return Ok(options);
         }
@@ -805,6 +830,7 @@ where
             base_url: defaults.base_url,
             model: defaults.model,
             revoke_on_launch_failure: true,
+            specialization_bundle,
         });
         Ok(options)
     }
@@ -1183,6 +1209,7 @@ pub struct FinitePrivateRuntimeDefaults {
     pub base_url: String,
     pub model: String,
     pub api_key_override: Option<String>,
+    pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 impl Default for FinitePrivateRuntimeDefaults {
@@ -1191,7 +1218,24 @@ impl Default for FinitePrivateRuntimeDefaults {
             base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
             model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
             api_key_override: None,
+            specialization_bundle: None,
         }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SpecializationBundleRuntimeDefaults {
+    pub bundle_id: String,
+    pub worker_api_key: String,
+}
+
+impl std::fmt::Debug for SpecializationBundleRuntimeDefaults {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpecializationBundleRuntimeDefaults")
+            .field("bundle_id", &self.bundle_id)
+            .field("worker_api_key", &"<redacted>")
+            .finish()
     }
 }
 
@@ -1376,6 +1420,7 @@ pub struct FinitePrivateLaunchKey {
     pub base_url: String,
     pub model: String,
     pub revoke_on_launch_failure: bool,
+    pub specialization_bundle: SpecializationBundleRuntimeDefaults,
 }
 
 fn provisioned_key_to_revoke(options: &RuntimeLaunchOptions) -> Option<String> {
@@ -1577,6 +1622,8 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
             | "FINITECHAT_HERMES_PROVIDER"
             | "FINITECHAT_HERMES_BASE_URL"
             | "FINITECHAT_HERMES_API_MODE"
+            | "FINITE_SPECIALIZATION_BUNDLE"
+            | "FINITE_SPECIALIZATION_WORKER_API_KEY"
             | "OPENAI_API_KEY"
     )
 }
@@ -1596,6 +1643,7 @@ impl std::fmt::Debug for FinitePrivateLaunchKey {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("revoke_on_launch_failure", &self.revoke_on_launch_failure)
+            .field("specialization_bundle", &self.specialization_bundle)
             .finish()
     }
 }
@@ -2436,6 +2484,14 @@ fn docker_equivalent_runtime_env(
             (
                 "OPENAI_API_KEY".to_string(),
                 finite_private.raw_api_key.clone(),
+            ),
+            (
+                FINITE_SPECIALIZATION_BUNDLE_ENV.to_string(),
+                finite_private.specialization_bundle.bundle_id.clone(),
+            ),
+            (
+                FINITE_SPECIALIZATION_WORKER_API_KEY_ENV.to_string(),
+                finite_private.specialization_bundle.worker_api_key.clone(),
             ),
         ]);
     }
@@ -3297,6 +3353,20 @@ mod tests {
     };
     use std::collections::VecDeque;
 
+    fn specialization_bundle_defaults() -> SpecializationBundleRuntimeDefaults {
+        SpecializationBundleRuntimeDefaults {
+            bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
+            worker_api_key: "specialization-worker-secret".to_owned(),
+        }
+    }
+
+    fn finite_private_defaults() -> FinitePrivateRuntimeDefaults {
+        FinitePrivateRuntimeDefaults {
+            specialization_bundle: Some(specialization_bundle_defaults()),
+            ..FinitePrivateRuntimeDefaults::default()
+        }
+    }
+
     #[test]
     fn captured_provider_output_is_drained_before_the_child_exits() {
         let child = Command::new("sh")
@@ -3966,7 +4036,7 @@ mod tests {
             ("XAI_API_KEY".to_string(), "unused-value".to_string()),
         ]))
         .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4036,7 +4106,7 @@ mod tests {
             300,
         )
         .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4056,6 +4126,15 @@ mod tests {
         assert_eq!(finite_private.base_url, DEFAULT_FINITE_PRIVATE_BASE_URL);
         assert_eq!(finite_private.model, DEFAULT_FINITE_PRIVATE_MODEL);
         assert_eq!(finite_private.model, "glm-5-2");
+        assert_eq!(
+            finite_private.specialization_bundle.bundle_id,
+            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
+        );
+        assert_eq!(
+            finite_private.specialization_bundle.worker_api_key,
+            "specialization-worker-secret"
+        );
+        assert!(!format!("{finite_private:?}").contains("specialization-worker-secret"));
         assert_eq!(runner.queue.registered.len(), 1);
         assert_eq!(
             runner.queue.registered[0]
@@ -4079,7 +4158,7 @@ mod tests {
         .unwrap()
         .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
             api_key_override: Some("fpk_operator_valid".to_string()),
-            ..FinitePrivateRuntimeDefaults::default()
+            ..finite_private_defaults()
         });
 
         let outcome = runner.run_once().unwrap();
@@ -4106,7 +4185,7 @@ mod tests {
             300,
         )
         .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4128,6 +4207,31 @@ mod tests {
     }
 
     #[test]
+    fn run_once_fails_closed_when_specialization_bundle_credential_is_missing() {
+        let lease = sample_lease("agent_request_123");
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
+        assert_eq!(runner.launcher.launch_count, 0);
+        assert!(runner.queue.provisioned.is_empty());
+        assert!(
+            runner.queue.failed[0]
+                .failure_message
+                .contains("specialization bundle credential is unavailable")
+        );
+    }
+
+    #[test]
     fn run_once_revokes_default_finite_private_key_when_launch_fails() {
         let lease = sample_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
@@ -4138,7 +4242,7 @@ mod tests {
             300,
         )
         .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4165,7 +4269,7 @@ mod tests {
         .unwrap()
         .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
             api_key_override: Some("fpk_operator_valid".to_string()),
-            ..FinitePrivateRuntimeDefaults::default()
+            ..finite_private_defaults()
         });
 
         let outcome = runner.run_once().unwrap();
@@ -4385,6 +4489,7 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
+                specialization_bundle: specialization_bundle_defaults(),
             }),
             profile_picture_url: None,
             environment: BTreeMap::from([(
@@ -4421,6 +4526,16 @@ mod tests {
         );
         assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
         assert_env(&env, "OPENAI_API_KEY", "fpk_live_test");
+        assert_env(
+            &env,
+            FINITE_SPECIALIZATION_BUNDLE_ENV,
+            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
+        );
+        assert_env(
+            &env,
+            FINITE_SPECIALIZATION_WORKER_API_KEY_ENV,
+            "specialization-worker-secret",
+        );
         assert_env(&env, "FINITE_SITES_API", "http://192.168.64.1:18789");
         assert!(
             env.iter()
@@ -4474,6 +4589,7 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
+                specialization_bundle: specialization_bundle_defaults(),
             }),
             profile_picture_url: Some("https://chat.finite.computer/blobs/profile".to_string()),
             environment: BTreeMap::from([(
@@ -4721,6 +4837,7 @@ mod tests {
                 base_url: "http://192.168.64.1:18002/v1".to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
+                specialization_bundle: specialization_bundle_defaults(),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -4819,6 +4936,7 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
+                specialization_bundle: specialization_bundle_defaults(),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
