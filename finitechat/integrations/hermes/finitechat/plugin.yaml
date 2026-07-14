@@ -1,6 +1,6 @@
 name: finitechat
 kind: platform
-version: 0.3.0
+version: 0.4.0
 description: >
   Finite Chat platform adapter for Hermes. Connects Hermes to E2EE Finite
   Chat rooms through the resident finitechat service. A user Device starts a
@@ -8,8 +8,6 @@ description: >
   agent does not create an invite session or choose a room at startup. All
   message senders are MLS-authenticated.
 author: finitecomputer
-provides_tools:
-  - aeon_interpret
 requires_env:
   - name: FINITECHAT_HOME
     description: >
