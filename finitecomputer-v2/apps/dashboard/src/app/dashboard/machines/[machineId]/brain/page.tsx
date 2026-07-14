@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { BrainIcon } from "lucide-react";
 
+import { BrainFrame } from "@/components/brain-frame";
 import { PageHeader } from "@/components/page-header";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
@@ -21,14 +22,7 @@ export default async function MachineBrainPage({
     <div className="space-y-6">
       <PageHeader title="Brain" description={`What ${access.displayName} remembers.`} />
       {enabled ? (
-        <div className="h-[calc(100vh-12rem)] min-h-[36rem] overflow-hidden rounded-[var(--radius-card)] border border-border bg-card">
-          <iframe
-            className="size-full border-0"
-            src="/client"
-            title={`${access.displayName} Brain`}
-            allow="clipboard-read; clipboard-write"
-          />
-        </div>
+        <BrainFrame title={`${access.displayName} Brain`} />
       ) : (
         <main className="finite-product-surface__empty rounded-[var(--radius-card)] border border-border bg-card">
           <BrainIcon className="size-10" />

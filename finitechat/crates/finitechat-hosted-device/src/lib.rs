@@ -17,7 +17,18 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use finite_brain_core::{
+    AdminAccessAction, AdminAccessChangeValidation, BRAIN_IDENTITY_PROVIDER_VERSION,
+    BrainEventAuthorizationIntent, BrainGrantIntent, BrainHttpAuthorizationIntent, FolderId,
+    FolderKey, IssuedFolderKeyGrant, PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS, VaultId,
+    issue_admin_access_change_event, issue_folder_key_grant,
+    issue_personal_vault_bootstrap_authorization_event, open_folder_key_grant,
+    sign_brain_event_template, validate_brain_event_authorization_intent,
+    validate_brain_grant_intent, validate_brain_http_authorization_intent,
+    wrap_brain_invite_bootstrap,
+};
 use finite_identity::{FiniteIdentity, IdentityPaths};
+use finite_nostr::NostrPublicKey;
 use finitechat_core::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkEncryptInput, encrypt_device_link_payload,
 };
@@ -36,6 +47,7 @@ use finitechat_proto::{
     RuntimeCommandResultV1, RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
 };
 use futures_util::{Stream, StreamExt};
+use nostr::{Keys, SecretKey};
 use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
@@ -43,6 +55,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
 const CREATED_BY: &str = concat!("finitechat-hosted-device/", env!("CARGO_PKG_VERSION"));
@@ -76,6 +90,9 @@ const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
+const MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES: usize = 8 * 1024;
+const MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES: usize = 1024 * 1024;
+const BRAIN_PUBLIC_ORIGIN_HEADER: &str = "x-finite-brain-public-origin";
 // A prepared one-member MLS commit can contain a Welcome, ratchet tree, and
 // envelope near their protocol ceilings. The sealed JSON v1 representation
 // encodes byte vectors as integer arrays, so its bounded disk form needs more
@@ -234,6 +251,12 @@ pub enum HostedDeviceError {
     AgentBindingNotFound,
     #[error("canonical Agent conversation requires recovery: {0}")]
     AgentBindingInvalid(String),
+    #[error("invalid Brain bootstrap authorization request: {0}")]
+    InvalidBrainBootstrapAuthorization(String),
+    #[error("Finite Chat Hosted Device setup is required before opening Brain")]
+    BrainIdentitySetupRequired,
+    #[error("invalid Brain Identity Provider request: {0}")]
+    InvalidBrainIdentityProvider(String),
     #[error("new chat must stay in the canonical Agent conversation: {0}")]
     CanonicalChatConflict(String),
     #[error("hosted chat state could not be inspected: {0}")]
@@ -252,9 +275,12 @@ impl IntoResponse for HostedDeviceError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::MissingUser | Self::InvalidUser | Self::InvalidMultipart(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::MissingUser
+            | Self::InvalidUser
+            | Self::InvalidMultipart(_)
+            | Self::InvalidBrainBootstrapAuthorization(_)
+            | Self::InvalidBrainIdentityProvider(_) => StatusCode::BAD_REQUEST,
+            Self::BrainIdentitySetupRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::AttachmentNotFound | Self::DeviceLinkNotFound | Self::AgentBindingNotFound => {
                 StatusCode::NOT_FOUND
@@ -370,6 +396,18 @@ fn app_with_test_options(
             "/v1/app/agent-bindings/authorize-bootstrap",
             post(authorize_agent_binding_bootstrap)
                 .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
+        )
+        .route(
+            "/v1/brain/personal-vault-bootstrap-authorizations",
+            post(issue_personal_vault_bootstrap_authorization).layer(DefaultBodyLimit::max(
+                MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/v1/brain/identity-provider",
+            post(execute_brain_identity_provider_operation).layer(DefaultBodyLimit::max(
+                MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES,
+            )),
         )
         .route(
             "/v1/app/images",
@@ -1201,6 +1239,26 @@ fn random_runtime_request_id() -> Result<String, HostedDeviceError> {
     Ok(format!("runtime-{}", hex::encode(entropy)))
 }
 
+fn random_brain_bootstrap_authorization_id() -> Result<String, HostedDeviceError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        HostedDeviceError::Task(format!(
+            "Brain bootstrap authorization id generation failed: {error}"
+        ))
+    })?;
+    Ok(format!("brain-bootstrap-{}", hex::encode(entropy)))
+}
+
+fn random_brain_grant_id() -> Result<String, HostedDeviceError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        HostedDeviceError::Task(format!(
+            "Brain Folder Key Grant id generation failed: {error}"
+        ))
+    })?;
+    Ok(format!("brain-grant-{}", hex::encode(entropy)))
+}
+
 const fn default_runtime_command_wait_millis() -> u64 {
     45_000
 }
@@ -1242,6 +1300,73 @@ struct EnsureAgentBindingRequest {
 struct AuthorizeAgentBindingBootstrapRequest {
     project_id: String,
     creation_request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuePersonalVaultBootstrapAuthorizationRequest {
+    agent_npub: String,
+    vault_id: String,
+    workspace_folder_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuePersonalVaultBootstrapAuthorizationResponse {
+    authorization_id: String,
+    owner_npub: String,
+    agent_npub: String,
+    vault_id: String,
+    name: String,
+    folder_id: String,
+    folder_name: String,
+    folder_path: String,
+    workspace_folder_id: String,
+    expires_at: u64,
+    bootstrap_grants: Vec<BrainBootstrapFolderGrant>,
+    workspace_grants: Vec<IssuedFolderKeyGrant>,
+    bootstrap_authorization: nostr::Event,
+    access_change_event: nostr::Event,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrainBootstrapFolderGrant {
+    folder_id: String,
+    grant: IssuedFolderKeyGrant,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrainIdentityProviderRequest {
+    version: String,
+    operation: String,
+    #[serde(default)]
+    input: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenBrainGrantPayloadInput {
+    #[serde(flatten)]
+    grant: BrainGrantIntent,
+    wrapped_event_json: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WrapBrainGrantPayloadInput {
+    #[serde(flatten)]
+    grant: BrainGrantIntent,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    folder_key: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    created_at_unix_seconds: u64,
+    #[serde(default)]
+    plaintext: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1299,6 +1424,338 @@ struct HostedAgentBindingResponse {
 #[derive(Serialize)]
 struct AuthorizeAgentBindingBootstrapResponse {
     status: &'static str,
+}
+
+async fn execute_brain_identity_provider_operation(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(request): Json<BrainIdentityProviderRequest>,
+) -> Result<Json<Value>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let official_origin = headers
+        .get(BRAIN_PUBLIC_ORIGIN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            HostedDeviceError::InvalidBrainIdentityProvider(
+                "trusted Brain origin is required".to_owned(),
+            )
+        })?
+        .to_owned();
+    if request.version != BRAIN_IDENTITY_PROVIDER_VERSION {
+        return Err(HostedDeviceError::InvalidBrainIdentityProvider(
+            "unsupported provider version".to_owned(),
+        ));
+    }
+
+    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let keys = brain_user_keys_if_setup(&state, &user_id)?;
+        match request.operation.as_str() {
+            "identifyMember" => {
+                let public_key = NostrPublicKey::from_protocol(keys.public_key());
+                Ok(json!({
+                    "publicKeyHex": public_key.to_hex(),
+                    "npub": public_key.to_npub().map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?,
+                }))
+            }
+            "authorizeHttpRequest" => {
+                let input: BrainHttpAuthorizationIntent = serde_json::from_value(request.input)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                validate_brain_http_authorization_intent(&input, &official_origin).map_err(
+                    |error| HostedDeviceError::InvalidBrainIdentityProvider(error.to_string()),
+                )?;
+                let event =
+                    sign_brain_event_template(&keys, &input.event_template).map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                serde_json::to_value(event).map_err(HostedDeviceError::from)
+            }
+            "authorizeBrainEvent" => {
+                let input: BrainEventAuthorizationIntent = serde_json::from_value(request.input)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                let signer_npub = NostrPublicKey::from_protocol(keys.public_key())
+                    .to_npub()
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                validate_brain_event_authorization_intent(&input, &signer_npub).map_err(
+                    |error| HostedDeviceError::InvalidBrainIdentityProvider(error.to_string()),
+                )?;
+                let event =
+                    sign_brain_event_template(&keys, &input.event_template).map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                serde_json::to_value(event).map_err(HostedDeviceError::from)
+            }
+            "openGrantPayload" => {
+                let input: OpenBrainGrantPayloadInput = serde_json::from_value(request.input)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                if input.wrapped_event_json.is_empty() {
+                    return Err(HostedDeviceError::InvalidBrainIdentityProvider(
+                        "Folder Key Grant wrapper is required".to_owned(),
+                    ));
+                }
+                let plaintext =
+                    open_folder_key_grant(&keys, &input.grant, &input.wrapped_event_json).map_err(
+                        |error| HostedDeviceError::InvalidBrainIdentityProvider(error.to_string()),
+                    )?;
+                Ok(json!({ "plaintext": plaintext }))
+            }
+            "wrapGrantPayload" => {
+                let input: WrapBrainGrantPayloadInput = serde_json::from_value(request.input)
+                    .map_err(|error| {
+                        HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                    })?;
+                validate_brain_grant_intent(&input.grant).map_err(|error| {
+                    HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                })?;
+                match input.grant.purpose.as_str() {
+                    "folder-key-grant" => {
+                        let id = input.id.ok_or_else(|| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(
+                                "Folder Key Grant id is required".to_owned(),
+                            )
+                        })?;
+                        let folder_id =
+                            FolderId::new(input.grant.folder_id.clone().ok_or_else(|| {
+                                HostedDeviceError::InvalidBrainIdentityProvider(
+                                    "Folder Key Grant Folder id is required".to_owned(),
+                                )
+                            })?)
+                            .map_err(|error| {
+                                HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                            })?;
+                        let key_version = input.grant.key_version.ok_or_else(|| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(
+                                "Folder Key Grant key version is required".to_owned(),
+                            )
+                        })?;
+                        let folder_key =
+                            FolderKey::from_base64(input.folder_key.as_deref().unwrap_or_default())
+                                .map_err(|error| {
+                                    HostedDeviceError::InvalidBrainIdentityProvider(
+                                        error.to_string(),
+                                    )
+                                })?;
+                        let created_at = input.created_at.ok_or_else(|| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(
+                                "Folder Key Grant createdAt is required".to_owned(),
+                            )
+                        })?;
+                        let vault_id = VaultId::new(input.grant.vault_id).map_err(|error| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                        })?;
+                        let grant = issue_folder_key_grant(
+                            &keys,
+                            id,
+                            &vault_id,
+                            &folder_id,
+                            key_version,
+                            input.grant.recipient_npub,
+                            &folder_key,
+                            created_at,
+                            input.created_at_unix_seconds,
+                        )
+                        .map_err(|error| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                        })?;
+                        Ok(json!({ "grant": grant }))
+                    }
+                    "vault-invite-bootstrap" => {
+                        let plaintext = input.plaintext.ok_or_else(|| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(
+                                "Email Invite Bootstrap plaintext is required".to_owned(),
+                            )
+                        })?;
+                        let wrapped = wrap_brain_invite_bootstrap(
+                            &keys,
+                            &input.grant,
+                            &plaintext,
+                            input.created_at_unix_seconds,
+                        )
+                        .map_err(|error| {
+                            HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+                        })?;
+                        Ok(json!({ "wrappedEventJson": wrapped.as_json() }))
+                    }
+                    _ => Err(HostedDeviceError::InvalidBrainIdentityProvider(
+                        "unsupported Brain grant purpose".to_owned(),
+                    )),
+                }
+            }
+            _ => Err(HostedDeviceError::InvalidBrainIdentityProvider(
+                "unsupported Brain Identity Provider operation".to_owned(),
+            )),
+        }
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+fn brain_user_keys_if_setup(
+    state: &HostedDeviceState,
+    user_id: &str,
+) -> Result<Keys, HostedDeviceError> {
+    let user_root = state.user_root(user_id);
+    let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
+    let identity_exists = path_exists(&identity_paths.identity_file())?;
+    let store_exists = path_exists(&user_root.join("chat/client.sqlite3"))?;
+    if !identity_exists && !store_exists {
+        return Err(HostedDeviceError::BrainIdentitySetupRequired);
+    }
+    if identity_exists != store_exists {
+        return Err(HostedDeviceError::IncompleteUserState);
+    }
+    let identity = FiniteIdentity::load(&identity_paths)?;
+    let secret = SecretKey::from_slice(&identity.expose_secret_bytes()).map_err(|_| {
+        HostedDeviceError::InvalidBrainIdentityProvider(
+            "Hosted Device User Key is invalid".to_owned(),
+        )
+    })?;
+    Ok(Keys::new(secret))
+}
+
+async fn issue_personal_vault_bootstrap_authorization(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(input): Json<IssuePersonalVaultBootstrapAuthorizationRequest>,
+) -> Result<Json<IssuePersonalVaultBootstrapAuthorizationResponse>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let vault_id = VaultId::new(input.vault_id).map_err(|error| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+        })?;
+        let workspace_folder_id = FolderId::new(input.workspace_folder_id).map_err(|error| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+        })?;
+        let runtime = state.runtime_for(&user_id)?;
+        let identity = runtime.state()?.identity;
+        let secret_bytes = hex::decode(&identity.account_secret_hex).map_err(|_| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(
+                "Hosted Device User Key is invalid".to_owned(),
+            )
+        })?;
+        let secret = SecretKey::from_slice(&secret_bytes).map_err(|_| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(
+                "Hosted Device User Key is invalid".to_owned(),
+            )
+        })?;
+        let owner_keys = Keys::new(secret);
+        let owner_npub = finitechat_core::npub_from_account_id(identity.account_id)?;
+        let created_at = device_link_now(&state)?;
+        let created_at_rfc3339 = OffsetDateTime::from_unix_timestamp(created_at as i64)
+            .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?
+            .format(&Rfc3339)
+            .map_err(|error| {
+                HostedDeviceError::Task(format!("system clock is invalid: {error}"))
+            })?;
+        let authorization_id = random_brain_bootstrap_authorization_id()?;
+        let event = issue_personal_vault_bootstrap_authorization_event(
+            &owner_keys,
+            authorization_id.clone(),
+            input.agent_npub.clone(),
+            &vault_id,
+            &workspace_folder_id,
+            created_at,
+        )
+        .map_err(|error| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+        })?;
+        let access_change_event = issue_admin_access_change_event(
+            &owner_keys,
+            &AdminAccessChangeValidation {
+                vault_id: vault_id.clone(),
+                change_id: format!("agent-first-workspace-{authorization_id}"),
+                action: AdminAccessAction::SetFolderAccessMode,
+                admin_npub: owner_npub.clone(),
+                folder_id: Some(workspace_folder_id.clone()),
+                target_npub: None,
+                key_version: Some(1),
+                note: None,
+                created_at: created_at_rfc3339.clone(),
+            },
+            created_at,
+        )
+        .map_err(|error| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+        })?;
+        let mut bootstrap_grants = Vec::with_capacity(2);
+        for folder_id in [
+            FolderId::new("getting-started"),
+            FolderId::new("restricted"),
+        ] {
+            let folder_id = folder_id.map_err(|error| {
+                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+            })?;
+            let folder_key = FolderKey::generate();
+            let grant = issue_folder_key_grant(
+                &owner_keys,
+                random_brain_grant_id()?,
+                &vault_id,
+                &folder_id,
+                1,
+                owner_npub.clone(),
+                &folder_key,
+                created_at_rfc3339.clone(),
+                created_at,
+            )
+            .map_err(|error| {
+                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+            })?;
+            bootstrap_grants.push(BrainBootstrapFolderGrant {
+                folder_id: folder_id.to_string(),
+                grant,
+            });
+        }
+        let workspace_key = FolderKey::generate();
+        let mut workspace_grants = Vec::with_capacity(2);
+        for recipient in [&owner_npub, &input.agent_npub] {
+            let grant = issue_folder_key_grant(
+                &owner_keys,
+                random_brain_grant_id()?,
+                &vault_id,
+                &workspace_folder_id,
+                1,
+                recipient.clone(),
+                &workspace_key,
+                created_at_rfc3339.clone(),
+                created_at,
+            )
+            .map_err(|error| {
+                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+            })?;
+            workspace_grants.push(grant);
+        }
+        Ok(IssuePersonalVaultBootstrapAuthorizationResponse {
+            authorization_id,
+            owner_npub,
+            agent_npub: input.agent_npub,
+            vault_id: vault_id.to_string(),
+            name: "Personal Brain".to_owned(),
+            folder_id: workspace_folder_id.to_string(),
+            folder_name: "Agent Workspace".to_owned(),
+            folder_path: "Agent Workspace".to_owned(),
+            workspace_folder_id: workspace_folder_id.to_string(),
+            expires_at: created_at + PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS,
+            bootstrap_grants,
+            workspace_grants,
+            bootstrap_authorization: event,
+            access_change_event,
+        })
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
 }
 
 async fn open_agent_binding(

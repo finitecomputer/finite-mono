@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { proxyBrainRequest } from "@/lib/brain-proxy";
+import { brainOpaqueCorsPreflight, proxyBrainRequest } from "@/lib/brain-proxy";
 
 type RouteContext = {
   params: Promise<{ path?: string[] }>;
@@ -17,3 +17,4 @@ export const POST = proxy;
 export const PUT = proxy;
 export const PATCH = proxy;
 export const DELETE = proxy;
+export const OPTIONS = brainOpaqueCorsPreflight;

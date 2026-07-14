@@ -9,7 +9,7 @@ use crate::{
     current_timestamp, to_from_sql_error,
 };
 
-pub(super) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreError> {
+pub(crate) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreError> {
     if input.record_event_id().trim().is_empty() {
         return Err(StoreError::InvalidRecord {
             reason: "record event id is required".to_owned(),
@@ -51,7 +51,7 @@ pub(super) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreEr
     Ok(())
 }
 
-pub(super) fn existing_sequence(
+pub(crate) fn existing_sequence(
     tx: &Transaction<'_>,
     vault_id: &VaultId,
     event_id: &str,
@@ -65,7 +65,7 @@ pub(super) fn existing_sequence(
     .map_err(StoreError::from)
 }
 
-pub(super) fn next_sequence(tx: &Transaction<'_>, vault_id: &VaultId) -> Result<u64, StoreError> {
+pub(crate) fn next_sequence(tx: &Transaction<'_>, vault_id: &VaultId) -> Result<u64, StoreError> {
     let next = tx.query_row(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM vault_record_index WHERE vault_id = ?1",
         params![vault_id.as_str()],
@@ -74,7 +74,7 @@ pub(super) fn next_sequence(tx: &Transaction<'_>, vault_id: &VaultId) -> Result<
     Ok(next)
 }
 
-pub(super) fn validate_sync_conflict(
+pub(crate) fn validate_sync_conflict(
     tx: &Transaction<'_>,
     vault_id: &VaultId,
     input: &SyncRecordInput,
@@ -157,7 +157,7 @@ pub(super) fn validate_sync_conflict(
     Ok(())
 }
 
-pub(super) fn insert_sync_record(
+pub(crate) fn insert_sync_record(
     tx: &Transaction<'_>,
     vault_id: &VaultId,
     sequence: u64,
@@ -189,7 +189,7 @@ pub(super) fn insert_sync_record(
     Ok(())
 }
 
-pub(super) fn project_sync_record(
+pub(crate) fn project_sync_record(
     tx: &Transaction<'_>,
     vault_id: &VaultId,
     input: &SyncRecordInput,

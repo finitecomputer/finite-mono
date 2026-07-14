@@ -117,6 +117,36 @@ is not itself a decryption key. Brain must issue current Folder Key Grants to
 the agent npub for every Folder the delegation makes readable; revoking the
 delegation must stop future authorization without rebinding either identity.
 
+The first user-owned pairing surface is
+`POST /_admin/vaults/{vault_id}/agent-workspace-pairings`. The Personal Vault
+owner signs the HTTP request and the included Folder access-change event, and
+supplies current NIP-59 grants for both the owner and the distinct Agent
+Principal. Brain atomically records the active delegation, non-admin
+membership, dedicated restricted Agent Workspace Folder, Folder Access, and
+grants. An exact retry returns the same delegation with `duplicate: true`.
+Owners inspect the durable scope and audit record with `GET` on the same path.
+This route is Brain-specific; other services own separate adapters and
+delegations.
+
+For the agent-first path, an explicit Chat setup action issues a short-lived
+bundle through
+`POST /v1/brain/personal-vault-bootstrap-authorizations`; the agent forwards it
+to `POST /_admin/personal-vault-bootstrap` using its own signed request. The
+Personal Vault owner expands a pairing one restricted Folder at a time through
+the pairing's `/folders/{folder_id}` route and revokes it through `DELETE` on
+the pairing resource. Revocation requires next-version grants and complete
+live-object re-encryption for every Folder in the current delegated scope.
+
+Hosted `/client` uses `finite-brain-identity-provider-v1` through the
+WorkOS-bound dashboard bridge. The dashboard injects a signed, expiring
+capability into a server-sandboxed Brain frame. For every operation, the parent
+dashboard supplies a short-lived proof bound to that exact request and its live
+WorkOS session; the parent never receives the frame capability, and ordinary
+dashboard code has no ambient signer route. The custody executor loads the existing Chat Hosted
+Device User Key and never returns it or performs arbitrary NIP-44 operations;
+without prior Chat setup, Brain shows setup-required and does not mint a
+replacement identity.
+
 External email redemption is recorded as email-only identity proof in
 finite-identity, but FiniteBrain folder sharing still requires an npub target
 for encrypted Folder Key Grants. Email-address folder grants are intentionally

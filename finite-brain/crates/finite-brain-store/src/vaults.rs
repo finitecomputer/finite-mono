@@ -54,7 +54,18 @@ impl BrainStore {
                   ON va.vault_id = v.id AND va.user_id = ?1
                 LEFT JOIN vault_members vm
                   ON vm.vault_id = v.id AND vm.user_id = ?1
-                WHERE v.owner_user_id = ?1 OR vm.user_id IS NOT NULL
+                WHERE v.owner_user_id = ?1
+                   OR (
+                       vm.user_id IS NOT NULL
+                       AND (
+                           v.kind = 'organization'
+                           OR EXISTS (
+                               SELECT 1
+                               FROM folder_access fa
+                               WHERE fa.vault_id = v.id AND fa.user_id = ?1
+                           )
+                       )
+                   )
 
                 UNION ALL
 

@@ -42,8 +42,11 @@ There are three relevant trust zones.
 
 Trusted local client:
 
-- Holds the active User's Nostr signing capability through a NIP-07 provider.
-- Uses NIP-44 encryption/decryption exposed by that provider.
+- Uses the active Member Identity through FiniteBrain's bounded Brain Identity
+  Provider.
+- Uses only the provider's validated Brain operations to authorize a request or
+  open a scoped Folder Key Grant. NIP-07 may be an internal adapter seam, not a
+  browser-wide capability contract.
 - Opens Folder Key Grants into an in-memory session keyring.
 - Encrypts plaintext Page content before uploading it.
 - Decrypts accessible ciphertext after sync.
@@ -87,23 +90,56 @@ Changing Nostr identity creates a new User from the access-control perspective.
 Nostr key loss means existing Folder Key Grants cannot be decrypted by the new
 identity.
 
-A product-scoped Email Access Delegation may authorize a distinct Agent
-Principal to exercise one verified email Principal's FiniteBrain grants, but it
-does not change either identity and never substitutes for cryptographic access.
-Every readable Folder still requires a current Folder Key Grant addressed to
-the agent npub. Sites delegations have no effect in FiniteBrain, and revocation
-must be independently enforceable here.
+A product-scoped Email Access Delegation may record one verified email
+Principal's explicit authorization for a distinct Agent Principal to receive
+product-owned, folder-scoped FiniteBrain access. It does not change either
+identity and never substitutes for explicit Brain access or cryptographic
+access. Every readable Folder still requires current Brain Folder Access and a
+Folder Key Grant addressed to the agent npub. Sites delegations have no effect
+in FiniteBrain, and revocation must be independently enforceable here.
 
-### 3.2 Browser Signing Interface
+### 3.2 Brain Identity Provider
 
-The browser client expects a NIP-07 provider with:
+The official Product Client uses a versioned, bounded Brain Identity Provider.
+It identifies the acting Member, authorizes Brain-bound requests and revisions,
+and opens or wraps appropriately scoped Folder Key Grants. It never exposes a
+raw identity secret or generic sign/decrypt operation to browser code.
 
-- `getPublicKey()`
-- `signEvent(event)`
-- `nip44.encrypt(pubkey, plaintext)`
-- `nip44.decrypt(pubkey, ciphertext)`
+Hosted Web, Electron, and iOS adapters implement this contract for the same
+User Nostr Identity despite different key custody. A NIP-07-shaped provider may
+remain inside an adapter for compatibility, but it is not the public Product
+Client contract.
 
-The client wraps this as a `VaultCryptoProvider`.
+The Product Client continues to hold Session Folder Keys and performs content
+encryption/decryption after a validated grant is opened.
+
+Only the official Brain Product Client may invoke this provider. Ordinary
+dashboard pages, Finite Sites content, and embedded frames never receive it or
+use it as a general signing/decryption capability.
+
+The hosted phase exposes the exact `finite-brain-identity-provider-v1`
+operations `identifyMember`, `authorizeHttpRequest`, `authorizeBrainEvent`,
+`openGrantPayload`, and `wrapGrantPayload`. The WorkOS-protected dashboard
+bridge injects a signed, expiring capability only into a genuine `/client`
+iframe navigation, and the response CSP plus iframe sandbox give that client
+an opaque browser origin. Every provider request also requires a short-lived
+proof bound to its exact body and minted by the authenticated parent dashboard.
+The frame keeps the capability, the parent proves its WorkOS session is still
+live, and neither alone can invoke custody. The internal call remains bound to
+the verified WorkOS user plus the trusted public Brain origin. The Hosted Device executor loads an already-created User Key; it MUST
+return setup-required rather than generate a key when Chat setup is absent.
+Account logout or expiry makes the bridge unavailable and the Product Client
+locks its in-memory session. That does not revoke an Agent Principal's separate
+Brain grants.
+
+The hosted compatibility adapter MUST bind HTTP authorization to the official
+Brain origin, a protected Brain route, the exact method, and the exact request
+body. Event authorization MUST validate canonical typed payloads and exact tags,
+not only an event kind or `d` prefix. `openGrantPayload` MUST open a complete
+NIP-59 Folder Key Grant only when its recipient, issuer, Vault, Folder, key
+version, payload, and tags agree. `wrapGrantPayload` MUST accept a typed Folder
+Key Grant or Email Invite Bootstrap contract, never arbitrary peer/ciphertext
+input.
 
 ### 3.3 HTTP Authorization
 
@@ -155,8 +191,11 @@ authorization. Metadata, Vault creation, secure object, sync, folder grant,
 access, sharing, and invitation routes do not accept `X-Actor-User-Id` as an
 authorization bridge.
 
-Creating a Vault with `POST /_admin/vaults` requires Nostr authorization. The
-created Vault owner/admin is the signer npub, not a caller-supplied `userId`.
+Creating a Vault with `POST /_admin/vaults` requires Nostr authorization. An
+owner-signed bootstrap names the signer as the Personal Vault owner; the sole
+exception is the explicitly user-approved delegated bootstrap in Section 4.8,
+which names its authorized User Nostr Identity as owner. No route accepts an
+arbitrary caller-supplied `userId` as authority.
 
 ## 4. Core Domain Model
 
@@ -184,7 +223,13 @@ Personal Vault:
   - `getting-started`: role `personal_home`, access `owner`
   - `restricted`: role `folder`, access `restricted`
 - Does not use ordinary organization membership/admin lists for the owner.
-- May contain limited members only when sharing a source Folder.
+- May contain limited Member Identities only for explicitly shared restricted
+  Folders. A limited Personal Vault Member is neither an owner nor an admin and
+  does not inherit access to any other Folder.
+- Each initial user-agent pairing uses a dedicated restricted **Agent Workspace
+  Folder**. The Personal Vault owner and the paired Agent Principal each receive
+  their own Folder Key Grant for that Folder; the agent receives no access to
+  the owner-only `getting-started` Folder.
 
 Organization Vault:
 
@@ -465,9 +510,40 @@ Vault bootstrap is the first atomic access-control boundary.
 Personal Vault bootstrap:
 
 - Create one Vault with `kind: "personal"` and `ownerUserId` equal to the
-  acting User.
+  user for whom the Personal Vault is being created. A user-signed path names
+  its acting User as the owner. A Chat-triggered agent path requires an explicit
+  user-approved **Personal Vault Bootstrap Authorization** and still names that
+  user, never the agent, as the owner. The authorization is short-lived,
+  single-use, and bound to that user, that Agent Principal, and the initial
+  Agent Workspace Folder.
 - Create the default personal wiki scope Folders from Section 4.1 with current
   key version `1` and Folder Key Grants for the owner.
+- When a valid agent pairing is present, atomically create the dedicated Agent
+  Workspace Folder, add the Agent Principal as a limited Member, record its
+  Folder Access, record the durable Brain Email Access Delegation, and store
+  current Folder Key Grants for both the owner and the Agent Principal. The
+  agent is not an admin and receives no owner-folder grant.
+- In the first user-first implementation, the owner calls
+  `POST /_admin/vaults/{vaultId}/agent-workspace-pairings` after ensuring the
+  Personal Vault. The signed request includes the distinct agent npub, the
+  dedicated Folder metadata, the owner-signed access-change event, and current
+  NIP-59 grants for the owner and agent. Exact retries return the same durable
+  delegation; `GET` on the same path exposes its fixed initial scope, lifecycle
+  state, and audit record to the owner.
+- The user-first and agent-first paths MUST converge on the same single
+  Personal Vault for that owner. A failed or unauthorized delegated bootstrap
+  MUST create neither a user-owned Vault nor an agent-accessible Folder.
+- A successful agent-first bootstrap MUST atomically consume its Personal Vault
+  Bootstrap Authorization. Replay, expiry, a different user, a different Agent
+  Principal, a different Folder scope, or a later access expansion MUST fail.
+- The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
+  Chat's explicit setup action obtains the bounded request bundle from
+  `POST /v1/brain/personal-vault-bootstrap-authorizations`; the Agent Principal
+  forwards that bundle and signs the protected Brain request as itself. The
+  bundle includes both the one-use bootstrap authorization and the owner's
+  canonical Agent Workspace access-change event; Brain verifies that both name
+  the same owner, Vault, Folder, key version, and Agent Principal before any
+  state is written.
 - Seed ordinary encrypted Folder Objects for default Pages:
   - `AGENTS.md`, `HUMANS.md`, `README.md`, and orientation Pages in
     `getting-started`
@@ -884,13 +960,17 @@ Access is binary:
   cannot open content.
 - Vault Admins have full access to all Folders in an Organization Vault.
 - A Personal Vault owner has access to owner Folders.
+- A limited Personal Vault Member can read and write only explicitly shared
+  restricted Folders for which it holds a current Folder Key Grant. Its metadata
+  view MUST omit owner-only and otherwise inaccessible Folder metadata.
 
 ### 6.2 Required Folder Key Recipients
 
 For any current Folder Key version, recipients are:
 
 - `all_members`: all Vault Members plus all Vault Admins.
-- `restricted`: members listed for that Folder plus all Vault Admins.
+- `restricted`: the Personal Vault owner, plus members listed for that Folder,
+  plus all Organization Vault Admins.
 - `owner`: the Personal Vault owner.
 - `admin_only`: all Vault Admins. In the current helper this is satisfied by
   always adding admins after mode-specific recipients.
@@ -920,17 +1000,47 @@ Adding Folder Access:
 
 - Does not require Folder Key Rotation.
 - Requires Folder Key Grants for each newly added recipient.
-- Requires a signed Vault Admin Access Change with action
-  `grant-folder-access` or the appropriate set/access-mode action.
+- Requires a signed access-change authorization from the controlling Vault
+  authority: a Vault Admin for an Organization Vault, or the Personal Vault
+  owner for Personal Vault scope.
 
 Removing Folder Access:
 
 - Requires Folder Key Rotation.
 - Must re-encrypt every live Folder Object under a new Folder Key version.
 - Must issue Folder Key Grants for every remaining required recipient.
-- Must carry a signed Vault Admin Access Change.
+- Requires a signed access-change authorization from the same controlling Vault
+  authority.
 
-### 6.5 Folder Key Rotation
+### 6.5 Personal Vault Agent Access
+
+The initial agent-first bootstrap may establish the Agent Workspace Folder only
+with the explicit, user-approved, single-use Personal Vault Bootstrap
+Authorization described in Section 4.8. That setup atomically creates the
+durable Brain Email Access Delegation, explicit limited membership and Folder
+Access, and a current Folder Key Grant addressed to the Agent Principal's own
+npub. Once a Personal Vault exists, its owner alone may establish, expand, or
+revoke an Agent Principal's access. The default scope is the Agent Workspace
+Folder; later scope expansion is Folder-by-Folder and never makes the agent an
+owner or admin.
+
+Revocation first disables the Brain Email Access Delegation and removes the
+agent's Folder Access, then rotates every affected Folder Key and re-encrypts
+live Folder Objects for the remaining recipients. It does not claim to erase
+plaintext or prior keys the agent already retained.
+
+The current owner lifecycle routes are:
+
+- `POST /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}/folders/{folderId}`
+  adds exactly one restricted Folder with an agent-addressed current grant.
+- `DELETE /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}` revokes
+  the delegation. Its body MUST contain every Folder in the current delegated
+  scope exactly once, with the next key version, every live object re-encrypted
+  exactly once, grants for all and only the remaining recipients, and an
+  owner-signed removal event per Folder. Brain commits the complete revocation
+  atomically or leaves the active delegation unchanged.
+
+### 6.6 Folder Key Rotation
 
 Rotation request:
 
@@ -1938,8 +2048,9 @@ User-facing framing:
 - "No access" means Folder Access or a usable Folder Key Grant is missing.
 - "Finish setup" means Folder metadata exists but current Folder Key Grants are
   missing for an empty Folder.
-- "Reconnect signer" means no NIP-07/NIP-44 capable signer is available, or the
-  signer key does not match the acting User.
+- "Reconnect signer" means no compatible Brain Identity Provider (or its
+  underlying NIP-07/NIP-44 adapter) is available, or the active key does not
+  match the acting Member Identity.
 
 ## 16. Security And Privacy Invariants
 
@@ -1950,8 +2061,11 @@ Compatible implementations MUST preserve these invariants:
 - The server never needs a Folder Key to authorize, sync, store, or export
   encrypted state.
 - Every Folder has an independent Folder Key.
-- Folder Key Grants are addressed to User npubs, not devices.
+- Folder Key Grants are addressed to Member Identity npubs, not devices.
 - Folder Access is binary.
+- A Personal Vault agent signs as its distinct Agent Principal Key and receives
+  only its own explicit Folder Key Grants; it never uses the owner's identity
+  secret or becomes the owner through a delegation.
 - Removing access requires Folder Key Rotation for future access control.
 - Folder Key Rotation does not promise retroactive erasure of content already
   decrypted, copied, exported, or retained as old ciphertext.
@@ -1983,13 +2097,14 @@ Clock skew:
 - If skew validation fails, the error SHOULD tell the client to retry signing
   with current time.
 
-NIP-07 boundary:
+Brain Identity Provider boundary:
 
-- The browser extension/provider is trusted to protect the User's Nostr secret
-  key and perform correct NIP-44 operations.
+- The hosted or native adapter is trusted to protect the User's Nostr secret key
+  and perform any underlying NIP-44 operations. It exposes only bounded Brain
+  operations to the Product Client.
 - FiniteBrain clients MUST treat provider output as authority from the active
-  User, but SHOULD display the active npub whenever access-sensitive operations
-  are performed.
+  Member Identity, but SHOULD display the active npub whenever access-sensitive
+  operations are performed.
 - A signer key mismatch is an auth failure, not a recoverable Folder Key issue.
 
 Local plaintext/XSS:
@@ -2239,5 +2354,6 @@ The current implementation source of truth is spread across:
   validation, replay rejection, protected-route rate limits, and CORS allowlist
   behavior.
 - `crates/finite-brain-server/src/product-client.js`: first-party Product
-  Client workflow, NIP-07/NIP-44 bridge, local Folder Key opening, decrypt/edit
-  loop, Graph View, Graph Replay, OKF import execution, and local sync merge.
+  Client workflow, current NIP-07/NIP-44 adapter seam, local Folder Key
+  opening, decrypt/edit loop, Graph View, Graph Replay, OKF import execution,
+  and local sync merge.

@@ -40,6 +40,19 @@ _Avoid_: account, user, member
 A Principal backed by a Nostr public key controlled by a human or agent Finite identity keypair.
 _Avoid_: native account, npub user
 
+**User Nostr Identity**:
+The human-controlled Nostr keypair used across that user's Hosted Web, Electron,
+and iOS surfaces. Hosted Web keeps it behind a server-side signer adapter while
+native surfaces keep it in protected local storage; the custody difference does
+not create another Principal.
+_Avoid_: WorkOS identity, hosted-device identity, agent key
+
+**Agent Principal Key**:
+The distinct Nostr keypair owned by one Agent Runtime and used for that agent's
+operations across Finite products. It is never the user's User Nostr Identity
+and never uses the user's hosted product adapter to act as that user.
+_Avoid_: user key, shared signer, Account Auth
+
 **Finite Home**:
 The filesystem root that scopes one Local Identity Key and the Finite tool state belonging to that identity owner.
 _Avoid_: User home, shared fleet home, product config directory
@@ -79,6 +92,20 @@ _Avoid_: internal API, shared database, crate API
 **Identity Client Flow**:
 A reusable client-side identity workflow implemented by Finite Identity and exposed through product CLIs. A standalone identity CLI may expose the same flows, but product users should not need to leave the product workflow for routine identity setup.
 _Avoid_: fsite auth flow, fbrain auth flow
+
+**Product Signer Adapter**:
+A product-owned adapter that uses Finite Identity's key-storage and lifecycle
+primitives to perform that product's validated identity operations without
+handing raw key material to product client code. Each product owns its own
+adapter and bounded provider contract; Finite Identity does not own a universal
+product adapter, product grants, content crypto, or authorization policy.
+For Hosted Web, Finite Chat's Hosted Device is the initial user-key setup and
+custody flow. The product's adapter acts as the same User Nostr Identity used
+by Electron and iOS, not as a separate product identity. Account Auth may
+authorize its session, but the product must still grant the User Nostr Identity
+access explicitly. It does not make the User Nostr Identity and an Agent
+Principal Key the same identity.
+_Avoid_: shared signer, generic signer API, product key store
 
 **Resolution Cache**:
 A short-lived product-held cache of Principal Resolution answers. A Resolution Cache is never the source of truth and must fail closed when an answer is missing, expired, or uncertain.

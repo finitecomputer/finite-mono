@@ -5,6 +5,7 @@ import {
   hostedDeviceAuthorizeAgentBinding,
   hostedDeviceApproveLink,
   hostedDeviceAttachments,
+  hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
   hostedDeviceHeaders,
   hostedDeviceProfileImage,
@@ -41,6 +42,44 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+});
+
+test("Brain identity operations use the narrow WorkOS-bound custody endpoint", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedHeaders = new Headers();
+  let observedBody = "";
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedHeaders = new Headers(init?.headers);
+    observedBody = String(init?.body);
+    return Response.json({ publicKeyHex: "11".repeat(32), npub: "npub1user" });
+  }) as typeof fetch;
+
+  const request = {
+    version: "finite-brain-identity-provider-v1" as const,
+    operation: "identifyMember" as const,
+    input: null,
+  };
+  const result = await hostedDeviceBrainIdentityProvider(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    request,
+    "https://finite.computer"
+  );
+
+  assert.equal(observedUrl, "https://device.internal/v1/brain/identity-provider");
+  assert.equal(observedHeaders.get("authorization"), "Bearer internal-token");
+  assert.equal(observedHeaders.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(
+    observedHeaders.get("x-finite-brain-public-origin"),
+    "https://finite.computer"
+  );
+  assert.deepEqual(JSON.parse(observedBody), request);
+  assert.equal(result.publicKeyHex, "11".repeat(32));
 });
 
 test("agent creation explicitly authorizes binding bootstrap with its durable ids", async (context) => {

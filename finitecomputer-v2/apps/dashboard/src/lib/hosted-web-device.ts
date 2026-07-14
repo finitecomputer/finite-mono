@@ -230,6 +230,19 @@ export type HostedDeviceConfig = {
   apiToken: string;
 };
 
+export type BrainIdentityProviderRequest = {
+  version: "finite-brain-identity-provider-v1";
+  operation:
+    | "identifyMember"
+    | "authorizeHttpRequest"
+    | "authorizeBrainEvent"
+    | "openGrantPayload"
+    | "wrapGrantPayload";
+  input: unknown;
+};
+
+export type BrainIdentityProviderResponse = Record<string, unknown>;
+
 export type HostedRuntimeCommand = {
   room_id: string;
   conversation_id?: string | null;
@@ -307,6 +320,31 @@ export async function hostedDeviceState(
   account: AccountAuthContext
 ) {
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/state");
+}
+
+export async function hostedDeviceBrainIdentityProvider(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  request: BrainIdentityProviderRequest,
+  brainPublicOrigin: string
+) {
+  const parsedOrigin = new URL(brainPublicOrigin);
+  if (parsedOrigin.origin !== brainPublicOrigin.replace(/\/$/u, "")) {
+    throw new Error("Brain public origin must not include a path, query, or fragment.");
+  }
+  const headers = hostedDeviceHeaders(config, account, true);
+  headers.set("x-finite-brain-public-origin", parsedOrigin.origin);
+  const response = await fetch(`${config.baseUrl}/v1/brain/identity-provider`, {
+    method: "POST",
+    cache: "no-store",
+    headers,
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
+  }
+  return response.json() as Promise<BrainIdentityProviderResponse>;
 }
 
 export async function hostedDeviceAction(

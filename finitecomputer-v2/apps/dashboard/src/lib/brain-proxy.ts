@@ -19,6 +19,7 @@ const RESPONSE_HEADERS = [
 ] as const;
 
 const MAX_BRAIN_REQUEST_BODY_BYTES = 1024 * 1024;
+const MAX_BRAIN_CLIENT_HTML_BYTES = 2 * 1024 * 1024;
 const BRAIN_PROXY_TIMEOUT_MS = 60_000;
 
 class BrainRequestTooLargeError extends Error {}
@@ -51,6 +52,7 @@ export async function proxyBrainRequest(
   request: NextRequest,
   prefix: "/client" | "/_admin" | "/health",
   path: string[] = [],
+  options: { clientCapability?: string; parentOrigin?: string } = {},
 ) {
   const baseUrl = brainUpstreamOrigin();
   if (!baseUrl) {
@@ -96,10 +98,53 @@ export async function proxyBrainRequest(
         { status: 502 },
       );
     }
+    if (
+      options.clientCapability &&
+      request.method === "GET" &&
+      response.ok &&
+      response.headers.get("content-type")?.includes("text/html")
+    ) {
+      const html = new TextDecoder().decode(
+        await readBoundedResponseBody(
+          response.body,
+          MAX_BRAIN_CLIENT_HTML_BYTES,
+          controller.signal,
+        ),
+      );
+      const closingHead = html.indexOf("</head>");
+      if (closingHead < 0) {
+        cleanup();
+        return NextResponse.json(
+          { error: "Brain returned an invalid client document." },
+          { status: 502 },
+        );
+      }
+      const capabilityMeta = `<meta name="finite-brain-client-capability" content="${escapeHtmlAttribute(options.clientCapability)}">`;
+      const parentOriginMeta = options.parentOrigin
+        ? `<meta name="finite-brain-parent-origin" content="${escapeHtmlAttribute(options.parentOrigin)}">`
+        : "";
+      const transformed = `${html.slice(0, closingHead)}${capabilityMeta}${parentOriginMeta}${html.slice(closingHead)}`;
+      cleanup();
+      return new NextResponse(transformed, {
+        status: response.status,
+        headers: {
+          "cache-control": "no-store",
+          "content-security-policy":
+            "sandbox allow-scripts allow-forms allow-downloads; connect-src 'self' https: http:; frame-ancestors 'self'",
+          "content-type": response.headers.get("content-type") ?? "text/html; charset=utf-8",
+          "referrer-policy": "no-referrer",
+          "x-frame-options": "SAMEORIGIN",
+        },
+      });
+    }
     const responseHeaders = new Headers();
     for (const name of RESPONSE_HEADERS) {
       const value = response.headers.get(name);
       if (value) responseHeaders.set(name, value);
+    }
+    if (request.headers.get("origin") === "null") {
+      responseHeaders.set("access-control-allow-origin", "null");
+      responseHeaders.append("vary", "origin");
     }
     const noBody = request.method === "HEAD" || responseStatusHasNoBody(response.status);
     const body = noBody
@@ -120,6 +165,60 @@ export async function proxyBrainRequest(
     }
     return NextResponse.json({ error: "Brain isn't available right now." }, { status: 502 });
   }
+}
+
+export function brainOpaqueCorsPreflight(request: Request) {
+  if (request.headers.get("origin") !== "null") {
+    return new Response(null, { status: 403, headers: { "cache-control": "no-store" } });
+  }
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "access-control-allow-origin": "null",
+      "access-control-allow-methods": "DELETE, GET, PATCH, POST, PUT",
+      "access-control-allow-headers":
+        "authorization, content-type, x-finitebrain-nostr, x-nostr-authorization",
+      "access-control-max-age": "600",
+      "cache-control": "no-store",
+      vary: "origin",
+    },
+  });
+}
+
+async function readBoundedResponseBody(
+  body: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+  signal: AbortSignal,
+) {
+  if (!body) return new Uint8Array();
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await readStreamChunk(reader, signal);
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new BrainRequestTooLargeError();
+    }
+    chunks.push(value);
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function escapeHtmlAttribute(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 function timedBrainResponseBody(
