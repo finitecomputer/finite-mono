@@ -1613,6 +1613,18 @@ impl Store {
         outputs: &[ProjectOutputApply],
         now: u64,
     ) -> Result<ProjectInitStoreOutcome, StoreError> {
+        self.init_project_with_owner_viewer(owner_pubkey, None, slug, outputs, now)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn init_project_with_owner_viewer(
+        &mut self,
+        owner_pubkey: &str,
+        owner_viewer_pubkey: Option<&str>,
+        slug: &str,
+        outputs: &[ProjectOutputApply],
+        now: u64,
+    ) -> Result<ProjectInitStoreOutcome, StoreError> {
         assert!(owner_pubkey.len() == 64);
         assert!(!slug.is_empty());
         let tx = self.conn.transaction()?;
@@ -1623,6 +1635,15 @@ impl Store {
             ids::new_id(ids::PRINCIPAL_ID_PREFIX),
             now,
         )?;
+        let owner_viewer_principal_id = match owner_viewer_pubkey {
+            Some(pubkey) => Some(ensure_native_principal(
+                &tx,
+                pubkey,
+                ids::new_id(ids::PRINCIPAL_ID_PREFIX),
+                now,
+            )?),
+            None => None,
+        };
 
         let existing_project = tx
             .query_row(
@@ -1778,6 +1799,39 @@ impl Store {
                     )
                 }
             };
+            if let Some(principal_id) = owner_viewer_principal_id.as_deref() {
+                let already_shared: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM native_shares
+                         WHERE site_id = ?1 AND principal_id = ?2",
+                        params![record.site_id, principal_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if already_shared.is_none() {
+                    let share_count: i64 = tx.query_row(
+                        "SELECT
+                           (SELECT COUNT(*) FROM shares WHERE site_id = ?1) +
+                           (SELECT COUNT(*) FROM native_shares WHERE site_id = ?1)",
+                        params![record.site_id],
+                        |row| row.get(0),
+                    )?;
+                    if share_count >= i64::from(finitesites_proto::limits::MAX_SHARES_PER_SITE) {
+                        return Err(StoreError::Conflict("too many site shares"));
+                    }
+                    tx.execute(
+                        "INSERT INTO native_shares (site_id, principal_id, created_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![record.site_id, principal_id, now],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO site_events
+                            (site_id, action, actor_pubkey, metadata, created_at)
+                         VALUES (?1, 'owner_viewer_shared', ?2, '{}', ?3)",
+                        params![record.site_id, owner_pubkey, now],
+                    )?;
+                }
+            }
             applied_outputs.push(AppliedProjectOutput { record, created });
         }
 
@@ -2741,7 +2795,9 @@ impl Store {
 
     pub fn count_shares(&self, site_id: &str) -> Result<u32, StoreError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM shares WHERE site_id = ?1",
+            "SELECT
+               (SELECT COUNT(*) FROM shares WHERE site_id = ?1) +
+               (SELECT COUNT(*) FROM native_shares WHERE site_id = ?1)",
             params![site_id],
             |row| row.get(0),
         )?;
@@ -2758,6 +2814,95 @@ impl Store {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    pub fn add_native_share(
+        &mut self,
+        site_id: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        let principal_id =
+            ensure_native_principal(&tx, pubkey, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO native_shares (site_id, principal_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![site_id, principal_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_native_share(&mut self, site_id: &str, pubkey: &str) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        self.conn.execute(
+            "DELETE FROM native_shares
+             WHERE site_id = ?1
+               AND principal_id IN (SELECT id FROM principals WHERE pubkey = ?2)",
+            params![site_id, pubkey],
+        )?;
+        Ok(())
+    }
+
+    pub fn native_shares(&self, site_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pubkey
+             FROM native_shares s
+             JOIN principals p ON p.id = s.principal_id
+             WHERE s.site_id = ?1
+             ORDER BY p.pubkey",
+        )?;
+        let rows = stmt.query_map(params![site_id], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn is_principal_shared(
+        &self,
+        site_id: &str,
+        principal_id: &str,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM native_shares
+                 WHERE site_id = ?1 AND principal_id = ?2",
+                params![site_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn record_native_viewer_nonce(
+        &mut self,
+        site_id: &str,
+        pubkey: &str,
+        nonce: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        assert!(expires_at > now);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM native_viewer_nonces WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        tx.execute(
+            "INSERT INTO native_viewer_nonces
+                (site_id, pubkey, nonce, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![site_id, pubkey, nonce, now, expires_at],
+        )
+        .map_err(|error| map_unique_violation(error, "native viewer nonce replay"))?;
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- email keys -------------------------------------------------------
@@ -2943,6 +3088,93 @@ impl Store {
         )?;
         tx.commit()?;
         Ok((site_id, email))
+    }
+
+    pub fn create_native_viewer_token(
+        &mut self,
+        token_hash: &str,
+        site_id: &str,
+        principal_id: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(token_hash.len() == 64);
+        assert!(expires_at > now);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM native_viewer_tokens
+             WHERE used_at IS NOT NULL OR expires_at < ?1",
+            params![now],
+        )?;
+        let active_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM native_viewer_tokens
+             WHERE site_id = ?1 AND principal_id = ?2
+               AND used_at IS NULL AND expires_at >= ?3",
+            params![site_id, principal_id, now],
+            |row| row.get(0),
+        )?;
+        let active_limit = i64::from(
+            finitesites_proto::limits::MAX_ACTIVE_NATIVE_VIEWER_TOKENS_PER_SITE_PRINCIPAL,
+        );
+        if active_count >= active_limit {
+            let remove_count = active_count - active_limit + 1;
+            tx.execute(
+                "DELETE FROM native_viewer_tokens
+                 WHERE token_hash IN (
+                   SELECT token_hash FROM native_viewer_tokens
+                   WHERE site_id = ?1 AND principal_id = ?2
+                     AND used_at IS NULL AND expires_at >= ?3
+                   ORDER BY created_at, rowid
+                   LIMIT ?4
+                 )",
+                params![site_id, principal_id, now, remove_count],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO native_viewer_tokens
+                (token_hash, site_id, principal_id, expires_at, used_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            params![token_hash, site_id, principal_id, expires_at, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn redeem_native_viewer_token(
+        &mut self,
+        token_hash: &str,
+        now: u64,
+    ) -> Result<(String, String), StoreError> {
+        let tx = self.conn.transaction()?;
+        let row: Option<(String, String, u64, Option<u64>)> = tx
+            .query_row(
+                "SELECT site_id, principal_id, expires_at, used_at
+                 FROM native_viewer_tokens WHERE token_hash = ?1",
+                params![token_hash],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get::<_, i64>(2)? as u64,
+                        row.get::<_, Option<i64>>(3)?.map(|value| value as u64),
+                    ))
+                },
+            )
+            .optional()?;
+        let (site_id, principal_id, expires_at, used_at) =
+            row.ok_or(StoreError::NotFound("native viewer token"))?;
+        if used_at.is_some() {
+            return Err(StoreError::Conflict("native viewer token already used"));
+        }
+        if now > expires_at {
+            return Err(StoreError::Conflict("native viewer token expired"));
+        }
+        tx.execute(
+            "UPDATE native_viewer_tokens SET used_at = ?1 WHERE token_hash = ?2",
+            params![now, token_hash],
+        )?;
+        tx.commit()?;
+        Ok((site_id, principal_id))
     }
 
     // ---- audit -------------------------------------------------------------

@@ -18,7 +18,8 @@ use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
     AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
-    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
+    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, NativeViewerSessionExchangeRequest,
+    NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse,
     ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse,
     SharingRequest, VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
@@ -48,6 +49,12 @@ fn user_secret() -> [u8; 32] {
 fn stranger_secret() -> [u8; 32] {
     let mut secret = [0u8; 32];
     secret[31] = 33;
+    secret
+}
+
+fn viewer_secret() -> [u8; 32] {
+    let mut secret = [0u8; 32];
+    secret[31] = 22;
     secret
 }
 
@@ -254,6 +261,25 @@ impl TestServer {
         let mut call = self
             .agent
             .post(&format!("{}/internal/v1/viewer-sessions", self.api_url))
+            .set("Content-Type", "application/json");
+        if let Some(token) = token {
+            call = call.set("Authorization", &format!("Bearer {token}"));
+        }
+        call.send_bytes(&body)
+    }
+
+    fn native_viewer_session(
+        &self,
+        token: Option<&str>,
+        request: &NativeViewerSessionExchangeRequest,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let body = serde_json::to_vec(request).unwrap();
+        let mut call = self
+            .agent
+            .post(&format!(
+                "{}/internal/v1/native-viewer-sessions",
+                self.api_url
+            ))
             .set("Content-Type", "application/json");
         if let Some(token) = token {
             call = call.set("Authorization", &format!("Bearer {token}"));
@@ -562,6 +588,7 @@ fn project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
+        owner_viewer_npub: None,
         dry_run,
     }
 }
@@ -574,6 +601,7 @@ fn bare_project_init_request(slug: &str, dry_run: bool) -> ProjectInitRequest {
             },
             outputs: BTreeMap::new(),
         },
+        owner_viewer_npub: None,
         dry_run,
     }
 }
@@ -606,6 +634,7 @@ fn single_site_project_init_request(
             },
             outputs,
         },
+        owner_viewer_npub: None,
         dry_run,
     }
 }
@@ -645,6 +674,7 @@ fn site_and_document_project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
+        owner_viewer_npub: None,
         dry_run,
     }
 }
@@ -671,6 +701,7 @@ fn app_project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
+        owner_viewer_npub: None,
         dry_run,
     }
 }
@@ -1282,6 +1313,8 @@ async fn full_publish_share_and_view_flow() {
             confirm_public: false,
             add_emails: vec!["friend@example.com".into()],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         let shared: ProjectOutputSharingResponse = json_body(
@@ -1395,6 +1428,8 @@ async fn full_publish_share_and_view_flow() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         server
@@ -1539,6 +1574,8 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
             confirm_public: false,
             add_emails: vec!["friend@example.com".into(), "rate@example.com".into()],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         server
@@ -1716,6 +1753,8 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
             confirm_public: false,
             add_emails: vec![],
             remove_emails: vec!["friend@example.com".into()],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         server
@@ -1743,6 +1782,252 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
         assert!(matches!(
             server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
             Err(ureq::Error::Status(403, _))
+        ));
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
+    let agent_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let viewer_pubkey = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
+    let viewer_npub = finitesites_proto::npub::encode_npub(&viewer_pubkey).unwrap();
+    let server = TestServer::start(&agent_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let mut init = project_init_request(false);
+        init.owner_viewer_npub = Some(viewer_npub.clone());
+        let init_body = serde_json::to_vec(&init).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/init",
+                    Some(&init_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            created.owner_viewer_npub.as_deref(),
+            Some(viewer_npub.as_str())
+        );
+        assert!(created.outputs[0].owner_viewer_shared);
+
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>native owner preview</h1>")],
+            "Native owner viewer deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+
+        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
+        assert!(matches!(
+            server.site_get("finitechat-native-mockup", "/", port),
+            Err(ureq::Error::Status(401, _))
+        ));
+
+        let direct_request = NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/preview?owner=true".into(),
+            client: "finitechat-ios".into(),
+            nonce: "direct-native-owner-proof".into(),
+        };
+        let direct_body = serde_json::to_vec(&direct_request).unwrap();
+        let direct_url = format!("{site_base}/_finite/auth/native-session");
+        let direct_auth = nip98::build_auth_header(
+            &viewer_secret(),
+            &direct_url,
+            "POST",
+            Some(&direct_body),
+            now_unix(),
+        )
+        .unwrap();
+
+        let stranger_auth = nip98::build_auth_header(
+            &stranger_secret(),
+            &direct_url,
+            "POST",
+            Some(&direct_body),
+            now_unix(),
+        )
+        .unwrap();
+        assert!(matches!(
+            server
+                .agent
+                .post(&direct_url)
+                .set("Authorization", &stranger_auth)
+                .send_bytes(&direct_body),
+            Err(ureq::Error::Status(401, _))
+        ));
+
+        let mut tampered_request = direct_request.clone();
+        tampered_request.return_to = "/tampered".into();
+        let tampered_body = serde_json::to_vec(&tampered_request).unwrap();
+        assert!(matches!(
+            server
+                .agent
+                .post(&direct_url)
+                .set("Authorization", &direct_auth)
+                .send_bytes(&tampered_body),
+            Err(ureq::Error::Status(401, _))
+        ));
+
+        let direct = server
+            .agent
+            .post(&direct_url)
+            .set("Authorization", &direct_auth)
+            .send_bytes(&direct_body)
+            .unwrap();
+        assert_eq!(direct.status(), 303);
+        assert_eq!(direct.header("location"), Some("/preview?owner=true"));
+        let direct_cookie = direct
+            .all("set-cookie")
+            .into_iter()
+            .find(|cookie| cookie.starts_with("finite_site_auth="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(matches!(
+            server
+                .agent
+                .post(&direct_url)
+                .set("Authorization", &direct_auth)
+                .send_bytes(&direct_body),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let page = server
+            .agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &direct_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(page.into_string().unwrap(), "<h1>native owner preview</h1>");
+
+        let hosted_request = NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/hosted-preview".into(),
+            client: "finite-dashboard".into(),
+            nonce: "hosted-native-owner-proof".into(),
+        };
+        let signed_body = serde_json::to_string(&hosted_request).unwrap();
+        let output_url = format!("{site_base}/");
+        let hosted_auth = nip98::build_auth_header(
+            &viewer_secret(),
+            &format!("{output_url}_finite/auth/native-session"),
+            "POST",
+            Some(signed_body.as_bytes()),
+            now_unix(),
+        )
+        .unwrap();
+        let hosted_exchange = NativeViewerSessionExchangeRequest {
+            output_url,
+            authorization: hosted_auth,
+            signed_body,
+        };
+        assert!(matches!(
+            server.native_viewer_session(None, &hosted_exchange),
+            Err(ureq::Error::Status(401, _))
+        ));
+        let issued: NativeViewerSessionExchangeResponse = json_body(
+            server
+                .native_viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &hosted_exchange)
+                .unwrap(),
+        );
+        assert!(issued.redeem_url.contains("native_token="));
+        assert!(issued.redeem_url.contains("return_to=%2Fhosted-preview"));
+        assert!(matches!(
+            server.native_viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &hosted_exchange,),
+            Err(ureq::Error::Status(409, _))
+        ));
+
+        let redeemed = server.agent.get(&issued.redeem_url).call().unwrap();
+        assert_eq!(redeemed.status(), 303);
+        assert_eq!(redeemed.header("location"), Some("/hosted-preview"));
+        let hosted_cookie = redeemed
+            .all("set-cookie")
+            .into_iter()
+            .find(|cookie| cookie.starts_with("finite_site_auth="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(matches!(
+            server.agent.get(&issued.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let hosted_page = server
+            .agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &hosted_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(
+            hosted_page.into_string().unwrap(),
+            "<h1>native owner preview</h1>"
+        );
+
+        let revoke = SharingRequest {
+            visibility: None,
+            confirm_public: false,
+            add_emails: vec![],
+            remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![viewer_npub],
+        };
+        let revoke_body = serde_json::to_vec(&revoke).unwrap();
+        let revoked: ProjectOutputSharingResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
+                    Some(&revoke_body),
+                )
+                .unwrap(),
+        );
+        assert!(revoked.shared_npubs.is_empty());
+        for cookie in [&direct_cookie, &hosted_cookie] {
+            assert!(matches!(
+                server
+                    .agent
+                    .get(&format!("{site_base}/"))
+                    .set("Cookie", cookie)
+                    .call(),
+                Err(ureq::Error::Status(401, _))
+            ));
+        }
+
+        let after_revoke_request = NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/".into(),
+            client: "finitechat-ios".into(),
+            nonce: "after-revoke-proof".into(),
+        };
+        let after_revoke_body = serde_json::to_vec(&after_revoke_request).unwrap();
+        let after_revoke_auth = nip98::build_auth_header(
+            &viewer_secret(),
+            &direct_url,
+            "POST",
+            Some(&after_revoke_body),
+            now_unix(),
+        )
+        .unwrap();
+        assert!(matches!(
+            server
+                .agent
+                .post(&direct_url)
+                .set("Authorization", &after_revoke_auth)
+                .send_bytes(&after_revoke_body),
+            Err(ureq::Error::Status(401, _))
         ));
     });
     task.await.unwrap();
@@ -1777,6 +2062,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             confirm_public: false,
             add_emails: vec!["Friend@Example.com".into()],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         let invalid_invite = server
@@ -1797,6 +2084,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             confirm_public: false,
             add_emails: vec!["Friend@Example.com".into()],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         let shared: ProjectOutputSharingResponse = json_body(
@@ -2457,6 +2746,8 @@ async fn git_push_can_change_spa_fallback_per_version() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         server
@@ -2670,6 +2961,8 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         let shared: ProjectOutputSharingResponse = json_body(
@@ -3030,6 +3323,8 @@ async fn generated_llms_txt_requires_project_output_and_respects_user_file() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         })
         .unwrap();
         server

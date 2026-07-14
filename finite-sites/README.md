@@ -366,16 +366,33 @@ Output visibility controls who can view the served website:
 
 ```sh
 fsite project share PROJECT site --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT site --add-npub npub1... --output json
+fsite project share PROJECT site --remove-npub npub1... --output json
 fsite project share PROJECT site --public --yes-public --output json
 fsite project share PROJECT site --private --output json
 ```
 
-The Finite dashboard can open an already-shared output for its signed-in user
-without sending another email. It presents the user's verified account email
-to a private Sites endpoint and receives the same single-use viewer link used
-by email login. This does not add the email to the output. The agent or owner
-must still choose `--shared --add-email ...`, and removing that email takes
-effect on the next content request even if the browser still has a cookie.
+When an authenticated human asks an Agent Principal to publish an Output, the
+agent passes the exact public-key account ID from authenticated
+`event.source.user_id` to both dry-run and apply. `fsite` normalizes it to an
+npub:
+
+```sh
+fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --dry-run --output json
+fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --output json
+```
+
+Project Init atomically creates that human's explicit revocable Native
+Principal Share. The dashboard, Electron, and iOS can then exchange a bounded
+User Nostr Identity proof for the Output's ordinary Viewer Cookie, without an
+email or Magic Link flow. A proof never creates a Share, and removing the npub
+takes effect on the next content request even if the browser still has a
+cookie. Agents must take this identity only from authenticated sender metadata,
+never from quoted message text.
+
+The Finite dashboard can also open an Output already shared to a verified
+External Principal email through the legacy server-to-server email exchange.
+That compatibility path does not add the email to the Output.
 The server-to-server credential for this optional exchange is
 `FINITE_SITES_VIEWER_SESSION_TOKEN`, exactly 64 lowercase hex characters
 (`openssl rand -hex 32`). Keep the same value in the Sites and dashboard

@@ -146,10 +146,10 @@ fn usage() -> String {
      # commit finite.toml plus deploy bytes, then push the Deploy Branch\n\n\
      Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
-     fsite project init --config finite.toml [--dry-run] [--output json]\n  \
+     fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n  \
      fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  \
      fsite project revoke PROJECT --email EMAIL [--output json]\n  \
-     fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--send-invite] [--output json]\n  \
+     fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
      fsite auth status [--output json]\n  \
@@ -224,11 +224,11 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
+    "usage:\n  fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
 }
 
 fn project_init_help() -> &'static str {
-    "usage: fsite project init --config finite.toml [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
+    "usage: fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. When an authenticated human asked an Agent Principal to publish, --owner-viewer-npub creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer it from message text. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
 }
 
 fn project_grant_help() -> &'static str {
@@ -240,7 +240,7 @@ fn project_revoke_help() -> &'static str {
 }
 
 fn project_share_help() -> &'static str {
-    "usage: fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--send-invite] [--output json]\n\nManage viewer access for one Project Output. This is separate from Project Repository edit access. Use OUTPUT from finite.toml or fsite project status. Public sharing requires --yes-public."
+    "usage: fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for one Project Output. Email viewers use magic links; Native Principal npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Use OUTPUT from finite.toml or fsite project status. Public sharing requires --yes-public."
 }
 
 fn project_status_help() -> &'static str {
@@ -341,7 +341,7 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "project init",
                 "summary": "Initialize a Project Repository and any finite.toml-described outputs.",
-                "usage": "fsite project init --config finite.toml [--dry-run] [--output json]"
+                "usage": "fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]"
             },
             {
                 "name": "project grant",
@@ -356,7 +356,7 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "project share",
                 "summary": "Manage viewer access for one Project Output.",
-                "usage": "fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--send-invite] [--output json]"
+                "usage": "fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
             },
             {
                 "name": "project status",
@@ -451,6 +451,7 @@ fn publish_static_site_workflow() -> serde_json::Value {
             "Keep the whole project source tree in the Project Repository.",
             "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
             "Create finite.toml with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -486,6 +487,7 @@ fn publish_stateful_app_workflow() -> serde_json::Value {
             "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
             "Put the app runtime files in a dedicated directory such as app/. The directory must contain everything the start command needs, or code that explicitly initializes dependencies under DATA_DIR at runtime.",
             "Create finite.toml with project.slug, one output with kind=app, site_name, branch=main, path=app, and start=\"bun server.ts\" or another supported command beginning with node, bun, or uv.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -523,6 +525,7 @@ fn publish_document_workflow() -> serde_json::Value {
             "Run fsite auth register --output json.",
             "Create Markdown in one file or a directory such as docs/.",
             "Create finite.toml with project.slug and one output with kind=document, document_name, branch=main, path=docs, and optional entry=index.md.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "Run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json.",
@@ -559,6 +562,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Run fsite auth register --output json.",
                 "Optional: run fsite auth link-email EMAIL --output json, then fsite auth redeem EMAIL TOKEN_FROM_EMAIL --output json to pair that email with this npub. If you already have a token from an invite email, run fsite auth redeem EMAIL TOKEN_FROM_EMAIL --link-native --output json.",
                 "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs an [outputs.<id>] entry.",
+                "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
                 "Run fsite project init --config finite.toml --dry-run --output json.",
                 "Run fsite project init --config finite.toml --output json.",
                 "Run fsite auth git PROJECT --store --output json.",
@@ -620,6 +624,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Run fsite project status PROJECT --output json and choose the output_id to share.",
                 "For public viewer access, run fsite project share PROJECT OUTPUT --public --yes-public --output json.",
                 "For email-gated viewer access, run fsite project share PROJECT OUTPUT --shared --add-email VIEWER_EMAIL --send-invite --output json.",
+                "For native Finite viewer access without email, run fsite project share PROJECT OUTPUT --add-npub VIEWER_NPUB --output json. Remove it with --remove-npub.",
                 "For private viewer access, run fsite project share PROJECT OUTPUT --private --output json."
             ]
         }),
@@ -667,6 +672,7 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     }
     let mut config_path: Option<PathBuf> = None;
     let mut dry_run = false;
+    let mut owner_viewer_npub: Option<String> = None;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -682,6 +688,17 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
             "--dry-run" => {
                 dry_run = true;
                 index += 1;
+            }
+            "--owner-viewer-npub" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    CliError::Usage("--owner-viewer-npub needs an npub".to_string())
+                })?;
+                if owner_viewer_npub.replace(value.clone()).is_some() {
+                    return Err(CliError::Usage(
+                        "--owner-viewer-npub may be supplied only once".to_string(),
+                    ));
+                }
+                index += 2;
             }
             "--output" => {
                 let value = args
@@ -702,7 +719,11 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     let config_path =
         config_path.ok_or_else(|| CliError::Usage(project_init_help().to_string()))?;
     let config = read_project_config_file(&config_path)?;
-    let request = ProjectInitRequest { config, dry_run };
+    let request = ProjectInitRequest {
+        config,
+        dry_run,
+        owner_viewer_npub,
+    };
     request
         .config
         .validate()
@@ -710,9 +731,10 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
 
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let response = client
-        .init_project(&identity, &request)
-        .map_err(|error| project_init_recovery_error(error, &config_path))?;
+    let recovery_owner_viewer_npub = request.owner_viewer_npub.clone();
+    let response = client.init_project(&identity, &request).map_err(|error| {
+        project_init_recovery_error(error, &config_path, recovery_owner_viewer_npub.as_deref())
+    })?;
     if output_json {
         println!(
             "{}",
@@ -722,6 +744,9 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
         println!("project: {}", response.slug);
         println!("source:  {}", response.project_visibility);
         println!("git:     {}", response.git_remote_url);
+        if let Some(npub) = &response.owner_viewer_npub {
+            println!("owner viewer: {npub} (shared)");
+        }
         if response.outputs.is_empty() {
             println!("outputs: none (source-only Project Repository)");
         }
@@ -758,7 +783,11 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn project_init_recovery_error(error: CliError, config_path: &Path) -> CliError {
+fn project_init_recovery_error(
+    error: CliError,
+    config_path: &Path,
+    owner_viewer_npub: Option<&str>,
+) -> CliError {
     let CliError::ApiStatus {
         method,
         path,
@@ -770,14 +799,17 @@ fn project_init_recovery_error(error: CliError, config_path: &Path) -> CliError 
         return error;
     };
 
+    let owner_viewer_arg = owner_viewer_npub
+        .map(|npub| format!(" --owner-viewer-npub {npub}"))
+        .unwrap_or_default();
     match code.as_deref() {
         Some(ERROR_GIT_REPOSITORY_SETUP_FAILED) => message.push_str(&format!(
-            "\n\nThe Project may already exist; do not change its slug or discard local source. After the service operator reports that Git repository setup is repaired, run this repair replay exactly once:\n  fsite project init --config {} --output json",
-            config_path.display()
+            "\n\nThe Project may already exist; do not change its slug or discard local source. After the service operator reports that Git repository setup is repaired, run this repair replay exactly once:\n  fsite project init --config {}{} --output json",
+            config_path.display(), owner_viewer_arg
         )),
         Some(ERROR_GIT_UNAVAILABLE) => message.push_str(&format!(
-            "\n\nNo Project Init state changed. After service health has recovered, retry exactly once:\n  fsite project init --config {} --output json",
-            config_path.display()
+            "\n\nNo Project Init state changed. After service health has recovered, retry exactly once:\n  fsite project init --config {}{} --output json",
+            config_path.display(), owner_viewer_arg
         )),
         _ => {}
     }
@@ -955,6 +987,8 @@ struct ProjectShareOptions {
     confirm_public: bool,
     add_emails: Vec<String>,
     remove_emails: Vec<String>,
+    add_npubs: Vec<String>,
+    remove_npubs: Vec<String>,
     send_invite: bool,
     output_json: bool,
 }
@@ -975,6 +1009,8 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
             confirm_public: options.confirm_public,
             add_emails: options.add_emails,
             remove_emails: options.remove_emails,
+            add_npubs: options.add_npubs,
+            remove_npubs: options.remove_npubs,
         },
         options.send_invite,
     )?;
@@ -987,10 +1023,12 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
         println!("project:    {}", response.project_slug);
         println!("output:     {}", response.output_id);
         println!("visibility: {}", response.visibility);
-        if response.shared_emails.is_empty() {
+        if response.shared_emails.is_empty() && response.shared_npubs.is_empty() {
             println!("shared with: none");
         } else {
-            println!("shared with: {}", response.shared_emails.join(", "));
+            let mut viewers = response.shared_emails.clone();
+            viewers.extend(response.shared_npubs.clone());
+            println!("shared with: {}", viewers.join(", "));
         }
         if !response.invited_emails.is_empty() {
             println!("invited: {}", response.invited_emails.join(", "));
@@ -1005,6 +1043,8 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
     let mut confirm_public = false;
     let mut add_emails = Vec::new();
     let mut remove_emails = Vec::new();
+    let mut add_npubs = Vec::new();
+    let mut remove_npubs = Vec::new();
     let mut send_invite = false;
     let mut output_json = false;
     let mut index: usize = 0;
@@ -1043,6 +1083,20 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--remove-email needs an email".to_string()))?;
                 remove_emails.push(value.clone());
+                index += 2;
+            }
+            "--add-npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--add-npub needs an npub".to_string()))?;
+                add_npubs.push(value.clone());
+                index += 2;
+            }
+            "--remove-npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--remove-npub needs an npub".to_string()))?;
+                remove_npubs.push(value.clone());
                 index += 2;
             }
             "--output" => {
@@ -1098,6 +1152,8 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
         confirm_public,
         add_emails,
         remove_emails,
+        add_npubs,
+        remove_npubs,
         send_invite,
         output_json,
     })
@@ -2208,6 +2264,7 @@ mod tests {
         let repaired = super::project_init_recovery_error(
             error,
             std::path::Path::new("workspace/finite.toml"),
+            None,
         );
         let super::CliError::ApiStatus { message, .. } = repaired else {
             panic!("expected API status error");
@@ -2230,7 +2287,8 @@ mod tests {
             message: "Git publishing is temporarily unavailable".to_string(),
         };
 
-        let retry = super::project_init_recovery_error(error, std::path::Path::new("finite.toml"));
+        let retry =
+            super::project_init_recovery_error(error, std::path::Path::new("finite.toml"), None);
         let super::CliError::ApiStatus { message, .. } = retry else {
             panic!("expected API status error");
         };
@@ -2425,6 +2483,8 @@ mod tests {
         assert!(text.contains("fsite auth register --output json"));
         assert!(text.contains("A source-only Project Repository may contain only [project]"));
         assert!(text.contains("served website needs an [outputs.<id>] entry"));
+        assert!(text.contains("event.source.user_id"));
+        assert!(text.contains("--owner-viewer-npub AUTHENTICATED_SENDER_ID"));
     }
 
     #[test]
@@ -2482,6 +2542,18 @@ mod tests {
         assert_eq!(parsed.visibility.as_deref(), Some("shared"));
         assert_eq!(parsed.add_emails, vec!["viewer@example.com"]);
         assert!(parsed.send_invite);
+
+        let native = parse_project_share_args(&args(&[
+            "demo",
+            "site",
+            "--add-npub",
+            "npub1viewer",
+            "--remove-npub",
+            "npub1former",
+        ]))
+        .unwrap();
+        assert_eq!(native.add_npubs, vec!["npub1viewer"]);
+        assert_eq!(native.remove_npubs, vec!["npub1former"]);
     }
 
     #[test]

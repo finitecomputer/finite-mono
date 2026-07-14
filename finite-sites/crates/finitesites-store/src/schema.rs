@@ -236,6 +236,37 @@ CREATE TABLE IF NOT EXISTS shares (
   PRIMARY KEY (site_id, email)
 );
 
+-- Native Principal Shares are separate from the legacy email table so this
+-- feature does not rewrite or reinterpret existing durable viewer grants.
+CREATE TABLE IF NOT EXISTS native_shares (
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (site_id, principal_id)
+);
+
+CREATE TABLE IF NOT EXISTS native_viewer_nonces (
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
+  nonce TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (site_id, pubkey, nonce),
+  CHECK (expires_at > created_at)
+);
+
+CREATE TABLE IF NOT EXISTS native_viewer_tokens (
+  token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS native_viewer_tokens_subject
+  ON native_viewer_tokens(site_id, principal_id, created_at);
+
 CREATE TABLE IF NOT EXISTS email_keys (
   email TEXT NOT NULL,
   pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),

@@ -19,6 +19,17 @@ version, payload, and tags; grant wrapping accepts typed grant or invite
 metadata rather than arbitrary NIP-44 plaintext. Missing Chat setup
 returns setup-required, and arbitrary sign/decrypt operations are not routes.
 
+Sites implementation note: Sites owns the versioned
+`finite-sites-identity-provider-v1` contract. Project Init signed by an Agent
+Principal may atomically create an explicit, revocable Native Principal Share
+for the authenticated human sender npub on each Project Output. The hosted
+dashboard asks the WorkOS-bound Hosted Device only to
+`authorizeViewerSession` for an exact Output native-session URL and bounded
+body; iOS/Electron sign the same request locally. Sites, not the adapter,
+verifies the proof against an existing Share and mints its ordinary Viewer
+Cookie (or a single-use hosted redemption URL). A valid signature never
+creates a Share, and revocation is rechecked on every content request.
+
 ## Context
 
 Finite products need a person's Nostr identity without putting raw key material

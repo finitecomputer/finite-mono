@@ -14,14 +14,18 @@ use finitesites_engine::EngineError;
 use finitesites_engine::validate_email;
 use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE,
-    GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
-    ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
-    ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
-    VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
+    GitAuthRequest, GitAuthResponse, NativeViewerSessionExchangeRequest,
+    NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
+    ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
+    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
+    ProjectStatusResponse, SharingRequest, VerifiedEmailViewerSessionRequest,
+    VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::limits::{
-    MAX_API_BODY_BYTES, MAX_AUTH_HEADER_BYTES, MAX_OUTPUT_URL_BYTES, MAX_VIEWER_RETURN_TO_BYTES,
-    MAX_VIEWER_SESSION_BODY_BYTES,
+    MAX_API_BODY_BYTES, MAX_AUTH_HEADER_BYTES, MAX_NATIVE_VIEWER_AUTH_BODY_BYTES,
+    MAX_NATIVE_VIEWER_CLIENT_BYTES, MAX_NATIVE_VIEWER_NONCE_BYTES,
+    MAX_NATIVE_VIEWER_RETURN_TO_BYTES, MAX_OUTPUT_URL_BYTES, MAX_VIEWER_RETURN_TO_BYTES,
+    MAX_VIEWER_SESSION_BODY_BYTES, MIN_NATIVE_VIEWER_NONCE_BYTES,
 };
 use finitesites_proto::{ProtoError, nip98};
 
@@ -47,6 +51,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/internal/v1/viewer-sessions",
             post(create_verified_email_viewer_session).layer(DefaultBodyLimit::max(
+                MAX_VIEWER_SESSION_BODY_BYTES as usize,
+            )),
+        )
+        .route(
+            "/internal/v1/native-viewer-sessions",
+            post(create_native_viewer_session).layer(DefaultBodyLimit::max(
                 MAX_VIEWER_SESSION_BODY_BYTES as usize,
             )),
         )
@@ -246,6 +256,79 @@ async fn create_verified_email_viewer_session(
     ))
 }
 
+async fn create_native_viewer_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let expected_token = state
+        .viewer_session_service_token
+        .as_deref()
+        .ok_or_else(|| ApiError::unavailable("viewer sessions are not configured"))?;
+    authenticate_viewer_session_service(&headers, expected_token)?;
+    if body.len() > MAX_VIEWER_SESSION_BODY_BYTES as usize {
+        return Err(ApiError::bad_request("request body is too large"));
+    }
+    let request: NativeViewerSessionExchangeRequest = parse_json_body(&body)?;
+    if request.authorization.len() > MAX_AUTH_HEADER_BYTES as usize
+        || request.signed_body.len() > MAX_NATIVE_VIEWER_AUTH_BODY_BYTES as usize
+    {
+        return Err(ApiError::bad_request("native viewer request is too large"));
+    }
+    let native_request: NativeViewerSessionRequest =
+        parse_json_body(request.signed_body.as_bytes())?;
+    if !valid_native_viewer_session_request(&native_request) {
+        return Err(ApiError::bad_request("invalid native viewer request"));
+    }
+
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let site = resolve_canonical_output_url(&state, &engine, &request.output_url)?
+        .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
+    let expected_url = format!("{}_finite/auth/native-session", request.output_url);
+    let now = now_unix();
+    let signer_pubkey = nip98::verify_auth_header(
+        &request.authorization,
+        &expected_url,
+        "POST",
+        Some(request.signed_body.as_bytes()),
+        now,
+    )
+    .map_err(|_| ApiError::forbidden("viewer access is unavailable"))?;
+    let limiter_key = format!("native-viewer:{}:{signer_pubkey}", site.id);
+    if !state.login_limiter.check_and_record(
+        &limiter_key,
+        crate::limiter::MAX_VIEWER_SESSIONS_PER_EMAIL,
+        now,
+    ) {
+        return Err(ApiError::too_many_requests(
+            "too many viewer sessions; try again shortly",
+        ));
+    }
+    let link = engine
+        .request_native_viewer_link(&site, &signer_pubkey, &native_request.nonce, now)
+        .map_err(|error| match error {
+            EngineError::NotAuthorized => ApiError::forbidden("viewer access is unavailable"),
+            EngineError::Conflict("native viewer nonce replay") => ApiError::new(
+                StatusCode::CONFLICT,
+                "replay",
+                "viewer request was already used",
+            ),
+            other => {
+                log_if_internal(&other);
+                ApiError::from(other)
+            }
+        })?;
+    let redeem_url = format!(
+        "{}&return_to={}",
+        link.url,
+        encode_query_component(&native_request.return_to)
+    );
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(NativeViewerSessionExchangeResponse { redeem_url }),
+    ))
+}
+
 fn authenticate_viewer_session_service(
     headers: &HeaderMap,
     expected_token: &str,
@@ -331,6 +414,37 @@ pub(crate) fn valid_return_to(return_to: &str) -> bool {
         && !return_to.contains('\\')
         && return_to.is_ascii()
         && !return_to.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+}
+
+pub(crate) fn valid_native_viewer_session_request(request: &NativeViewerSessionRequest) -> bool {
+    request.purpose == "finite_site_view_session"
+        && valid_native_return_to(&request.return_to)
+        && valid_token_like(&request.client, 1, MAX_NATIVE_VIEWER_CLIENT_BYTES as usize)
+        && valid_token_like(
+            &request.nonce,
+            MIN_NATIVE_VIEWER_NONCE_BYTES as usize,
+            MAX_NATIVE_VIEWER_NONCE_BYTES as usize,
+        )
+}
+
+fn valid_native_return_to(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_NATIVE_VIEWER_RETURN_TO_BYTES as usize
+        && value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains('\\')
+        && value.is_ascii()
+        && !bytes.iter().any(|byte| !(0x21..=0x7e).contains(byte))
+}
+
+fn valid_token_like(value: &str, min_len: usize, max_len: usize) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= min_len
+        && bytes.len() <= max_len
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
 }
 
 fn encode_query_component(value: &str) -> String {
@@ -743,6 +857,7 @@ async fn share_project_output(
         output_id,
         visibility: response.visibility,
         shared_emails: response.shared_emails,
+        shared_npubs: response.shared_npubs,
         invited_emails: response.invited_emails,
     }))
 }

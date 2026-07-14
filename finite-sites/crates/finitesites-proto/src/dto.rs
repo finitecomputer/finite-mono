@@ -59,7 +59,7 @@ pub struct AuthRegisterResponse {
     pub output_limit: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SharingRequest {
     /// Target visibility: "private", "shared", or "public". Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,12 +72,18 @@ pub struct SharingRequest {
     pub add_emails: Vec<String>,
     #[serde(default)]
     pub remove_emails: Vec<String>,
+    #[serde(default)]
+    pub add_npubs: Vec<String>,
+    #[serde(default)]
+    pub remove_npubs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharingResponse {
     pub visibility: String,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub shared_npubs: Vec<String>,
     #[serde(default)]
     pub invited_emails: Vec<String>,
 }
@@ -88,6 +94,8 @@ pub struct ProjectOutputSharingResponse {
     pub output_id: String,
     pub visibility: String,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub shared_npubs: Vec<String>,
     #[serde(default)]
     pub invited_emails: Vec<String>,
 }
@@ -104,6 +112,33 @@ pub struct SiteSummary {
     pub kind: String,
     pub active_version: Option<u32>,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub shared_npubs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeViewerSessionRequest {
+    pub purpose: String,
+    pub return_to: String,
+    pub client: String,
+    pub nonce: String,
+}
+
+/// Hosted-Web exchange for the same bounded request used directly by native
+/// clients. The signed body remains an exact string so JSON reserialization
+/// cannot change the NIP-98 payload hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeViewerSessionExchangeRequest {
+    pub output_url: String,
+    pub authorization: String,
+    pub signed_body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeViewerSessionExchangeResponse {
+    pub redeem_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +153,10 @@ pub struct ProjectInitRequest {
     /// registry state or writing a git repository.
     #[serde(default)]
     pub dry_run: bool,
+    /// The authenticated human requester who should receive the initial,
+    /// revocable Native Principal viewer Share on every Project Output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_viewer_npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +182,8 @@ pub struct ProjectInitResponse {
     pub git_remote_url: String,
     pub finite_toml: String,
     pub outputs: Vec<ProjectOutputSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_viewer_npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +215,8 @@ pub struct ProjectOutputSummary {
     pub start: Option<String>,
     pub spa: bool,
     pub created: bool,
+    #[serde(default)]
+    pub owner_viewer_shared: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

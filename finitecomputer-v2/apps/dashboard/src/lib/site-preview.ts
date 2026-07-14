@@ -1,5 +1,11 @@
+import { randomUUID } from "node:crypto";
+
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+import {
+  hostedDeviceConfig,
+  hostedDeviceSitesIdentityProvider,
+} from "@/lib/hosted-web-device";
 
 const MAX_PREVIEW_URL_BYTES = 2 * 1024;
 const MAX_RETURN_TO_BYTES = 1024;
@@ -102,8 +108,8 @@ async function readSitePreviewChunk(
 
 export async function createSitePreviewSession(machineId: string, rawUrl: unknown) {
   const account = await getAccountAuthContext();
-  if (!account.workosUserId || !account.email || !account.emailVerified) {
-    throw new SitePreviewError("Sign in with a verified email to preview this site.", 401);
+  if (!account.workosUserId || !account.emailVerified) {
+    throw new SitePreviewError("Sign in again to preview this site.", 401);
   }
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access || access.machineId !== machineId) {
@@ -113,14 +119,34 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   const target = parseSitePreviewTarget(rawUrl);
   const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
-  if (!upstream || !serviceToken) {
+  const device = hostedDeviceConfig();
+  if (!upstream || !serviceToken || !device) {
     throw new SitePreviewError("Site previews aren't available right now.", 503);
   }
+
+  const endpointUrl = `${target.outputUrl}_finite/auth/native-session`;
+  const proof = await hostedDeviceSitesIdentityProvider(
+    device,
+    account,
+    {
+      version: "finite-sites-identity-provider-v1",
+      operation: "authorizeViewerSession",
+      input: {
+        url: endpointUrl,
+        returnTo: target.returnTo,
+        client: "finite-dashboard",
+        nonce: randomUUID(),
+      },
+    },
+    new URL(target.outputUrl).origin
+  ).catch(() => {
+    throw new SitePreviewError("Site previews aren't available right now.", 503);
+  });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITES_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${upstream}/internal/v1/viewer-sessions`, {
+    const response = await fetch(`${upstream}/internal/v1/native-viewer-sessions`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${serviceToken}`,
@@ -128,8 +154,8 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
       },
       body: JSON.stringify({
         output_url: target.outputUrl,
-        verified_email: account.email,
-        return_to: target.returnTo,
+        authorization: proof.authorization_header,
+        signed_body: proof.body_json,
       }),
       cache: "no-store",
       signal: controller.signal,
@@ -265,6 +291,7 @@ export function parseViewerSessionResponse(payload: unknown, target: SitePreview
   }
   const expectedOrigin = new URL(target.outputUrl).origin;
   const keys = Array.from(url.searchParams.keys()).sort();
+  const tokenKey = keys.includes("native_token") ? "native_token" : "token";
   if (
     url.origin !== expectedOrigin ||
     url.pathname !== "/_finite/auth" ||
@@ -272,9 +299,9 @@ export function parseViewerSessionResponse(payload: unknown, target: SitePreview
     url.password ||
     url.hash ||
     keys.length !== 2 ||
-    keys[0] !== "return_to" ||
-    keys[1] !== "token" ||
-    !/^[0-9a-f]{64}$/u.test(url.searchParams.get("token") ?? "") ||
+    !keys.includes("return_to") ||
+    !keys.includes(tokenKey) ||
+    !/^[0-9a-f]{64}$/u.test(url.searchParams.get(tokenKey) ?? "") ||
     url.searchParams.get("return_to") !== target.returnTo
   ) {
     throw new SitePreviewError("Site previews aren't available right now.", 502);

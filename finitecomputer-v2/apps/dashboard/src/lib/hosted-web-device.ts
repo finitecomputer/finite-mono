@@ -243,6 +243,22 @@ export type BrainIdentityProviderRequest = {
 
 export type BrainIdentityProviderResponse = Record<string, unknown>;
 
+export type SitesIdentityProviderRequest = {
+  version: "finite-sites-identity-provider-v1";
+  operation: "authorizeViewerSession";
+  input: {
+    url: string;
+    returnTo: string;
+    client: string;
+    nonce: string;
+  };
+};
+
+export type SitesIdentityProviderResponse = {
+  body_json: string;
+  authorization_header: string;
+};
+
 export type HostedRuntimeCommand = {
   room_id: string;
   conversation_id?: string | null;
@@ -345,6 +361,31 @@ export async function hostedDeviceBrainIdentityProvider(
     throw new HostedDeviceRequestError(await responseError(response), response.status);
   }
   return response.json() as Promise<BrainIdentityProviderResponse>;
+}
+
+export async function hostedDeviceSitesIdentityProvider(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  request: SitesIdentityProviderRequest,
+  sitesPublicOrigin: string
+) {
+  const parsedOrigin = new URL(sitesPublicOrigin);
+  if (parsedOrigin.origin !== sitesPublicOrigin.replace(/\/$/u, "")) {
+    throw new Error("Sites public origin must not include a path, query, or fragment.");
+  }
+  const headers = hostedDeviceHeaders(config, account, true);
+  headers.set("x-finite-sites-public-origin", parsedOrigin.origin);
+  const response = await fetch(`${config.baseUrl}/v1/sites/identity-provider`, {
+    method: "POST",
+    cache: "no-store",
+    headers,
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
+  }
+  return response.json() as Promise<SitesIdentityProviderResponse>;
 }
 
 export async function hostedDeviceAction(
