@@ -189,6 +189,13 @@ def effective_build_platform(engine: str, requested: str | None) -> str | None:
     return None
 
 
+def target_architecture(platform: str) -> str:
+    parts = platform.split("/")
+    if len(parts) < 2 or parts[0] != "linux" or parts[1] not in {"amd64", "arm64"}:
+        raise SystemExit(f"unsupported runtime image platform: {platform}")
+    return parts[1]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -252,6 +259,10 @@ def build_image(
     )
     if platform:
         build.extend(["--platform", platform])
+        # Docker's legacy builder accepts --platform but does not populate the
+        # BuildKit TARGETARCH argument. Pass the already-validated architecture
+        # explicitly so release, smoke, and Apple builds select the same tools.
+        build.extend(["--build-arg", f"TARGETARCH={target_architecture(platform)}"])
     if args.no_cache:
         build.append("--no-cache")
     build.append(str(context))
