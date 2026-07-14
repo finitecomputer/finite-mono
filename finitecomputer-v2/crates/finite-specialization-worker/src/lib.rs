@@ -33,7 +33,7 @@ const DEFAULT_MAX_OUTPUT_CHARS: usize = 32 * 1024;
 const DEFAULT_MAX_IMAGES: usize = 8;
 const DEFAULT_MAX_AUDIO_DURATION_SECONDS: u64 = 900;
 const DEFAULT_MAX_VIDEO_DURATION_SECONDS: u64 = 600;
-const DEFAULT_MAX_VIDEO_FRAMES: usize = 16;
+const DEFAULT_MAX_VIDEO_FRAMES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -2789,6 +2789,7 @@ mod tests {
 
     #[test]
     fn uniform_video_sampling_covers_short_and_long_clips() {
+        assert_eq!(DEFAULT_MAX_VIDEO_FRAMES, 4);
         assert_eq!(uniform_video_timestamps(3.2, 16), vec![0.0, 1.0, 2.0, 3.0]);
 
         let long = uniform_video_timestamps(60.0, 16);

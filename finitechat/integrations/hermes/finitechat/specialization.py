@@ -80,13 +80,12 @@ class AeonSpecialization:
         media_urls: list[str],
         media_types: list[str],
     ) -> list[CapabilityResult]:
-        requests = [
-            self._interpret_group(instruction, group)
-            for group in _invocation_groups(media_urls, media_types)
-        ]
-        if not requests:
-            return []
-        return list(await asyncio.gather(*requests))
+        results: list[CapabilityResult] = []
+        # All capabilities share one resident AEON backend. Parallel mixed-media
+        # calls can starve one another in its queue until the caller times out.
+        for group in _invocation_groups(media_urls, media_types):
+            results.append(await self._interpret_group(instruction, group))
+        return results
 
     async def _interpret_group(
         self, instruction: str, media: list[tuple[str, str, str]]

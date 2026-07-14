@@ -74,7 +74,7 @@ spec:
             - name: FINITE_SPECIALIZATION_MAX_VIDEO_DURATION_SECONDS
               value: "600"
             - name: FINITE_SPECIALIZATION_MAX_VIDEO_FRAMES
-              value: "16"
+              value: "4"
           ports:
             - name: http
               containerPort: 18998

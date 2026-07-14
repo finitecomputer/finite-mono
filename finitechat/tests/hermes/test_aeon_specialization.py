@@ -80,6 +80,42 @@ class AeonSpecializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content[1]["image_url"]["url"], "https://example.com/red.png")
         self.assertEqual(content[2]["image_url"]["url"], "https://example.com/blue.png")
 
+    async def test_mixed_capabilities_are_serialized_for_the_resident_backend(self):
+        active = 0
+        max_active = 0
+
+        async def requester(_base_url, _api_key, payload, _timeout):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(0.01)
+                part_type = payload["messages"][0]["content"][1]["type"]
+                capability = {
+                    "image_url": "image",
+                    "input_audio": "audio",
+                    "video_url": "video",
+                }[part_type]
+                return success(capability, f"{capability} result")
+            finally:
+                active -= 1
+
+        client = AeonSpecialization(
+            base_url="http://worker/v1", api_key="secret", requester=requester
+        )
+        results = await client.interpret(
+            "Interpret all media",
+            [
+                "https://example.com/image.png",
+                "https://example.com/audio.wav",
+                "https://example.com/video.mp4",
+            ],
+            ["image/png", "audio/wav", "video/mp4"],
+        )
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual([result.capability for result in results], ["image", "audio", "video"])
+
     async def test_mixed_media_composes_success_and_capability_local_failure(self):
         calls = []
 
