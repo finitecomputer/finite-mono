@@ -346,6 +346,54 @@ pub struct AgentWorkspacePairingListResponse {
     pub pairings: Vec<AgentWorkspacePairingResponse>,
 }
 
+/// Agent-first request backed by one owner-signed Personal Vault bootstrap authorization.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapPersonalVaultForAgentRequest {
+    pub vault_id: String,
+    pub name: String,
+    pub folder_id: String,
+    pub folder_name: String,
+    pub folder_path: String,
+    pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
+    pub workspace_grants: Vec<FolderKeyGrantRequest>,
+    pub bootstrap_authorization: serde_json::Value,
+}
+
+/// The converged user-owned Personal Vault and its initial Agent Workspace pairing.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapPersonalVaultForAgentResponse {
+    pub vault: VaultMetadataResponse,
+    pub pairing: AgentWorkspacePairingResponse,
+}
+
+/// Owner-authorized grant of one additional restricted Folder to a paired Agent Principal.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandAgentWorkspaceRequest {
+    pub grant: FolderKeyGrantRequest,
+    pub access_change_event: serde_json::Value,
+}
+
+/// One delegated Folder rotation supplied during Agent Workspace revocation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeAgentWorkspaceFolderRequest {
+    pub folder_id: String,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub reencrypted_records: Vec<RotationObjectRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Revoke an Agent Principal's complete current Personal Vault Folder scope.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeAgentWorkspaceRequest {
+    pub folders: Vec<RevokeAgentWorkspaceFolderRequest>,
+}
+
 /// Add/remove member/admin request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

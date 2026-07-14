@@ -117,6 +117,17 @@ Only the official Brain Product Client may invoke this provider. Ordinary
 dashboard pages, Finite Sites content, and embedded frames never receive it or
 use it as a general signing/decryption capability.
 
+The hosted phase exposes the exact `finite-brain-identity-provider-v1`
+operations `identifyMember`, `authorizeHttpRequest`, `authorizeBrainEvent`,
+`openGrantPayload`, and `wrapGrantPayload`. The WorkOS-protected dashboard
+bridge accepts them only from the same-origin `/client` document and binds the
+internal custody call to the verified WorkOS user plus the trusted public Brain
+origin. The Hosted Device executor loads an already-created User Key; it MUST
+return setup-required rather than generate a key when Chat setup is absent.
+Account logout or expiry makes the bridge unavailable and the Product Client
+locks its in-memory session. That does not revoke an Agent Principal's separate
+Brain grants.
+
 The hosted compatibility adapter MUST bind HTTP authorization to the official
 Brain origin, a protected Brain route, the exact method, and the exact request
 body. Event authorization MUST validate the named Brain intent and its event
@@ -517,6 +528,10 @@ Personal Vault bootstrap:
 - A successful agent-first bootstrap MUST atomically consume its Personal Vault
   Bootstrap Authorization. Replay, expiry, a different user, a different Agent
   Principal, a different Folder scope, or a later access expansion MUST fail.
+- The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
+  Chat's explicit setup action obtains the bounded request bundle from
+  `POST /v1/brain/personal-vault-bootstrap-authorizations`; the Agent Principal
+  forwards that bundle and signs the protected Brain request as itself.
 - Seed ordinary encrypted Folder Objects for default Pages:
   - `AGENTS.md`, `HUMANS.md`, `README.md`, and orientation Pages in
     `getting-started`
@@ -1001,6 +1016,17 @@ Revocation first disables the Brain Email Access Delegation and removes the
 agent's Folder Access, then rotates every affected Folder Key and re-encrypts
 live Folder Objects for the remaining recipients. It does not claim to erase
 plaintext or prior keys the agent already retained.
+
+The current owner lifecycle routes are:
+
+- `POST /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}/folders/{folderId}`
+  adds exactly one restricted Folder with an agent-addressed current grant.
+- `DELETE /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}` revokes
+  the delegation. Its body MUST contain every Folder in the current delegated
+  scope exactly once, with the next key version, every live object re-encrypted
+  exactly once, grants for all and only the remaining recipients, and an
+  owner-signed removal event per Folder. Brain commits the complete revocation
+  atomically or leaves the active delegation unchanged.
 
 ### 6.6 Folder Key Rotation
 

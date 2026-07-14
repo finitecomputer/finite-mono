@@ -2130,6 +2130,67 @@ assert.doesNotMatch(
   assert.equal(brainIdentityProvider.signEvent, undefined);
   assert.equal(brainIdentityProvider.decrypt, undefined);
   assert.equal(brainIdentityProvider.nip44, undefined);
+  const hostedCalls = [];
+  const hostedBrainIdentityProvider = client.createHostedBrainIdentityProvider({
+    endpoint: "/api/brain/identity-provider",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      hostedCalls.push({ request, init });
+      if (request.operation === "identifyMember") {
+        return Response.json({ publicKeyHex: "55".repeat(32), npub: client.npubFromHex("55".repeat(32)) });
+      }
+      if (request.operation === "openGrantPayload") {
+        return Response.json({ plaintext: "opened-session-key" });
+      }
+      if (request.operation === "wrapGrantPayload") {
+        return Response.json({ ciphertext: "wrapped-session-key" });
+      }
+      return Response.json({ id: "signed-event" });
+    },
+  });
+  assert.deepEqual(
+    Object.keys(hostedBrainIdentityProvider).sort(),
+    Object.keys(brainIdentityProvider).sort()
+  );
+  assert.equal(
+    client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
+    "checking"
+  );
+  assert.equal(
+    (await hostedBrainIdentityProvider.identifyMember()).publicKeyHex,
+    "55".repeat(32)
+  );
+  assert.equal(
+    client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
+    "ready"
+  );
+  assert.equal(
+    await hostedBrainIdentityProvider.openGrantPayload({
+      purpose: "folder-key-grant",
+      peerPublicKeyHex: "66".repeat(32),
+      ciphertext: "wrapped",
+    }),
+    "opened-session-key"
+  );
+  assert.equal(
+    await hostedBrainIdentityProvider.wrapGrantPayload({
+      purpose: "folder-key-grant",
+      peerPublicKeyHex: "66".repeat(32),
+      plaintext: "session-key",
+    }),
+    "wrapped-session-key"
+  );
+  assert.equal(hostedCalls[0].request.version, "finite-brain-identity-provider-v1");
+  assert.equal(hostedCalls[0].request.operation, "identifyMember");
+  assert.equal(hostedCalls[0].init.credentials, "same-origin");
+  const setupRequiredProvider = client.createHostedBrainIdentityProvider({
+    fetch: async () => Response.json({ error: "setup required" }, { status: 428 }),
+  });
+  await assert.rejects(() => setupRequiredProvider.identifyMember(), /setup required/u);
+  assert.equal(
+    client.deriveBrainIdentityProviderState(setupRequiredProvider).status,
+    "setup_required"
+  );
   const missingBrainIdentityProvider = client.deriveBrainIdentityProviderState(null);
   assert.equal(missingBrainIdentityProvider.status, "setup_required");
   assert.equal(missingBrainIdentityProvider.label, "setup required");

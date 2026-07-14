@@ -60,6 +60,15 @@ Brain API operations still require their normal Nostr authorization. Do not
 point this at an independently login-gated public URL or treat WorkOS as a
 replacement for Brain Folder Key grants.
 
+Hosted `/client` reaches its bounded Brain Identity Provider through
+`POST /api/brain/identity-provider`. The route accepts only the versioned Brain
+operation set from the same-origin `/client` document, revalidates the WorkOS
+session, and forwards the verified WorkOS user plus public Brain origin to the
+internal Hosted Device. `FC_HOSTED_WEB_DEVICE_URL` and
+`FINITECHAT_HOSTED_API_TOKEN` must therefore be configured alongside
+`FC_BRAIN_UPSTREAM_URL`. Logout or session expiry makes this bridge unavailable;
+it never replaces Brain's Nostr authorization or Folder Key Grants.
+
 ## Sites account preview boundary
 
 Set `FC_SITES_UPSTREAM_URL` to the internal Finite Sites origin and give the

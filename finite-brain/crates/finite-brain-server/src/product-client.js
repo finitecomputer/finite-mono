@@ -72,6 +72,7 @@ const FiniteBrainProductClient = (() => {
   };
   const handledAccessFailures = new WeakSet();
   const handledSessionLockFailures = new WeakSet();
+  const hostedIdentityProviderStates = new WeakMap();
   let pendingInviteNavigation = null;
   let clientActionFeedbackTimer = null;
 
@@ -1111,6 +1112,19 @@ const FiniteBrainProductClient = (() => {
         canConnect: false,
       };
     }
+    const hostedState = hostedIdentityProviderStates.get(provider);
+    if (hostedState && hostedState.status !== "ready") {
+      return {
+        status: hostedState.status,
+        label: hostedState.status === "setup_required" ? "setup required" : "checking",
+        detail:
+          hostedState.detail ||
+          (hostedState.status === "setup_required"
+            ? "Set up your Finite Chat Hosted Device before opening Brain."
+            : "Checking the hosted Brain identity."),
+        canConnect: false,
+      };
+    }
     return {
       status: "ready",
       label: "ready",
@@ -1901,6 +1915,68 @@ const FiniteBrainProductClient = (() => {
         );
       },
     });
+  }
+
+  function createHostedBrainIdentityProvider(options = {}) {
+    const endpoint = String(options.endpoint || "/api/brain/identity-provider");
+    const fetchImpl = options.fetch || fetch;
+    const providerState = {
+      status: "checking",
+      detail: "Checking the hosted Brain identity.",
+    };
+    const providerRequest = async (operation, input = null) => {
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "content-type": "application/json",
+          "x-finite-brain-provider-version": BRAIN_IDENTITY_PROVIDER_VERSION,
+        },
+        body: JSON.stringify({
+          version: BRAIN_IDENTITY_PROVIDER_VERSION,
+          operation,
+          input,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 428) {
+          providerState.status = "setup_required";
+          providerState.detail = "Set up your Finite Chat Hosted Device before opening Brain.";
+        } else if (response.status === 401 || response.status === 403) {
+          providerState.status = "setup_required";
+          providerState.detail = "Your hosted Brain session expired. Sign in and open Brain again.";
+          if (state.identityProvider === provider) expireBrainIdentitySession();
+        }
+        throw new Error(body?.error || `Hosted Brain identity request failed with ${response.status}`);
+      }
+      providerState.status = "ready";
+      providerState.detail = "Hosted Brain identity is ready.";
+      return body;
+    };
+    const provider = Object.freeze({
+      version: BRAIN_IDENTITY_PROVIDER_VERSION,
+      identifyMember() {
+        return providerRequest("identifyMember");
+      },
+      authorizeHttpRequest(input) {
+        return providerRequest("authorizeHttpRequest", input);
+      },
+      authorizeBrainEvent(input) {
+        return providerRequest("authorizeBrainEvent", input);
+      },
+      async openGrantPayload(input) {
+        const result = await providerRequest("openGrantPayload", input);
+        return result.plaintext;
+      },
+      async wrapGrantPayload(input) {
+        const result = await providerRequest("wrapGrantPayload", input);
+        return result.ciphertext;
+      },
+    });
+    hostedIdentityProviderStates.set(provider, providerState);
+    return provider;
   }
 
   function eventTagValues(eventTemplate, name) {
@@ -8233,6 +8309,14 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function detectSigner() {
+    const hostedState = hostedIdentityProviderStates.get(state.identityProvider);
+    if (hostedState) {
+      try {
+        await state.identityProvider.identifyMember();
+      } catch (error) {
+        state.lastError = error.message;
+      }
+    }
     const derived = deriveBrainIdentityProviderState(state.identityProvider);
     state.signerStatus = derived.status;
     render();
@@ -11198,6 +11282,8 @@ const FiniteBrainProductClient = (() => {
   async function start(options = {}) {
     if (Object.prototype.hasOwnProperty.call(options, "identityProvider")) {
       configureBrainIdentityProvider(options.identityProvider);
+    } else if (!state.identityProvider) {
+      configureBrainIdentityProvider(createHostedBrainIdentityProvider());
     }
     mountAccessPanelInSettings();
     mountInvitationPanelInSettings();
@@ -11243,6 +11329,7 @@ const FiniteBrainProductClient = (() => {
     cloneSessionKeyring,
     createClientProjection,
     createLocalNip07ProviderFromSecret,
+    createHostedBrainIdentityProvider,
     createNip07BrainIdentityProvider,
     configureBrainIdentityProvider,
     connectBrainIdentityProvider,

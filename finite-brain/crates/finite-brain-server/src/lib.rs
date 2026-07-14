@@ -21,16 +21,19 @@ use finite_brain_core::{
     FolderId, FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
     ObjectId, RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation,
     UserId, VaultId, VaultKind, bootstrap_organization_vault, bootstrap_personal_vault,
-    validate_admin_access_change_event, validate_revision_event, validate_tombstone_event,
+    validate_admin_access_change_event, validate_personal_vault_bootstrap_authorization_event,
+    validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainEmailAccessDelegation, BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder,
-    EncryptedVaultExport, EnsurePersonalAgentWorkspaceInput, FolderKeyGrantMetadata,
+    BootstrapPersonalAgentWorkspaceInput, BrainEmailAccessDelegation, BrainStore,
+    ControlSyncRecord, EmailInviteBootstrapScopeFolder, EncryptedVaultExport,
+    EnsurePersonalAgentWorkspaceInput, ExpandPersonalAgentWorkspaceInput, FolderKeyGrantMetadata,
     FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, SharedFolderConnectionStatus,
-    SharedFolderDirection, StoreError, StoredShareLink, StoredSharedFolderConnection,
-    StoredSharedFolderInvitation, StoredSyncRecord, StoredVault, StoredVaultInvitation,
-    SyncRecordInput, SyncRecordType, VaultInvitationTargetKind, VisibleVault, VisibleVaultRole,
+    MountedFolderProjection, MountedFolderState, RevokePersonalAgentFolderInput,
+    RevokePersonalAgentWorkspaceInput, SharedFolderConnectionStatus, SharedFolderDirection,
+    StoreError, StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation,
+    StoredSyncRecord, StoredVault, StoredVaultInvitation, SyncRecordInput, SyncRecordType,
+    VaultInvitationTargetKind, VisibleVault, VisibleVaultRole,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -513,6 +516,18 @@ pub fn router_with_state(state: ServerState) -> Router {
         .route(
             "/_admin/vaults/{vault_id}/agent-workspace-pairings",
             get(list_agent_workspace_pairings_handler).post(ensure_agent_workspace_pairing_handler),
+        )
+        .route(
+            "/_admin/vaults/{vault_id}/agent-workspace-pairings/{agent_npub}",
+            axum::routing::delete(revoke_agent_workspace_handler),
+        )
+        .route(
+            "/_admin/vaults/{vault_id}/agent-workspace-pairings/{agent_npub}/folders/{folder_id}",
+            post(expand_agent_workspace_handler),
+        )
+        .route(
+            "/_admin/personal-vault-bootstrap",
+            post(bootstrap_personal_vault_for_agent_handler),
         )
         .route("/_admin/vaults/{vault_id}/admins", post(add_admin_handler))
         .route(
@@ -3623,6 +3638,600 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_bootstraps_the_users_personal_vault_with_one_owner_authorization() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
+        let router = test_router();
+        let path = "/_admin/personal-vault-bootstrap";
+        let body = serde_json::json!({
+            "vaultId": "personal",
+            "name": "Personal Brain",
+            "folderId": "agent-workspace",
+            "folderName": "Agent Workspace",
+            "folderPath": "Agent Workspace",
+            "bootstrapGrants": [
+                {
+                    "folderId": "getting-started",
+                    "grant": folder_key_grant_value(
+                        "grant-getting-started-owner-v1",
+                        1,
+                        owner_npub.as_str(),
+                    ),
+                },
+                {
+                    "folderId": "restricted",
+                    "grant": folder_key_grant_value(
+                        "grant-restricted-owner-v1",
+                        1,
+                        owner_npub.as_str(),
+                    ),
+                },
+            ],
+            "workspaceGrants": [
+                folder_key_grant_value(
+                    "grant-agent-workspace-owner-v1",
+                    1,
+                    owner_npub.as_str(),
+                ),
+                folder_key_grant_value(
+                    "grant-agent-workspace-agent-v1",
+                    1,
+                    agent_npub.as_str(),
+                ),
+            ],
+            "bootstrapAuthorization": personal_vault_bootstrap_authorization_event(
+                &owner_keys,
+                "bootstrap-1",
+                "personal",
+                agent_npub.as_str(),
+                "agent-workspace",
+                TEST_NOW + 60,
+            ),
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-agent-first-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+
+        let response = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            path,
+            Some(body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: serde_json::Value = read_json(response).await;
+        assert_eq!(response["vault"]["vaultId"], "personal");
+        assert_eq!(response["vault"]["ownerUserId"], owner_npub);
+        assert_eq!(response["pairing"]["agentNpub"], agent_npub);
+        assert_eq!(response["pairing"]["workspaceFolderId"], "agent-workspace");
+
+        let agent_metadata =
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 1).await;
+        assert_eq!(agent_metadata.status(), StatusCode::OK);
+        let agent_metadata: VaultMetadataResponse = read_json(agent_metadata).await;
+        assert_eq!(
+            agent_metadata.owner_user_id.as_deref(),
+            Some(owner_npub.as_str())
+        );
+        assert_eq!(agent_metadata.folders.len(), 1);
+        assert_eq!(agent_metadata.folders[0].id, "agent-workspace");
+
+        let object_path =
+            "/_admin/vaults/personal/folders/agent-workspace/objects/obj_000000000903";
+        let object_body = object_write_body(
+            &agent_keys,
+            RevisionFixture {
+                vault_id: "personal",
+                folder_id: "agent-workspace",
+                object_id: "obj_000000000903",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "agent-first workspace page",
+                nonce: 93,
+                record_type: false,
+            },
+        );
+        let write = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            object_path,
+            Some(object_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(write.status(), StatusCode::OK);
+
+        let owner_metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 1).await;
+        assert_eq!(owner_metadata.status(), StatusCode::OK);
+        let owner_metadata: VaultMetadataResponse = read_json(owner_metadata).await;
+        assert_eq!(owner_metadata.folders.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn consumed_personal_vault_bootstrap_authorization_cannot_be_replayed() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let router = test_router();
+        let path = "/_admin/personal-vault-bootstrap";
+        let body =
+            agent_first_bootstrap_body(&owner_keys, &agent_keys, "bootstrap-replay", TEST_NOW + 60);
+
+        let first = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            path,
+            Some(body.clone()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let replay = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            path,
+            Some(body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            replay,
+            StatusCode::BAD_REQUEST,
+            "Personal Vault Bootstrap Authorization was already consumed",
+        )
+        .await;
+
+        let owner_vaults = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let owner_vaults: VisibleVaultsResponse = read_json(owner_vaults).await;
+        assert_eq!(owner_vaults.vaults.len(), 1);
+
+        let pairings = authed_request(
+            router,
+            &owner_keys,
+            "GET",
+            "/_admin/vaults/personal/agent-workspace-pairings",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let pairings: AgentWorkspacePairingListResponse = read_json(pairings).await;
+        assert_eq!(pairings.pairings.len(), 1);
+        assert_eq!(pairings.pairings[0].audit.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_first_bootstrap_converges_on_a_user_first_personal_vault() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let router = test_router();
+        let created = post_vault(
+            router.clone(),
+            &owner_keys,
+            &create_vault_body("personal", "personal"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+
+        let body = agent_first_bootstrap_body(
+            &owner_keys,
+            &agent_keys,
+            "bootstrap-converge",
+            TEST_NOW + 60,
+        );
+        let converged = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            "/_admin/personal-vault-bootstrap",
+            Some(body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(converged.status(), StatusCode::OK);
+
+        let owner_vaults = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let owner_vaults: VisibleVaultsResponse = read_json(owner_vaults).await;
+        assert_eq!(owner_vaults.vaults.len(), 1);
+        assert_eq!(owner_vaults.vaults[0].vault_id, "personal");
+
+        let agent_metadata = get_metadata(router, &agent_keys, "personal", TEST_NOW + 1).await;
+        assert_eq!(agent_metadata.status(), StatusCode::OK);
+        let agent_metadata: VaultMetadataResponse = read_json(agent_metadata).await;
+        assert_eq!(agent_metadata.folders.len(), 1);
+        assert_eq!(agent_metadata.folders[0].id, "agent-workspace");
+    }
+
+    #[tokio::test]
+    async fn failed_agent_first_bootstrap_leaves_no_partial_state_or_consumption() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let router = test_router();
+        let valid_body = agent_first_bootstrap_body(
+            &owner_keys,
+            &agent_keys,
+            "bootstrap-retry-after-failure",
+            TEST_NOW + 60,
+        );
+        let mut invalid_body: serde_json::Value = serde_json::from_str(&valid_body).unwrap();
+        invalid_body["workspaceGrants"] = serde_json::json!([]);
+
+        let failed = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            "/_admin/personal-vault-bootstrap",
+            Some(invalid_body.to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(failed, StatusCode::BAD_REQUEST, "missing required grant").await;
+
+        let owner_vaults = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let owner_vaults: VisibleVaultsResponse = read_json(owner_vaults).await;
+        assert!(owner_vaults.vaults.is_empty());
+
+        let retried = authed_request(
+            router,
+            &agent_keys,
+            "POST",
+            "/_admin/personal-vault-bootstrap",
+            Some(valid_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(retried.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn personal_vault_owner_expands_and_revokes_a_paired_agents_folder_scope() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
+        let router = test_router();
+        let create = post_vault(
+            router.clone(),
+            &owner_keys,
+            &create_vault_body("personal", "personal"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+        let pairing_body = serde_json::json!({
+            "agentNpub": agent_npub,
+            "folderId": "agent-workspace",
+            "name": "Agent Workspace",
+            "path": "Agent Workspace",
+            "grants": [
+                folder_key_grant_value("grant-agent-workspace-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-agent-workspace-agent-v1", 1, agent_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-pair-agent-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let paired = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/agent-workspace-pairings",
+            Some(pairing_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(paired.status(), StatusCode::OK);
+
+        let expansion_path = format!(
+            "/_admin/vaults/personal/agent-workspace-pairings/{agent_npub}/folders/restricted"
+        );
+        let expansion_body = serde_json::json!({
+            "grant": folder_key_grant_value(
+                "grant-agent-restricted-v1",
+                1,
+                agent_npub.as_str(),
+            ),
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-expand-agent-restricted",
+                AdminAccessAction::GrantFolderAccess,
+                Some("restricted"),
+                Some(agent_npub.as_str()),
+                Some(1),
+            ),
+        })
+        .to_string();
+        let expanded = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            &expansion_path,
+            Some(expansion_body.clone()),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(expanded.status(), StatusCode::OK);
+        let expanded: AgentWorkspacePairingResponse = read_json(expanded).await;
+        assert_eq!(
+            expanded.scope.folder_ids,
+            vec!["agent-workspace".to_owned(), "restricted".to_owned()]
+        );
+        assert_eq!(expanded.audit.len(), 2);
+        assert_eq!(expanded.audit[1].action, "scope_expanded");
+        assert_eq!(expanded.audit[1].actor_npub, owner_npub);
+
+        let agent_metadata =
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 2).await;
+        assert_eq!(agent_metadata.status(), StatusCode::OK);
+        let agent_metadata: VaultMetadataResponse = read_json(agent_metadata).await;
+        assert_eq!(
+            agent_metadata
+                .folders
+                .iter()
+                .map(|folder| folder.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-workspace", "restricted"]
+        );
+
+        let denied = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            &expansion_path,
+            Some(expansion_body),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(
+            denied,
+            StatusCode::FORBIDDEN,
+            "Personal Vault owner access required",
+        )
+        .await;
+
+        for (folder_id, object_id, content, nonce) in [
+            (
+                "agent-workspace",
+                "obj_000000000903",
+                "agent workspace before revocation",
+                93,
+            ),
+            (
+                "restricted",
+                "obj_000000000904",
+                "expanded folder before revocation",
+                94,
+            ),
+        ] {
+            let object_path =
+                format!("/_admin/vaults/personal/folders/{folder_id}/objects/{object_id}");
+            let object_body = object_write_body(
+                &agent_keys,
+                RevisionFixture {
+                    vault_id: "personal",
+                    folder_id,
+                    object_id,
+                    operation: FolderObjectOperation::Create,
+                    revision: 1,
+                    base_revision: None,
+                    key_version: 1,
+                    content,
+                    nonce,
+                    record_type: false,
+                },
+            );
+            let write = authed_request(
+                router.clone(),
+                &agent_keys,
+                "PUT",
+                &object_path,
+                Some(object_body),
+                TEST_NOW + 3,
+            )
+            .await;
+            assert_eq!(write.status(), StatusCode::OK);
+        }
+
+        let revoke_value = serde_json::json!({
+            "folders": [
+                {
+                    "folderId": "agent-workspace",
+                    "newKeyVersion": 2,
+                    "grants": [folder_key_grant_value(
+                        "grant-agent-workspace-owner-v2",
+                        2,
+                        owner_npub.as_str(),
+                    )],
+                    "reencryptedRecords": [rotation_object_value(
+                        &owner_keys,
+                        "personal",
+                        "agent-workspace",
+                        "obj_000000000903",
+                        2,
+                        Some(1),
+                        2,
+                        "owner copy after agent revocation",
+                        95,
+                    )],
+                    "accessChangeEvent": admin_event(
+                        &owner_keys,
+                        "personal",
+                        "change-revoke-agent-workspace",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("agent-workspace"),
+                        Some(agent_npub.as_str()),
+                        Some(2),
+                    ),
+                },
+                {
+                    "folderId": "restricted",
+                    "newKeyVersion": 2,
+                    "grants": [folder_key_grant_value(
+                        "grant-restricted-owner-v2",
+                        2,
+                        owner_npub.as_str(),
+                    )],
+                    "reencryptedRecords": [rotation_object_value(
+                        &owner_keys,
+                        "personal",
+                        "restricted",
+                        "obj_000000000904",
+                        2,
+                        Some(1),
+                        2,
+                        "owner expanded copy after agent revocation",
+                        96,
+                    )],
+                    "accessChangeEvent": admin_event(
+                        &owner_keys,
+                        "personal",
+                        "change-revoke-agent-restricted",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("restricted"),
+                        Some(agent_npub.as_str()),
+                        Some(2),
+                    ),
+                },
+            ],
+        });
+        let pairing_path = format!("/_admin/vaults/personal/agent-workspace-pairings/{agent_npub}");
+
+        let agent_cannot_revoke = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &pairing_path,
+            Some(revoke_value.to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_error(
+            agent_cannot_revoke,
+            StatusCode::FORBIDDEN,
+            "Personal Vault owner access required",
+        )
+        .await;
+
+        let incomplete_revoke = authed_request(
+            router.clone(),
+            &owner_keys,
+            "DELETE",
+            &pairing_path,
+            Some(
+                serde_json::json!({
+                    "folders": [revoke_value["folders"][0].clone()],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_error(
+            incomplete_revoke,
+            StatusCode::BAD_REQUEST,
+            "Agent Workspace revocation must rotate every delegated Folder exactly once",
+        )
+        .await;
+        let still_active =
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 4).await;
+        assert_eq!(still_active.status(), StatusCode::OK);
+
+        let revoked = authed_request(
+            router.clone(),
+            &owner_keys,
+            "DELETE",
+            &pairing_path,
+            Some(revoke_value.to_string()),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(revoked.status(), StatusCode::OK);
+        let revoked: AgentWorkspacePairingResponse = read_json(revoked).await;
+        assert_eq!(revoked.status, "revoked");
+        assert_eq!(revoked.audit.len(), 3);
+        assert_eq!(revoked.audit[2].action, "revoked");
+        assert_eq!(revoked.audit[2].actor_npub, owner_npub);
+
+        let agent_metadata =
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 5).await;
+        assert_error(
+            agent_metadata,
+            StatusCode::FORBIDDEN,
+            "vault access required",
+        )
+        .await;
+
+        let owner_metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 5).await;
+        assert_eq!(owner_metadata.status(), StatusCode::OK);
+        let owner_metadata: VaultMetadataResponse = read_json(owner_metadata).await;
+        for folder_id in ["agent-workspace", "restricted"] {
+            assert_eq!(
+                owner_metadata
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id == folder_id)
+                    .map(|folder| folder.current_key_version),
+                Some(2),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn protected_create_rejects_missing_auth() {
         let response = test_router()
             .oneshot(
@@ -6637,6 +7246,71 @@ mod tests {
         .to_string()
     }
 
+    fn agent_first_bootstrap_body(
+        owner_keys: &Keys,
+        agent_keys: &Keys,
+        authorization_id: &str,
+        expires_at: u64,
+    ) -> String {
+        let owner_npub = npub(owner_keys);
+        let agent_npub = npub(agent_keys);
+        serde_json::json!({
+            "vaultId": "personal",
+            "name": "Personal Brain",
+            "folderId": "agent-workspace",
+            "folderName": "Agent Workspace",
+            "folderPath": "Agent Workspace",
+            "bootstrapGrants": [
+                {
+                    "folderId": "getting-started",
+                    "grant": folder_key_grant_value(
+                        "grant-getting-started-owner-v1",
+                        1,
+                        owner_npub.as_str(),
+                    ),
+                },
+                {
+                    "folderId": "restricted",
+                    "grant": folder_key_grant_value(
+                        "grant-restricted-owner-v1",
+                        1,
+                        owner_npub.as_str(),
+                    ),
+                },
+            ],
+            "workspaceGrants": [
+                folder_key_grant_value(
+                    "grant-agent-workspace-owner-v1",
+                    1,
+                    owner_npub.as_str(),
+                ),
+                folder_key_grant_value(
+                    "grant-agent-workspace-agent-v1",
+                    1,
+                    agent_npub.as_str(),
+                ),
+            ],
+            "bootstrapAuthorization": personal_vault_bootstrap_authorization_event(
+                owner_keys,
+                authorization_id,
+                "personal",
+                agent_npub.as_str(),
+                "agent-workspace",
+                expires_at,
+            ),
+            "accessChangeEvent": admin_event(
+                owner_keys,
+                "personal",
+                "change-agent-first-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string()
+    }
+
     async fn post_vault(
         router: Router,
         keys: &Keys,
@@ -6959,6 +7633,46 @@ mod tests {
             keys,
             payload.canonical_json(),
             admin_access_change_tags(&expected),
+        )
+    }
+
+    fn personal_vault_bootstrap_authorization_event(
+        owner_keys: &Keys,
+        authorization_id: &str,
+        vault_id: &str,
+        agent_npub: &str,
+        workspace_folder_id: &str,
+        expires_at: u64,
+    ) -> Event {
+        let owner_npub = npub(owner_keys);
+        let content = format!(
+            concat!(
+                "{{\"version\":\"finitebrain-personal-vault-bootstrap-authorization-v1\",",
+                "\"authorizationId\":\"{}\",",
+                "\"ownerNpub\":\"{}\",",
+                "\"agentNpub\":\"{}\",",
+                "\"vaultId\":\"{}\",",
+                "\"workspaceFolderId\":\"{}\",",
+                "\"expiresAt\":{}}}"
+            ),
+            authorization_id, owner_npub, agent_npub, vault_id, workspace_folder_id, expires_at,
+        );
+        sign_app_event(
+            owner_keys,
+            content,
+            vec![
+                vec![
+                    "d".to_owned(),
+                    format!("finitebrain-personal-vault-bootstrap:{authorization_id}"),
+                ],
+                vec!["vault".to_owned(), vault_id.to_owned()],
+                vec!["folder".to_owned(), workspace_folder_id.to_owned()],
+                vec![
+                    "p".to_owned(),
+                    NostrPublicKey::parse(agent_npub).unwrap().to_hex(),
+                ],
+                vec!["expires".to_owned(), expires_at.to_string()],
+            ],
         )
     }
 

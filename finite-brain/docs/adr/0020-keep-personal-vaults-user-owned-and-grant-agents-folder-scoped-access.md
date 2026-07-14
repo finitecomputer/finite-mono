@@ -2,10 +2,12 @@
 
 Status: accepted 2026-07-13.
 
-Implementation note: the initial user-first path now supports limited Personal
-Vault members plus idempotent, owner-signed Agent Workspace pairing with a
-durable delegation and audit record. Agent-first Bootstrap Authorization and
-revocation/key rotation remain separate follow-on slices.
+Implementation note: phase one now includes limited Personal Vault members,
+idempotent owner-first pairing, Chat-issued one-use agent-first bootstrap,
+owner-only Folder-by-Folder expansion, and atomic delegation revocation with
+key rotation across the complete delegated scope. Public API tests cover both
+principals, convergence/replay failures, rollback, filtered visibility, live
+object re-encryption, and retained owner access.
 
 ## Context
 

@@ -11,8 +11,9 @@ use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use finite_nostr::{NostrPublicKey, verify_event_integrity};
-use nostr::{Event, Kind};
+use finite_nostr::{NostrPublicKey, build_rumor, verify_event_integrity, wrap_rumor};
+use nostr::event::FinalizeEvent;
+use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -24,6 +25,45 @@ const APP_SPECIFIC_KIND: u16 = 30_078;
 const MAX_USER_ID_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 128;
 const MAX_SAFE_RELATIVE_PATH_LEN: usize = 1024;
+
+/// Versioned official Product Client identity boundary.
+pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
+
+/// Unsigned Nostr event accepted only after a named Brain intent validates it.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub struct BrainEventTemplate {
+    pub kind: u16,
+    pub created_at: u64,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+/// Typed protected-request authorization presented to the Brain Identity Provider.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainHttpAuthorizationIntent {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub body_text: String,
+    pub event_template: BrainEventTemplate,
+}
+
+/// Typed Brain event authorization presented to the Brain Identity Provider.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainEventAuthorizationIntent {
+    pub intent: String,
+    pub event_template: BrainEventTemplate,
+}
+
+/// Typed NIP-44 operation for a Brain-owned Folder Key or invitation grant.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainGrantIntent {
+    pub purpose: String,
+    pub peer_public_key_hex: String,
+}
 
 /// Default markdown Page materialized in a starter Vault Folder.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1808,6 +1848,477 @@ pub fn validate_admin_access_change_event(
 
     validate_signer(event, &payload.admin_npub)?;
     require_exact_tags(event, admin_access_change_tags(expected)?)?;
+    Ok(payload)
+}
+
+/// Validate an official Product Client request-signing intent before the user key signs it.
+pub fn validate_brain_http_authorization_intent(
+    input: &BrainHttpAuthorizationIntent,
+    official_brain_origin: &str,
+) -> Result<(), CryptoRecordError> {
+    let method = input.method.to_ascii_uppercase();
+    if !matches!(method.as_str(), "DELETE" | "GET" | "PATCH" | "POST" | "PUT") {
+        return brain_identity_provider_error("Brain HTTP authorization method is unsupported");
+    }
+    let (origin, path) =
+        absolute_http_url_parts(&input.url).ok_or_else(|| CryptoRecordError::EventMismatch {
+            reason: "Brain HTTP authorization URL is invalid".to_owned(),
+        })?;
+    if origin != official_brain_origin.trim_end_matches('/') {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization requires the official Brain origin",
+        );
+    }
+    if path != "/_admin" && !path.starts_with("/_admin/") {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization requires a protected Brain route",
+        );
+    }
+    let template = &input.event_template;
+    if template.kind != 27_235 || !template.content.is_empty() {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization requires an empty kind 27235 event",
+        );
+    }
+    let allowed_tags = BTreeSet::from(["method", "nonce", "payload", "u"]);
+    if template.tags.iter().any(|tag| {
+        tag.first()
+            .is_none_or(|name| !allowed_tags.contains(name.as_str()))
+    }) {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization contains an unsupported tag",
+        );
+    }
+    if single_template_tag(template, "u")? != input.url {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization URL tag does not match its request",
+        );
+    }
+    if single_template_tag(template, "method")? != method {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization method tag does not match its request",
+        );
+    }
+    let nonce = single_template_tag(template, "nonce")?;
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return brain_identity_provider_error("Brain HTTP authorization nonce tag is invalid");
+    }
+    let payload_tags = template_tag_values(template, "payload");
+    if input.body_text.is_empty() {
+        if !payload_tags.is_empty() {
+            return brain_identity_provider_error(
+                "Brain HTTP authorization without a body cannot include a payload tag",
+            );
+        }
+    } else if payload_tags.len() != 1 || payload_tags[0] != sha256_hex(input.body_text.as_bytes()) {
+        return brain_identity_provider_error(
+            "Brain HTTP authorization payload tag does not match its request body",
+        );
+    }
+    Ok(())
+}
+
+/// Validate one named Brain application-event intent before signing it.
+pub fn validate_brain_event_authorization_intent(
+    input: &BrainEventAuthorizationIntent,
+) -> Result<(), CryptoRecordError> {
+    let (expected_kind, d_prefix) = match input.intent.as_str() {
+        "folder-key-grant-seal" => (13, None),
+        "folder-key-grant-wrap" => (1_059, None),
+        "folder-object-revision" => (APP_SPECIFIC_KIND, Some("finite-folder-object-revision:")),
+        "folder-object-tombstone" => (APP_SPECIFIC_KIND, Some("finite-folder-object-tombstone:")),
+        "vault-access-change" => (APP_SPECIFIC_KIND, Some("finite-vault-admin-access-change:")),
+        "vault-invite-authorization" => (
+            APP_SPECIFIC_KIND,
+            Some("finite-email-invite-bootstrap-authorization:"),
+        ),
+        "vault-invite-bootstrap-seal" => (13, None),
+        "vault-invite-bootstrap-wrap" => (1_059, None),
+        _ => return brain_identity_provider_error("unsupported Brain identity intent"),
+    };
+    let template = &input.event_template;
+    if template.kind != expected_kind || template.content.is_empty() {
+        return brain_identity_provider_error(
+            "Brain event kind or content does not match its named intent",
+        );
+    }
+    if let Some(prefix) = d_prefix {
+        if !single_template_tag(template, "d")?.starts_with(prefix) {
+            return brain_identity_provider_error("Brain event does not match its named intent");
+        }
+    } else if input.intent.ends_with("-seal") {
+        if !template.tags.is_empty() {
+            return brain_identity_provider_error("Brain seal intent cannot include tags");
+        }
+    } else {
+        let recipient = single_template_tag(template, "p")?;
+        if template.tags.len() != 1
+            || recipient.len() != 64
+            || !recipient.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return brain_identity_provider_error(
+                "Brain wrap intent requires exactly one valid recipient tag",
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Validate and parse the peer key for one bounded Brain grant operation.
+pub fn validate_brain_grant_intent(
+    input: &BrainGrantIntent,
+) -> Result<NostrPublicKey, CryptoRecordError> {
+    if !matches!(
+        input.purpose.as_str(),
+        "folder-key-grant" | "vault-invite-bootstrap"
+    ) {
+        return brain_identity_provider_error("unsupported Brain grant purpose");
+    }
+    NostrPublicKey::from_hex(&input.peer_public_key_hex).map_err(|_| {
+        CryptoRecordError::EventMismatch {
+            reason: "Brain grant peer public key is invalid".to_owned(),
+        }
+    })
+}
+
+/// Sign an already validated event template without exposing a general signer API.
+pub fn sign_brain_event_template(
+    keys: &Keys,
+    template: &BrainEventTemplate,
+) -> Result<Event, CryptoRecordError> {
+    let tags = template
+        .tags
+        .iter()
+        .cloned()
+        .map(|parts| {
+            Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
+                reason: format!("Brain event tag is invalid: {error}"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    EventBuilder::new(Kind::from(template.kind), template.content.clone())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(template.created_at))
+        .finalize(keys)
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: format!("Brain event could not be signed: {error}"),
+        })
+}
+
+fn brain_identity_provider_error<T>(reason: &str) -> Result<T, CryptoRecordError> {
+    Err(CryptoRecordError::EventMismatch {
+        reason: reason.to_owned(),
+    })
+}
+
+fn template_tag_values<'a>(template: &'a BrainEventTemplate, name: &str) -> Vec<&'a str> {
+    template
+        .tags
+        .iter()
+        .filter_map(|tag| match tag.as_slice() {
+            [tag_name, value, ..] if tag_name == name => Some(value.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn single_template_tag<'a>(
+    template: &'a BrainEventTemplate,
+    name: &str,
+) -> Result<&'a str, CryptoRecordError> {
+    let values = template_tag_values(template, name);
+    if values.len() != 1 {
+        return brain_identity_provider_error(&format!(
+            "Brain event requires exactly one {name} tag"
+        ));
+    }
+    Ok(values[0])
+}
+
+fn absolute_http_url_parts(value: &str) -> Option<(&str, &str)> {
+    let scheme_end = value.find("://")?;
+    if !matches!(&value[..scheme_end], "http" | "https") {
+        return None;
+    }
+    let authority_start = scheme_end + 3;
+    let path_start = value[authority_start..]
+        .find('/')
+        .map_or(value.len(), |index| authority_start + index);
+    if path_start == authority_start {
+        return None;
+    }
+    let origin = &value[..path_start];
+    let path_and_suffix = if path_start == value.len() {
+        "/"
+    } else {
+        &value[path_start..]
+    };
+    let path_end = path_and_suffix
+        .find(['?', '#'])
+        .unwrap_or(path_and_suffix.len());
+    Some((origin, &path_and_suffix[..path_end]))
+}
+
+/// Maximum lifetime of a user-approved Personal Vault bootstrap authorization.
+pub const PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS: u64 = 5 * 60;
+
+/// Signed, one-use authority for an Agent Principal to initialize a user's Personal Vault.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalVaultBootstrapAuthorizationPayload {
+    pub version: String,
+    pub authorization_id: String,
+    pub owner_npub: String,
+    pub agent_npub: String,
+    pub vault_id: String,
+    pub workspace_folder_id: String,
+    pub expires_at: u64,
+}
+
+/// One client-generated encrypted Folder Key Grant ready for the Brain HTTP contract.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuedFolderKeyGrant {
+    pub id: String,
+    pub key_version: u32,
+    pub recipient_npub: String,
+    pub wrapped_event_json: String,
+    pub created_at: String,
+}
+
+/// Wrap a Folder Key for one recipient without exposing the key in the returned contract.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_folder_key_grant(
+    issuer_keys: &Keys,
+    grant_id: impl Into<String>,
+    vault_id: &VaultId,
+    folder_id: &FolderId,
+    key_version: u32,
+    recipient_npub: impl Into<String>,
+    folder_key: &FolderKey,
+    created_at: impl Into<String>,
+    created_at_unix_seconds: u64,
+) -> Result<IssuedFolderKeyGrant, CryptoRecordError> {
+    let issuer_npub = NostrPublicKey::from_protocol(issuer_keys.public_key())
+        .to_npub()
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })?;
+    let recipient_npub = recipient_npub.into();
+    let recipient = NostrPublicKey::parse(&recipient_npub).map_err(|error| {
+        CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        }
+    })?;
+    let created_at = created_at.into();
+    let content = serde_json::json!({
+        "version": "finite-folder-key-grant-v1",
+        "vaultId": vault_id,
+        "folderId": folder_id,
+        "keyVersion": key_version,
+        "folderKey": folder_key.to_base64(),
+        "issuerNpub": issuer_npub,
+        "recipientNpub": recipient_npub,
+        "createdAt": created_at,
+    })
+    .to_string();
+    let tags = vec![
+        vec![
+            "d".to_owned(),
+            format!("finite-folder-key-grant:{vault_id}:{folder_id}:{key_version}"),
+        ],
+        vec!["vault".to_owned(), vault_id.to_string()],
+        vec!["folder".to_owned(), folder_id.to_string()],
+        vec!["keyVersion".to_owned(), key_version.to_string()],
+    ]
+    .into_iter()
+    .map(|parts| {
+        Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let rumor = build_rumor(
+        NostrPublicKey::from_protocol(issuer_keys.public_key()),
+        Kind::ApplicationSpecificData,
+        tags,
+        content,
+        created_at_unix_seconds,
+    );
+    let wrapped = wrap_rumor(issuer_keys, recipient, rumor).map_err(|error| {
+        CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(IssuedFolderKeyGrant {
+        id: grant_id.into(),
+        key_version,
+        recipient_npub,
+        wrapped_event_json: wrapped.as_json(),
+        created_at,
+    })
+}
+
+impl PersonalVaultBootstrapAuthorizationPayload {
+    /// Canonical JSON signed by the Personal Vault owner.
+    pub fn canonical_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\"version\":{},",
+                "\"authorizationId\":{},",
+                "\"ownerNpub\":{},",
+                "\"agentNpub\":{},",
+                "\"vaultId\":{},",
+                "\"workspaceFolderId\":{},",
+                "\"expiresAt\":{}}}"
+            ),
+            json_string(&self.version),
+            json_string(&self.authorization_id),
+            json_string(&self.owner_npub),
+            json_string(&self.agent_npub),
+            json_string(&self.vault_id),
+            json_string(&self.workspace_folder_id),
+            self.expires_at,
+        )
+    }
+}
+
+/// Issue the bounded owner authorization used by the hosted Chat setup action.
+pub fn issue_personal_vault_bootstrap_authorization_event(
+    owner_keys: &Keys,
+    authorization_id: impl Into<String>,
+    agent_npub: impl Into<String>,
+    vault_id: &VaultId,
+    workspace_folder_id: &FolderId,
+    created_at_unix_seconds: u64,
+) -> Result<Event, CryptoRecordError> {
+    let owner_npub = NostrPublicKey::from_protocol(owner_keys.public_key())
+        .to_npub()
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })?;
+    let agent_npub = agent_npub.into();
+    let agent_hex = NostrPublicKey::parse(&agent_npub)
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })?
+        .to_hex();
+    let authorization_id = authorization_id.into();
+    let expires_at = created_at_unix_seconds
+        .checked_add(PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS)
+        .ok_or_else(|| CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap authorization expiry overflowed".to_owned(),
+        })?;
+    let payload = PersonalVaultBootstrapAuthorizationPayload {
+        version: "finitebrain-personal-vault-bootstrap-authorization-v1".to_owned(),
+        authorization_id: authorization_id.clone(),
+        owner_npub,
+        agent_npub,
+        vault_id: vault_id.to_string(),
+        workspace_folder_id: workspace_folder_id.to_string(),
+        expires_at,
+    };
+    let tags = vec![
+        vec![
+            "d".to_owned(),
+            format!("finitebrain-personal-vault-bootstrap:{authorization_id}"),
+        ],
+        vec!["vault".to_owned(), vault_id.to_string()],
+        vec!["folder".to_owned(), workspace_folder_id.to_string()],
+        vec!["p".to_owned(), agent_hex],
+        vec!["expires".to_owned(), expires_at.to_string()],
+    ]
+    .into_iter()
+    .map(|parts| {
+        Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    EventBuilder::new(Kind::ApplicationSpecificData, payload.canonical_json())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(created_at_unix_seconds))
+        .finalize(owner_keys)
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })
+}
+
+/// Validate the signed bounds of an agent-first Personal Vault bootstrap.
+pub fn validate_personal_vault_bootstrap_authorization_event(
+    event: &Event,
+    expected_agent_npub: &str,
+    expected_vault_id: &VaultId,
+    expected_workspace_folder_id: &FolderId,
+    now_unix_seconds: u64,
+) -> Result<PersonalVaultBootstrapAuthorizationPayload, CryptoRecordError> {
+    validate_event_integrity(event)?;
+    let payload: PersonalVaultBootstrapAuthorizationPayload = parse_event_content(event)?;
+    if payload.canonical_json() != event.content {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap authorization payload is not canonical".to_owned(),
+        });
+    }
+    if payload.version != "finitebrain-personal-vault-bootstrap-authorization-v1" {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "unsupported Personal Vault bootstrap authorization version".to_owned(),
+        });
+    }
+    if payload.authorization_id.trim().is_empty()
+        || payload.authorization_id.len() > 128
+        || payload.authorization_id.chars().any(char::is_control)
+    {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap authorization id is invalid".to_owned(),
+        });
+    }
+    if payload.agent_npub != expected_agent_npub
+        || payload.vault_id != expected_vault_id.as_str()
+        || payload.workspace_folder_id != expected_workspace_folder_id.as_str()
+    {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap authorization does not match requested scope"
+                .to_owned(),
+        });
+    }
+    if payload.owner_npub == payload.agent_npub {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap owner and Agent Principal must be distinct"
+                .to_owned(),
+        });
+    }
+    let created_at = event.created_at.as_secs();
+    if payload.expires_at <= created_at
+        || payload.expires_at.saturating_sub(created_at) > PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS
+        || now_unix_seconds > payload.expires_at
+    {
+        return Err(CryptoRecordError::EventMismatch {
+            reason: "Personal Vault bootstrap authorization is expired or exceeds its lifetime"
+                .to_owned(),
+        });
+    }
+    validate_signer(event, &payload.owner_npub)?;
+    let agent_hex = NostrPublicKey::parse(&payload.agent_npub)
+        .map_err(|error| CryptoRecordError::EventMismatch {
+            reason: error.to_string(),
+        })?
+        .to_hex();
+    require_exact_tags(
+        event,
+        vec![
+            vec![
+                "d".to_owned(),
+                format!(
+                    "finitebrain-personal-vault-bootstrap:{}",
+                    payload.authorization_id
+                ),
+            ],
+            vec!["vault".to_owned(), payload.vault_id.clone()],
+            vec!["folder".to_owned(), payload.workspace_folder_id.clone()],
+            vec!["p".to_owned(), agent_hex],
+            vec!["expires".to_owned(), payload.expires_at.to_string()],
+        ],
+    )?;
     Ok(payload)
 }
 

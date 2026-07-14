@@ -2,6 +2,16 @@
 
 Status: accepted, 2026-07-13.
 
+Implementation note: the hosted phase uses the versioned
+`finite-brain-identity-provider-v1` contract. The Product Client calls the
+WorkOS-protected dashboard bridge at `POST /api/brain/identity-provider`; that
+bridge forwards only the named Brain operations to the Hosted Device's
+`POST /v1/brain/identity-provider` executor with the verified WorkOS user and
+trusted public Brain origin. The executor loads an existing Hosted Device User
+Key without generating one, applies validation owned by `finite-brain-core`,
+and returns only signed events or bounded NIP-44 results. Missing Chat setup
+returns setup-required, and arbitrary sign/decrypt operations are not routes.
+
 ## Context
 
 Finite products need a person's Nostr identity without putting raw key material

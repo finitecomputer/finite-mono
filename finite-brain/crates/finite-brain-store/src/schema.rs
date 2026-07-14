@@ -68,6 +68,22 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 8)? {
+            tx.execute_batch(SCHEMA_V8)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![8, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 9)? {
+            tx.execute_batch(SCHEMA_V9)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![9, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -435,6 +451,50 @@ CREATE TABLE brain_email_access_delegation_audit (
     FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
         ON DELETE CASCADE
 );
+
+CREATE INDEX brain_email_access_delegation_audit_by_delegation
+    ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);
+"#;
+
+const SCHEMA_V8: &str = r#"
+CREATE TABLE personal_vault_bootstrap_authorizations (
+    authorization_id TEXT PRIMARY KEY NOT NULL,
+    authorization_event_id TEXT NOT NULL UNIQUE,
+    owner_npub TEXT NOT NULL,
+    agent_npub TEXT NOT NULL,
+    vault_id TEXT NOT NULL,
+    workspace_folder_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at TEXT NOT NULL,
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE,
+    FOREIGN KEY (vault_id, workspace_folder_id)
+        REFERENCES folders(vault_id, id) ON DELETE RESTRICT
+);
+"#;
+
+const SCHEMA_V9: &str = r#"
+ALTER TABLE brain_email_access_delegation_audit
+    RENAME TO brain_email_access_delegation_audit_old;
+
+CREATE TABLE brain_email_access_delegation_audit (
+    id TEXT PRIMARY KEY NOT NULL,
+    delegation_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('created', 'scope_expanded', 'revoked')),
+    actor_npub TEXT NOT NULL,
+    subject_npub TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
+        ON DELETE CASCADE
+);
+
+INSERT INTO brain_email_access_delegation_audit (
+    id, delegation_id, action, actor_npub, subject_npub, scope_json, occurred_at
+)
+SELECT id, delegation_id, action, actor_npub, subject_npub, scope_json, occurred_at
+FROM brain_email_access_delegation_audit_old;
+
+DROP TABLE brain_email_access_delegation_audit_old;
 
 CREATE INDEX brain_email_access_delegation_audit_by_delegation
     ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);

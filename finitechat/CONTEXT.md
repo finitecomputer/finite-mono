@@ -215,6 +215,15 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   separate Device whose key and store remain local.
 - A **Hosted Web Device** may decrypt its Rooms by design, so SaaS web chat is
   not described as browser E2EE even though the room server stores ciphertext.
+- The **Hosted Web Device** is also the hosted custody location for the human's
+  existing **User Key**. Its Brain executor implements only Brain's versioned,
+  typed identity-provider operations after a verified WorkOS bridge call. It
+  is not a generic Chat signer, does not define Brain access policy, and does
+  not expose arbitrary signing or decryption.
+- A Brain provider request never initializes Chat identity state. If the User
+  Key and Hosted Web Device store do not already exist, it returns
+  setup-required; normal Chat setup remains the only hosted key-creation entry
+  point.
 - A Finite Computer Project-to-Room binding is product navigation metadata
   layered above Finite Chat. It cannot grant membership, constrain a Device's
   sync, or be inferred from selection, display order, timestamps, or Room ids.

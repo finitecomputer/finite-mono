@@ -162,6 +162,7 @@ pub struct BrainEmailAccessDelegation {
     pub owner_npub: UserId,
     pub agent_npub: UserId,
     pub workspace_folder_id: FolderId,
+    pub folder_ids: Vec<FolderId>,
     pub status: String,
     pub created_by_npub: UserId,
     pub created_at: String,
@@ -198,6 +199,56 @@ pub struct EnsurePersonalAgentWorkspaceInput {
 pub struct EnsurePersonalAgentWorkspaceOutcome {
     pub delegation: BrainEmailAccessDelegation,
     pub duplicate: bool,
+}
+
+/// Validated all-or-nothing input for the agent-first Personal Vault path.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BootstrapPersonalAgentWorkspaceInput {
+    pub authorization_id: String,
+    pub authorization_event_id: String,
+    pub authorization_expires_at: u64,
+    pub vault: BootstrapOutput,
+    pub bootstrap_grants: Vec<FolderKeyGrantMetadata>,
+    pub pairing: EnsurePersonalAgentWorkspaceInput,
+    pub consumed_at: String,
+}
+
+/// Result of consuming one agent-first bootstrap authorization.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BootstrapPersonalAgentWorkspaceOutcome {
+    pub delegation: BrainEmailAccessDelegation,
+}
+
+/// Owner-authorized expansion of an active Agent Workspace delegation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ExpandPersonalAgentWorkspaceInput {
+    pub vault_id: VaultId,
+    pub owner_npub: UserId,
+    pub agent_npub: UserId,
+    pub folder_id: FolderId,
+    pub grant: FolderKeyGrantMetadata,
+    pub sync_records: Vec<SyncRecordInput>,
+    pub changed_at: String,
+}
+
+/// One Folder Key rotation inside an all-or-nothing agent-delegation revocation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RevokePersonalAgentFolderInput {
+    pub folder_id: FolderId,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
+    pub sync_records: Vec<SyncRecordInput>,
+}
+
+/// Owner-authorized removal and key rotation for every Folder in an agent delegation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RevokePersonalAgentWorkspaceInput {
+    pub vault_id: VaultId,
+    pub owner_npub: UserId,
+    pub agent_npub: UserId,
+    pub folders: Vec<RevokePersonalAgentFolderInput>,
+    pub changed_at: String,
 }
 
 /// Verified display metadata for one canonical Nostr identity.
