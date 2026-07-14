@@ -47,9 +47,13 @@ export HERMES_HOME="$hermes_home"
 export FINITECHAT_BIN="$finitechat_bin"
 export FINITECHAT_HERMES_INBOUND_STREAM="${FINITECHAT_HERMES_INBOUND_STREAM:-1}"
 export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
+# Finite Chat inbound arrives over the authenticated relay binding, so its
+# platform-scoped allow-all is the intended delegation to that upstream.
+# GATEWAY_ALLOW_ALL_USERS must never be set here: it is the gateway-global
+# switch and silently authorized every stranger on every other platform
+# (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
 export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
-export FINITE_ALLOW_ALL_USERS="${FINITE_ALLOW_ALL_USERS:-true}"
-export GATEWAY_ALLOW_ALL_USERS="${GATEWAY_ALLOW_ALL_USERS:-true}"
+unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
 export FINITE_AGENT_ID="${FINITE_AGENT_ID:-agent_${device_id}}"
 export FINITE_AGENT_NAME="$agent_name"
 
