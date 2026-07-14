@@ -26,9 +26,16 @@ test("the parent dashboard accepts only bounded Brain session-proof messages", (
 
 test("the selected runtime Agent Principal is only a bounded Brain input hint", () => {
   assert.equal(
-    brainClientPath("npub1agentexamplekey"),
-    "/client?agentNpub=npub1agentexamplekey"
+    brainClientPath({
+      email: "cheater-a1b2c3d4e5f60708@finite.vip",
+      name: "cheater",
+      npub: "npub1agentexamplekey",
+    }),
+    "/client?agentEmail=cheater-a1b2c3d4e5f60708%40finite.vip&agentName=cheater&agentNpub=npub1agentexamplekey"
   );
-  assert.equal(brainClientPath("not-an-npub"), "/client");
+  assert.equal(
+    brainClientPath({ email: "not-an-email", name: "x", npub: "not-an-npub" }),
+    "/client"
+  );
   assert.equal(brainClientPath(null), "/client");
 });

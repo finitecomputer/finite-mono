@@ -33,6 +33,7 @@ enum ManagedProcess {
     FiniteChat,
     HostedWebDevice,
     FiniteSites,
+    FiniteIdentity,
     FiniteBrain,
     RuntimeImage,
     FinitePrivateLimiter,
@@ -44,7 +45,7 @@ enum ManagedProcess {
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::ProcessCompose,
         Self::WorkosFixture,
         Self::RustBuild,
@@ -53,6 +54,7 @@ impl ManagedProcess {
         Self::FiniteChat,
         Self::HostedWebDevice,
         Self::FiniteSites,
+        Self::FiniteIdentity,
         Self::FiniteBrain,
         Self::RuntimeImage,
         Self::FinitePrivateLimiter,
@@ -73,6 +75,7 @@ impl ManagedProcess {
             Self::FiniteChat => "finitechat",
             Self::HostedWebDevice => "hosted-web-device",
             Self::FiniteSites => "finitesites",
+            Self::FiniteIdentity => "finite-identity",
             Self::FiniteBrain => "finite-brain",
             Self::RuntimeImage => "runtime-image",
             Self::FinitePrivateLimiter => "finite-private-limiter",
@@ -196,6 +199,7 @@ struct Ports {
     finitechat: u16,
     hosted_web_device: u16,
     finitesites: u16,
+    finite_identity: u16,
     finite_brain: u16,
     finite_private_limiter: u16,
     workos_fixture: u16,
@@ -229,6 +233,7 @@ impl Stack {
                 finitechat: 18787,
                 hosted_web_device: 38918,
                 finitesites: 18789,
+                finite_identity: 18788,
                 finite_brain: 18790,
                 finite_private_limiter: 18002,
                 workos_fixture: 14199,
@@ -327,6 +332,7 @@ impl Stack {
             &self.finitechat_dir(),
             &self.hosted_web_device_dir(),
             &self.finitesites_dir(),
+            &self.finite_identity_dir(),
             &self.finite_brain_dir(),
             &self.finite_home_dir(),
             &self.runtime_image_dir(),
@@ -367,6 +373,7 @@ impl Stack {
         let workos_api_key = fs::read_to_string(&fixture.api_key)?;
         let customer_token = fs::read_to_string(&fixture.customer_token)?;
         let runner_credentials_json = devfinity_runner_credentials_json();
+        let identity_operator_token = random_local_secret()?;
         write_mode_600(
             &self.core_secret_file(),
             format!(
@@ -388,6 +395,14 @@ impl Stack {
             .as_bytes(),
         )?;
         write_mode_600(
+            &self.identity_authority_secret_file(),
+            format!(
+                "export FINITE_IDENTITY_OPERATOR_TOKEN={}\n",
+                shell_quote(&identity_operator_token)
+            )
+            .as_bytes(),
+        )?;
+        write_mode_600(
             &self.limiter_auth_secret_file(),
             format!(
                 "export FC_FINITE_PRIVATE_USAGE_API_TOKEN={}\n",
@@ -398,8 +413,9 @@ impl Stack {
         write_mode_600(
             &self.dashboard_auth_secret_file(),
             format!(
-                "export FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN={}\n",
-                shell_quote(customer_token.trim())
+                "export FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN={}\nexport FC_CORE_API_TOKEN={}\n",
+                shell_quote(customer_token.trim()),
+                shell_quote(&self.core_token)
             )
             .as_bytes(),
         )?;
@@ -444,6 +460,7 @@ impl Stack {
             self.runner_auth_secret_file(),
             self.limiter_auth_secret_file(),
             self.dashboard_auth_secret_file(),
+            self.identity_authority_secret_file(),
         ] {
             remove_file_best_effort(&path);
         }
@@ -697,6 +714,7 @@ impl Stack {
         self.write_finitechat(&mut yaml);
         self.write_hosted_web_device(&mut yaml);
         self.write_finitesites(&mut yaml);
+        self.write_finite_identity(&mut yaml);
         self.write_finite_brain(&mut yaml);
         if self.profile.includes_runtime() {
             self.write_runtime_image(&mut yaml);
@@ -722,9 +740,9 @@ impl Stack {
             process,
         );
         let build_command = if self.profile.includes_runtime() {
-            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-brain-app && cargo build -p finite-saas-local && cargo build -p finite-saas-runner"
+            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-identity --bin finite-identityd && cargo build -p finite-brain-app && cargo build -p finite-saas-local && cargo build -p finite-saas-runner"
         } else {
-            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-brain-app"
+            "cargo build -p finite-saas-core && cargo build -p finitechat-server && cargo build -p finitechat-hosted-device && cargo build -p finitesitesd && cargo build -p finite-identity --bin finite-identityd && cargo build -p finite-brain-app"
         };
         self.write_managed_command(
             yaml,
@@ -943,7 +961,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe_host(
             yaml,
-            &self.service_bind_host(),
+            self.service_probe_host(),
             "/health",
             self.ports.finitechat,
             1,
@@ -1058,6 +1076,8 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
+        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
             &[
@@ -1073,11 +1093,12 @@ wait "$postgres_pid"
                         .display()
                         .to_string(),
                 ),
+                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
             ],
         );
         self.write_http_probe_host(
             yaml,
-            &self.service_bind_host(),
+            self.service_probe_host(),
             "/health",
             self.ports.finite_brain,
             1,
@@ -1085,6 +1106,40 @@ wait "$postgres_pid"
             3,
             45,
         );
+    }
+
+    fn write_finite_identity(&self, yaml: &mut String) {
+        let process = ManagedProcess::FiniteIdentity;
+        let command = vec![
+            format!(
+                ". {}",
+                shell_quote(&self.identity_authority_secret_file().display().to_string())
+            ),
+            format!(
+                concat!(
+                    "exec cargo run -p finite-identity --bin finite-identityd -- serve ",
+                    "--data {} --external-base-url {} --listen 127.0.0.1:{} ",
+                    "--finite-vip-domain finite.vip ",
+                    "--mailer dev --dev-print-email-tokens yes"
+                ),
+                shell_quote(&self.finite_identity_dir().display().to_string()),
+                shell_quote(&self.finite_identity_url()),
+                self.ports.finite_identity,
+            ),
+        ];
+
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Local Finite Identity authority",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &command, &[]);
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        self.write_http_probe(yaml, "/health", self.ports.finite_identity, 1, 2, 3, 45);
     }
 
     fn write_runtime_image(&self, yaml: &mut String) {
@@ -1165,7 +1220,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_http_probe_host(
             yaml,
-            &self.service_bind_host(),
+            self.service_probe_host(),
             "/health",
             self.ports.finite_private_limiter,
             1,
@@ -1292,6 +1347,10 @@ wait "$postgres_pid"
             ),
             format!(
                 ". {}",
+                shell_quote(&self.identity_authority_secret_file().display().to_string())
+            ),
+            format!(
+                ". {}",
                 shell_quote(
                     &self
                         .runtime_image_dir()
@@ -1322,11 +1381,14 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeArtifact);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
+        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
             &[
                 ("FC_RUNNER_CLASS", RUNNER_CLASS.to_string()),
                 ("FC_CORE_URL", self.core_url()),
+                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
                 ("FC_RUNNER_ID", RUNNER_ID.to_string()),
                 (
                     "FC_RUNNER_SOURCE_HOST_ID",
@@ -1971,6 +2033,9 @@ wait "$postgres_pid"
                         String::from("finitesitesd"),
                         self.finitesites_dir().display().to_string(),
                     ],
+                    ManagedProcess::FiniteIdentity => {
+                        vec![String::from("finite-identityd"), String::from("serve")]
+                    }
                     ManagedProcess::FiniteBrain => vec![String::from("finite-brain")],
                     ManagedProcess::RuntimeImage => vec![
                         String::from("python3"),
@@ -2038,7 +2103,7 @@ wait "$postgres_pid"
             ),
             check_http_service(
                 ManagedProcess::FiniteChat,
-                &self.service_bind_host(),
+                self.service_probe_host(),
                 self.ports.finitechat,
                 "/health",
             ),
@@ -2055,8 +2120,14 @@ wait "$postgres_pid"
                 "/api/v1/healthz",
             ),
             check_http_service(
+                ManagedProcess::FiniteIdentity,
+                "127.0.0.1",
+                self.ports.finite_identity,
+                "/health",
+            ),
+            check_http_service(
                 ManagedProcess::FiniteBrain,
-                &self.service_bind_host(),
+                self.service_probe_host(),
                 self.ports.finite_brain,
                 "/health",
             ),
@@ -2070,7 +2141,7 @@ wait "$postgres_pid"
         if self.profile.includes_runtime() && self.inference_mode == InferenceMode::ChainedLimiter {
             checks.push(check_http_service(
                 ManagedProcess::FinitePrivateLimiter,
-                &self.service_bind_host(),
+                self.service_probe_host(),
                 self.ports.finite_private_limiter,
                 "/health",
             ));
@@ -2088,6 +2159,7 @@ wait "$postgres_pid"
                 "hosted_web_device={}\n",
                 "finitesites_api={}\n",
                 "finitesites_base=http://*.sites.localhost:{}\n",
+                "finite_identity={}\n",
                 "finite_brain={}\n"
             ),
             self.profile.as_str(),
@@ -2097,6 +2169,7 @@ wait "$postgres_pid"
             self.hosted_web_device_url(),
             self.finitesites_api_url(),
             self.ports.finitesites,
+            self.finite_identity_url(),
             self.finite_brain_url()
         );
         if self.profile.includes_runtime() {
@@ -2122,7 +2195,7 @@ wait "$postgres_pid"
     fn finitechat_url(&self) -> String {
         format!(
             "http://{}:{}",
-            self.service_bind_host(),
+            self.service_probe_host(),
             self.ports.finitechat
         )
     }
@@ -2149,6 +2222,10 @@ wait "$postgres_pid"
         }
     }
 
+    fn service_probe_host(&self) -> &'static str {
+        "127.0.0.1"
+    }
+
     fn hosted_web_device_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.ports.hosted_web_device)
     }
@@ -2156,9 +2233,13 @@ wait "$postgres_pid"
     fn finite_brain_url(&self) -> String {
         format!(
             "http://{}:{}",
-            self.service_bind_host(),
+            self.service_probe_host(),
             self.ports.finite_brain
         )
+    }
+
+    fn finite_identity_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.finite_identity)
     }
 
     fn runtime_finite_brain_url(&self) -> String {
@@ -2220,6 +2301,10 @@ wait "$postgres_pid"
         self.process_state_dir(ManagedProcess::FiniteBrain)
     }
 
+    fn finite_identity_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::FiniteIdentity)
+    }
+
     fn finite_home_dir(&self) -> PathBuf {
         self.run_dir.join("finite-home")
     }
@@ -2263,6 +2348,9 @@ wait "$postgres_pid"
     }
     fn dashboard_auth_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("dashboard-auth.sh")
+    }
+    fn identity_authority_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("identity-authority.sh")
     }
 
     fn process_state_dir(&self, process: ManagedProcess) -> PathBuf {
@@ -2805,7 +2893,7 @@ fn detect_apple_host_access() -> Result<AppleHostAccess> {
     }
     Ok(AppleHostAccess {
         runtime_host: gateway.to_string(),
-        bind_host: gateway.to_string(),
+        bind_host: "0.0.0.0".to_string(),
         source: "Apple default-network gateway; runtime probe pending",
     })
 }
@@ -2816,6 +2904,13 @@ fn shell_words(words: &[String]) -> String {
         .map(|word| shell_quote(word))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn random_local_secret() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("local credential generation failed: {error:?}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2972,6 +3067,29 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_secret_includes_core_service_token_without_core_only_credentials() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-dashboard-credential-wiring-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+        let stack = Stack::new(state_dir.clone())
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        stack.ensure_dirs().unwrap();
+        stack.write_secret_files().unwrap();
+
+        let dashboard_exports = fs::read_to_string(stack.dashboard_auth_secret_file()).unwrap();
+        assert!(dashboard_exports.contains("export FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN="));
+        assert!(dashboard_exports.contains("export FC_CORE_API_TOKEN="));
+        assert!(!dashboard_exports.contains("FC_CORE_RUNNER_CREDENTIALS_JSON"));
+        assert!(!dashboard_exports.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN"));
+        assert!(!dashboard_exports.contains("WORKOS_API_KEY"));
+
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
     fn env_exports_are_shell_quoted() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
     }
@@ -3000,6 +3118,12 @@ mod tests {
         assert!(yaml.contains("workos-fixture --listen 127.0.0.1:14199"));
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
+        assert!(yaml.contains("finite-identity:"));
+        assert!(yaml.contains("finite-identityd -- serve"));
+        assert!(yaml.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
+        assert!(yaml.contains("secrets/identity-authority.sh"));
+        assert!(!yaml.contains("FINITE_IDENTITY_OPERATOR_TOKEN="));
+        assert!(!yaml.contains("--operator-token"));
         assert!(yaml.contains("cargo run -p finite-brain-app"));
         assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(
@@ -3073,11 +3197,11 @@ mod tests {
     }
 
     #[test]
-    fn finite_brain_probe_uses_the_gateway_fallback_bind_host() {
+    fn gateway_fallback_separates_host_bind_and_runtime_addresses() {
         let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
         stack.apple_host_access = AppleHostAccess {
             runtime_host: "192.168.67.1".to_string(),
-            bind_host: "192.168.67.1".to_string(),
+            bind_host: "0.0.0.0".to_string(),
             source: "test gateway",
         };
 
@@ -3088,9 +3212,10 @@ mod tests {
             .and_then(|tail| tail.split("\n  runtime-image:\n").next())
             .unwrap();
 
-        assert!(finite_brain.contains("FINITE_BRAIN_ADDR=192.168.67.1:18790"));
-        assert!(finite_brain.contains("host: \"192.168.67.1\""));
-        assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://192.168.67.1:18790"));
+        assert!(finite_brain.contains("FINITE_BRAIN_ADDR=0.0.0.0:18790"));
+        assert!(finite_brain.contains("host: \"127.0.0.1\""));
+        assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FINITE_BRAIN_SERVER_URL\\\":\\\"http://192.168.67.1:18790"));
     }
 
     #[test]

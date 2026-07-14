@@ -76,6 +76,10 @@ product's adapter to the client environment.
 - Finite Sites will adopt this pattern with its own Sites adapter while using
   Finite Identity primitives. It does not inherit Brain grants or Folder Key
   access.
+- Product access pickers show a Managed Agent Email or similarly readable
+  identity, resolve it through Finite Identity, and grant the resulting Native
+  Principal. Brain establishes this pattern first; Sites may reuse the
+  identity-resolution pattern without reusing Brain authorization policy.
 - This does not make a User Nostr Identity equal to an Agent Principal Key or
   revive `finite-auth`.
 - An agent uses its own Agent Principal Key and only the Folder Key Grants

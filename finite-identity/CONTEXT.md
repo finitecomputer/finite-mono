@@ -53,6 +53,13 @@ operations across Finite products. It is never the user's User Nostr Identity
 and never uses the user's hosted product adapter to act as that user.
 _Avoid_: user key, shared signer, Account Auth
 
+**Managed Agent Email**:
+The canonical Finite VIP Email assigned to one hosted agent and immutably bound
+to that agent's Agent Principal Key by the trusted provisioning path. Products
+show this readable name to people and resolve it through Finite Identity; the
+underlying `npub` remains the authorization subject and an advanced diagnostic.
+_Avoid_: agent account, shared user email, display-only alias
+
 **Finite Home**:
 The filesystem root that scopes one Local Identity Key and the Finite tool state belonging to that identity owner.
 _Avoid_: User home, shared fleet home, product config directory
@@ -132,6 +139,9 @@ _Avoid_: email service, notification service
 - One **Finite Home** contains exactly one **Local Identity Key**.
 - Each hosted agent has its own **Finite Home** and **Local Identity Key**;
   `finitechat`, `fsite`, and `fbrain` inside that agent use the same key.
+- Each newly provisioned hosted agent has one **Managed Agent Email**. The
+  trusted runner registers the runtime's public Agent Principal Key; it never
+  receives authority to issue product grants.
 - A human's Finite Chat identity lives separately from every agent **Finite
   Home** and may be generated or imported by the human.
 - **Account Auth** is outside Finite Identity; proving a dashboard session does

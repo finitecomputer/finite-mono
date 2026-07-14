@@ -713,6 +713,7 @@ pub enum StoreError {
 
 pub fn router(state: AuthorityState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/.well-known/nostr.json", get(nip05))
         .route("/api/v1/email-challenges", post(request_email_challenge))
         .route(
@@ -729,10 +730,21 @@ pub fn router(state: AuthorityState) -> Router {
         )
         .route("/api/v1/operator/inspect", post(operator_inspect))
         .route(
+            "/api/v1/operator/agent-email-bindings",
+            post(operator_bind_agent_email),
+        )
+        .route(
             "/api/v1/operator/disable-binding",
             post(operator_disable_binding),
         )
         .with_state(state)
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "finite-identity",
+        "status": "ok",
+    }))
 }
 
 async fn nip05(
@@ -1020,6 +1032,48 @@ async fn operator_inspect(
     .into_response()
 }
 
+async fn operator_bind_agent_email(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorBindAgentEmailRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_operator(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    let Some(email) = normalize_finite_vip_email(&request.email, &state.config.finite_vip_domain)
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_finite_vip_email");
+    };
+    let pubkey_bytes = match npub::decode(request.agent_npub.trim()) {
+        Ok(pubkey) => pubkey,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_agent_npub"),
+    };
+    let pubkey = hex::encode(&pubkey_bytes);
+    match state.store.vip_binding_by_email(&email) {
+        Ok(Some(binding)) if binding.disabled() => {
+            return api_error(StatusCode::CONFLICT, "vip_email_binding_disabled");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    }
+    match state
+        .store
+        .bind_vip_email(&email, &pubkey, state.clock.now())
+    {
+        Ok(()) => Json(OperatorBindAgentEmailResponse {
+            email: email.clone(),
+            agent_npub: npub::encode(&pubkey_bytes),
+            nip05: email,
+        })
+        .into_response(),
+        Err(StoreError::Conflict(code)) => api_error(StatusCode::CONFLICT, code),
+        Err(StoreError::Validation(code)) => api_error(StatusCode::BAD_REQUEST, code),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
+    }
+}
+
 async fn operator_disable_binding(
     State(state): State<AuthorityState>,
     headers: HeaderMap,
@@ -1300,6 +1354,19 @@ struct EmailChallengeResponse {
 struct VipEmailRedeemRequest {
     email: String,
     token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorBindAgentEmailRequest {
+    email: String,
+    agent_npub: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorBindAgentEmailResponse {
+    email: String,
+    agent_npub: String,
+    nip05: String,
 }
 
 #[derive(Debug, Serialize)]

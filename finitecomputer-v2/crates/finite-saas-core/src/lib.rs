@@ -29,7 +29,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0009_artifact_recovery_support.sql"),
     "\n",
-    include_str!("../migrations/0010_align_finite_private_generous.sql")
+    include_str!("../migrations/0010_align_finite_private_generous.sql"),
+    "\n",
+    include_str!("../migrations/0011_agent_email.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -705,6 +707,10 @@ pub struct Project {
     pub customer_org_id: String,
     pub owner_user_id: String,
     pub display_name: String,
+    /// Canonical human-facing Finite Identity for this hosted Agent Principal.
+    /// Authorization continues to use the principal key resolved from it.
+    #[serde(default)]
+    pub agent_email: Option<String>,
     pub import_candidate_id: Option<String>,
     #[serde(default)]
     pub hosting_tier: Option<HostingTier>,
@@ -1781,6 +1787,7 @@ impl BridgeCoreState {
                 customer_org_id: candidate.customer_org_id.clone(),
                 owner_user_id: user.id.clone(),
                 display_name: candidate.host_facts.display_name.clone(),
+                agent_email: None,
                 import_candidate_id: Some(candidate.id.clone()),
                 hosting_tier: Some(HostingTier::Standard),
                 placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
@@ -2019,6 +2026,7 @@ impl BridgeCoreState {
             customer_org_id: org.id.clone(),
             owner_user_id: user.id.clone(),
             display_name: display_name.clone(),
+            agent_email: Some(canonical_agent_email(&display_name, &project_id)),
             import_candidate_id: None,
             hosting_tier: Some(hosting_tier),
             placement: Some(placement),
@@ -6451,6 +6459,50 @@ pub(crate) fn new_agent_creation_request_id() -> CoreResult<String> {
 
 pub(crate) fn new_self_service_project_id() -> CoreResult<String> {
     generate_surrogate_id("project")
+}
+
+/// Mint the stable, collision-resistant Finite VIP address shown to humans.
+/// The readable prefix comes from the chosen agent name; the opaque project
+/// suffix keeps duplicate names from competing for the same global identity.
+pub fn canonical_agent_email(display_name: &str, project_id: &str) -> String {
+    let mut slug = String::with_capacity(display_name.len());
+    let mut previous_was_separator = false;
+    for character in display_name.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !slug.is_empty() && !previous_was_separator {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str("agent");
+    }
+    slug.truncate(40);
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    let mut suffix = project_id
+        .strip_prefix("project_")
+        .unwrap_or(project_id)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(16)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if suffix.len() < 16 {
+        suffix = Sha256::digest(project_id.as_bytes())
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+    }
+    format!("{slug}-{suffix}@finite.vip")
 }
 
 fn project_runtime_link_id_for(project_id: &str, agent_runtime_id: &str) -> String {

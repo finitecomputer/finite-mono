@@ -8,17 +8,57 @@ export type BrainSessionProofRequest = {
   requestHash: string;
 };
 
-export function brainClientPath(agentNpub: string | null | undefined) {
-  const candidate = agentNpub?.trim();
+export type BrainAgentIdentityHint = {
+  email?: string | null;
+  name?: string | null;
+  npub?: string | null;
+};
+
+export function brainClientPath(identity: BrainAgentIdentityHint | null | undefined) {
+  if (!identity) return "/client";
+  const email = boundedAgentEmail(identity.email);
+  const name = boundedAgentName(identity.name);
+  const npub = boundedAgentNpub(identity.npub);
+  if (!email && !npub) return "/client";
+
+  const query = new URLSearchParams();
+  if (email) query.set("agentEmail", email);
+  if (name) query.set("agentName", name);
+  if (npub) query.set("agentNpub", npub);
+  return `/client?${query.toString()}`;
+}
+
+function boundedAgentEmail(value: string | null | undefined) {
+  const candidate = value?.trim().toLowerCase();
+  if (
+    !candidate ||
+    candidate.length > 254 ||
+    !/^[a-z0-9._-]+@[a-z0-9.-]+$/u.test(candidate)
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+function boundedAgentName(value: string | null | undefined) {
+  const candidate = value?.trim();
+  if (!candidate || candidate.length > 80 || /[\u0000-\u001f\u007f]/u.test(candidate)) {
+    return null;
+  }
+  return candidate;
+}
+
+function boundedAgentNpub(value: string | null | undefined) {
+  const candidate = value?.trim();
   if (
     !candidate ||
     !candidate.toLowerCase().startsWith("npub1") ||
     candidate.length > 256 ||
     !/^[a-z0-9]+$/iu.test(candidate)
   ) {
-    return "/client";
+    return null;
   }
-  return `/client?agentNpub=${encodeURIComponent(candidate)}`;
+  return candidate;
 }
 
 export function parseBrainSessionProofRequest(value: unknown): BrainSessionProofRequest | null {

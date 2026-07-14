@@ -146,18 +146,41 @@ vm.runInNewContext(source, context, { filename: "product-client.js" });
 const client = context.window.FiniteBrainProductClient;
 const suggestedAgentNpub = client.npubFromHex("77".repeat(32));
 assert.equal(
-  client.suggestedAgentNpubFromNavigation(`?agentNpub=${suggestedAgentNpub}`),
-  suggestedAgentNpub,
-  "Brain should understand the selected runtime Agent Principal as a pairing input hint"
+  JSON.stringify(
+    client.suggestedAgentIdentityFromNavigation(
+      `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+    )
+  ),
+  JSON.stringify({
+    email: "cheater@finite.vip",
+    name: "cheater",
+    npub: suggestedAgentNpub,
+  }),
+  "Brain should understand the selected runtime display identity as a pairing input hint"
 );
 assert.equal(
-  client.suggestedAgentNpubFromNavigation("?agentNpub=not-an-npub"),
+  client.suggestedAgentIdentityFromNavigation(
+    "?agentEmail=not-an-email&agentNpub=not-an-npub"
+  ),
   null,
   "An invalid navigation hint must not become pairing input"
 );
+context.document.getElementById("agentWorkspaceEmailInput").value = "";
 context.document.getElementById("agentWorkspaceNpubInput").value = "";
-assert.equal(client.applySuggestedAgentNpub(`?agentNpub=${suggestedAgentNpub}`), true);
+assert.equal(
+  client.applySuggestedAgentIdentity(
+    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+  ),
+  true
+);
+assert.equal(elements.get("agentWorkspaceEmailInput").value, "cheater@finite.vip");
 assert.equal(elements.get("agentWorkspaceNpubInput").value, suggestedAgentNpub);
+assert.equal(
+  client.agentWorkspacePairingPrompt(
+    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+  ),
+  "Pair cheater with an Agent Workspace."
+);
 
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("locked")),
@@ -897,7 +920,12 @@ assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
 assert.match(htmlSource, /id="agentWorkspacePairingSection"/);
+assert.match(htmlSource, />\s*Agent email\s*</);
+assert.match(htmlSource, /id="agentWorkspaceEmailInput"/);
+assert.match(htmlSource, /placeholder="agent@finite\.vip"/);
+assert.match(htmlSource, />\s*Advanced identity details\s*</);
 assert.match(htmlSource, /id="agentWorkspaceNpubInput"/);
+assert.doesNotMatch(htmlSource, /placeholder="Agent npub… or name@domain"/);
 assert.match(htmlSource, /id="pairAgentWorkspaceButton"/);
 assert.match(htmlSource, /id="agentWorkspacePairingList"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
@@ -2150,11 +2178,12 @@ assert.doesNotMatch(
           audit: [{ action: "created", occurredAt: "2026-07-13T00:00:00.000Z" }],
         },
       ],
-    })),
+    }, `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${client.npubFromHex("22".repeat(32))}`)),
     JSON.stringify([
     {
       id: "delegation-1",
       agentNpub: client.npubFromHex("22".repeat(32)),
+      displayIdentity: "cheater · cheater@finite.vip",
       folderId: "agent-workspace",
       status: "active",
       title: "Agent Workspace",
@@ -2162,6 +2191,15 @@ assert.doesNotMatch(
     },
     ])
   );
+  const fallbackIdentity = await client.resolveAgentWorkspacePairingIdentity(
+    "stale@finite.vip",
+    personalMemberNpub,
+    async (value) => {
+      if (value.includes("@")) throw new Error("unresolvable email");
+      return { npub: value };
+    }
+  );
+  assert.equal(fallbackIdentity.npub, personalMemberNpub);
   assert.equal(brainIdentityProvider.version, "finite-brain-identity-provider-v1");
   assert.deepEqual(
     Object.keys(brainIdentityProvider).sort(),

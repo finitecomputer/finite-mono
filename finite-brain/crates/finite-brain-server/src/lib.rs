@@ -69,6 +69,7 @@ const FINITEBRAIN_NOSTR_HEADER: &str = "x-finitebrain-nostr";
 const APP_SPECIFIC_KIND: u16 = 30_078;
 const NIP05_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const NIP05_READ_TIMEOUT_SECONDS: u64 = 5;
+const FINITE_VIP_NIP05_PREFIX: &str = "https://finite.vip/";
 const SECP256K1_ORDER_HEX: &str =
     "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
 
@@ -207,7 +208,9 @@ impl ServerState {
     pub fn with_identity_authority_url(mut self, base_url: impl Into<String>) -> Self {
         let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
         if !base_url.is_empty() {
-            self.email_proof_verifier = Some(identity_authority_email_proof_verifier(base_url));
+            self.email_proof_verifier =
+                Some(identity_authority_email_proof_verifier(base_url.clone()));
+            self.nip05_fetcher = identity_authority_nip05_fetcher(base_url);
         }
         self
     }
@@ -675,31 +678,43 @@ struct ResolvedIdentity {
 }
 
 fn default_nip05_fetcher() -> Nip05Fetcher {
-    Arc::new(|request| {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(NIP05_CONNECT_TIMEOUT_SECONDS))
-            .timeout_read(Duration::from_secs(NIP05_READ_TIMEOUT_SECONDS))
-            .redirects(0)
-            .build();
-        let response = agent
-            .get(&request.url)
-            .call()
-            .map_err(|error| format!("NIP-05 lookup failed: {error}"))?;
-        let mut bytes = Vec::new();
-        let mut reader = response
-            .into_reader()
-            .take(request.max_response_bytes.saturating_add(1) as u64);
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("NIP-05 response read failed: {error}"))?;
-        if bytes.len() > request.max_response_bytes {
-            return Err(format!(
-                "NIP-05 document exceeded {} bytes",
-                request.max_response_bytes
-            ));
-        }
-        Ok(bytes)
+    Arc::new(|request| fetch_nip05_document(request, &request.url))
+}
+
+fn identity_authority_nip05_fetcher(base_url: String) -> Nip05Fetcher {
+    let internet = default_nip05_fetcher();
+    Arc::new(move |request| {
+        let Some(path_and_query) = request.url.strip_prefix(FINITE_VIP_NIP05_PREFIX) else {
+            return internet(request);
+        };
+        fetch_nip05_document(request, &format!("{base_url}/{path_and_query}"))
     })
+}
+
+fn fetch_nip05_document(request: &Nip05WellKnownRequest, url: &str) -> Result<Vec<u8>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(NIP05_CONNECT_TIMEOUT_SECONDS))
+        .timeout_read(Duration::from_secs(NIP05_READ_TIMEOUT_SECONDS))
+        .redirects(0)
+        .build();
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("NIP-05 lookup failed: {error}"))?;
+    let mut bytes = Vec::new();
+    let mut reader = response
+        .into_reader()
+        .take(request.max_response_bytes.saturating_add(1) as u64);
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("NIP-05 response read failed: {error}"))?;
+    if bytes.len() > request.max_response_bytes {
+        return Err(format!(
+            "NIP-05 document exceeded {} bytes",
+            request.max_response_bytes
+        ));
+    }
+    Ok(bytes)
 }
 
 fn resolve_identity_input(state: &ServerState, input: &str) -> Result<ResolvedIdentity, ApiError> {
@@ -6811,6 +6826,37 @@ mod tests {
         assert_eq!(invitation.target_kind, "npub");
         assert_eq!(invitation.user_id.as_deref(), Some(target_npub.as_str()));
         assert_eq!(invitation.invited_email, None);
+    }
+
+    #[test]
+    fn configured_identity_authority_serves_finite_vip_nip05_resolution() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let bytes = stream.read(&mut request).unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..bytes])
+                    .starts_with("GET /.well-known/nostr.json?name=cheater ")
+            );
+            let body = serde_json::json!({ "names": { "cheater": "77".repeat(32) } }).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let state = test_state().with_identity_authority_url(format!("http://{address}"));
+
+        let resolved = resolve_identity_input(&state, "cheater@finite.vip").unwrap();
+
+        assert_eq!(resolved.hex, "77".repeat(32));
+        assert_eq!(resolved.nip05.as_deref(), Some("cheater@finite.vip"));
+        server.join().unwrap();
     }
 
     #[tokio::test]

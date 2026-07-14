@@ -130,12 +130,15 @@ and the explicitly authorized Agent Principal can use. It is the narrow shared
 starting place for an agent, not a second Vault and not a change to Personal
 Vault ownership.
 
-In Hosted Web, the selected Runtime's public Agent Principal may prefill the
-owner's pairing input, but that navigation context carries no authority. The
-owner must still explicitly pair it from an unlocked Personal Vault. After
-pairing, the Agent Principal discovers the user-owned Personal Vault through
-the signed visible-Vault list and opens its restricted Folder in a durable
-Vault Working Tree below the Runtime's `/data/workspace` boundary.
+In Hosted Web, the selected Runtime's Managed Agent Email and display name may
+prefill the owner's pairing input, but that navigation context carries no
+authority. Brain resolves the email through Finite Identity and grants the
+resolved Agent Principal Key only after the owner explicitly pairs it from an
+unlocked Personal Vault. The raw `npub` is an advanced fallback, not the
+primary user experience. After pairing, the Agent Principal discovers the
+user-owned Personal Vault through the signed visible-Vault list and opens its
+restricted Folder in a durable Vault Working Tree below the Runtime's
+`/data/workspace` boundary.
 
 ### Local Data Security Baseline
 

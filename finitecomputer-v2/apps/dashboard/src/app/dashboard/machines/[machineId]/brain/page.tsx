@@ -24,7 +24,12 @@ export default async function MachineBrainPage({
       <BrainHeader />
       <div className="finite-brain-page__body">
         {enabled ? (
-          <BrainFrame title={`${access.displayName} Brain`} agentNpub={agentNpub} />
+          <BrainFrame
+            title={`${access.displayName} Brain`}
+            agentEmail={access.coreProject.project.agent_email}
+            agentName={access.displayName}
+            agentNpub={agentNpub}
+          />
         ) : (
           <main className="finite-product-surface__empty">
             <BrainIcon className="size-10" />

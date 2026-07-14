@@ -27,9 +27,13 @@ export function BrainHeader() {
 
 export function BrainFrame({
   title,
+  agentEmail,
+  agentName,
   agentNpub,
 }: {
   title: string;
+  agentEmail?: string | null;
+  agentName?: string | null;
   agentNpub?: string | null;
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -77,7 +81,7 @@ export function BrainFrame({
       <iframe
         ref={frameRef}
         className="size-full border-0"
-        src={brainClientPath(agentNpub)}
+        src={brainClientPath({ email: agentEmail, name: agentName, npub: agentNpub })}
         title={title}
         allow="clipboard-read; clipboard-write"
         sandbox="allow-downloads allow-forms allow-scripts"

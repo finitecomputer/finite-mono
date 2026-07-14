@@ -24,6 +24,7 @@ export type CoreProjectImportCandidate = {
 export type CoreProject = {
   id: string;
   display_name: string;
+  agent_email?: string | null;
   hosting_tier?: CoreHostingTier | null;
   created_at: string;
   updated_at: string;
