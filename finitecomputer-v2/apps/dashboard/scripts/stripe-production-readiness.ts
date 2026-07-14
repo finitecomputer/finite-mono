@@ -15,6 +15,8 @@ async function main() {
 
   const expectedAccountId = requiredEnv("STRIPE_EXPECTED_ACCOUNT_ID");
   const expectedPriceId = requiredEnv("STRIPE_EXPECTED_PRICE_ID");
+  const publicLegalLinksConfirmed =
+    process.env.STRIPE_PORTAL_PUBLIC_LEGAL_LINKS_CONFIRMED?.trim() === "1";
   const stripe = new Stripe(secretKey, { apiVersion: STRIPE_API_VERSION });
 
   const [account, price, taxSettings, portalPage, destinationPage] = await Promise.all([
@@ -68,8 +70,14 @@ async function main() {
           livemode: portal.livemode,
           isDefault: portal.is_default,
           defaultReturnUrl: portal.default_return_url,
-          hasTermsUrl: Boolean(portal.business_profile.terms_of_service_url),
-          hasPrivacyUrl: Boolean(portal.business_profile.privacy_policy_url),
+          termsSource: legalLinkSource(
+            portal.business_profile.terms_of_service_url,
+            publicLegalLinksConfirmed
+          ),
+          privacySource: legalLinkSource(
+            portal.business_profile.privacy_policy_url,
+            publicLegalLinksConfirmed
+          ),
           customerUpdateEnabled: portal.features.customer_update.enabled,
           customerAllowedUpdates: portal.features.customer_update.allowed_updates,
           invoiceHistoryEnabled: portal.features.invoice_history.enabled,
@@ -114,6 +122,12 @@ function requiredEnv(name: string) {
 function expandableId(value: string | { id: string } | null | undefined) {
   if (!value) return null;
   return typeof value === "string" ? value : value.id;
+}
+
+function legalLinkSource(value: string | null, publicBusinessInformationConfirmed: boolean) {
+  if (value) return "portal" as const;
+  if (publicBusinessInformationConfirmed) return "public_business_information" as const;
+  return "missing" as const;
 }
 
 main().catch((error: unknown) => {

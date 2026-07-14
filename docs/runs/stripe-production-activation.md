@@ -7,9 +7,24 @@ access to the official Finite Supply Stripe organization, then explicitly
 activated it later that day with the direction to rebase onto `main`, build,
 test, and ship. Stripe Checkout Readiness is PAUSED with its queue and human
 test-mode acceptance preserved. Hosted Web Chat product continuity is accepted
-and its run deleted on `main`; the separately proposed Hosted Web Chat
-Disaster Recovery empty-target proof remains a hard gate before paid customer
-admission.
+and its run deleted on `main`. On 2026-07-13 Paul accepted the current off-host
+backup and retained Recovery Authority posture as sufficient for this launch
+and authorized customer mode. The separately proposed Hosted Web Chat Disaster
+Recovery empty-target exercise remains planned work; it has not been run and
+this launch does not claim that recovery proof or stronger operator-blindness.
+
+On 2026-07-13 Paul confirmed the earlier sandbox pass was completed and
+directed this run not to repeat a second sandbox cycle. The remaining Stripe
+acceptance is the inspection-only live audit followed by the first live charge
+from a fresh verified public signup. The intentionally indirect homepage copy
+(`I have a Launch Code`) remains a product choice, not an invitation gate.
+
+Paul also confirmed in the live Customer Portal UI that Terms and Privacy both
+inherit `https://finite.computer/privacy.txt` from Public business information.
+Stripe's restricted Account and Portal APIs omit those inherited URLs, so the
+readiness command accepts `STRIPE_PORTAL_PUBLIC_LEGAL_LINKS_CONFIRMED=1` only
+with that operator evidence; it does not silently infer that missing fields are
+configured.
 
 Owner: Paul
 
@@ -17,16 +32,16 @@ Opened: 2026-07-13
 
 Expires: 2026-08-03
 
-Acceptance: From one dedicated invited production account, a human sees the
-exact Finite Computer offer and policies, pays a real $200 USD monthly charge
-through live Stripe Checkout, returns to the sealed agent draft, and the live
+Acceptance: From one fresh production signup with a verified email, a human
+sees the exact Finite Computer offer and policies, pays a real $200 USD monthly
+charge through live Stripe Checkout, returns to the sealed agent draft, and the live
 signed webhook records the matching active subscription in Core before the
 draft creates exactly one fresh agent. The Stripe payment, Customer,
 Subscription, invoice/receipt, four subscribed event types, Core billing row,
 and agent-creation request all retain mutually consistent non-secret
-identifiers. No operator edits Core billing state. Paid admission remains
-blocked unless Hosted Web Chat Disaster Recovery has also passed its real
-off-host, empty-target restore acceptance.
+identifiers. No operator edits Core billing state. The pending empty-target
+restore exercise remains outside this acceptance and is not marked passed by a
+successful billing launch.
 
 ## Problem statement
 
@@ -46,15 +61,17 @@ production is not an environment-variable flip:
 - the customer-facing pre-Checkout surface does not yet state $200 USD/month,
   renewal, cancellation, refund, fulfillment, and support terms.
 
-The outcome is one narrow, inspectable paid path. It is not general public
-self-service, multi-plan billing, metered billing, or permission to weaken the
-recovery gate.
+The outcome is one narrow, inspectable public self-service paid path. It is not
+multi-plan billing or metered billing, and it does not change the declared
+Recovery Set, remove a Recovery Authority, couple billing to data deletion, or
+support a stronger operator-blindness claim.
 
 ## Authority and constraints
 
 - Paul explicitly made this the sole ACTIVE run on 2026-07-13 and authorized
-  implementation, testing, and deployment. Live customer admission and the
-  first real charge remain separately gated below.
+  implementation, testing, deployment, live customer admission, and the
+  `canary` to `customer` mode change. The first real charge remains the human
+  acceptance step below.
 - Creating or changing live Stripe objects, credentials, Portal settings,
   webhooks, tax registrations, customer communications, subscriptions,
   refunds, or production deployment state requires explicit production-
@@ -71,12 +88,11 @@ recovery gate.
   fails closed without creating a duplicate.
 - Billing status can block a new creation entitlement. It never stops,
   retires, purges, or deletes an existing runtime or its recovery material.
-- Do not admit a paying customer before the same Recovery Set has restored onto
-  an empty target under
-  [`ADR 0001`](../adr/0001-recoverability-precedes-operator-blindness.md)
-  and the separately authorized
-  [Hosted Web Chat Disaster Recovery](hosted-web-chat-disaster-recovery.md)
-  run.
+- Preserve the current Recovery Set and Recovery Authorities. The owner has
+  accepted the current backup posture for launch, while the separately
+  authorized [Hosted Web Chat Disaster Recovery](hosted-web-chat-disaster-recovery.md)
+  empty-target exercise remains planned. Until it passes, do not describe the
+  service as empty-target restore-proven or claim stronger operator-blindness.
 
 ## Product and policy defaults
 
@@ -154,8 +170,10 @@ Still required before live money:
 - deploy the same live Price id to Dashboard and Core while paid UI remains
   dark;
 - prove live webhook delivery and read-only cross-system reconciliation;
-- pass the recovery/admission gates; and
-- separately authorize the `canary` to `customer` mode change and first charge.
+- record the owner's recovery-risk decision without claiming an unperformed
+  restore; and
+- activate the authorized `canary` to `customer` mode change and request the
+  first live-charge acceptance.
 
 ## Queue
 
@@ -163,21 +181,14 @@ Work top-down after this run is explicitly made ACTIVE. Every item is retained.
 
 ### P0 — Finish test-mode readiness
 
-- Resume and exhaust [`Stripe Checkout Readiness`](stripe-checkout-readiness.md):
-  dashboard unit tests, browser product flow, root gates, opt-in test-clock E2E,
-  and Paul's real test-mode browser Checkout. Synthetic events alone do not
-  close it.
-- In the official account sandbox, create the same one-product/one-Price
-  contract, sandbox Portal configuration, and sandbox webhook destination used
-  below. Record sandbox object ids only in ephemeral evidence, not deployment
-  config.
-- Create a sandbox restricted API key starting from no permissions. Exercise
-  every application call and use its request logs to prove the minimum live
-  permission set. The test-clock harness uses a separate, test-only key because
-  it creates clocks and synthetic subscriptions that production never may.
+- Treat Paul's confirmed earlier sandbox pass as the retained test-mode
+  acceptance. Do not create another sandbox, sandbox Product, test clock, or
+  synthetic subscription solely to repeat it.
 - Pin and test the Stripe API version used by `stripe@22.1.1`, currently
-  `2026-04-22.dahlia`. If the SDK changes before activation, update this plan
-  and the webhook destination to the newly tested pinned version.
+  `2026-04-22.dahlia`. The existing live snapshot webhook is immutable at
+  `2024-06-20`; its four handlers use the stable Checkout/Subscription fields
+  covered by the suite, so readiness accepts that exact legacy version without
+  rotating the signing secret. New destinations use the pinned SDK version.
 
 ### P0 — Close production code and disclosure gaps
 
@@ -194,7 +205,7 @@ Work top-down after this run is explicitly made ACTIVE. Every item is retained.
 - Add an inspection-only live-readiness command that reports no secrets and
   checks the Stripe account id/mode, Product/Price name/amount/currency/
   interval/active/tax facts, Portal default configuration, API version, and
-  webhook URL/events. Run it with a separate temporary read-only audit key,
+  webhook URL/events. Run it with the separate minimal read-only audit key,
   never the production application key. It must never create, update, refund,
   cancel, resend, or delete an object.
 - Centralize or mechanically assert the one public live Price id used by
@@ -208,10 +219,13 @@ Work top-down after this run is explicitly made ACTIVE. Every item is retained.
 - Add monitoring for live webhook non-2xx delivery and a bounded reconciliation
   alert. Do not log Customer email, card data, key material, or webhook bodies.
 
-### P0 — Prove customer data recovery before admission
+### P0 — Record the launch recovery posture
 
-- Activate and complete Hosted Web Chat Disaster Recovery, including one
-  empty-target restore of the real encrypted off-host Recovery Set.
+- Record Paul's decision that the current off-host backup and retained Recovery
+  Authority posture is sufficient for this launch.
+- Keep the Hosted Web Chat Disaster Recovery empty-target restore as planned
+  follow-up work. Do not mark it passed or make stronger recovery/privacy
+  claims until the exercise actually succeeds.
 - Confirm the first-admitted-Principal owner-claim posture and the paid cohort's
   stuck-launch boundary. Stripe success never overrides either gate.
 
@@ -231,10 +245,11 @@ Work top-down after this run is explicitly made ACTIVE. Every item is retained.
 
 - Under a separately named rollout authorization, change the production
   dashboard to `FC_DASHBOARD_RUNTIME_MODE = "customer"`, promote the pinned
-  image/config, and verify an unentitled invited account sees payment alongside
-  Launch Code while non-invited public admission remains closed.
+  image/config, and verify a fresh verified public signup sees payment alongside
+  Launch Code. `FC_WORKOS_OPERATOR_ORG_ID` gates operator APIs, not signup or
+  customer Checkout; do not describe the customer path as invitation-only.
 - Produce the exact Acceptance Request from `docs/runs/README.md`: deployed Git
-  revision and image digest, Finite URL, dedicated invited account, Stripe
+  revision and image digest, Finite URL, fresh verified signup, Stripe
   member account id, live Price id, expected observation after each Checkout/
   webhook/Core/draft step, stop conditions, rollback boundary, and estimated
   minutes.
@@ -429,8 +444,9 @@ proved the permissions.
       verified member account and live mode.
 - [ ] Select **Your account** (not Connected accounts and not an organization-
       wide destination), **snapshot events**, and API version
-      `2026-04-22.dahlia` unless the accepted implementation records a newer
-      tested pin.
+      `2026-04-22.dahlia`. The already-created production destination remains
+      at its immutable, explicitly supported `2024-06-20` version; do not
+      replace it merely to rotate versions.
 - [ ] Select only:
       - `checkout.session.completed`;
       - `customer.subscription.created`;
@@ -449,20 +465,21 @@ proved the permissions.
       version, and four event types. Do not manually create a live Customer or
       Subscription merely to make an event appear.
 
-### 11. Create a temporary read-only readiness key
+### 11. Create a minimal read-only readiness key
 
 - [ ] In live **Workbench → API keys**, create a second restricted key named
       `finite-billing-readiness-audit-202607` with only the read permissions
       needed for Account, Products, Prices, Customer Portal configurations,
       and webhook endpoints/event destinations.
-- [ ] Transfer it directly to the operator running the inspection-only
-      readiness command. Keep it in that process environment only; do not add
-      it to `/etc/finite/dashboard.env` or a developer `.env` file.
+- [ ] Store it only in the Git-ignored, owner-readable local developer
+      environment chosen by Paul. Do not add it to `/etc/finite/dashboard.env`,
+      the application runtime, source control, logs, or task transcripts.
 - [ ] Run the readiness command against the expected `acct_...` id and save its
       secret-free report in private launch evidence.
-- [ ] Expire the audit key immediately after the report passes. If it fails,
-      keep production in canary mode, expire the key, and repair the named
-      Dashboard fact under separate mutation authority.
+- [ ] Retain the minimal read-only key for future Stripe diagnostics by Paul's
+      explicit decision. Review and revoke it if its scope expands, its storage
+      is exposed, or it is no longer useful. A failed audit still blocks
+      activation until the named Dashboard fact is repaired.
 
 ### 12. Hand off configuration without leaking it
 
@@ -473,15 +490,16 @@ proved the permissions.
 | Standard `price_...` id | both Nix service configs through reviewed code | Yes |
 | Restricted `rk_live_...` value | vault + `/etc/finite/dashboard.env` as `STRIPE_SECRET_KEY` | **Secret** |
 | Endpoint `whsec_...` value | vault + `/etc/finite/dashboard.env` as `STRIPE_WEBHOOK_SECRET` | **Secret** |
-| Temporary readiness key | operator process only, then expire | **Secret** |
+| Minimal readiness key | Git-ignored, owner-readable local developer environment | **Secret** |
 | Portal settings/API version/events | run evidence and inspection-only preflight | No secret values |
 
 - [ ] Have the deploy operator confirm the two secret names are present without
       printing their values or shell history.
 - [ ] Have engineering replace/verify the Price id in both Dashboard and Core
       configuration. Do not point one service at sandbox and the other at live.
-- [ ] Keep production in canary mode until the dark deploy, readiness preflight,
-      recovery gate, and explicit activation authorization all pass.
+- [ ] Keep production in canary mode until the dark deploy and readiness
+      preflight pass and Paul explicitly authorizes activation. Paul gave that
+      activation authorization on 2026-07-13.
 
 ## Evaluation design
 
@@ -506,9 +524,10 @@ proved the permissions.
 1. Paul's existing test-mode browser acceptance from the paused readiness run.
 2. A non-developer verifies the disclosures, Checkout, cancel path, receipt,
    and Portal in the sandbox.
-3. The separately activated disaster-recovery run proves the real off-host
-   empty-target restore.
-4. Paul executes the final live Acceptance Request and pays the real $200 USD.
+3. The launch record states that empty-target restore remains planned and does
+   not claim it has passed.
+4. Paul uses a fresh verified public signup to execute the final live
+   Acceptance Request and pays the real $200 USD.
 5. An operator observes a successful Stripe payment/invoice, 2xx webhook
    delivery, active matching Core billing row, one consumed entitlement, and
    one agent creation request without changing durable state by hand.
@@ -517,8 +536,9 @@ proved the permissions.
 
 Stop before charge if the account id/mode, Price facts, tax posture, payment
 methods, API version, endpoint scope, or secret provenance is ambiguous; if
-public policies are missing; if the recovery gate has not passed; or if any
-secret appears in a transcript.
+public policies are missing; if the declared backup/Recovery Authority posture
+has materially changed since Paul's launch decision; or if any secret appears
+in a transcript.
 
 Stop after charge if Checkout succeeds but the live event is non-2xx, the
 Subscription does not contain the exact live Price, metadata lacks the
