@@ -3239,6 +3239,23 @@ mod tests {
 
         assert_eq!(error.code, "media_fetch_failed");
         assert!(error.message.contains("non-public"));
+
+        for capability in [Capability::Audio, Capability::Video] {
+            let error = fetch_binary_media(
+                &state,
+                "https://127.0.0.1/media",
+                capability,
+                test_limits().max_download_bytes,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "media_fetch_failed", "{}", capability.name());
+            assert!(
+                error.message.contains("non-public"),
+                "{}",
+                capability.name()
+            );
+        }
     }
 
     #[tokio::test]
@@ -3270,6 +3287,18 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, "media_fetch_failed");
+
+        for capability in [Capability::Audio, Capability::Video] {
+            let error = fetch_binary_media(
+                &state,
+                &format!("http://{addr}/attachment.png"),
+                capability,
+                test_limits().max_download_bytes,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "media_fetch_failed", "{}", capability.name());
+        }
     }
 
     #[tokio::test]
