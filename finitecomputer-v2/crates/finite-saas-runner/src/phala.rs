@@ -2373,10 +2373,10 @@ mod tests {
                 base_url: "https://inference.example.invalid/v1".to_string(),
                 model: "fixture-model".to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: crate::SpecializationBundleRuntimeDefaults {
+                specialization_bundle: Some(crate::SpecializationBundleRuntimeDefaults {
                     bundle_id: crate::DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
                     worker_api_key: "fixture-plaintext-specialization-key".to_owned(),
-                },
+                }),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
