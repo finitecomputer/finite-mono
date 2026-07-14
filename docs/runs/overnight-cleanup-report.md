@@ -210,3 +210,45 @@ Paul action: Loudly: production still falls back to the archived
 `FC_FINITE_SKILLS_SOURCE_DIR`. The correct mono tree is baked into the runtime,
 but the dashboard source contract is not wired to it. Keep the existing
 parking-lot item and schedule the infra/image-layout reconciliation separately.
+
+## 7. AEON image detection — AUDIT-ONLY
+
+Observed path: Image handling is automatic before the Hermes message handler.
+The adapter removes supported image media from the ordinary attachment list and
+splices either AEON's normalized text or an explicit
+`capability_unavailable` result into the event text. Agentd accepts an AEON
+vision offer only after configuration read-back, a Hermes restart, and the
+fixed red-square probe returning exactly `RED`. Image can be enabled while
+audio/video stay disabled.
+
+Verification evidence:
+
+- Sixteen focused tests passed inside the built runtime: exact-red probe,
+  wrong-result refusal, configured image specialization, unconfigured fallback,
+  mixed media, retries/deadlines, and caption/ack behavior.
+- Five focused `finite-agentd` reconciliation tests passed, including exact
+  rollback and stale-semantics refusal.
+- An ephemeral branch runtime with no `auxiliary.vision` configuration returned
+  status 1 and only the sanitized marker
+  `{"success":false,"analysis":null}`. It did not pretend to see the image.
+
+Why audit-only: The AEON worker is deployed on clawland, not in local
+devfinity. This environment also has no
+`FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`, and the fixed local ports are owned by
+the already-running stack from the other worktree. Standing up a local GPU
+worker or changing an offer would be CREEP.
+
+Two-minute morning verification:
+
+1. In an already-configured disposable canary Agent, attach a known image (for
+   example, a red square) and ask for its dominant color without naming it.
+2. Confirm the Agent answers from the image and that the attachment required no
+   manual tool selection or skill prompt.
+3. Read the canary logs and confirm the specialization result names the image
+   capability/model and a request ID; do not copy credentials or image bytes.
+
+Paul action: Name a disposable canary Agent whose existing offer already has
+`auxiliary.vision` image capability enabled and whose reconciliation probe is
+healthy, then run the three steps above. If no such Agent exists, applying an
+offer is a production mutation and needs a separately authorized test. Do not
+use Sol 2 or customer state for this proof.
