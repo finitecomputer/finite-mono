@@ -288,11 +288,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await expectVisibleText(page, "Pay securely or use a Launch Code.");
       await expectVisibleText(page, "Finite Computer Hosted Agent");
       await expectVisibleText(page, "$200 USD / month");
-      await expectVisibleText(page, "No trial. Renews automatically each month until canceled.");
-      await expectVisibleText(
-        page,
-        "Cancel in the billing portal; cancellation takes effect at period end."
-      );
+      await page
+        .getByText("Renews monthly until you cancel in the billing portal.")
+        .waitFor({ state: "visible", timeout: 15_000 });
+      await page
+        .getByText("refunds are handled per our")
+        .waitFor({ state: "visible", timeout: 15_000 });
       assert.equal(
         core.state.creationPosts.length,
         0,
