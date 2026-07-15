@@ -36,8 +36,8 @@ skills. They do not become Runtime Management Pipe commands or status fields.
 - Core leases a control only when the persisted Runtime and the worker both
   explicitly advertise that exact kind. Restart completes only after the
   runtime proves it is alive again; stop completes after the provider operation
-  succeeds. Recover-known-good and Runtime Retirement are currently
-  unadvertised and unavailable.
+  succeeds. Kata advertises the image-owned recover-known-good operation;
+  Runtime Retirement remains unadvertised and unavailable.
 - Recovery does not mutate chat identity, room membership, Hermes memory,
   workspace files, user-installed tools, or skills.
 - The recover-known-good database kind remains for rollout compatibility, but
@@ -108,21 +108,20 @@ when Finite Chat, Hermes, or health checks appear stuck.
 ### Recover Known-Good Runtime
 
 The current API and database kind are named
-`recover_known_good_chat_runtime`. That chat-specific name is legacy coupling;
-until a generic recovery contract exists, the operation must not accumulate
-chat-specific configuration behavior.
+`recover_known_good_chat_runtime`. That chat-specific name remains legacy
+coupling and is not a relaunch-from-backup contract.
 
-It is intended for a case where the runtime is reachable enough to restart but
-image-owned boot state is suspected broken.
+It is intended for a Kata runtime whose canonical compute still exists but
+whose image-owned generated chat boot state is suspected broken. The operation
+is Core-bound to a compatible artifact and RuntimeSpec, reconciles a fenced
+candidate against the same durable `/data`, verifies the retained Agent
+Principal, and preserves the old canonical handle until the candidate passes.
+It keeps chat identity, Hermes memory, workspace files, skills, and user data
+intact. Other adapters continue to advertise it as false.
 
-Today this operation is unavailable. Treating provider restart as recovery made
-the control misleading, so every adapter advertises it as false. The retained
-Core kind and adapter method are compatibility seams, not evidence of support.
-
-A stronger recovery policy may be added later only if the same runtime image
-used by Docker, Kata, and Phala implements it. That future image-owned operation must
-keep durable chat identity, Hermes memory, workspace files, skills, and user
-data intact.
+This operation deliberately fails when canonical compute is absent. Restoring
+an off-host Recovery Snapshot or generically relaunching missing compute is a
+separate recovery contract and remains proposed work.
 
 If recovery still does not restore the runtime, the next escalation is a deeper
 image or data migration, not dashboard feature state.
@@ -233,9 +232,9 @@ Current debt:
 
 - the first-class image still uses the Finite Chat owned entrypoint and gateway
   launcher. That is the right product shape for this release.
-- recover-known-good is unavailable. A stronger boot-policy operation may be
-  advertised only when it is implemented and verified across the same runtime
-  image and provider test matrix; ordinary restart does not satisfy that bar.
+- recover-known-good is currently Kata-only and requires canonical compute. It
+  is not an off-host restore or generic relaunch mechanism; those remain a
+  separate Recovery Set and lifecycle project.
 - v2 does not currently configure independent Agent Runtime backup. The
   optional entrypoint Restic path now includes the complete `/data` root,
   including `/data/workspace`, but it does not yet provide the required

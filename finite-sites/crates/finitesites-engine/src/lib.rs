@@ -8,7 +8,7 @@
 mod cookie;
 mod email;
 
-pub use cookie::ViewerCookie;
+pub use cookie::{ViewerCookie, ViewerCookieSubject};
 pub use email::validate_email;
 
 use thiserror::Error;
@@ -23,7 +23,7 @@ use finitesites_proto::dto::{
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EMAIL_KEYS_PER_EMAIL,
     MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
-    VIEWER_COOKIE_TTL_SECONDS,
+    NIP98_MAX_SKEW_SECONDS, VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::ProjectOutputKind;
@@ -52,7 +52,7 @@ pub enum EngineError {
     NotAuthorized,
     #[error("too many sites for this owner")]
     TooManySites,
-    #[error("too many shared emails for this site")]
+    #[error("too many viewer shares for this site")]
     TooManyShares,
     #[error("too many active keys for this email")]
     TooManyEmailKeys,
@@ -178,6 +178,11 @@ pub struct LoginLink {
     pub url: String,
 }
 
+#[derive(Debug)]
+pub struct NativeViewerLink {
+    pub url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitCredentialAuth {
     pub project_id: String,
@@ -267,28 +272,49 @@ impl Engine {
         }
         let finite_toml = request.config.to_toml_string()?;
         let outputs = output_apply_inputs(request);
+        let requesting_user_pubkey = request
+            .requesting_user_npub
+            .as_deref()
+            .map(npub::pubkey_from_hex_or_npub)
+            .transpose()?;
+        let requesting_user_npub = requesting_user_pubkey
+            .as_deref()
+            .map(npub::encode_npub)
+            .transpose()?;
         if request.dry_run {
             return self.dry_run_project_init(
                 owner_pubkey,
                 request,
                 &outputs,
+                requesting_user_npub,
                 git_remote_url,
                 finite_toml,
             );
         }
 
-        let outcome =
-            match self
-                .store
-                .init_project(owner_pubkey, &request.config.project.slug, &outputs, now)
-            {
-                Ok(outcome) => outcome,
-                Err(StoreError::Conflict("site name already claimed")) => {
-                    return Err(EngineError::NameTaken);
-                }
-                Err(error) => return Err(error.into()),
-            };
-        self.project_init_response_from_store(request.dry_run, git_remote_url, finite_toml, outcome)
+        let outcome = match self.store.init_project_with_requesting_user(
+            owner_pubkey,
+            requesting_user_pubkey.as_deref(),
+            &request.config.project.slug,
+            &outputs,
+            now,
+        ) {
+            Ok(outcome) => outcome,
+            Err(StoreError::Conflict("site name already claimed")) => {
+                return Err(EngineError::NameTaken);
+            }
+            Err(StoreError::Conflict("too many site shares")) => {
+                return Err(EngineError::TooManyShares);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        self.project_init_response_from_store(
+            request.dry_run,
+            requesting_user_npub,
+            git_remote_url,
+            finite_toml,
+            outcome,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -297,6 +323,7 @@ impl Engine {
         owner_pubkey: &str,
         request: &ProjectInitRequest,
         outputs: &[ProjectOutputApply],
+        requesting_user_npub: Option<String>,
         git_remote_url: String,
         finite_toml: String,
     ) -> Result<ProjectInitResponse, EngineError> {
@@ -335,7 +362,11 @@ impl Engine {
                         "project output config cannot change during init",
                     ));
                 }
-                output_summaries.push(self.project_output_summary(record, false)?);
+                output_summaries.push(self.project_output_summary(
+                    record,
+                    false,
+                    requesting_user_npub.is_some(),
+                )?);
                 continue;
             }
             if self
@@ -364,6 +395,7 @@ impl Engine {
                 start: output.start_command.clone(),
                 spa: output.spa,
                 created: true,
+                requesting_user_shared: requesting_user_npub.is_some(),
             });
         }
 
@@ -380,19 +412,25 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs: output_summaries,
+            requesting_user_npub,
         })
     }
 
     fn project_init_response_from_store(
         &self,
         dry_run: bool,
+        requesting_user_npub: Option<String>,
         git_remote_url: String,
         finite_toml: String,
         outcome: ProjectInitStoreOutcome,
     ) -> Result<ProjectInitResponse, EngineError> {
         let mut outputs = Vec::with_capacity(outcome.outputs.len());
         for output in &outcome.outputs {
-            outputs.push(self.project_output_summary(&output.record, output.created)?);
+            outputs.push(self.project_output_summary(
+                &output.record,
+                output.created,
+                requesting_user_npub.is_some(),
+            )?);
         }
         Ok(ProjectInitResponse {
             dry_run,
@@ -403,6 +441,7 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs,
+            requesting_user_npub,
         })
     }
 
@@ -560,7 +599,7 @@ impl Engine {
         let records = self.store.project_outputs(project_id)?;
         let mut outputs = Vec::with_capacity(records.len());
         for record in &records {
-            outputs.push(self.project_output_summary(record, false)?);
+            outputs.push(self.project_output_summary(record, false, false)?);
         }
         Ok(outputs)
     }
@@ -581,6 +620,7 @@ impl Engine {
         &self,
         record: &ProjectOutputRecord,
         created: bool,
+        requesting_user_shared: bool,
     ) -> Result<ProjectOutputSummary, EngineError> {
         let site = self
             .store
@@ -606,6 +646,7 @@ impl Engine {
             start: record.start_command.clone(),
             spa: record.spa,
             created,
+            requesting_user_shared,
         })
     }
 
@@ -1107,9 +1148,14 @@ impl Engine {
         if actor_pubkey != site.owner_pubkey {
             return Err(EngineError::NotAuthorized);
         }
-        let adds = request.add_emails.len() + request.remove_emails.len();
+        let adds = request.add_emails.len()
+            + request.remove_emails.len()
+            + request.add_npubs.len()
+            + request.remove_npubs.len();
         if adds > MAX_EMAILS_PER_SHARING_REQUEST as usize {
-            return Err(EngineError::Validation("too many emails in one request"));
+            return Err(EngineError::Validation(
+                "too many sharing changes in one request",
+            ));
         }
 
         let target_visibility = match request.visibility.as_deref() {
@@ -1133,12 +1179,23 @@ impl Engine {
             let normalized = validate_email(email)?;
             self.store.remove_share(&site.id, &normalized)?;
         }
+        for value in &request.remove_npubs {
+            let pubkey = npub::pubkey_from_hex_or_npub(value)?;
+            self.store.remove_native_share(&site.id, &pubkey)?;
+        }
         for email in &request.add_emails {
             let normalized = validate_email(email)?;
             if self.store.count_shares(&site.id)? >= MAX_SHARES_PER_SITE {
                 return Err(EngineError::TooManyShares);
             }
             self.store.add_share(&site.id, &normalized, now)?;
+        }
+        for value in &request.add_npubs {
+            let pubkey = npub::pubkey_from_hex_or_npub(value)?;
+            if self.store.count_shares(&site.id)? >= MAX_SHARES_PER_SITE {
+                return Err(EngineError::TooManyShares);
+            }
+            self.store.add_native_share(&site.id, &pubkey, now)?;
         }
         if let Some(visibility) = target_visibility {
             self.store.set_visibility(&site.id, visibility, now)?;
@@ -1155,6 +1212,7 @@ impl Engine {
         Ok(SharingResponse {
             visibility: refreshed.visibility.as_str().to_string(),
             shared_emails: self.store.shares(&site.id)?,
+            shared_npubs: native_npubs(&self.store.native_shares(&site.id)?)?,
             invited_emails: Vec::new(),
         })
     }
@@ -1262,6 +1320,7 @@ impl Engine {
             kind: site.kind.as_str().to_string(),
             active_version: site.active_version_number,
             shared_emails: self.store.shares(&site.id)?,
+            shared_npubs: native_npubs(&self.store.native_shares(&site.id)?)?,
         })
     }
 
@@ -1313,10 +1372,21 @@ impl Engine {
                 else {
                     return Ok(ViewAccess::NeedsLogin);
                 };
-                if self.store.is_email_shared(&site.id, &cookie.email)? {
-                    Ok(ViewAccess::Allowed)
-                } else {
-                    Ok(ViewAccess::NeedsLogin)
+                match cookie.subject {
+                    ViewerCookieSubject::ExternalEmail(email) => {
+                        if self.store.is_email_shared(&site.id, &email)? {
+                            Ok(ViewAccess::Allowed)
+                        } else {
+                            Ok(ViewAccess::NeedsLogin)
+                        }
+                    }
+                    ViewerCookieSubject::PrincipalId(principal_id) => {
+                        if self.store.is_principal_shared(&site.id, &principal_id)? {
+                            Ok(ViewAccess::Allowed)
+                        } else {
+                            Ok(ViewAccess::NeedsLogin)
+                        }
+                    }
                 }
             }
         }
@@ -1516,6 +1586,119 @@ impl Engine {
         }))
     }
 
+    // ---- native viewer auth -------------------------------------------------
+
+    pub fn native_viewer_session(
+        &mut self,
+        site: &SiteRecord,
+        signer_pubkey: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<String, EngineError> {
+        let principal_id = self.authorize_native_viewer(site, signer_pubkey, nonce, now)?;
+        Ok(ViewerCookie {
+            site_id: site.id.clone(),
+            subject: ViewerCookieSubject::PrincipalId(principal_id),
+            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
+        }
+        .sign(&self.cookie_secret))
+    }
+
+    pub fn request_native_viewer_link(
+        &mut self,
+        site: &SiteRecord,
+        signer_pubkey: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<NativeViewerLink, EngineError> {
+        let principal_id = self.authorize_native_viewer(site, signer_pubkey, nonce, now)?;
+        let token = hex::encode(&ids::random_32());
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        self.store.create_native_viewer_token(
+            &token_hash,
+            &site.id,
+            &principal_id,
+            now + LOGIN_TOKEN_TTL_SECONDS,
+            now,
+        )?;
+        Ok(NativeViewerLink {
+            url: format!(
+                "{}_finite/auth?native_token={token}",
+                self.output_url_for_site(site)
+            ),
+        })
+    }
+
+    fn authorize_native_viewer(
+        &mut self,
+        site: &SiteRecord,
+        signer_pubkey: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<String, EngineError> {
+        if !hex::is_hex32(signer_pubkey)
+            || site.status != SiteStatus::Published
+            || site.visibility == Visibility::Public
+        {
+            return Err(EngineError::NotAuthorized);
+        }
+        let principal = self
+            .store
+            .principal_by_pubkey(signer_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
+        if !self.store.is_principal_shared(&site.id, &principal.id)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        self.store
+            .record_native_viewer_nonce(
+                &site.id,
+                signer_pubkey,
+                nonce,
+                now + NIP98_MAX_SKEW_SECONDS,
+                now,
+            )
+            .map_err(|error| match error {
+                StoreError::Conflict("native viewer nonce replay") => {
+                    EngineError::Conflict("native viewer nonce replay")
+                }
+                other => EngineError::Store(other),
+            })?;
+        Ok(principal.id)
+    }
+
+    pub fn redeem_native_viewer_link(
+        &mut self,
+        token: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String), EngineError> {
+        if !hex::is_hex32(token) {
+            return Err(EngineError::Validation("malformed token"));
+        }
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        let (site_id, principal_id) = self
+            .store
+            .redeem_native_viewer_token(&token_hash, now)
+            .map_err(|error| match error {
+                StoreError::NotFound(_) | StoreError::Conflict(_) => {
+                    EngineError::Validation("unknown or expired link")
+                }
+                other => EngineError::Store(other),
+            })?;
+        let site = self
+            .store
+            .site_by_id(&site_id)?
+            .ok_or(StoreError::CorruptState(
+                "native viewer token references missing site",
+            ))?;
+        let cookie = ViewerCookie {
+            site_id,
+            subject: ViewerCookieSubject::PrincipalId(principal_id),
+            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
+        }
+        .sign(&self.cookie_secret);
+        Ok((site, cookie))
+    }
+
     // ---- magic-link login --------------------------------------------------------
 
     /// Issue a login token if (and only if) the email is shared on the site.
@@ -1599,7 +1782,7 @@ impl Engine {
             ))?;
         let cookie = ViewerCookie {
             site_id,
-            email,
+            subject: ViewerCookieSubject::ExternalEmail(email),
             expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
         }
         .sign(&self.cookie_secret);
@@ -1626,6 +1809,13 @@ fn output_apply_inputs(request: &ProjectInitRequest) -> Vec<ProjectOutputApply> 
         });
     }
     outputs
+}
+
+fn native_npubs(pubkeys: &[String]) -> Result<Vec<String>, EngineError> {
+    pubkeys
+        .iter()
+        .map(|pubkey| npub::encode_npub(pubkey).map_err(EngineError::from))
+        .collect()
 }
 
 fn output_claim_kind(output_kind: &str) -> &str {

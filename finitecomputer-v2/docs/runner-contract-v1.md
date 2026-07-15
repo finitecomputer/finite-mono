@@ -112,11 +112,12 @@ Runtime controls use a separate versioned `runtime_capabilities.v1` envelope
 persisted on the Runtime and advertised by the worker. Core leases an operation
 only when both envelopes explicitly enable that exact kind; missing or empty
 advertisements enable no controls. Docker, Apple Container, Enclavia, and Phala
-currently advertise restart and stop. Kata additionally advertises runtime
-upgrade. Recover-known-good and Runtime Retirement are false everywhere, and
-Phala upgrade remains false until its opaque environment-encryption boundary is
-implemented. A draining worker rejects new creation leases but may still
-service its explicitly advertised controls.
+currently advertise restart and stop. Kata additionally advertises the
+image-owned recover-known-good operation and Runtime Upgrade. Runtime
+Retirement is false everywhere, and Phala upgrade remains false until its
+opaque environment-encryption boundary is implemented. A draining worker
+rejects new creation leases but may still service its explicitly advertised
+controls.
 
 The expand migration backfills only already-running, Core-created Kata rows.
 The exact legacy Kata runner credential supplies the same narrow envelope for
@@ -139,8 +140,11 @@ Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
 root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the
 bounded map, rejects Runtime-contract keys, exposes key names only in
 diagnostics, and transports values through each adapter's secret-safe channel.
-This restores the legacy shared tool-provider set without teaching Runner what
-FAL, xAI, or any product feature means. It is transitional host-wide bootstrap,
-not a replacement for Core-owned per-Project secret references. Runtime
-restart preserves the credential set already held by the Runtime; it does not
-silently rotate shared or inference credentials.
+Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` allowlist selects
+which entries are persisted in each new RuntimeSpec; Runner resolves only those
+references from the file. This restores the shared tool-provider set without
+giving Core the values or teaching Runner what FAL, xAI, or any product feature
+means. It is transitional host-wide bootstrap, not a replacement for
+Core-owned per-Project secret references. Runtime restart preserves the
+credential set already held by the Runtime; it does not silently rotate shared
+or inference credentials.

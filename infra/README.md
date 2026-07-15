@@ -35,6 +35,19 @@ Still elsewhere: **the CI runners** live on lat2; **clawland** remains the
 legacy finite.vip fleet box; **Tinfoil** is unchanged. The old FiniteBrain
 smoke service remains a rollback source, not the production origin.
 
+## First-cohort production baseline (2026-07-15)
+
+The hosted-agent path is now in production with a proven fresh-Agent flow,
+authenticated private Finite Sites Preview, Telegram pairing, and serial
+digest-pinned upgrades of existing healthy Kata Agents. The exact deployed
+checkpoint and future regression gates are recorded in
+[`docs/runs/production-baseline-2026-07-15.md`](../docs/runs/production-baseline-2026-07-15.md).
+
+`scripts/deploy-lat1 REV` switches infrastructure only. An Agent Runtime image
+rollout is a separate opt-in argument set: it must name an exact promoted
+artifact and either explicit Project ids or `--roll-all` plus a canary. Never
+infer a bot rollout from the word “deploy.”
+
 ## Layout
 
 ```

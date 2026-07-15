@@ -381,6 +381,12 @@ rewrite its binding or associated Rooms. Any attempt to preserve or repair Sol
 2 first needs a read-only binding snapshot plus a named backup and rollback
 boundary as a separate authorized recovery task.
 
+2026-07-15 clarification: the removal UI and retained-data offboarding
+transition landed, but Runtime Retirement remains intentionally unadvertised
+and is rejected by Core policy. There is still no supported deletion path for
+Sol 2. The production-baseline audit left it untouched rather than bypassing
+that capability gate.
+
 ## Final gates
 
 Passed:

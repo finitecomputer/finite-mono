@@ -1,6 +1,6 @@
 name: finitechat
 kind: platform
-version: 0.4.0
+version: 0.4.1
 description: >
   Finite Chat platform adapter for Hermes. Connects Hermes to E2EE Finite
   Chat rooms through the resident finitechat service. A user Device starts a

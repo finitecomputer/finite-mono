@@ -37,6 +37,10 @@ with exactly these meanings.
   harmful product data.
 - **Native Principal**: a Principal known by npub inside Finite surfaces, such
   as a chat participant. Native shares can target this Principal directly.
+- **Requesting User Share**: an explicit, revocable Share created atomically by
+  an Agent Principal's signed Project Init for the authenticated human sender's
+  Native Principal. It grants view access to each declared Project Output; it
+  does not change Project ownership, collaboration, or Git access.
 - **External Principal**: a Principal identified by email because they are not
   yet a Finite user. External shares use email verification.
 - **Principal Link**: an explicit, approved relationship between Principals
@@ -284,8 +288,9 @@ with exactly these meanings.
   instead of using a separate platform namespace. It returns the exact authored
   Document Markdown for that page. Directory index pages use the route-shaped
   companion URL; the Document Output root uses `/index.md`.
-- **Visibility**: `private` (nobody), `shared` (emails on the Share list),
-  or `public`. New Project Outputs are private by default. Changing
+- **Visibility**: `private` (only explicitly shared Native Principals),
+  `shared` (explicit Native Principal or email Shares), or `public`. New
+  Project Outputs are private by default. Changing
   Visibility is a Project Output sharing mutation. Making a Project Output
   public requires an explicit confirmation from the human, relayed as
   `confirm_public`.
@@ -294,8 +299,15 @@ with exactly these meanings.
   cookies.
 - **Magic Link**: a single-use, 15-minute login token mailed to a shared
   email. Redeeming it sets a Viewer Cookie on the site's own host.
-- **Viewer Cookie**: an HMAC-signed `(site, email, expiry)` proof, scoped to
-  one site host. It proves login; the Share table decides access.
+- **Viewer Cookie**: an HMAC-signed `(Project Output, Principal, expiry)`
+  proof, scoped to one Output host. Legacy email cookies retain their existing
+  wire shape. A cookie proves a bounded session; the Share table still decides
+  access on every request.
+- **Native Viewer Session**: a bounded NIP-98 proof for one exact Output-host
+  session endpoint, POST body, nonce, client, and same-origin return path. The
+  signer must already have a Native Principal Share. Direct native clients
+  receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
+  the same cookies. Proof never creates a Share.
 - **Verified Email Viewer Session**: a server-to-server exchange that accepts
   an email already verified by the SaaS account boundary and, only when that
   email is already on a shared output's Share list, mints the existing

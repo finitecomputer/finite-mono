@@ -425,6 +425,226 @@ write_agent_workspace_note() {
     >"$brain_sync_json"
 }
 
+requesting_user_account_id() {
+  node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const accountId = String(state.identity?.account_id || "");
+if (!/^[0-9a-f]{64}$/u.test(accountId)) {
+  throw new Error("Hosted Web Device did not expose the authenticated human account id");
+}
+process.stdout.write(accountId);
+JS
+}
+
+publish_private_requesting_user_site() {
+  local init_fields
+  sites_run_id="$(date +%s)-$$"
+  sites_slug="devfinity-private-${sites_run_id}"
+  sites_marker="Devfinity private Sites ${sites_run_id}"
+  sites_tree="/data/workspace/${sites_slug}"
+  requesting_user_id="$(requesting_user_account_id)"
+
+  container exec \
+    -e "DEVFINITY_SITES_SLUG=$sites_slug" \
+    -e "DEVFINITY_SITES_MARKER=$sites_marker" \
+    "$container_machine_id" \
+    /bin/bash -lc '
+      set -euo pipefail
+      tree="/data/workspace/$DEVFINITY_SITES_SLUG"
+      test ! -e "$tree"
+      mkdir -p "$tree/site"
+      printf "%s\n" \
+        "[project]" \
+        "slug = \"$DEVFINITY_SITES_SLUG\"" \
+        "" \
+        "[outputs.site]" \
+        "kind = \"site\"" \
+        "site_name = \"$DEVFINITY_SITES_SLUG\"" \
+        "branch = \"main\"" \
+        "path = \"site\"" \
+        "spa = false" >"$tree/finite.toml"
+      printf "<h1>%s</h1>\n" "$DEVFINITY_SITES_MARKER" >"$tree/site/index.html"
+    '
+
+  container exec "$container_machine_id" fsite auth register --output json \
+    >"$sites_auth_json"
+  container exec -w "$sites_tree" "$container_machine_id" \
+    fsite project init \
+      --config finite.toml \
+      --requesting-user-npub "$requesting_user_id" \
+      --dry-run \
+      --output json \
+    >"$sites_dry_run_json"
+  container exec -w "$sites_tree" "$container_machine_id" \
+    fsite project init \
+      --config finite.toml \
+      --requesting-user-npub "$requesting_user_id" \
+      --output json \
+    >"$sites_init_json"
+
+  init_fields="$(node - "$sites_init_json" "$sites_slug" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const expectedSlug = process.argv[3];
+const output = response.outputs?.[0];
+if (
+  response.slug !== expectedSlug ||
+  !response.requesting_user_npub?.startsWith("npub1") ||
+  !output?.requesting_user_shared ||
+  output.visibility !== "private" ||
+  typeof output.output_id !== "string" ||
+  typeof output.output_url !== "string" ||
+  typeof response.git_remote_url !== "string"
+) {
+  throw new Error(`Project Init did not create the private requesting-user Share: ${JSON.stringify(response)}`);
+}
+process.stdout.write([
+  output.output_id,
+  output.output_url,
+  response.git_remote_url,
+].join("\t"));
+JS
+)"
+  IFS=$'\t' read -r sites_output_id sites_url sites_git_remote <<<"$init_fields"
+
+  container exec \
+    -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
+    "$container_machine_id" \
+    fsite auth git "$sites_slug" --store --output json \
+    >"$sites_git_auth_json"
+  container exec \
+    -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
+    -e "DEVFINITY_SITES_GIT_REMOTE=$sites_git_remote" \
+    -w "$sites_tree" \
+    "$container_machine_id" \
+    /bin/bash -lc '
+      set -euo pipefail
+      git init -b main
+      git config user.name "Devfinity Sites Smoke"
+      git config user.email "devfinity-sites-smoke@finite.invalid"
+      git add finite.toml site
+      git commit -m "Publish private requesting-user smoke site"
+      git remote add finite "$DEVFINITY_SITES_GIT_REMOTE"
+      git push finite main
+    '
+
+  local started status
+  started="$(date +%s)"
+  while true; do
+    status="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$sites_url" || true)"
+    if [[ "$status" == "401" ]]; then
+      break
+    fi
+    if (( "$(date +%s)" - started >= 90 )); then
+      echo "Private Sites Output did not publish at $sites_url within 90s; last status $status" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  assert_site_unauthorized
+  issue_and_redeem_site_preview "$sites_cookie_jar_before"
+  echo "agent publish -> requesting user private preview ok: $sites_url"
+}
+
+issue_and_redeem_site_preview() {
+  local cookie_jar="$1"
+  local redeem_url status
+  node -e 'process.stdout.write(JSON.stringify({ url: process.argv[1] }))' \
+    "$sites_url" >"$sites_preview_request_json"
+  curl -fsS --max-time 30 \
+    -H 'content-type: application/json' \
+    --data-binary "@$sites_preview_request_json" \
+    "$dashboard_origin/api/site-previews/machines/$machine_id/session" \
+    >"$sites_preview_response_json"
+  redeem_url="$(node - "$sites_preview_response_json" "$sites_url" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const original = new URL(process.argv[3]).toString();
+const redeem = new URL(String(response.url || ""));
+if (
+  redeem.origin !== new URL(original).origin ||
+  redeem.pathname !== "/_finite/auth" ||
+  !/^[0-9a-f]{64}$/u.test(redeem.searchParams.get("native_token") || "")
+) {
+  throw new Error(`Dashboard did not return a native Sites redemption URL: ${JSON.stringify(response)}`);
+}
+process.stdout.write(redeem.toString());
+JS
+)"
+  status="$(curl -sS --max-time 15 \
+    -D "$sites_redeem_headers" \
+    -o /dev/null \
+    -c "$cookie_jar" \
+    -w '%{http_code}' \
+    "$redeem_url")"
+  if [[ "$status" != "303" ]]; then
+    echo "Sites redemption returned HTTP $status instead of 303" >&2
+    return 1
+  fi
+  assert_site_cookie_works "$cookie_jar"
+}
+
+assert_site_cookie_works() {
+  local cookie_jar="$1"
+  local body
+  body="$(curl -fsS --max-time 15 -b "$cookie_jar" "$sites_url")"
+  if [[ "$body" != *"$sites_marker"* ]]; then
+    echo "Authenticated Sites response did not contain the smoke marker" >&2
+    return 1
+  fi
+}
+
+assert_site_unauthorized() {
+  local status
+  status="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "$sites_url")"
+  if [[ "$status" != "401" ]]; then
+    echo "Private Sites Output returned HTTP $status without a Viewer Cookie" >&2
+    return 1
+  fi
+}
+
+revoke_requesting_user_site() {
+  container exec -w "$sites_tree" "$container_machine_id" \
+    fsite project share "$sites_slug" "$sites_output_id" \
+      --remove-npub "$requesting_user_id" \
+      --output json \
+    >"$sites_revoke_json"
+  node - "$sites_revoke_json" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if ((response.shared_npubs || []).length !== 0) {
+  throw new Error(`Requesting-user Share was not revoked: ${JSON.stringify(response)}`);
+}
+JS
+
+  local status
+  for cookie_jar in "$sites_cookie_jar_before" "$sites_cookie_jar_after"; do
+    status="$(curl -sS --max-time 15 -o /dev/null -b "$cookie_jar" -w '%{http_code}' "$sites_url")"
+    if [[ "$status" != "401" ]]; then
+      echo "Revoked Sites Viewer Cookie returned HTTP $status instead of 401" >&2
+      return 1
+    fi
+  done
+  assert_site_unauthorized
+
+  node -e 'process.stdout.write(JSON.stringify({ url: process.argv[1] }))' \
+    "$sites_url" >"$sites_preview_request_json"
+  curl -fsS --max-time 30 \
+    -H 'content-type: application/json' \
+    --data-binary "@$sites_preview_request_json" \
+    "$dashboard_origin/api/site-previews/machines/$machine_id/session" \
+    >"$sites_preview_response_json"
+  node - "$sites_preview_response_json" "$sites_url" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (new URL(String(response.url || "")).toString() !== new URL(process.argv[3]).toString()) {
+  throw new Error(`Dashboard unexpectedly minted a Sites viewer session after revocation: ${JSON.stringify(response)}`);
+}
+JS
+  echo "requesting-user Share revocation invalidated live and future Sites sessions"
+}
+
 need container
 need curl
 need node
@@ -438,12 +658,17 @@ if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_BRAIN_ONLY_SMOKE
   echo "DEVFINITY_BRAIN_ONLY_SMOKE must be 0 or 1" >&2
   exit 64
 fi
+if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "1" ]]; then
+  echo "DEVFINITY_SITES_ONLY_SMOKE must be 0 or 1" >&2
+  exit 64
+fi
 
 core_url="${FC_CORE_URL:?}"
 dashboard_url="${FC_DASHBOARD_URL:?}"
 dashboard_origin="${dashboard_url%/dashboard}"
 chat_url="${FINITECHAT_SERVER_URL:?}"
 hosted_device_url="${FC_HOSTED_WEB_DEVICE_URL:?}"
+sites_api_url="${FC_SITES_UPSTREAM_URL:?}"
 state_dir="${DEVFINITY_STATE_DIR:?}"
 dashboard_dir="$(pwd)/finitecomputer-v2/apps/dashboard"
 me_json="$state_dir/saas-smoke-core-me.json"
@@ -454,6 +679,21 @@ brain_open_json="$state_dir/saas-smoke-brain-open.json"
 brain_sync_json="$state_dir/saas-smoke-brain-sync.json"
 brain_directory_json="$state_dir/saas-smoke-brain-directory.json"
 brain_tree_state_json="$state_dir/saas-smoke-brain-tree-state.json"
+sites_auth_json="$state_dir/saas-smoke-sites-auth.json"
+sites_dry_run_json="$state_dir/saas-smoke-sites-dry-run.json"
+sites_init_json="$state_dir/saas-smoke-sites-init.json"
+sites_git_auth_json="$state_dir/saas-smoke-sites-git-auth.json"
+sites_preview_request_json="$state_dir/saas-smoke-sites-preview-request.json"
+sites_preview_response_json="$state_dir/saas-smoke-sites-preview-response.json"
+sites_redeem_headers="$state_dir/saas-smoke-sites-redeem.headers"
+sites_cookie_jar_before="$state_dir/saas-smoke-sites-before.cookies"
+sites_cookie_jar_after="$state_dir/saas-smoke-sites-after.cookies"
+sites_revoke_json="$state_dir/saas-smoke-sites-revoke.json"
+track_sensitive_file "$sites_git_auth_json"
+track_sensitive_file "$sites_preview_response_json"
+track_sensitive_file "$sites_redeem_headers"
+track_sensitive_file "$sites_cookie_jar_before"
+track_sensitive_file "$sites_cookie_jar_after"
 
 read_core_me
 if ! runtime_fields >/dev/null 2>&1; then
@@ -506,10 +746,10 @@ wait_http "Agent Runtime" "$runtime_url/healthz" 180
 wait_http "Agent contact" "$runtime_url/contact" 180
 start_chat_updates
 wait_for_connected_chat
-if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: devfinity apple chat works"
 else
-  echo "brain-only smoke: Hosted Web Device connected; real inference reply skipped"
+  echo "focused smoke: Hosted Web Device connected; real inference reply skipped"
 fi
 
 agent_npub_before="$(runtime_agent_npub)"
@@ -520,14 +760,19 @@ brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"
 open_and_sync_agent_workspace
 write_agent_workspace_note
 brain_browser_smoke assert-note "$brain_proof"
+publish_private_requesting_user_site
 
 restart_process finitechat
 wait_http "Finite Chat after restart" "$chat_url/health" 120
 restart_process hosted-web-device
 wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
+restart_process finitesites
+wait_http "Finite Sites after restart" "$sites_api_url/api/v1/healthz" 120
+assert_site_cookie_works "$sites_cookie_jar_before"
+issue_and_redeem_site_preview "$sites_cookie_jar_after"
 start_chat_updates
 wait_for_connected_chat
-if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: chat services healed"
 fi
 
@@ -566,8 +811,11 @@ container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
   >"$brain_sync_json"
 assert_agent_workspace_scope
 brain_browser_smoke assert-note "$brain_proof"
+assert_site_cookie_works "$sites_cookie_jar_before"
+assert_site_cookie_works "$sites_cookie_jar_after"
+revoke_requesting_user_site
 wait_for_connected_chat
-if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: runtime restart healed"
 fi
 

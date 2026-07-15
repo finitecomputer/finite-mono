@@ -132,11 +132,13 @@ For new versioned leases, Core—not Runner—selects the newest promoted,
 non-retired digest-pinned OCI artifact and persists the complete RuntimeSpec
 before returning the lease. The checked-in Core service sets
 `FC_CORE_RUNTIME_ENV_JSON` to the public Sites and Brain endpoints that are
-copied into that spec. The Runner artifact and `FC_RUNNER_RUNTIME_ENV_JSON`
-values remain only as an N-1 fallback for already-existing rows without a
-RuntimeSpec during expand; a present spec always wins. Do not put credentials
-in either JSON map. Each name and value is bounded and validated identically by
-Core and Runner.
+copied into that spec. Its names-only
+`FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` setting selects the shared tool
+credentials that Runner resolves from its root-owned runtime secret file. The
+Runner artifact and `FC_RUNNER_RUNTIME_ENV_JSON` values remain only as an N-1
+fallback for already-existing rows without a RuntimeSpec during expand; a
+present spec always wins. Do not put credential values in either JSON setting.
+Each name and value is bounded and validated identically by Core and Runner.
 
 Core holds the corresponding rotatable keyring. Its non-secret metadata shape
 is an array in `FC_CORE_RUNNER_CREDENTIALS_JSON`:

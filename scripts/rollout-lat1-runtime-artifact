@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# Opt-in, serial rollout of one promoted Runtime Artifact to existing lat1
+# agents. This reuses Core's explicit per-Runtime Upgrade operation; it does
+# not create a second fleet lifecycle contract.
+set -euo pipefail
+
+LAT1="${LAT1:-root@64.34.82.77}"
+SOURCE_HOST_ID=finite-lat-1
+
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/rollout-lat1-runtime-artifact [--validate-only] \
+  --roll-runtime-artifact ID \
+  --roll-admin-email EMAIL \
+  --roll-admin-workos-user-id ID \
+  (--roll-project-id PROJECT_ID... | --roll-all --roll-canary-project-id PROJECT_ID) \
+  [--roll-wait-timeout-seconds SECS]
+EOF
+}
+
+invalid_value() {
+  echo "invalid $1" >&2
+  return 64
+}
+
+validate_id() {
+  local label="$1" value="$2"
+  [[ $value =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$ ]] || invalid_value "$label: expected a simple identifier"
+}
+
+validate_local_inputs() {
+  [[ $LAT1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT1 destination"; return; }
+  validate_id "runtime artifact id" "$ROLLOUT_ARTIFACT_ID" || return
+  [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
+  validate_id "admin WorkOS user id" "$ROLLOUT_ADMIN_WORKOS_USER_ID" || return
+  local project_id
+  for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+    validate_id "project id" "$project_id" || return
+  done
+  if [[ -n $ROLLOUT_CANARY_PROJECT_ID ]]; then
+    validate_id "canary project id" "$ROLLOUT_CANARY_PROJECT_ID" || return
+  fi
+}
+
+parse_args() {
+  VALIDATE_ONLY=false
+  ROLLOUT_ARTIFACT_ID=""
+  ROLLOUT_ADMIN_EMAIL=""
+  ROLLOUT_ADMIN_WORKOS_USER_ID=""
+  ROLLOUT_ALL=false
+  ROLLOUT_CANARY_PROJECT_ID=""
+  ROLLOUT_WAIT_TIMEOUT_SECONDS=1200
+  ROLLOUT_PROJECT_IDS=()
+
+  while (($#)); do
+    case "$1" in
+      --validate-only)
+        VALIDATE_ONLY=true
+        shift
+        ;;
+      --roll-runtime-artifact)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_ARTIFACT_ID="$2"
+        shift 2
+        ;;
+      --roll-admin-email)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_ADMIN_EMAIL="$2"
+        shift 2
+        ;;
+      --roll-admin-workos-user-id)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_ADMIN_WORKOS_USER_ID="$2"
+        shift 2
+        ;;
+      --roll-project-id)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_PROJECT_IDS+=("$2")
+        shift 2
+        ;;
+      --roll-all)
+        ROLLOUT_ALL=true
+        shift
+        ;;
+      --roll-canary-project-id)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_CANARY_PROJECT_ID="$2"
+        shift 2
+        ;;
+      --roll-wait-timeout-seconds)
+        [[ $# -ge 2 && $2 =~ ^[0-9]+$ ]] || { usage; return 64; }
+        ROLLOUT_WAIT_TIMEOUT_SECONDS="$2"
+        shift 2
+        ;;
+      *)
+        echo "unknown runtime rollout option: $1" >&2
+        usage
+        return 64
+        ;;
+    esac
+  done
+
+  if [[ -z $ROLLOUT_ARTIFACT_ID || -z $ROLLOUT_ADMIN_EMAIL || -z $ROLLOUT_ADMIN_WORKOS_USER_ID ]]; then
+    echo "runtime rollout requires the artifact id and real admin identity" >&2
+    return 64
+  fi
+  if ((ROLLOUT_WAIT_TIMEOUT_SECONDS < 60 || ROLLOUT_WAIT_TIMEOUT_SECONDS > 3600)); then
+    echo "runtime rollout timeout must be between 60 and 3600 seconds" >&2
+    return 64
+  fi
+  if [[ $ROLLOUT_ALL == true ]]; then
+    if [[ ${#ROLLOUT_PROJECT_IDS[@]} -gt 0 || -z $ROLLOUT_CANARY_PROJECT_ID ]]; then
+      echo "--roll-all requires one canary and cannot be combined with explicit projects" >&2
+      return 64
+    fi
+  elif [[ ${#ROLLOUT_PROJECT_IDS[@]} -eq 0 || -n $ROLLOUT_CANARY_PROJECT_ID ]]; then
+    echo "choose explicit projects, or --roll-all with one canary" >&2
+    return 64
+  fi
+  validate_local_inputs
+}
+
+build_plan_cli_args() {
+  PLAN_CLI_ARGS=(
+    runtime-artifact-rollout
+    --artifact-id "$ROLLOUT_ARTIFACT_ID"
+    --source-host-id "$SOURCE_HOST_ID"
+    --admin-email "$ROLLOUT_ADMIN_EMAIL"
+    --admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID"
+    --wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS"
+  )
+  local project_id
+  if [[ $ROLLOUT_ALL == true ]]; then
+    PLAN_CLI_ARGS+=(--all --canary-project-id "$ROLLOUT_CANARY_PROJECT_ID")
+  else
+    for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+      PLAN_CLI_ARGS+=(--project-id "$project_id")
+    done
+  fi
+}
+
+# OpenSSH sends a remote command as one shell-parsed string. Build that one
+# string with Bash's %q and never append an unquoted caller value.
+run_remote_bash() {
+  local script="$1"
+  shift
+  local remote_command quoted argument
+  printf -v quoted '%q' "$script"
+  remote_command="bash -c $quoted --"
+  for argument in "$@"; do
+    printf -v quoted '%q' "$argument"
+    remote_command+=" $quoted"
+  done
+  ssh -o BatchMode=yes -- "$LAT1" "$remote_command"
+}
+
+run_remote_cli() {
+  run_remote_bash 'set -euo pipefail
+set -a
+. /etc/finite/core.env
+set +a
+exec /run/current-system/sw/bin/finite-saas-core "$@"' "$@"
+}
+
+print_json_if_present() {
+  local payload="$1"
+  [[ -n $payload ]] || return 0
+  if ! jq . <<<"$payload"; then
+    printf '%s\n' "$payload"
+    return 65
+  fi
+}
+
+capture_remote_cli() {
+  local output_name="$1" status_name="$2"
+  shift 2
+  local captured_status captured_output
+  set +e
+  captured_output="$(run_remote_cli "$@")"
+  captured_status=$?
+  set -e
+  printf -v "$output_name" '%s' "$captured_output"
+  printf -v "$status_name" '%s' "$captured_status"
+}
+
+validate_plan() {
+  local plan="$1"
+  jq -e --arg artifact "$ROLLOUT_ARTIFACT_ID" --arg host "$SOURCE_HOST_ID" '
+    .target_artifact_id == $artifact
+    and .source_host_id == $host
+    and (.planned | type == "array")
+    and (.skipped | type == "array")
+    and all(.planned[];
+      .source_host_id == $host
+      and .target_artifact_id == $artifact
+      and (.project_id | type == "string")
+      and (.agent_runtime_id | type == "string")
+      and (.source_machine_id | type == "string"))
+  ' <<<"$plan" >/dev/null
+
+  local project_id runtime_id source_host_id machine_id target_artifact_id
+  while IFS=$'\t' read -r project_id runtime_id source_host_id machine_id target_artifact_id; do
+    validate_id "planned project id" "$project_id" || return
+    validate_id "planned Runtime id" "$runtime_id" || return
+    [[ $source_host_id == "$SOURCE_HOST_ID" ]] || { invalid_value "planned source host id"; return; }
+    validate_id "planned source machine id" "$machine_id" || return
+    [[ $target_artifact_id == "$ROLLOUT_ARTIFACT_ID" ]] || { invalid_value "planned target artifact id"; return; }
+  done < <(jq -r '.planned[] | [.project_id, .agent_runtime_id, .source_host_id, .source_machine_id, .target_artifact_id] | @tsv' <<<"$plan")
+}
+
+preflight_planned_compute() {
+  local plan="$1"
+  local -a machines=()
+  mapfile -t machines < <(jq -r '.planned[].source_machine_id' <<<"$plan")
+  if [[ ${#machines[@]} -eq 0 ]]; then
+    return 0
+  fi
+  local machine
+  for machine in "${machines[@]}"; do
+    validate_id "planned source machine id" "$machine" || return
+  done
+  run_remote_bash 'set -euo pipefail
+for machine in "$@"; do
+  nerdctl --namespace finite inspect "$machine" >/dev/null || {
+    echo "runtime rollout preflight failed: canonical container $machine is absent" >&2
+    exit 1
+  }
+done' "${machines[@]}"
+}
+
+execute_exact_plan() {
+  local plan="$1"
+  local project_id runtime_id source_host_id machine_id target_artifact_id result result_status
+  while IFS=$'\t' read -r project_id runtime_id source_host_id machine_id target_artifact_id; do
+    local -a exact_args=(
+      runtime-artifact-rollout
+      --artifact-id "$target_artifact_id"
+      --source-host-id "$source_host_id"
+      --admin-email "$ROLLOUT_ADMIN_EMAIL"
+      --admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID"
+      --wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS"
+      --project-id "$project_id"
+      --expected-agent-runtime-id "$runtime_id"
+      --expected-source-machine-id "$machine_id"
+    )
+    capture_remote_cli result result_status "${exact_args[@]}"
+    print_json_if_present "$result" || return $?
+    if ((result_status != 0)); then
+      return "$result_status"
+    fi
+    jq -e \
+      --arg project "$project_id" \
+      --arg runtime "$runtime_id" \
+      --arg host "$source_host_id" \
+      --arg machine "$machine_id" \
+      --arg artifact "$target_artifact_id" '
+        .halted == false
+        and .source_host_id == $host
+        and .target_artifact_id == $artifact
+        and (.planned | length == 1)
+        and .planned[0].project_id == $project
+        and .planned[0].agent_runtime_id == $runtime
+        and .planned[0].source_host_id == $host
+        and .planned[0].source_machine_id == $machine
+        and .planned[0].target_artifact_id == $artifact
+        and (.outcomes | length == 1)
+        and .outcomes[0].project_id == $project
+        and .outcomes[0].agent_runtime_id == $runtime
+        and .outcomes[0].status == "succeeded"
+      ' <<<"$result" >/dev/null || return 1
+  done < <(jq -r '.planned[] | [.project_id, .agent_runtime_id, .source_host_id, .source_machine_id, .target_artifact_id] | @tsv' <<<"$plan")
+}
+
+main() {
+  parse_args "$@" || exit $?
+  if [[ $VALIDATE_ONLY == true ]]; then
+    exit 0
+  fi
+  build_plan_cli_args
+
+  echo "==> planning existing-runtime rollout on source host $SOURCE_HOST_ID"
+  local plan plan_status
+  capture_remote_cli plan plan_status "${PLAN_CLI_ARGS[@]}" --plan-only
+  print_json_if_present "$plan" || exit $?
+  if ((plan_status != 0)); then
+    exit "$plan_status"
+  fi
+  validate_plan "$plan"
+
+  if [[ $(jq '.planned | length' <<<"$plan") -eq 0 ]]; then
+    echo "==> no eligible existing runtimes need this artifact"
+    exit 0
+  fi
+
+  echo "==> preflighting every exact planned canonical Kata container"
+  preflight_planned_compute "$plan"
+
+  echo "==> rolling the exact preflighted runtimes serially; first failure stops the cohort"
+  execute_exact_plan "$plan"
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

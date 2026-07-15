@@ -1348,6 +1348,30 @@ pub struct AdminRuntimeUpgradeInput {
     pub now: Option<String>,
 }
 
+/// Operator-only upgrade input that binds enqueueing to the exact Runtime
+/// observed during a rollout plan. The binding is checked in the same critical
+/// section/transaction that creates the lifecycle request, so a changed active
+/// Runtime fails closed instead of upgrading replacement compute.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeUpgradeExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub target_runtime_artifact_id: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeControlExpectedBinding {
+    pub agent_runtime_id: String,
+    pub source_host_id: String,
+    pub source_machine_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminRuntimeControlInput {
@@ -2315,6 +2339,28 @@ impl BridgeCoreState {
         )
     }
 
+    pub fn admin_request_runtime_upgrade_exact(
+        &mut self,
+        input: AdminRuntimeUpgradeExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        self.admin_request_runtime_control_bound(
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Upgrade,
+            Some(input.target_runtime_artifact_id),
+            Some(&expected),
+        )
+    }
+
     /// Admin variant of `request_runtime_control`: the acting user does not
     /// have to own the project, and the action is written to the admin audit
     /// log with the admin's verified email as actor. The API layer requires
@@ -2324,6 +2370,16 @@ impl BridgeCoreState {
         input: AdminRuntimeControlInput,
         kind: RuntimeControlKind,
         target_runtime_artifact_id: Option<String>,
+    ) -> CoreResult<RuntimeControlRequest> {
+        self.admin_request_runtime_control_bound(input, kind, target_runtime_artifact_id, None)
+    }
+
+    fn admin_request_runtime_control_bound(
+        &mut self,
+        input: AdminRuntimeControlInput,
+        kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
+        expected: Option<&RuntimeControlExpectedBinding>,
     ) -> CoreResult<RuntimeControlRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
@@ -2338,12 +2394,13 @@ impl BridgeCoreState {
             .get(&input.project_id)
             .cloned()
             .ok_or(CoreError::ProjectNotFound)?;
-        let request = self.enqueue_runtime_control_request(
+        let request = self.enqueue_runtime_control_request_bound(
             &project,
             &admin_user.id,
             kind,
             target_runtime_artifact_id,
             now.clone(),
+            expected,
         )?;
         self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
             action: match kind {
@@ -2379,9 +2436,35 @@ impl BridgeCoreState {
         target_runtime_artifact_id: Option<String>,
         now: String,
     ) -> CoreResult<RuntimeControlRequest> {
+        self.enqueue_runtime_control_request_bound(
+            project,
+            requested_by_user_id,
+            kind,
+            target_runtime_artifact_id,
+            now,
+            None,
+        )
+    }
+
+    fn enqueue_runtime_control_request_bound(
+        &mut self,
+        project: &Project,
+        requested_by_user_id: &str,
+        kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
+        now: String,
+        expected: Option<&RuntimeControlExpectedBinding>,
+    ) -> CoreResult<RuntimeControlRequest> {
         let runtime = self
             .active_runtime_for_project(&project.id)
             .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if expected.is_some_and(|expected| {
+            runtime.id != expected.agent_runtime_id
+                || runtime.source_host_id != expected.source_host_id
+                || runtime.source_machine_id != expected.source_machine_id
+        }) {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
         if !runtime.supports_runtime_control(kind) {
             return Err(CoreError::RuntimeControlUnsupported);
         }
@@ -2474,7 +2557,21 @@ impl BridgeCoreState {
         input: LeaseAgentCreationRequestInput,
         runtime_environment: &BTreeMap<String, String>,
     ) -> CoreResult<Option<AgentCreationLease>> {
+        self.lease_agent_creation_request_with_runtime_configuration(
+            input,
+            runtime_environment,
+            &[],
+        )
+    }
+
+    pub(crate) fn lease_agent_creation_request_with_runtime_configuration(
+        &mut self,
+        input: LeaseAgentCreationRequestInput,
+        runtime_environment: &BTreeMap<String, String>,
+        runtime_secret_references: &[String],
+    ) -> CoreResult<Option<AgentCreationLease>> {
         validate_runtime_spec_environment(runtime_environment)?;
+        let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -2575,7 +2672,7 @@ impl BridgeCoreState {
                 &artifact,
                 &runtime_id,
                 runtime_environment.clone(),
-                vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+                runtime_secret_references,
                 RuntimeBootIntent::Normal,
             )?;
             Some((runtime_id, artifact.id, runtime_spec))
@@ -4870,6 +4967,18 @@ impl BridgeCoreState {
         overviews
     }
 
+    /// Read one exact lifecycle request for operator-side orchestration.
+    ///
+    /// This deliberately exposes no queue mutation or aggregate inference:
+    /// callers can only observe the request id returned by an existing control
+    /// operation and wait for that same request to become terminal.
+    pub fn runtime_control_request(&self, request_id: &str) -> CoreResult<RuntimeControlRequest> {
+        self.runtime_control_requests
+            .get(request_id)
+            .cloned()
+            .ok_or(CoreError::RuntimeControlRequestNotFound)
+    }
+
     pub fn reserve_finite_private_usage(
         &mut self,
         input: ReserveFinitePrivateUsageInput,
@@ -5763,6 +5872,29 @@ pub(crate) fn build_runtime_spec_v1(
     };
     validate_runtime_spec_v1(&spec, artifact)?;
     Ok(RuntimeSpecEnvelope::V1(spec))
+}
+
+pub(crate) fn runtime_spec_secret_references(
+    configured_references: &[String],
+) -> CoreResult<Vec<String>> {
+    let mut seen = BTreeSet::from([FINITE_PRIVATE_SECRET_REFERENCE.to_string()]);
+    let mut references = vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()];
+
+    for reference in configured_references {
+        if !runtime_spec_environment_key_is_valid(reference)
+            || runtime_spec_reserved_environment_key(reference)
+            || !runtime_spec_secret_environment_key(reference)
+            || !seen.insert(reference.clone())
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        references.push(reference.clone());
+    }
+
+    if references.len() > 64 {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(references)
 }
 
 pub(crate) fn runtime_spec_v1(spec: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
@@ -7222,8 +7354,13 @@ mod tests {
             "FINITE_SITES_API".to_string(),
             "https://api.finite.chat".to_string(),
         )]);
+        let original_secret_references = vec![
+            "FAL_KEY".to_string(),
+            "FIRECRAWL_API_KEY".to_string(),
+            "XAI_API_KEY".to_string(),
+        ];
         let first = state
-            .lease_agent_creation_request_with_runtime_environment(
+            .lease_agent_creation_request_with_runtime_configuration(
                 LeaseAgentCreationRequestInput {
                     runner_id: "kata-worker-1".to_string(),
                     source_host_id: None,
@@ -7236,6 +7373,7 @@ mod tests {
                     now: Some(LATER.to_string()),
                 },
                 &original_environment,
+                &original_secret_references,
             )
             .unwrap()
             .unwrap();
@@ -7248,7 +7386,12 @@ mod tests {
         assert_eq!(first_spec_v1.environment, original_environment);
         assert_eq!(
             first_spec_v1.secret_references,
-            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()]
+            vec![
+                FINITE_PRIVATE_SECRET_REFERENCE.to_string(),
+                "FAL_KEY".to_string(),
+                "FIRECRAWL_API_KEY".to_string(),
+                "XAI_API_KEY".to_string(),
+            ]
         );
 
         promote_runtime_artifact_version(
@@ -7263,7 +7406,7 @@ mod tests {
             "2026-05-25T13:05:00Z",
         );
         let second = state
-            .lease_agent_creation_request_with_runtime_environment(
+            .lease_agent_creation_request_with_runtime_configuration(
                 LeaseAgentCreationRequestInput {
                     runner_id: "kata-worker-2".to_string(),
                     source_host_id: None,
@@ -7279,6 +7422,7 @@ mod tests {
                     "FINITE_SITES_API".to_string(),
                     "https://changed.example.test".to_string(),
                 )]),
+                &["PERPLEXITY_API_KEY".to_string()],
             )
             .unwrap()
             .unwrap();
@@ -7292,6 +7436,25 @@ mod tests {
             second.request.agent_runtime_id.as_deref(),
             Some(first_runtime_id.as_str())
         );
+    }
+
+    #[test]
+    fn configured_runtime_secret_references_are_bounded_unique_and_cannot_override_inference() {
+        assert!(
+            runtime_spec_secret_references(&[
+                "FAL_KEY".to_string(),
+                "X_API_BEARER_TOKEN".to_string(),
+            ])
+            .is_ok()
+        );
+        for invalid in [
+            vec!["OPENAI_API_KEY".to_string()],
+            vec!["FAL_KEY".to_string(), "FAL_KEY".to_string()],
+            vec!["FINITE_SITES_API".to_string()],
+            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+        ] {
+            assert!(runtime_spec_secret_references(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -10830,6 +10993,21 @@ mod tests {
             .get_mut("artifact-v2")
             .unwrap()
             .recover_known_good_chat = true;
+
+        let changed_binding = state
+            .admin_request_runtime_upgrade_exact(AdminRuntimeUpgradeExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                expected_agent_runtime_id: "runtime-replaced-after-plan".to_string(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-upgrade".to_string(),
+                target_runtime_artifact_id: "artifact-v2".to_string(),
+                now: Some("2026-05-25T13:03:30Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+        assert!(state.runtime_control_requests.is_empty());
 
         let upgrade = state
             .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {

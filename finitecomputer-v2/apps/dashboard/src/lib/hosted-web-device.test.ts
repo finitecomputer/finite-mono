@@ -11,6 +11,7 @@ import {
   hostedDeviceProfileImage,
   hostedDeviceLinkStatus,
   hostedDeviceRuntimeCommand,
+  hostedDeviceSitesIdentityProvider,
 } from "@/lib/hosted-web-device";
 
 const verifiedAccount = {
@@ -80,6 +81,52 @@ test("Brain identity operations use the narrow WorkOS-bound custody endpoint", a
   );
   assert.deepEqual(JSON.parse(observedBody), request);
   assert.equal(result.publicKeyHex, "11".repeat(32));
+});
+
+test("Sites viewer authorization uses the narrow WorkOS-bound custody endpoint", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedHeaders = new Headers();
+  let observedBody = "";
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedHeaders = new Headers(init?.headers);
+    observedBody = String(init?.body);
+    return Response.json({
+      body_json: "{\"purpose\":\"finite_site_view_session\"}",
+      authorization_header: "Nostr signed-event",
+    });
+  }) as typeof fetch;
+
+  const request = {
+    version: "finite-sites-identity-provider-v1" as const,
+    operation: "authorizeViewerSession" as const,
+    input: {
+      url: "https://hello.finite.chat/_finite/auth/native-session",
+      returnTo: "/draft",
+      client: "finite-dashboard",
+      nonce: "native-owner-session-proof",
+    },
+  };
+  const result = await hostedDeviceSitesIdentityProvider(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    request,
+    "https://hello.finite.chat"
+  );
+
+  assert.equal(observedUrl, "https://device.internal/v1/sites/identity-provider");
+  assert.equal(observedHeaders.get("authorization"), "Bearer internal-token");
+  assert.equal(observedHeaders.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(
+    observedHeaders.get("x-finite-sites-public-origin"),
+    "https://hello.finite.chat"
+  );
+  assert.deepEqual(JSON.parse(observedBody), request);
+  assert.equal(result.authorization_header, "Nostr signed-event");
 });
 
 test("agent creation explicitly authorizes binding bootstrap with its durable ids", async (context) => {

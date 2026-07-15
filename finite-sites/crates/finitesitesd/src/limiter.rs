@@ -1,8 +1,9 @@
 //! In-memory rate limiting for the magic-link endpoint.
 //!
-//! Two budgets guard `/_finite/request-link`: per (site, email) so one
+//! Budgets guard `/_finite/request-link`: per (site, email) so one
 //! address cannot be mail-bombed, and per client IP so one client cannot
-//! sweep the endpoint. Limited requests still render the generic
+//! sweep the endpoint. The same client-IP budget bounds direct native viewer
+//! proofs before they can create nonce rows. Limited email requests render the generic
 //! "check your email" page — the limiter must not become an oracle for the
 //! share list.
 //!

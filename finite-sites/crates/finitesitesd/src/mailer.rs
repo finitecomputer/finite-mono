@@ -492,6 +492,7 @@ mod tests {
             start: None,
             spa: false,
             created: false,
+            requesting_user_shared: false,
         }];
         let project = project_collaborator_invite_text(&ProjectCollaboratorInvite {
             email: "skyler@example.com",

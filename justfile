@@ -38,10 +38,17 @@ nixos-build-lat1 rev:
 
 # Full lat1 deploy for a committed main rev: prebuild on lat2, copy/switch
 # lat1, then verify the running closure and dashboard digest by state.
-deploy-lat1 rev:
+[positional-arguments]
+deploy-lat1 rev *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    exec scripts/deploy-lat1 {{ quote(rev) }}
+    exec scripts/deploy-lat1 "$@"
+
+# Static parsing, transport, ordering, and failure-propagation contract for the
+# optional existing-Runtime rollout appended to a lat1 deploy.
+lat1-rollout-contract:
+    bash -n scripts/deploy-lat1 scripts/rollout-lat1-runtime-artifact
+    python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
 
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:

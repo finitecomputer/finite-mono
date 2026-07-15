@@ -139,6 +139,24 @@ Runtime `destroy` endpoint as an upgrade step: destroy intentionally offboards
 the Runtime, removes its relay credential, and revokes its Runtime-scoped Finite
 Private key.
 
+For a controlled production cohort, use the deploy wrapper with explicit
+projects. It prints Core's deterministic plan, preflights every canonical Kata
+container on lat1, and then submits and verifies the same operation serially:
+
+```sh
+scripts/rollout-lat1-runtime-artifact \
+  --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
+  --roll-admin-email operator@example.com \
+  --roll-admin-workos-user-id user_operator \
+  --roll-project-id project_canary \
+  --roll-project-id project_next
+```
+
+The command stops before enqueueing if any planned Runtime has no canonical
+container. It stops before the next Runtime on an operation failure, timeout,
+wrong artifact, or non-online postcondition. Do not use this rollout path to
+reconstruct missing compute.
+
 Core accepts the request only when all of these are true:
 
 - the Runtime was created by Core with the Kata runner class;

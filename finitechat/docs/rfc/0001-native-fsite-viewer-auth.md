@@ -1,6 +1,6 @@
 # RFC 0001: Native Finite Sites Viewer Auth
 
-Status: draft for Friends Alpha
+Status: implemented for direct native and Hosted Web adapters, 2026-07-14
 
 ## Problem
 
@@ -66,6 +66,14 @@ When the app opens `https://{site}.finite.chat/{path}` in the in-app browser:
 7. The `WKWebView` loads the site normally. Static assets and app-site requests
    use the cookie, not per-request injected auth headers.
 
+Hosted Web uses the same proof contract without exposing custody to the
+browser. The dashboard asks the WorkOS-bound Hosted Device's
+`finite-sites-identity-provider-v1` adapter to authorize the exact Output
+session endpoint. It forwards the returned signed body and Authorization
+header to Sites' service-authenticated native viewer exchange. Sites returns a
+single-use Output-host redemption URL, which sets the ordinary and Partitioned
+Viewer Cookies before the iframe loads.
+
 ## Trust Boundary
 
 The user key stays in the native app. The web page sees only ordinary site
@@ -77,6 +85,12 @@ Finite Sites verifies the signature locally using the event body; no relay
 state is authoritative for access. Access remains a serving-plane decision:
 the share table, delegation table, or future entitlement table is re-checked
 on every request, so revocation takes effect without waiting for cookie expiry.
+
+An Agent Principal publishing for an authenticated human supplies that human's
+npub from trusted Chat sender metadata during Project Init. The Agent-signed
+mutation atomically creates an explicit Native Principal Share; it does not
+merge the Agent and human identities. Proof exchange can consume an existing
+Share but can never create one.
 
 ## Endpoint Sketch
 

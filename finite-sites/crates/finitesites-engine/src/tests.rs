@@ -16,6 +16,7 @@ use crate::{Engine, EngineConfig, EngineError, ViewAccess};
 
 const OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const OTHER_OWNER: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+const STRANGER: &str = "8888888888888888888888888888888888888888888888888888888888888888";
 const NOW: u64 = 1_750_000_000;
 
 struct Fixture {
@@ -82,6 +83,7 @@ fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> Pro
             outputs,
         },
         dry_run,
+        requesting_user_npub: None,
     }
 }
 
@@ -108,6 +110,7 @@ fn app_project_request(slug: &str, site_name: &str, dry_run: bool) -> ProjectIni
             outputs,
         },
         dry_run,
+        requesting_user_npub: None,
     }
 }
 
@@ -1014,6 +1017,8 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
         confirm_public: false,
         add_emails: vec!["Friend@Example.com".into()],
         remove_emails: vec![],
+        add_npubs: vec![],
+        remove_npubs: vec![],
     };
     let response = fx
         .engine
@@ -1040,6 +1045,8 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
         confirm_public: false,
         add_emails: vec![],
         remove_emails: vec![],
+        add_npubs: vec![],
+        remove_npubs: vec![],
     };
     let rejected =
         fx.engine
@@ -1076,6 +1083,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: vec!["not-an-email".into()],
         remove_emails: vec![],
+        add_npubs: vec![],
+        remove_npubs: vec![],
     };
     assert!(matches!(
         fx.engine.set_sharing(OWNER, "hello", &bad_email, NOW),
@@ -1087,6 +1096,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: (0..21).map(|i| format!("user{i}@example.com")).collect(),
         remove_emails: vec![],
+        add_npubs: vec![],
+        remove_npubs: vec![],
     };
     assert!(matches!(
         fx.engine
@@ -1104,6 +1115,8 @@ fn sharing_validates_emails_and_limits() {
                 .map(|i| format!("user{i}@example.com"))
                 .collect(),
             remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
         };
         fx.engine.set_sharing(OWNER, "hello", &batch, NOW).unwrap();
         added = upper;
@@ -1113,6 +1126,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: vec!["overflow@example.com".into()],
         remove_emails: vec![],
+        add_npubs: vec![],
+        remove_npubs: vec![],
     };
     assert!(matches!(
         fx.engine.set_sharing(OWNER, "hello", &over_cap, NOW),
@@ -1135,6 +1150,8 @@ fn shared_site_full_magic_link_flow() {
                 confirm_public: false,
                 add_emails: vec!["friend@example.com".into()],
                 remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![],
             },
             NOW,
         )
@@ -1185,6 +1202,8 @@ fn shared_site_full_magic_link_flow() {
                 confirm_public: false,
                 add_emails: vec![],
                 remove_emails: vec!["friend@example.com".into()],
+                add_npubs: vec![],
+                remove_npubs: vec![],
             },
             NOW,
         )
@@ -1194,6 +1213,163 @@ fn shared_site_full_magic_link_flow() {
             .view_access(&site, Some(&cookie), NOW + 180)
             .unwrap(),
         ViewAccess::NeedsLogin
+    );
+}
+
+#[test]
+fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
+    let mut fx = fixture();
+    let mut request = project_request("requesting-user", "requesting-user-site", false, false);
+    request.requesting_user_npub = Some(OTHER_OWNER.to_string());
+    let initialized = fx
+        .engine
+        .init_project(OWNER, &request, remote("requesting-user"), NOW)
+        .unwrap();
+    assert_eq!(
+        initialized.requesting_user_npub,
+        Some(finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap())
+    );
+    assert!(initialized.outputs[0].requesting_user_shared);
+    let replayed = fx
+        .engine
+        .init_project(OWNER, &request, remote("requesting-user"), NOW + 1)
+        .unwrap();
+    assert!(!replayed.created);
+    assert!(!replayed.outputs[0].created);
+    assert_eq!(
+        fx.engine
+            .store_mut()
+            .native_shares(replayed.outputs[0].site_id.as_deref().unwrap())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let site_id = initialized.outputs[0].site_id.as_deref().unwrap();
+    fx.engine
+        .commit_project_output_version(
+            site_id,
+            vec![output_file("/index.html", b"<h1>requesting user</h1>")],
+            false,
+            NOW + 1,
+        )
+        .unwrap();
+    let site = fx
+        .engine
+        .resolve_site("requesting-user-site")
+        .unwrap()
+        .unwrap();
+    assert_eq!(site.owner_pubkey, OWNER);
+    assert_eq!(
+        fx.engine.view_access(&site, None, NOW + 2).unwrap(),
+        ViewAccess::NeedsLogin
+    );
+
+    // A valid identity proof is not authority to create a Share.
+    let stranger = fx
+        .engine
+        .native_viewer_session(&site, STRANGER, "stranger-proof", NOW + 2);
+    assert!(matches!(stranger, Err(EngineError::NotAuthorized)));
+    assert!(
+        fx.engine
+            .store_mut()
+            .principal_by_pubkey(STRANGER)
+            .unwrap()
+            .is_none()
+    );
+
+    let cookie = fx
+        .engine
+        .native_viewer_session(&site, OTHER_OWNER, "first-proof", NOW + 2)
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 3)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+    assert!(matches!(
+        fx.engine
+            .native_viewer_session(&site, OTHER_OWNER, "first-proof", NOW + 3),
+        Err(EngineError::Conflict("native viewer nonce replay"))
+    ));
+
+    let link = fx
+        .engine
+        .request_native_viewer_link(&site, OTHER_OWNER, "hosted-proof", NOW + 4)
+        .unwrap();
+    let token = link.url.split("native_token=").nth(1).unwrap();
+    let (_, hosted_cookie) = fx.engine.redeem_native_viewer_link(token, NOW + 5).unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&hosted_cookie), NOW + 6)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+    assert!(matches!(
+        fx.engine.redeem_native_viewer_link(token, NOW + 6),
+        Err(EngineError::Validation(_))
+    ));
+
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "requesting-user-site",
+            &SharingRequest {
+                visibility: None,
+                confirm_public: false,
+                add_emails: vec![],
+                remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![OTHER_OWNER.to_string()],
+            },
+            NOW + 7,
+        )
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 8)
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&hosted_cookie), NOW + 8)
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+
+    let malformed = SharingRequest {
+        add_npubs: vec!["not-an-npub".into()],
+        ..SharingRequest::default()
+    };
+    assert!(matches!(
+        fx.engine
+            .set_sharing(OWNER, "requesting-user-site", &malformed, NOW + 9),
+        Err(EngineError::Proto(_))
+    ));
+    let restored = fx
+        .engine
+        .set_sharing(
+            OWNER,
+            "requesting-user-site",
+            &SharingRequest {
+                add_npubs: vec![OTHER_OWNER.to_string()],
+                ..SharingRequest::default()
+            },
+            NOW + 10,
+        )
+        .unwrap();
+    assert_eq!(restored.shared_npubs.len(), 1);
+    let restored_cookie = fx
+        .engine
+        .native_viewer_session(&site, OTHER_OWNER, "restored-proof", NOW + 11)
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&restored_cookie), NOW + 12)
+            .unwrap(),
+        ViewAccess::Allowed
     );
 }
 
@@ -1233,6 +1409,8 @@ fn public_private_and_unpublished_view_paths() {
                 confirm_public: true,
                 add_emails: vec![],
                 remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![],
             },
             NOW + 3,
         )
@@ -1257,6 +1435,8 @@ fn login_tokens_expire_and_reject_malformed_values() {
                 confirm_public: false,
                 add_emails: vec!["friend@example.com".into()],
                 remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![],
             },
             NOW,
         )

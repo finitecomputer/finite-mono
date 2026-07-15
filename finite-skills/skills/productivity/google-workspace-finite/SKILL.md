@@ -261,6 +261,10 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 Hosted Finite runtimes include the pinned `gws` CLI. **Always check `gws`
 first** — it may already be authenticated even when the Python setup is not.
+The runtime points `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` into durable Hermes state
+and `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` at the same durable
+`$HERMES_HOME/google_token.json` used by the Python helper, so credentials and
+CLI state survive restarts and Runtime upgrades.
 
 ```bash
 gws auth status
@@ -273,19 +277,14 @@ gws gmail users messages list --params '{"userId": "me", "maxResults": 10, "labe
 gws gmail users messages get --params '{"userId": "me", "id": "MESSAGE_ID", "format": "metadata", "metadataHeaders": ["From","Subject","Date"]}'
 ```
 
-### gws Permission Denied on credentials.json
+### gws authentication mismatch
 
-If `gws auth status` shows `plain_credentials_exists: true` but API calls fail with `Permission denied (os error 13)`, the credentials file is owned by root (e.g., was created during a privileged setup step). Since `sudo` is not available, the fix is to re-run the auth flow as the current user:
-
-```bash
-gws auth login
-```
-
-This creates new credentials owned by the current user and replaces the inaccessible ones.
-
-### gws Credential Loss Between Sessions
-
-The pod may be refreshed, causing `gws auth status` to show no credentials. Just ask the user to re-run `gws auth login` — it only takes a moment and restores access.
+Do not run a second `gws auth login` flow or copy credentials into
+`/root/.config/gws`. Run `$GSETUP --check` first; it refreshes and normalizes
+the platform-managed token in durable Hermes state. If that succeeds but a
+`gws` API command still reports an authentication-format error, report a
+Runtime image/skill packaging bug and use the bundled Python helper for the
+current task.
 
 ## Revoking Access
 

@@ -50,6 +50,10 @@ pub const LOGIN_TOKEN_TTL_SECONDS: u64 = 15 * 60;
 /// usable, while a caller cannot grow durable token state without bound.
 pub const MAX_ACTIVE_LOGIN_TOKENS_PER_SITE_EMAIL: u32 = 8;
 
+/// Hosted native-session exchanges use the same bounded number of one-use
+/// redirects per Site + Native Principal as the email fallback.
+pub const MAX_ACTIVE_NATIVE_VIEWER_TOKENS_PER_SITE_PRINCIPAL: u32 = 8;
+
 /// Viewer cookies last 7 days, then the viewer re-authenticates.
 pub const VIEWER_COOKIE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
@@ -60,6 +64,14 @@ pub const MAX_API_BODY_BYTES: u64 = 2 * 1024 * 1024;
 /// The account-to-Sites viewer-session exchange carries only three bounded
 /// strings and uses a smaller limit than the public control-plane API.
 pub const MAX_VIEWER_SESSION_BODY_BYTES: u64 = 4 * 1024;
+
+/// Direct native viewer auth carries one small signed JSON challenge.
+pub const MAX_NATIVE_VIEWER_AUTH_BODY_BYTES: u64 = 4 * 1024;
+
+pub const MAX_NATIVE_VIEWER_RETURN_TO_BYTES: u32 = 1024;
+pub const MAX_NATIVE_VIEWER_CLIENT_BYTES: u32 = 64;
+pub const MIN_NATIVE_VIEWER_NONCE_BYTES: u32 = 16;
+pub const MAX_NATIVE_VIEWER_NONCE_BYTES: u32 = 128;
 
 /// Canonical output URLs are one origin plus `/`; this leaves ample room for
 /// local ports while preventing an internal caller from sending huge values.

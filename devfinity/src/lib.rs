@@ -1,5 +1,7 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
@@ -152,6 +154,7 @@ const DEVFINITY_RUNNER_CREDENTIAL_ID: &str = "devfinity-apple-current";
 const DEVFINITY_RUNNER_TOKEN_ENV: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFINITY_APPLE_CURRENT";
 const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
 const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
+const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
 
 fn devfinity_runner_credentials_json() -> String {
     serde_json::json!([{
@@ -179,6 +182,7 @@ pub struct Stack {
     logs_dir: PathBuf,
     pids_dir: PathBuf,
     process_compose_file: PathBuf,
+    process_compose_control_dir: PathBuf,
     process_compose_socket: PathBuf,
     ports: Ports,
     core_token: String,
@@ -213,6 +217,7 @@ impl Stack {
         let run_dir = state_dir.join("runs").join("default");
         let logs_dir = run_dir.join("logs");
         let pids_dir = run_dir.join("pids");
+        let process_compose_control_dir = process_compose_control_dir(&run_dir);
         let runtime_agent_port = optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?;
         let apple_container_name_prefix = std::env::var("DEVFINITY_APPLE_CONTAINER_NAME_PREFIX")
             .ok()
@@ -221,7 +226,8 @@ impl Stack {
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
-            process_compose_socket: run_dir.join("process-compose.sock"),
+            process_compose_socket: process_compose_control_dir.join("pc.sock"),
+            process_compose_control_dir,
             state_dir,
             run_dir,
             logs_dir,
@@ -529,6 +535,7 @@ impl Stack {
         dry_run: bool,
     ) -> Result<ExitCode> {
         self.ensure_process_compose_available()?;
+        ensure_private_dir(&self.process_compose_control_dir)?;
         if !dry_run {
             self.prepare_for_start()?;
         }
@@ -543,6 +550,8 @@ impl Stack {
         let result =
             run_status_with_pid_file(command, &self.pid_file(ManagedProcess::ProcessCompose));
         self.remove_secret_files();
+        remove_file_best_effort(&self.process_compose_socket);
+        self.remove_process_compose_control_dir();
         result
     }
 
@@ -642,9 +651,25 @@ impl Stack {
                 eprintln!("failed to remove {}: {error}", path.display());
             }
         }
+        self.remove_process_compose_control_dir();
 
         println!("devfinity cleanup complete");
         Ok(ExitCode::SUCCESS)
+    }
+
+    fn remove_process_compose_control_dir(&self) {
+        match fs::remove_dir(&self.process_compose_control_dir) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => eprintln!(
+                "failed to remove {}: {error}",
+                self.process_compose_control_dir.display()
+            ),
+        }
     }
 
     pub fn status(&self) -> Result<ExitCode> {
@@ -1803,6 +1828,7 @@ wait "$postgres_pid"
 
     fn start_process_compose_headless(&self) -> Result<ProcessComposeGuard<'_>> {
         self.ensure_process_compose_available()?;
+        ensure_private_dir(&self.process_compose_control_dir)?;
         let mut command = self.process_compose_up_command();
         command.arg("--tui=false");
         command.arg("up");
@@ -2471,6 +2497,7 @@ impl ProcessComposeGuard<'_> {
         self.stack.cleanup_managed_processes();
         self.stack.remove_secret_files();
         remove_file_best_effort(&self.stack.process_compose_socket);
+        self.stack.remove_process_compose_control_dir();
         remove_file_best_effort(&self.pid_file);
         Ok(())
     }
@@ -2995,6 +3022,50 @@ fn write_mode_600(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn process_compose_control_dir(run_dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    run_dir.hash(&mut hasher);
+    let directory_name = format!("devfinity-pc-{:016x}", hasher.finish());
+    let preferred = std::env::temp_dir().join(&directory_name);
+    if unix_socket_path_len(&preferred.join("pc.sock")) <= MACOS_UNIX_SOCKET_PATH_MAX {
+        return preferred;
+    }
+
+    // TMPDIR can itself be arbitrarily deep. `/tmp` is a short, standard
+    // fallback on Unix; the private per-state directory below prevents other
+    // users from accessing the control socket.
+    PathBuf::from("/tmp").join(directory_name)
+}
+
+fn unix_socket_path_len(path: &Path) -> usize {
+    path.to_string_lossy().len()
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)
+                .with_context(|| format!("failed to inspect {}", path.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "refusing to use process-compose control path {} because it is not a directory",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to create protected directory {}", path.display())
+            });
+        }
+    }
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to protect directory {}", path.display()))?;
+    Ok(())
+}
+
 fn yaml_string(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
@@ -3427,6 +3498,52 @@ mod tests {
         let mut descendants = descendant_pids(&table, 10);
         descendants.sort_unstable();
         assert_eq!(descendants, vec![11, 12]);
+    }
+
+    #[test]
+    fn process_compose_socket_is_short_and_state_specific() {
+        let long_segment = "nested-state-directory-".repeat(12);
+        let first = Stack::new(PathBuf::from(format!("/{long_segment}/first"))).unwrap();
+        let second = Stack::new(PathBuf::from(format!("/{long_segment}/second"))).unwrap();
+
+        assert!(
+            unix_socket_path_len(&first.process_compose_socket) <= MACOS_UNIX_SOCKET_PATH_MAX,
+            "socket path is too long: {}",
+            first.process_compose_socket.display()
+        );
+        assert!(!first.process_compose_socket.starts_with(&first.run_dir));
+        assert_ne!(first.process_compose_socket, second.process_compose_socket);
+        assert!(first.env_values().iter().any(|(name, value)| {
+            *name == "DEVFINITY_PROCESS_COMPOSE_SOCKET"
+                && value == &first.process_compose_socket.display().to_string()
+        }));
+    }
+
+    #[test]
+    fn process_compose_control_directory_is_private_and_removable() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-control-directory-{}",
+            std::process::id()
+        ));
+        let stack = Stack::new(state_dir).unwrap();
+        let _ = fs::remove_dir_all(&stack.process_compose_control_dir);
+
+        ensure_private_dir(&stack.process_compose_control_dir).unwrap();
+        assert!(stack.process_compose_control_dir.is_dir());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&stack.process_compose_control_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        fs::write(&stack.process_compose_socket, b"test").unwrap();
+        remove_file_best_effort(&stack.process_compose_socket);
+        stack.remove_process_compose_control_dir();
+        assert!(!stack.process_compose_control_dir.exists());
     }
 
     #[test]

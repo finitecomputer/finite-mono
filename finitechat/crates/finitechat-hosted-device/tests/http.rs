@@ -779,6 +779,107 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
 }
 
 #[tokio::test]
+async fn hosted_sites_identity_provider_is_setup_gated_and_origin_bounded() {
+    let root = TempDir::new().unwrap();
+    let hosted = test_app(&root);
+    let provider_request = |operation: &str, origin: &str, url: &str, return_to: &str| {
+        Request::post("/v1/sites/identity-provider")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, "user_paul")
+            .header("x-finite-sites-public-origin", origin)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "version": "finite-sites-identity-provider-v1",
+                    "operation": operation,
+                    "input": {
+                        "url": url,
+                        "returnTo": return_to,
+                        "client": "finite-dashboard",
+                        "nonce": "native-owner-session-proof",
+                    },
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let session_url = "https://hello.finite.chat/_finite/auth/native-session";
+
+    let setup_required = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeViewerSession",
+            "https://hello.finite.chat",
+            session_url,
+            "/draft?view=full#top",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(setup_required.status(), StatusCode::PRECONDITION_REQUIRED);
+
+    state_for(hosted.clone(), "user_paul").await;
+    let authorized = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeViewerSession",
+            "https://hello.finite.chat",
+            session_url,
+            "/draft?view=full#top",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let authorized: Value =
+        serde_json::from_slice(&authorized.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(
+        authorized["body_json"],
+        r#"{"purpose":"finite_site_view_session","return_to":"/draft?view=full#top","client":"finite-dashboard","nonce":"native-owner-session-proof"}"#
+    );
+    assert!(
+        authorized["authorization_header"]
+            .as_str()
+            .unwrap()
+            .starts_with("Nostr ")
+    );
+
+    let wrong_origin = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeViewerSession",
+            "https://other.finite.chat",
+            session_url,
+            "/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_origin.status(), StatusCode::BAD_REQUEST);
+
+    let external_redirect = hosted
+        .clone()
+        .oneshot(provider_request(
+            "authorizeViewerSession",
+            "https://hello.finite.chat",
+            session_url,
+            "https://evil.example/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(external_redirect.status(), StatusCode::BAD_REQUEST);
+
+    let unsupported = hosted
+        .oneshot(provider_request(
+            "signArbitraryRequest",
+            "https://hello.finite.chat",
+            session_url,
+            "/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn chat_authorization_bootstraps_brain_for_the_separate_agent_principal() {
     let root = TempDir::new().unwrap();
     let hosted = test_app(&root);
