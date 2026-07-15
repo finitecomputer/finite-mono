@@ -25,6 +25,10 @@ pub type ConversationId = String;
 pub type ConversationSegmentId = String;
 pub type RuntimeStateKey = String;
 pub type RuntimeCommandRequestId = String;
+pub const BRAIN_PERSONAL_VAULT_BOOTSTRAP_COMMAND_V1: &str =
+    "brain.personal-vault-bootstrap.authorize";
+pub const BRAIN_PERSONAL_VAULT_BOOTSTRAP_RESPONSE_SCHEMA_V1: &str =
+    "finitebrain-personal-vault-bootstrap-authorization-v1";
 pub type RuntimeCommandName = String;
 pub type RuntimeCommandResourceKey = String;
 pub type ActivityKind = String;

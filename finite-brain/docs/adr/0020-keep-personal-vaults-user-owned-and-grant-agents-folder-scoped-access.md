@@ -7,7 +7,11 @@ idempotent owner-first pairing, Chat-issued one-use agent-first bootstrap,
 owner-only Folder-by-Folder expansion, and atomic delegation revocation with
 key rotation across the complete delegated scope. Public API tests cover both
 principals, convergence/replay failures, rollback, filtered visibility, live
-object re-encryption, and retained owner access.
+object re-encryption, and retained owner access. Hosted Chat treats the
+authenticated user's exact `/brain setup` action as approval, then transports
+the resulting authorization over the encrypted direct room; agent-native
+`fbrain` blocks ordinary Personal Vault creation. The user-first client
+retains an explicit owner-signed Pair action.
 
 ## Context
 
@@ -33,7 +37,8 @@ implementation follows separately.
 - An Agent Principal remains a distinct Member Identity. It never becomes a
   Personal Vault owner or admin, never uses the user's Brain Identity Provider,
   and never receives the user's identity secret.
-- An explicit Chat request creates a short-lived, single-use **Personal Vault
+- The authenticated user's explicit `/brain setup` Chat action creates a
+  short-lived, single-use **Personal Vault
   Bootstrap Authorization** bound to that user, that Agent Principal, and the
   initial Agent Workspace Folder. It is an internal Brain mechanism, not a
   second user-facing approval. It cannot create a second Vault or broaden
@@ -50,7 +55,7 @@ implementation follows separately.
   access implicitly.
 - A user-first bootstrap creates or ensures the user-owned Personal Vault and
   then establishes the same delegated Agent Workspace access. An agent-first
-  bootstrap, initiated by an explicit user request in Chat, must consume the
+  bootstrap, initiated by that explicit user action in Chat, must consume the
   valid Bootstrap Authorization and atomically create the user-owned Personal
   Vault, durable delegation, limited agent access, and all required Folder Key
   Grants. Both paths converge on the same state.

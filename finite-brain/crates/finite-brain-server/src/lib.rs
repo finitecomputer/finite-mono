@@ -3710,7 +3710,7 @@ mod tests {
                 "change-agent-first-workspace",
                 AdminAccessAction::SetFolderAccessMode,
                 Some("agent-workspace"),
-                None,
+                Some(agent_npub.as_str()),
                 Some(1),
             ),
         })
@@ -7628,7 +7628,7 @@ mod tests {
                 "change-agent-first-workspace",
                 AdminAccessAction::SetFolderAccessMode,
                 Some("agent-workspace"),
-                None,
+                Some(agent_npub.as_str()),
                 Some(1),
             ),
         })

@@ -11,7 +11,7 @@
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
@@ -49,11 +49,13 @@ use finitechat_hermes::{
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
 use finitechat_mls::NostrSecretKey;
 use finitechat_proto::{
-    AttachmentBlobReferenceV1, DecryptedApplicationEventV1, DurableAppEventKind,
-    EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
-    ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
-    RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_encode,
+    AttachmentBlobReferenceV1, BRAIN_PERSONAL_VAULT_BOOTSTRAP_COMMAND_V1,
+    BRAIN_PERSONAL_VAULT_BOOTSTRAP_RESPONSE_SCHEMA_V1, DecryptedApplicationEventV1,
+    DurableAppEventKind, EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES,
+    MAX_RUNTIME_COMMAND_LEDGER_RECORDS, ProtocolLimitError, RuntimeCommandCancelV1,
+    RuntimeCommandDeliveryAckV1, RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1,
+    RuntimeCommandRequestV1, RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1,
+    npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -66,6 +68,7 @@ const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
 const AGENTD_INBOX_FILE: &str = "agentd-inbox.json";
 const HERMES_RUNNING_FILE: &str = "hermes-running.json";
 const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
+const BRAIN_BOOTSTRAP_CONSUMED_FILE: &str = "brain-bootstrap-consumed.json";
 const BACKUP_ACTIVITY_FILE: &str = ".finitechat-backup-active";
 const STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
@@ -483,7 +486,124 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .route("/v1/agentd/ack", post(agentd_service_ack))
         .route("/v1/agentd/result", post(agentd_service_result))
         .route("/v1/agentd/state", post(agentd_service_state))
+        .route(
+            "/v1/brain/personal-vault-bootstrap-authorizations",
+            post(brain_service_bootstrap_authorization),
+        )
         .with_state(state)
+}
+
+async fn brain_service_bootstrap_authorization(
+    State(state): State<HermesServiceState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let result = tokio::task::spawn_blocking(move || request_brain_bootstrap_authorization(&state))
+        .await
+        .map_err(|error| service_internal_error(error.to_string()))?;
+    result.map(Json).map_err(service_cli_error)
+}
+
+fn request_brain_bootstrap_authorization(state: &HermesServiceState) -> Result<Value, CliError> {
+    let _guard = lock_service_mutex(&state.inbox_lock)?;
+    state
+        .runtime
+        .agent_bridge_poll_once()
+        .map_err(map_core_hermes_error)?;
+    let mut consumed = load_consumed_brain_bootstrap_authorizations(&state.agent_home)?;
+    let candidates = state
+        .runtime
+        .recent_bridge_events(MAX_RUNTIME_COMMAND_LEDGER_RECORDS)
+        .map_err(map_core_hermes_error)?
+        .into_iter()
+        .filter_map(|stored| {
+            if stored.sender_account_id == state.account_id {
+                return None;
+            }
+            let event =
+                serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext).ok()?;
+            if event.kind != DurableAppEventKind::RuntimeCommandRequest {
+                return None;
+            }
+            let request = serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload).ok()?;
+            (request.validate_structure().is_ok()
+                && !consumed.contains(&request.request_id)
+                && request.command == BRAIN_PERSONAL_VAULT_BOOTSTRAP_COMMAND_V1
+                && request.target.account_id == state.account_id
+                && request.target.device_id.is_none()
+                && request.resource_key.is_none()
+                && request.body.schema == BRAIN_PERSONAL_VAULT_BOOTSTRAP_RESPONSE_SCHEMA_V1)
+                .then_some((stored, request))
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() > 1 {
+        consumed.extend(
+            candidates
+                .iter()
+                .map(|(_, request)| request.request_id.clone()),
+        );
+        save_consumed_brain_bootstrap_authorizations(&state.agent_home, &consumed)?;
+        return Err(CliError::Hermes(
+            "Brain setup was not performed because more than one unused authorization existed; the ambiguous tickets were discarded, so ask the user to send `/brain setup` again"
+                .to_owned(),
+        ));
+    }
+    let (stored, request) = candidates.into_iter().next().ok_or_else(|| {
+        CliError::Hermes(
+            "Brain setup is not authorized; ask the user to send `/brain setup` in this Chat"
+                .to_owned(),
+        )
+    })?;
+    let opened = state
+        .runtime
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: stored.room_id.clone(),
+        })
+        .map_err(map_core_hermes_error)?;
+    let direct_user = opened
+        .room_details
+        .as_ref()
+        .filter(|details| details.room_id == stored.room_id)
+        .is_some_and(|details| {
+            details.members.len() == 2
+                && details.members.iter().any(|member| {
+                    member.account_id == stored.sender_account_id
+                        && member.account_id != state.account_id
+                })
+        });
+    let agent_chat = opened
+        .rooms
+        .iter()
+        .any(|room| room.room_id == stored.room_id && room.is_agent_chat);
+    if !agent_chat || !direct_user {
+        return Err(CliError::Hermes(
+            "Brain setup authorization is not from the user's direct Agent Chat".to_owned(),
+        ));
+    }
+    let bundle = serde_json::from_slice(&request.body.json_payload).map_err(CliError::Json)?;
+    consumed.insert(request.request_id);
+    save_consumed_brain_bootstrap_authorizations(&state.agent_home, &consumed)?;
+    Ok(bundle)
+}
+
+fn load_consumed_brain_bootstrap_authorizations(
+    home_dir: &Path,
+) -> Result<BTreeSet<String>, CliError> {
+    let path = home_dir.join(BRAIN_BOOTSTRAP_CONSUMED_FILE);
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(CliError::Hermes(error.to_string())),
+    };
+    serde_json::from_str(&raw).map_err(CliError::Json)
+}
+
+fn save_consumed_brain_bootstrap_authorizations(
+    home_dir: &Path,
+    consumed: &BTreeSet<String>,
+) -> Result<(), CliError> {
+    write_private_durable_atomic(
+        home_dir.join(BRAIN_BOOTSTRAP_CONSUMED_FILE),
+        &serde_json::to_string_pretty(consumed).map_err(CliError::Serialize)?,
+    )
 }
 
 fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError> {
@@ -3297,6 +3417,40 @@ fn write_private(path: PathBuf, contents: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+fn write_private_durable_atomic(path: PathBuf, contents: &str) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::Hermes("private state path has no parent".to_owned()))?;
+    fs::create_dir_all(parent).map_err(|error| CliError::Hermes(error.to_string()))?;
+    let temporary = path.with_extension("tmp");
+    let result = (|| -> Result<(), CliError> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| CliError::Hermes(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| CliError::Hermes(error.to_string()))?;
+        }
+        file.write_all(contents.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| CliError::Hermes(error.to_string()))?;
+        drop(file);
+        fs::rename(&temporary, &path).map_err(|error| CliError::Hermes(error.to_string()))?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| CliError::Hermes(error.to_string()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -3351,6 +3505,19 @@ mod tests {
     use super::*;
     use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
+
+    #[test]
+    fn consumed_brain_bootstrap_authorizations_survive_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let consumed = BTreeSet::from(["authorization-a".to_owned(), "authorization-b".to_owned()]);
+
+        save_consumed_brain_bootstrap_authorizations(home.path(), &consumed).unwrap();
+
+        assert_eq!(
+            load_consumed_brain_bootstrap_authorizations(home.path()).unwrap(),
+            consumed
+        );
+    }
 
     /// `hermes install` requires an initialized agent home; plant the
     /// config marker without running init (install only checks existence).

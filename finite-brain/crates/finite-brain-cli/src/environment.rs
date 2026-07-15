@@ -14,6 +14,13 @@ pub struct CliEnvironment {
     /// Optional finite-identity Authority URL for email proof and native
     /// finite.vip binding flows.
     pub identity_authority_url: Option<String>,
+    /// Loopback Finite Chat resident service used by hosted agents to obtain
+    /// a user's bounded Personal Vault bootstrap authorization.
+    pub finitechat_service_url: Option<String>,
+    /// Trusted embedder/test seam for user-owned Personal Vault creation.
+    /// The agent-native process entrypoint always leaves this false.
+    #[doc(hidden)]
+    pub allow_personal_vault_creation: bool,
     /// Explicit Finite home for the shared identity, used by tests and
     /// embedders. `None` resolves per the Finite Identity Contract v1:
     /// `$FINITE_HOME/identity/` when `FINITE_HOME` is set, otherwise
@@ -40,12 +47,18 @@ impl CliEnvironment {
             .ok()
             .map(|value| value.trim().trim_end_matches('/').to_owned())
             .filter(|value| !value.is_empty());
+        let finitechat_service_url = env::var("FINITECHAT_HERMES_SERVICE_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
         Self {
             cwd,
             config_dir,
             working_tree_root,
             now,
             identity_authority_url,
+            finitechat_service_url,
+            allow_personal_vault_creation: false,
             finite_home: None,
         }
     }

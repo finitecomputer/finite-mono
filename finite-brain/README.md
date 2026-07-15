@@ -128,10 +128,16 @@ Owners inspect the durable scope and audit record with `GET` on the same path.
 This route is Brain-specific; other services own separate adapters and
 delegations.
 
-For the agent-first path, an explicit Chat setup action issues a short-lived
-bundle through
-`POST /v1/brain/personal-vault-bootstrap-authorizations`; the agent forwards it
-to `POST /_admin/personal-vault-bootstrap` using its own signed request. The
+For the agent-first path, the authenticated user sends `/brain setup` in their
+direct Agent Chat. Hosted Device treats that exact action as approval, issues a
+short-lived bundle, and carries it through the encrypted direct Chat room to
+that Agent Principal. The agent forwards the bundle to
+`POST /_admin/personal-vault-bootstrap` using its own signed request. The
+agent-native `fbrain` CLI never creates Personal Vaults directly:
+`setup-personal` is its only Personal Vault setup command, while the user client
+owns user-first creation. The user-first client retains its explicit
+owner-signed Pair action;
+navigation identity only pre-fills that action and never grants access itself.
 Personal Vault owner expands a pairing one restricted Folder at a time through
 the pairing's `/folders/{folder_id}` route and revokes it through `DELETE` on
 the pairing resource. Revocation requires next-version grants and complete

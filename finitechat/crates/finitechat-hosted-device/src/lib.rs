@@ -36,13 +36,14 @@ use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
     AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
     OpenOptions, OutboundAttachment, account_id_from_npub,
-    finite_sites_native_viewer_session_proof,
+    finite_sites_native_viewer_session_proof, npub_from_account_id,
 };
 use finitechat_http::{
     ExpireLinkSessionRequest, ExpireLinkSessionResponse, GetLinkSessionRequest,
     HttpLinkSessionRecord, HttpLinkSessionState, UploadLinkPayloadRequest,
 };
 use finitechat_proto::{
+    BRAIN_PERSONAL_VAULT_BOOTSTRAP_COMMAND_V1, BRAIN_PERSONAL_VAULT_BOOTSTRAP_RESPONSE_SCHEMA_V1,
     ClaimKeyPackageResult, CreateRoomRequest, DecryptedApplicationEventV1, DurableAppEventKind,
     RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1,
     RuntimeCommandResultV1, RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
@@ -62,6 +63,7 @@ use time::format_description::well_known::Rfc3339;
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
 const CREATED_BY: &str = concat!("finitechat-hosted-device/", env!("CARGO_PKG_VERSION"));
 const DEFAULT_UPDATE_TIMEOUT_MILLIS: u64 = 30_000;
+const BRAIN_SETUP_CHAT_COMMAND: &str = "/brain setup";
 const MAX_USER_ID_BYTES: usize = 512;
 /// The hosted browser surface is deliberately narrower than the core's wire
 /// limit. A bounded fan-out keeps one HTTP request from monopolizing a Device.
@@ -91,7 +93,6 @@ const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
-const MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES: usize = 1024 * 1024;
 const BRAIN_PUBLIC_ORIGIN_HEADER: &str = "x-finite-brain-public-origin";
 const SITES_IDENTITY_PROVIDER_VERSION: &str = "finite-sites-identity-provider-v1";
@@ -407,12 +408,6 @@ fn app_with_test_options(
             "/v1/app/agent-bindings/authorize-bootstrap",
             post(authorize_agent_binding_bootstrap)
                 .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
-        )
-        .route(
-            "/v1/brain/personal-vault-bootstrap-authorizations",
-            post(issue_personal_vault_bootstrap_authorization).layer(DefaultBodyLimit::max(
-                MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES,
-            )),
         )
         .route(
             "/v1/brain/identity-provider",
@@ -1737,137 +1732,207 @@ fn brain_user_keys_if_setup(
     Ok(Keys::new(secret))
 }
 
-async fn issue_personal_vault_bootstrap_authorization(
-    State(state): State<HostedDeviceState>,
-    headers: HeaderMap,
-    Json(input): Json<IssuePersonalVaultBootstrapAuthorizationRequest>,
-) -> Result<Json<IssuePersonalVaultBootstrapAuthorizationResponse>, HostedDeviceError> {
-    let user_id = authorized_user(&state, &headers)?;
-    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
-        let vault_id = VaultId::new(input.vault_id).map_err(|error| {
+fn issue_personal_vault_bootstrap_authorization_for_user(
+    state: &HostedDeviceState,
+    user_id: &str,
+    input: IssuePersonalVaultBootstrapAuthorizationRequest,
+) -> Result<IssuePersonalVaultBootstrapAuthorizationResponse, HostedDeviceError> {
+    let vault_id = VaultId::new(input.vault_id).map_err(|error| {
+        HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+    })?;
+    let workspace_folder_id = FolderId::new(input.workspace_folder_id).map_err(|error| {
+        HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+    })?;
+    let runtime = state.runtime_for(user_id)?;
+    let identity = runtime.state()?.identity;
+    let secret_bytes = hex::decode(&identity.account_secret_hex).map_err(|_| {
+        HostedDeviceError::InvalidBrainBootstrapAuthorization(
+            "Hosted Device User Key is invalid".to_owned(),
+        )
+    })?;
+    let secret = SecretKey::from_slice(&secret_bytes).map_err(|_| {
+        HostedDeviceError::InvalidBrainBootstrapAuthorization(
+            "Hosted Device User Key is invalid".to_owned(),
+        )
+    })?;
+    let owner_keys = Keys::new(secret);
+    let owner_npub = finitechat_core::npub_from_account_id(identity.account_id)?;
+    let created_at = device_link_now(state)?;
+    let created_at_rfc3339 = OffsetDateTime::from_unix_timestamp(created_at as i64)
+        .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?
+        .format(&Rfc3339)
+        .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?;
+    let authorization_id = random_brain_bootstrap_authorization_id()?;
+    let event = issue_personal_vault_bootstrap_authorization_event(
+        &owner_keys,
+        authorization_id.clone(),
+        input.agent_npub.clone(),
+        &vault_id,
+        &workspace_folder_id,
+        created_at,
+    )
+    .map_err(|error| HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string()))?;
+    let access_change_event = issue_admin_access_change_event(
+        &owner_keys,
+        &AdminAccessChangeValidation {
+            vault_id: vault_id.clone(),
+            change_id: format!("agent-first-workspace-{authorization_id}"),
+            action: AdminAccessAction::SetFolderAccessMode,
+            admin_npub: owner_npub.clone(),
+            folder_id: Some(workspace_folder_id.clone()),
+            target_npub: Some(input.agent_npub.clone()),
+            key_version: Some(1),
+            note: None,
+            created_at: created_at_rfc3339.clone(),
+        },
+        created_at,
+    )
+    .map_err(|error| HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string()))?;
+    let mut bootstrap_grants = Vec::with_capacity(2);
+    for folder_id in [
+        FolderId::new("getting-started"),
+        FolderId::new("restricted"),
+    ] {
+        let folder_id = folder_id.map_err(|error| {
             HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
         })?;
-        let workspace_folder_id = FolderId::new(input.workspace_folder_id).map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let runtime = state.runtime_for(&user_id)?;
-        let identity = runtime.state()?.identity;
-        let secret_bytes = hex::decode(&identity.account_secret_hex).map_err(|_| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(
-                "Hosted Device User Key is invalid".to_owned(),
-            )
-        })?;
-        let secret = SecretKey::from_slice(&secret_bytes).map_err(|_| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(
-                "Hosted Device User Key is invalid".to_owned(),
-            )
-        })?;
-        let owner_keys = Keys::new(secret);
-        let owner_npub = finitechat_core::npub_from_account_id(identity.account_id)?;
-        let created_at = device_link_now(&state)?;
-        let created_at_rfc3339 = OffsetDateTime::from_unix_timestamp(created_at as i64)
-            .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?
-            .format(&Rfc3339)
-            .map_err(|error| {
-                HostedDeviceError::Task(format!("system clock is invalid: {error}"))
-            })?;
-        let authorization_id = random_brain_bootstrap_authorization_id()?;
-        let event = issue_personal_vault_bootstrap_authorization_event(
+        let folder_key = FolderKey::generate();
+        let grant = issue_folder_key_grant(
             &owner_keys,
-            authorization_id.clone(),
-            input.agent_npub.clone(),
+            random_brain_grant_id()?,
+            &vault_id,
+            &folder_id,
+            1,
+            owner_npub.clone(),
+            &folder_key,
+            created_at_rfc3339.clone(),
+            created_at,
+        )
+        .map_err(|error| {
+            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
+        })?;
+        bootstrap_grants.push(BrainBootstrapFolderGrant {
+            folder_id: folder_id.to_string(),
+            grant,
+        });
+    }
+    let workspace_key = FolderKey::generate();
+    let mut workspace_grants = Vec::with_capacity(2);
+    for recipient in [&owner_npub, &input.agent_npub] {
+        let grant = issue_folder_key_grant(
+            &owner_keys,
+            random_brain_grant_id()?,
             &vault_id,
             &workspace_folder_id,
+            1,
+            recipient.clone(),
+            &workspace_key,
+            created_at_rfc3339.clone(),
             created_at,
         )
         .map_err(|error| {
             HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
         })?;
-        let access_change_event = issue_admin_access_change_event(
-            &owner_keys,
-            &AdminAccessChangeValidation {
-                vault_id: vault_id.clone(),
-                change_id: format!("agent-first-workspace-{authorization_id}"),
-                action: AdminAccessAction::SetFolderAccessMode,
-                admin_npub: owner_npub.clone(),
-                folder_id: Some(workspace_folder_id.clone()),
-                target_npub: None,
-                key_version: Some(1),
-                note: None,
-                created_at: created_at_rfc3339.clone(),
-            },
-            created_at,
-        )
-        .map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let mut bootstrap_grants = Vec::with_capacity(2);
-        for folder_id in [
-            FolderId::new("getting-started"),
-            FolderId::new("restricted"),
-        ] {
-            let folder_id = folder_id.map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            let folder_key = FolderKey::generate();
-            let grant = issue_folder_key_grant(
-                &owner_keys,
-                random_brain_grant_id()?,
-                &vault_id,
-                &folder_id,
-                1,
-                owner_npub.clone(),
-                &folder_key,
-                created_at_rfc3339.clone(),
-                created_at,
-            )
-            .map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            bootstrap_grants.push(BrainBootstrapFolderGrant {
-                folder_id: folder_id.to_string(),
-                grant,
-            });
-        }
-        let workspace_key = FolderKey::generate();
-        let mut workspace_grants = Vec::with_capacity(2);
-        for recipient in [&owner_npub, &input.agent_npub] {
-            let grant = issue_folder_key_grant(
-                &owner_keys,
-                random_brain_grant_id()?,
-                &vault_id,
-                &workspace_folder_id,
-                1,
-                recipient.clone(),
-                &workspace_key,
-                created_at_rfc3339.clone(),
-                created_at,
-            )
-            .map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            workspace_grants.push(grant);
-        }
-        Ok(IssuePersonalVaultBootstrapAuthorizationResponse {
-            authorization_id,
-            owner_npub,
-            agent_npub: input.agent_npub,
-            vault_id: vault_id.to_string(),
-            name: "Personal Brain".to_owned(),
-            folder_id: workspace_folder_id.to_string(),
-            folder_name: "Agent Workspace".to_owned(),
-            folder_path: "Agent Workspace".to_owned(),
-            workspace_folder_id: workspace_folder_id.to_string(),
-            expires_at: created_at + PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS,
-            bootstrap_grants,
-            workspace_grants,
-            bootstrap_authorization: event,
-            access_change_event,
-        })
+        workspace_grants.push(grant);
+    }
+    Ok(IssuePersonalVaultBootstrapAuthorizationResponse {
+        authorization_id,
+        owner_npub,
+        agent_npub: input.agent_npub,
+        vault_id: vault_id.to_string(),
+        name: "Personal Brain".to_owned(),
+        folder_id: workspace_folder_id.to_string(),
+        folder_name: "Agent Workspace".to_owned(),
+        folder_path: "Agent Workspace".to_owned(),
+        workspace_folder_id: workspace_folder_id.to_string(),
+        expires_at: created_at + PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS,
+        bootstrap_grants,
+        workspace_grants,
+        bootstrap_authorization: event,
+        access_change_event,
     })
-    .await
-    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
-    Ok(Json(response))
+}
+
+fn send_user_approved_brain_bootstrap(
+    state: &HostedDeviceState,
+    user_id: &str,
+    runtime: &FiniteChatRuntime,
+    room_id: &str,
+) -> Result<(), HostedDeviceError> {
+    let opened = runtime.dispatch_and_wait(AppAction::OpenRoom {
+        room_id: room_id.to_owned(),
+    })?;
+    let local_account_id = opened.identity.account_id;
+    let direct_agent_room = opened
+        .rooms
+        .iter()
+        .any(|room| room.room_id == room_id && room.is_agent_chat);
+    let mut counterparties = opened
+        .room_details
+        .as_ref()
+        .filter(|details| details.room_id == room_id)
+        .into_iter()
+        .flat_map(|details| details.members.iter())
+        .filter(|member| member.account_id != local_account_id)
+        .map(|member| member.account_id.clone())
+        .collect::<Vec<_>>();
+    counterparties.sort();
+    counterparties.dedup();
+    if !direct_agent_room || counterparties.len() != 1 {
+        return Err(HostedDeviceError::InvalidBrainBootstrapAuthorization(
+            "Brain setup requires the user's direct Agent Chat room".to_owned(),
+        ));
+    }
+    let agent_account_id = counterparties.remove(0);
+    let agent_npub = npub_from_account_id(agent_account_id.clone())?;
+    let conversation_id = opened
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.room_id == room_id
+                && message.sender_account_id == local_account_id
+                && message
+                    .text
+                    .trim()
+                    .eq_ignore_ascii_case(BRAIN_SETUP_CHAT_COMMAND)
+        })
+        .and_then(|message| message.conversation_id.clone());
+    let response = issue_personal_vault_bootstrap_authorization_for_user(
+        state,
+        user_id,
+        IssuePersonalVaultBootstrapAuthorizationRequest {
+            agent_npub,
+            vault_id: format!(
+                "personal-{}",
+                local_account_id.chars().take(16).collect::<String>()
+            ),
+            workspace_folder_id: "agent-workspace".to_owned(),
+        },
+    )?;
+    let request = RuntimeCommandRequestV1 {
+        payload_kind: RuntimeCommandPayloadKindV1::Request,
+        request_id: response.authorization_id.clone(),
+        command: BRAIN_PERSONAL_VAULT_BOOTSTRAP_COMMAND_V1.to_owned(),
+        target: RuntimeCommandTargetV1 {
+            account_id: agent_account_id,
+            device_id: None,
+        },
+        resource_key: None,
+        body: RuntimeCommandJsonPayloadV1 {
+            schema: BRAIN_PERSONAL_VAULT_BOOTSTRAP_RESPONSE_SCHEMA_V1.to_owned(),
+            json_payload: serde_json::to_vec(&response)?,
+        },
+    };
+    request
+        .validate_structure()
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))?;
+    runtime.send_runtime_command_request_and_wait(
+        room_id.to_owned(),
+        conversation_id,
+        serde_json::to_vec(&request)?,
+    )?;
+    Ok(())
 }
 
 async fn open_agent_binding(
@@ -2733,10 +2798,25 @@ async fn dispatch_action(
     Json(action): Json<AppAction>,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
-    let runtime = state.runtime_for(&user_id)?;
-    let next = tokio::task::spawn_blocking(move || runtime.dispatch_and_wait(action))
-        .await
-        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    let brain_setup_room = match &action {
+        AppAction::SendMessage { room_id, text }
+            if text.trim().eq_ignore_ascii_case(BRAIN_SETUP_CHAT_COMMAND) =>
+        {
+            Some(room_id.clone())
+        }
+        _ => None,
+    };
+    let next = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
+        let runtime = state.runtime_for(&user_id)?;
+        let mut next = runtime.dispatch_and_wait(action)?;
+        if let Some(room_id) = brain_setup_room {
+            send_user_approved_brain_bootstrap(&state, &user_id, &runtime, &room_id)?;
+            next = runtime.state()?;
+        }
+        Ok(next)
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
 }
 

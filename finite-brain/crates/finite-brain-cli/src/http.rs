@@ -174,6 +174,20 @@ pub(crate) fn validate_http_url(url: &str) -> Result<(), CliError> {
     validate_http_url_with_development_host(url, development_host.as_deref())
 }
 
+pub(crate) fn validate_loopback_http_url(url: &str) -> Result<(), CliError> {
+    let host = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(http_host_without_port)
+        .filter(|host| is_loopback_host(host));
+    if host.is_none() {
+        return Err(CliError::Unsupported(
+            "hosted Finite Chat service must use a loopback http:// URL".to_owned(),
+        ));
+    }
+    validate_http_url(url)
+}
+
 pub(crate) fn validate_http_url_with_development_host(
     url: &str,
     development_host: Option<&str>,
@@ -315,6 +329,15 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn hosted_chat_service_validation_accepts_only_loopback_http() {
+        assert!(validate_loopback_http_url("http://127.0.0.1:4321").is_ok());
+        assert!(validate_loopback_http_url("http://[::1]:4321").is_ok());
+        assert!(validate_loopback_http_url("http://localhost:4321").is_ok());
+        assert!(validate_loopback_http_url("https://chat.finite.computer").is_err());
+        assert!(validate_loopback_http_url("http://127.0.0.1.example:4321").is_err());
     }
 
     #[test]

@@ -1,15 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use finite_brain_core::{
-    BRAIN_IDENTITY_PROVIDER_VERSION, FolderId, FolderKey, VaultId,
-    validate_personal_vault_bootstrap_authorization_event,
-};
-use finite_brain_server::{ServerState as BrainServerState, router_with_state as brain_router};
-use finite_brain_store::BrainStore;
+use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};
 use finite_identity::{FiniteIdentity, IdentityPaths};
-use finite_nostr::{
-    HttpAuthEventRequest, encode_http_auth_header, sign_http_auth_event, verify_event_integrity,
-};
+use finite_nostr::verify_event_integrity;
 use finitechat_core::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkDecryptInput, create_device_link_pairing_key,
     decrypt_device_link_payload,
@@ -34,7 +27,7 @@ use finitechat_proto::{
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
-use nostr::{Event, Keys};
+use nostr::Event;
 use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
@@ -510,26 +503,9 @@ async fn users_get_isolated_devices_and_restart_reopens_the_same_identity() {
 }
 
 #[tokio::test]
-async fn explicit_chat_request_issues_a_bounded_personal_vault_bootstrap_authorization() {
+async fn brain_bootstrap_authorization_is_not_exposed_as_a_direct_hosted_api() {
     let root = TempDir::new().unwrap();
     let hosted = test_app(&root);
-    let user_state = state_for(hosted.clone(), "user_paul").await;
-    let agent_state = state_for(hosted.clone(), "agent_paul").await;
-    let owner_npub = npub_from_account_id(
-        user_state["identity"]["account_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    )
-    .unwrap();
-    let agent_npub = npub_from_account_id(
-        agent_state["identity"]["account_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    )
-    .unwrap();
-    let before = test_now_unix_seconds();
     let response = hosted
         .oneshot(
             Request::post("/v1/brain/personal-vault-bootstrap-authorizations")
@@ -538,7 +514,7 @@ async fn explicit_chat_request_issues_a_bounded_personal_vault_bootstrap_authori
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "agentNpub": agent_npub,
+                        "agentNpub": "npub-not-authorized-by-chat",
                         "vaultId": "personal",
                         "workspaceFolderId": "agent-workspace",
                     })
@@ -548,22 +524,130 @@ async fn explicit_chat_request_issues_a_bounded_personal_vault_bootstrap_authori
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let response: Value = serde_json::from_slice(&bytes).unwrap();
-    let event = Event::from_json(response["bootstrapAuthorization"].to_string()).unwrap();
-    let payload = validate_personal_vault_bootstrap_authorization_event(
-        &event,
-        &agent_npub,
-        &VaultId::new("personal").unwrap(),
-        &FolderId::new("agent-workspace").unwrap(),
-        before,
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_user_brain_setup_command_delivers_the_bounded_bundle_to_the_agent() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("brain-command-server.sqlite3"), None).await;
+    let agent_identity = FiniteIdentity::load_or_generate(
+        &IdentityPaths::with_finite_home(root.path().join("brain-command-agent")),
+        "finitechat-hosted-device-test/brain-command-agent",
     )
     .unwrap();
-    assert_eq!(payload.owner_npub, owner_npub);
-    assert_eq!(payload.agent_npub, agent_npub);
-    assert!(payload.expires_at > before);
-    assert!(payload.expires_at <= before + 5 * 60 + 1);
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("brain-command-chat").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: Some(hex::encode(agent_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let agent_account_id = agent_state.identity.account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+    let hosted = app(HostedDeviceConfig {
+        data_root: root.path().join("brain-command-hosted"),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    });
+    let user = state_for(hosted.clone(), "user_paul").await;
+    let user_account_id = user["identity"]["account_id"].as_str().unwrap().to_owned();
+    let owner_npub = npub_from_account_id(user_account_id.clone()).unwrap();
+    action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    let connected = action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({
+            "StartProfileChat": {
+                "profile": {
+                    "account_id": agent_account_id,
+                    "npub": agent_npub,
+                    "display_name": "Brain Agent",
+                    "about": "Requests bounded Brain setup",
+                    "picture": null,
+                    "stale": false,
+                    "is_agent": true
+                },
+                "display_name": "Chat with Brain Agent"
+            }
+        }),
+    )
+    .await;
+    let room_id = connected["selected_room_id"].as_str().unwrap().to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    action_for(
+        hosted.clone(),
+        "user_paul",
+        serde_json::json!({
+            "SendMessage": {
+                "room_id": room_id.clone(),
+                "text": "hello agent"
+            }
+        }),
+    )
+    .await;
+    let ordinary = agent.agent_bridge_poll_once().unwrap();
+    assert!(!ordinary.events.iter().any(|stored| {
+        serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+            .is_ok_and(|event| event.kind == DurableAppEventKind::RuntimeCommandRequest)
+    }));
+    action_for(
+        hosted,
+        "user_paul",
+        serde_json::json!({
+            "SendMessage": {
+                "room_id": room_id,
+                "text": "/brain setup"
+            }
+        }),
+    )
+    .await;
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let bridge = agent.agent_bridge_poll_once().unwrap();
+            if let Some(request) = bridge.events.into_iter().find_map(|stored| {
+                let event =
+                    serde_json::from_slice::<DecryptedApplicationEventV1>(&stored.plaintext)
+                        .ok()?;
+                if event.kind != DurableAppEventKind::RuntimeCommandRequest {
+                    return None;
+                }
+                let request =
+                    serde_json::from_slice::<RuntimeCommandRequestV1>(&event.payload).ok()?;
+                (request.command == "brain.personal-vault-bootstrap.authorize").then_some(request)
+            }) {
+                break request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Hosted Device must deliver the Brain bootstrap bundle");
+    assert_eq!(request.target.account_id, agent_account_id);
+    assert_eq!(
+        request.body.schema,
+        "finitebrain-personal-vault-bootstrap-authorization-v1"
+    );
+    let bundle: Value = serde_json::from_slice(&request.body.json_payload).unwrap();
+    assert_eq!(bundle["ownerNpub"], owner_npub);
+    assert_eq!(bundle["agentNpub"], agent_npub);
+    assert_eq!(
+        bundle["vaultId"],
+        format!("personal-{}", &user_account_id[..16])
+    );
+    assert_eq!(bundle["workspaceFolderId"], "agent-workspace");
+
+    server_task.abort();
 }
 
 #[tokio::test]
@@ -877,73 +961,6 @@ async fn hosted_sites_identity_provider_is_setup_gated_and_origin_bounded() {
         .await
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn chat_authorization_bootstraps_brain_for_the_separate_agent_principal() {
-    let root = TempDir::new().unwrap();
-    let hosted = test_app(&root);
-    let agent_keys = Keys::generate();
-    let agent_npub = finite_nostr::NostrPublicKey::from_protocol(agent_keys.public_key())
-        .to_npub()
-        .unwrap();
-    let issued = hosted
-        .oneshot(
-            Request::post("/v1/brain/personal-vault-bootstrap-authorizations")
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .header(WORKOS_USER_HEADER, "user_paul")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "agentNpub": agent_npub,
-                        "vaultId": "personal",
-                        "workspaceFolderId": "agent-workspace",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(issued.status(), StatusCode::OK);
-    let issued = issued.into_body().collect().await.unwrap().to_bytes();
-
-    let now = test_now_unix_seconds();
-    let brain = brain_router(
-        BrainServerState::new(
-            BrainStore::open_in_memory().unwrap(),
-            "http://127.0.0.1:3015",
-        )
-        .with_auth_clock(now, 60),
-    );
-    let path = "/_admin/personal-vault-bootstrap";
-    let auth_event = sign_http_auth_event(
-        &agent_keys,
-        &HttpAuthEventRequest::new("POST", format!("http://127.0.0.1:3015{path}"), now)
-            .with_body(issued.to_vec()),
-    )
-    .unwrap();
-    let bootstrapped = brain
-        .oneshot(
-            Request::post(path)
-                .header("authorization", encode_http_auth_header(&auth_event))
-                .header("content-type", "application/json")
-                .body(Body::from(issued))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = bootstrapped.status();
-    let body = bootstrapped.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let response: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        response["vault"]["ownerUserId"],
-        response["pairing"]["ownerNpub"]
-    );
-    assert_eq!(response["pairing"]["agentNpub"], agent_npub);
-    assert_eq!(response["vault"]["folders"].as_array().unwrap().len(), 1);
-    assert_eq!(response["vault"]["folders"][0]["id"], "agent-workspace");
 }
 
 #[tokio::test]

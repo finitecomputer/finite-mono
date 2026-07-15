@@ -537,9 +537,12 @@ Personal Vault bootstrap:
   Bootstrap Authorization. Replay, expiry, a different user, a different Agent
   Principal, a different Folder scope, or a later access expansion MUST fail.
 - The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
-  Chat's explicit setup action obtains the bounded request bundle from
-  `POST /v1/brain/personal-vault-bootstrap-authorizations`; the Agent Principal
-  forwards that bundle and signs the protected Brain request as itself. The
+  Chat's authenticated `/brain setup` action creates the bounded request bundle
+  inside Hosted Device and delivers it to the Agent Principal through their
+  encrypted direct room. The agent-local signer adapter exposes that delivered
+  one-use ticket to `fbrain`; it is not a directly callable Hosted Device API.
+  The Agent Principal forwards the bundle and signs the protected Brain request
+  as itself. The
   bundle includes both the one-use bootstrap authorization and the owner's
   canonical Agent Workspace access-change event; Brain verifies that both name
   the same owner, Vault, Folder, key version, and Agent Principal before any

@@ -2829,6 +2829,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(temp.path().join("finite-home")),
         };
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
@@ -3056,6 +3058,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(root.join("finite-home")),
         };
         let object_id = ObjectId::new("obj_remote000001").unwrap();
@@ -3146,6 +3150,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(root.join("finite-home")),
         };
         let object_id = ObjectId::new("obj_mounted00001").unwrap();
@@ -3316,6 +3322,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(root.join("finite-home")),
         };
         let export = CliEncryptedVaultExport {

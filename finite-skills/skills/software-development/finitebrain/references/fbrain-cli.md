@@ -40,7 +40,7 @@ fbrain conflicts
 fbrain resolve <id>
 fbrain activity
 fbrain access explain|list|grant|revoke
-fbrain vault list|create|metadata|export
+fbrain vault list|create|setup-personal|metadata|export
 fbrain folder create|list
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
@@ -162,8 +162,11 @@ contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
 `accessChangeEvent`.
 
 ```sh
-fbrain vault create <vault-id> --kind personal --name "My Vault"
 fbrain vault create <vault-id> --kind organization --name "Org Vault"
+
+# Personal Vaults: only after the user sends `/brain setup` in direct Agent Chat.
+# Hosted Device binds the one-use authorization to that exact action.
+fbrain vault setup-personal --server "$SERVER" --json
 fbrain vault metadata --vault <vault-id>
 fbrain vault export --vault <vault-id>
 

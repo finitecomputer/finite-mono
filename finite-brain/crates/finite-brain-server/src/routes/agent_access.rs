@@ -38,7 +38,7 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
         owner_npub.as_str(),
         AdminAccessAction::SetFolderAccessMode,
         Some(&folder.id),
-        None,
+        Some(agent_npub.as_str()),
         Some(1),
     )?;
     let output = bootstrap_personal_vault(vault_id.as_str(), request.name, owner_npub.to_string())?;

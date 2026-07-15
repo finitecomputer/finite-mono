@@ -58,9 +58,15 @@ fbrain -- <args>` may be the available entrypoint.
 1. Verify runtime state with `doctor`, `auth status --json`, and `status --json`.
    Completion: acting identity, working tree path, server source, daemon state,
    sync state, and blockers are known.
-   Before creating any Vault, run `vault list --json`. An Agent Principal paired
-   by a user discovers that user's Personal Vault there with role `member`; use
-   that Vault and never create a second agent-owned Personal Vault.
+   First run `vault list --json`. An Agent Principal paired by a user discovers
+   that user's Personal Vault there with role `member`; use that Vault. If the
+   list is empty and the current user message is exactly `/brain setup`, run
+   `fbrain vault setup-personal --server "$SERVER" --json`. Hosted Device has
+   already turned that explicit action into the user's one-use authorization
+   and creates the user-owned Personal Vault plus only your Agent Workspace.
+   If the user asks in ordinary language, ask them to send `/brain setup` once;
+   never attempt setup from another message. The agent-native CLI never permits
+   `vault create --kind personal`.
 2. Sync before reading broadly with `sync now --summary`, then finish with
    `conflicts --json`.
    Completion: latest sequence is recorded, encrypted grants were reopened for

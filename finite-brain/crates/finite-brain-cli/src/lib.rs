@@ -123,7 +123,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|setup-personal|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -1522,6 +1522,12 @@ fn vault<W: Write>(
             let vault_id = values.get(1).ok_or(CliError::MissingArgument("vault-id"))?;
             let kind = option_value(args, "--kind").unwrap_or_else(|| "personal".to_owned());
             let normalized_kind = normalize_vault_kind(&kind)?;
+            if normalized_kind == "personal" && !env.allow_personal_vault_creation {
+                return Err(CliError::Unsupported(
+                    "the agent-native fbrain CLI cannot create an agent-owned Personal Vault; use the user client, or run `fbrain vault setup-personal` after the user sends `/brain setup` in direct Agent Chat"
+                        .to_owned(),
+                ));
+            }
             let name = option_value(args, "--name").unwrap_or_else(|| vault_id.clone());
             let bootstrap_plan =
                 bootstrap_plan_for_vault_create(env, vault_id, normalized_kind, &name)?;
@@ -1542,6 +1548,7 @@ fn vault<W: Write>(
             write_default_vault_pages_for_create(env, &server_url, vault_id, &bootstrap_plan)?;
             write_command_response(output, json, &response)
         }
+        "setup-personal" => setup_personal_vault_for_hosted_agent(args, env, json, output),
         "metadata" | "status" => {
             let explicit_vault_id =
                 option_value(args, "--vault").or_else(|| positional_values(args).get(1).cloned());
@@ -1568,6 +1575,59 @@ fn vault<W: Write>(
         }
         other => Err(CliError::InvalidCommand(format!("vault {other}"))),
     }
+}
+
+fn setup_personal_vault_for_hosted_agent<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let service_url = env.finitechat_service_url.as_deref().ok_or_else(|| {
+        CliError::Unsupported(
+            "`vault setup-personal` is available only inside a hosted Agent Runtime connected to Finite Chat"
+                .to_owned(),
+        )
+    })?;
+    validate_loopback_http_url(service_url)?;
+    let service_endpoint = absolute_server_url(
+        service_url,
+        "/v1/brain/personal-vault-bootstrap-authorizations",
+    );
+    let authorization_response = http_request("POST", &service_endpoint, None, Some(br#"{}"#))?;
+    if !(200..300).contains(&authorization_response.status) {
+        return Err(CliError::Http(format!(
+            "Finite Chat returned {}: {}",
+            authorization_response.status,
+            authorization_response.body.trim()
+        )));
+    }
+    let authorization: HostedPersonalVaultBootstrapAuthorization =
+        serde_json::from_str(&authorization_response.body)?;
+    let body = serde_json::to_value(authorization)?;
+    let server_url = server_url_for_command(env, args)?;
+    let response = signed_json_request_to_server(
+        env,
+        &server_url,
+        "POST",
+        "/_admin/personal-vault-bootstrap",
+        Some(body),
+    )?;
+    write_command_response(output, json, &response)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedPersonalVaultBootstrapAuthorization {
+    vault_id: String,
+    name: String,
+    folder_id: String,
+    folder_name: String,
+    folder_path: String,
+    bootstrap_grants: Vec<serde_json::Value>,
+    workspace_grants: Vec<serde_json::Value>,
+    bootstrap_authorization: serde_json::Value,
+    access_change_event: serde_json::Value,
 }
 
 fn folder<W: Write>(
@@ -2491,6 +2551,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: true,
             finite_home: Some(tmp.path().join("finite-home")),
         }
     }
@@ -2502,6 +2564,78 @@ mod tests {
         let mut env = env_for(tmp);
         env.identity_authority_url = Some(identity_authority_url);
         env
+    }
+
+    #[test]
+    fn agent_cli_cannot_create_an_agent_owned_personal_vault() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = env_for(&tmp);
+        env.allow_personal_vault_creation = false;
+        let mut output = Vec::new();
+
+        let error =
+            run_with_env(["vault", "create", "personal-agent"], env, &mut output).unwrap_err();
+
+        assert!(error.to_string().contains("vault setup-personal"));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn hosted_agent_setup_forwards_only_the_bounded_user_authorization_to_brain() {
+        let tmp = TempDir::new().unwrap();
+        let test_identity = Keys::generate();
+        import_identity_secret(&tmp, &test_identity.secret_key().to_secret_hex());
+        let bundle = serde_json::json!({
+            "authorizationId": "brain-bootstrap-test",
+            "ownerNpub": "npub-owner",
+            "agentNpub": "npub-agent",
+            "vaultId": "personal-owner",
+            "name": "Personal Brain",
+            "folderId": "agent-workspace",
+            "folderName": "Agent Workspace",
+            "folderPath": "Agent Workspace",
+            "workspaceFolderId": "agent-workspace",
+            "expiresAt": 1_800_000_000,
+            "bootstrapGrants": [{ "folderId": "getting-started", "grant": {} }],
+            "workspaceGrants": [{ "recipientNpub": "npub-agent" }],
+            "bootstrapAuthorization": { "id": "owner-authorization" },
+            "accessChangeEvent": { "id": "owner-access-change" }
+        });
+        let (chat_url, chat) = start_json_capture_server(bundle);
+        let (brain_url, brain) = start_ok_capture_server(1);
+        let mut env = env_for(&tmp);
+        env.finitechat_service_url = Some(chat_url);
+        let mut output = Vec::new();
+
+        run_with_env(
+            ["vault", "setup-personal", "--server", &brain_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let (chat_request, chat_body) = chat.join().unwrap();
+        assert_eq!(
+            chat_request,
+            "POST /v1/brain/personal-vault-bootstrap-authorizations HTTP/1.1"
+        );
+        assert_eq!(chat_body, "{}");
+        let requests = brain.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /_admin/personal-vault-bootstrap ")
+        );
+        let forwarded: Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(forwarded["vaultId"], "personal-owner");
+        assert_eq!(forwarded["folderId"], "agent-workspace");
+        assert!(forwarded.get("ownerNpub").is_none());
+        assert!(forwarded.get("authorizationId").is_none());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).unwrap()["status"],
+            "ok"
+        );
     }
 
     fn run(tmp: &TempDir, args: &[&str]) -> String {
@@ -3341,6 +3475,27 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
             requests
+        });
+        (url, handle)
+    }
+
+    fn start_json_capture_server(
+        response_body: Value,
+    ) -> (String, thread::JoinHandle<(String, String)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let response_body = response_body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            request
         });
         (url, handle)
     }
@@ -5866,6 +6021,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(tmp.path().join("finite-home")),
         };
         // Both agents share the one Finite identity: import once.
@@ -5881,6 +6038,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(tmp.path().join("finite-home")),
         };
         let actor_npub = load_signer(&env_b).unwrap().npub;
@@ -5904,6 +6063,8 @@ mod tests {
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
+            finitechat_service_url: None,
+            allow_personal_vault_creation: false,
             finite_home: Some(tmp.path().join("finite-home")),
         };
         let mut output_a = Vec::new();

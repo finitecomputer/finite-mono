@@ -1268,6 +1268,8 @@ dependencies = [
  "finitechat-server",
  "finitechat-transport",
  "futures-util",
+ "getrandom 0.3.4",
+ "hex",
  "qrcode",
  "reqwest",
  "serde",
