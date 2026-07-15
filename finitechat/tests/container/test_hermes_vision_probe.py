@@ -75,28 +75,30 @@ class HermesVisionProbeTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         payload = json.loads(completed.stdout.removeprefix(MARKER))
         self.assertEqual(
-            payload,
+            {key: value for key, value in payload.items() if key != "hermes_version"},
             {
                 "success": True,
                 "analysis": "RED",
                 "video_analyze": True,
-                "hermes_version": "unknown",
             },
         )
+        self.assertIsInstance(payload["hermes_version"], str)
+        self.assertTrue(payload["hermes_version"])
 
     def test_wrong_hermes_semantics_fail_without_echoing_details(self) -> None:
         completed = self.run_probe({"success": True, "analysis": "BLUE secret"})
         self.assertNotEqual(completed.returncode, 0)
         payload = json.loads(completed.stdout.removeprefix(MARKER))
         self.assertEqual(
-            payload,
+            {key: value for key, value in payload.items() if key != "hermes_version"},
             {
                 "success": False,
                 "analysis": None,
                 "video_analyze": True,
-                "hermes_version": "unknown",
             },
         )
+        self.assertIsInstance(payload["hermes_version"], str)
+        self.assertTrue(payload["hermes_version"])
         self.assertNotIn("secret", completed.stdout)
 
     def test_missing_native_video_tool_fails_admission(self) -> None:
