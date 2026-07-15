@@ -60,13 +60,14 @@ fbrain -- <args>` may be the available entrypoint.
    sync state, and blockers are known.
    First run `vault list --json`. An Agent Principal paired by a user discovers
    that user's Personal Vault there with role `member`; use that Vault. If the
-   list is empty and the current user message is exactly `/brain setup`, run
-   `fbrain vault setup-personal --server "$SERVER" --json`. Hosted Device has
-   already turned that explicit action into the user's one-use authorization
-   and creates the user-owned Personal Vault plus only your Agent Workspace.
+   list is empty, the authenticated Finite Chat adapter handles the exact
+   `/brain setup` product command before the model loop and runs
+   `fbrain vault setup-personal` with the user's one-use authorization. It
+   creates the user-owned Personal Vault plus only your Agent Workspace.
    If the user asks in ordinary language, ask them to send `/brain setup` once;
-   never attempt setup from another message. The agent-native CLI never permits
-   `vault create --kind personal`.
+   never attempt setup from another message. Use `setup-personal` manually only
+   to diagnose that adapter path. The agent-native CLI never permits `vault
+   create --kind personal`.
 2. Sync before reading broadly with `sync now --summary`, then finish with
    `conflicts --json`.
    Completion: latest sequence is recorded, encrypted grants were reopened for

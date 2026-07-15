@@ -9,9 +9,11 @@ key rotation across the complete delegated scope. Public API tests cover both
 principals, convergence/replay failures, rollback, filtered visibility, live
 object re-encryption, and retained owner access. Hosted Chat treats the
 authenticated user's exact `/brain setup` action as approval, then transports
-the resulting authorization over the encrypted direct room; agent-native
-`fbrain` blocks ordinary Personal Vault creation. The user-first client
-retains an explicit owner-signed Pair action.
+the resulting authorization over the encrypted direct room. The authenticated
+Finite Chat adapter handles that exact command deterministically and invokes
+agent-native `fbrain setup-personal`; it does not depend on model interpretation.
+Agent-native `fbrain` blocks ordinary Personal Vault creation. The user-first
+client retains an explicit owner-signed Pair action.
 
 ## Context
 

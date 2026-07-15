@@ -479,6 +479,67 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             {"room_id": "room-agent-1", "seq": 12, "message_id": "msg-12"},
         )
 
+    def test_brain_setup_command_runs_deterministic_agent_setup_then_acks(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        setup_calls = []
+
+        async def setup_personal_vault():
+            setup_calls.append("setup")
+            return True
+
+        adapter._run_brain_personal_vault_setup = setup_personal_vault
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 14,
+            "message_id": "msg-14",
+            "conversation_id": "home",
+            "segment_id": "home-chat",
+            "text": "  /BRAIN SETUP  ",
+            "source": {
+                "platform": "finitechat",
+                "chat_id": "room-agent-1",
+                "chat_type": "dm",
+                "user_id": "b2" * 32,
+            },
+        }
+
+        asyncio.run(adapter._handle_finitechat_event(raw_event))
+
+        self.assertEqual(setup_calls, ["setup"])
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertEqual([call[0] for call in calls], ["activity", "send", "ack"])
+        self.assertEqual(calls[1][1]["conversation_id"], "home")
+        self.assertEqual(calls[1][1]["segment_id"], "home-chat")
+        self.assertIn("Personal Vault is ready", calls[1][1]["text"])
+
+    def test_brain_setup_failure_is_fixed_copy_and_does_not_reach_model(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        async def setup_personal_vault():
+            return False
+
+        adapter._run_brain_personal_vault_setup = setup_personal_vault
+
+        asyncio.run(
+            adapter._handle_finitechat_event(
+                {
+                    "room_id": "room-agent-1",
+                    "seq": 15,
+                    "message_id": "msg-15",
+                    "text": "/brain setup",
+                }
+            )
+        )
+
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertEqual([call[0] for call in calls], ["activity", "send", "ack"])
+        self.assertIn("could not be completed", calls[1][1]["text"])
+        self.assertNotIn("npub", calls[1][1]["text"])
+
     def test_poll_event_exposes_authenticated_account_id_in_ephemeral_prompt(self):
         adapter = self.adapter()
         calls = []

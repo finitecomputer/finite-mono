@@ -539,10 +539,11 @@ Personal Vault bootstrap:
 - The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
   Chat's authenticated `/brain setup` action creates the bounded request bundle
   inside Hosted Device and delivers it to the Agent Principal through their
-  encrypted direct room. The agent-local signer adapter exposes that delivered
-  one-use ticket to `fbrain`; it is not a directly callable Hosted Device API.
-  The Agent Principal forwards the bundle and signs the protected Brain request
-  as itself. The
+  encrypted direct room. The authenticated Finite Chat adapter handles that
+  exact product command before model dispatch and invokes `fbrain
+  setup-personal`. The agent-local signer adapter exposes the delivered one-use
+  ticket to `fbrain`; it is not a directly callable Hosted Device API. The Agent
+  Principal forwards the bundle and signs the protected Brain request as itself. The
   bundle includes both the one-use bootstrap authorization and the owner's
   canonical Agent Workspace access-change event; Brain verifies that both name
   the same owner, Vault, Folder, key version, and Agent Principal before any

@@ -115,6 +115,13 @@ See
 [../../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md](../../../finitecomputer-v2/docs/hermes-runtime-test-matrix.md)
 for the current local Apple Container → Kata → Phala proof ladder.
 
+The exact authenticated Finite Chat message `/brain setup` is a product control,
+not a model prompt. The adapter handles only that exact command before Hermes's
+generic slash-command dispatcher and invokes `fbrain vault setup-personal` with
+the Agent Principal. Hosted Device must already have delivered the user-bound,
+single-use authorization through the same direct Agent Chat; otherwise setup
+fails closed.
+
 ## Agent → user attachment contract
 
 Hermes sends a newly created local file as a typed attachment. The Python

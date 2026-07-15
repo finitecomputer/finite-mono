@@ -29,6 +29,16 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 logger = logging.getLogger(__name__)
 
 FINITE_PLATFORM_NAME = "finitechat"
+BRAIN_SETUP_CHAT_COMMAND = "/brain setup"
+BRAIN_SETUP_TIMEOUT_SECS = 90
+BRAIN_SETUP_SUCCESS_MESSAGE = (
+    "Your Personal Vault is ready. I can work only in my Agent Workspace unless "
+    "you explicitly grant another folder from Brain."
+)
+BRAIN_SETUP_FAILURE_MESSAGE = (
+    "Brain setup could not be completed. Send `/brain setup` again. If it still "
+    "fails, open Brain from the dashboard and try again."
+)
 LOCAL_ENV_FILE = "finitechat.env"
 DEFAULT_POLL_LIMIT = 10
 DEFAULT_POLL_TIMEOUT_SECS = 20
@@ -574,7 +584,18 @@ class FiniteChatAdapter(BasePlatformAdapter):
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
-            await self.handle_message(event)
+            if event.text.strip().casefold() == BRAIN_SETUP_CHAT_COMMAND:
+                setup_succeeded = await self._run_brain_personal_vault_setup()
+                response = (
+                    BRAIN_SETUP_SUCCESS_MESSAGE
+                    if setup_succeeded
+                    else BRAIN_SETUP_FAILURE_MESSAGE
+                )
+                sent = await self.send(room_id, response, metadata=activity_metadata)
+                if not sent.success:
+                    raise RuntimeError("could not send the Brain setup result")
+            else:
+                await self.handle_message(event)
             if event_key:
                 self._remember_delivered_event(event_key)
             await self._ack_finitechat_event(room_id, seq, message_id)
@@ -582,6 +603,35 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+
+    async def _run_brain_personal_vault_setup(self) -> bool:
+        fbrain = str(os.getenv("FBRAIN_BIN") or shutil.which("fbrain") or "").strip()
+        if not fbrain:
+            logger.warning("[finitechat] Brain setup unavailable: fbrain is not installed")
+            return False
+        try:
+            process = await asyncio.create_subprocess_exec(
+                fbrain,
+                "vault",
+                "setup-personal",
+                "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=BRAIN_SETUP_TIMEOUT_SECS)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                logger.warning("[finitechat] Brain setup timed out")
+                return False
+        except (OSError, asyncio.SubprocessError):
+            logger.warning("[finitechat] Brain setup could not start")
+            return False
+        if process.returncode != 0:
+            logger.warning("[finitechat] Brain setup failed with exit code %s", process.returncode)
+            return False
+        return True
 
     async def _set_processing_activity(
         self,

@@ -131,7 +131,9 @@ delegations.
 For the agent-first path, the authenticated user sends `/brain setup` in their
 direct Agent Chat. Hosted Device treats that exact action as approval, issues a
 short-lived bundle, and carries it through the encrypted direct Chat room to
-that Agent Principal. The agent forwards the bundle to
+that Agent Principal. The Finite Chat adapter handles that exact product command
+before the model loop and invokes the agent's `fbrain setup-personal` signer
+path. The agent forwards the bundle to
 `POST /_admin/personal-vault-bootstrap` using its own signed request. The
 agent-native `fbrain` CLI never creates Personal Vaults directly:
 `setup-personal` is its only Personal Vault setup command, while the user client
