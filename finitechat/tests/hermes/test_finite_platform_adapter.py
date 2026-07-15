@@ -163,6 +163,16 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         )
         self.assertTrue(callable(entry["adapter_factory"]))
 
+    def test_register_advertises_generic_file_attachments_to_hermes(self):
+        ctx = MockPluginContext()
+        self.module.register(ctx)
+
+        hint = ctx.registered[0]["platform_hint"]
+        self.assertIn("You can send files natively", hint)
+        self.assertIn("MEDIA:/absolute/path/to/file", hint)
+        self.assertIn("downloadable attachments", hint)
+        self.assertIn("Do not tell the user", hint)
+
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
 
@@ -383,6 +393,24 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "media")
         self.assertEqual(payload["attachments"][0]["kind"], "file")
         self.assertEqual(payload["attachments"][0]["mime_type"], "application/pdf")
+
+    def test_generic_file_send_uses_downloadable_attachment_payload(self):
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            return self.module._FiniteChatResult(True, {"message_id": "archive-1"}, None, False)
+
+        adapter._finitechat_json = fake_json
+        result = asyncio.run(adapter.send_document("room-agent-1", "/tmp/export.zip"))
+
+        self.assertTrue(result.success)
+        payload = calls[0][1]
+        self.assertEqual(payload["kind"], "media")
+        self.assertEqual(payload["attachments"][0]["name"], "export.zip")
+        self.assertEqual(payload["attachments"][0]["kind"], "file")
+        self.assertEqual(payload["attachments"][0]["mime_type"], "application/octet-stream")
 
     def test_poll_event_maps_room_to_chat_and_conversation_to_thread_then_acks(self):
         adapter = self.adapter()
