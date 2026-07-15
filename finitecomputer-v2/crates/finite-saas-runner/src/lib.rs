@@ -775,29 +775,7 @@ where
                 "RuntimeSpec omitted the Finite Private secret reference".to_string(),
             ));
         }
-        let specialization_bundle = defaults
-            .specialization_bundle
-            .map(|mut specialization_bundle| {
-                if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
-                    return Err(RunnerError::InvalidRuntimeEnvironment(format!(
-                        "unsupported Finite Private specialization bundle {:?}",
-                        specialization_bundle.bundle_id
-                    )));
-                }
-                specialization_bundle.worker_api_key =
-                    specialization_bundle.worker_api_key.trim().to_owned();
-                if specialization_bundle.worker_api_key.is_empty()
-                    || specialization_bundle.worker_api_key.len()
-                        > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
-                {
-                    return Err(RunnerError::InvalidRuntimeEnvironment(
-                        "Finite Private specialization worker credential is empty or oversized"
-                            .to_string(),
-                    ));
-                }
-                Ok(specialization_bundle)
-            })
-            .transpose()?;
+        let specialization_bundle = specialization_bundle_for_finite_private_profile(&defaults)?;
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -1223,6 +1201,39 @@ impl Default for FinitePrivateRuntimeDefaults {
             specialization_bundle: None,
         }
     }
+}
+
+fn specialization_bundle_for_finite_private_profile(
+    defaults: &FinitePrivateRuntimeDefaults,
+) -> Result<Option<SpecializationBundleRuntimeDefaults>, RunnerError> {
+    // This is a profile decision, never a host, customer, or agent-name decision.
+    if defaults.model != DEFAULT_FINITE_PRIVATE_MODEL {
+        return Ok(None);
+    }
+    defaults
+        .specialization_bundle
+        .clone()
+        .map(|mut specialization_bundle| {
+            if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
+                return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+                    "unsupported Finite Private specialization bundle {:?}",
+                    specialization_bundle.bundle_id
+                )));
+            }
+            specialization_bundle.worker_api_key =
+                specialization_bundle.worker_api_key.trim().to_owned();
+            if specialization_bundle.worker_api_key.is_empty()
+                || specialization_bundle.worker_api_key.len()
+                    > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
+            {
+                return Err(RunnerError::InvalidRuntimeEnvironment(
+                    "Finite Private specialization worker credential is empty or oversized"
+                        .to_string(),
+                ));
+            }
+            Ok(specialization_bundle)
+        })
+        .transpose()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -3373,6 +3384,33 @@ mod tests {
             specialization_bundle: Some(specialization_bundle_defaults()),
             ..FinitePrivateRuntimeDefaults::default()
         }
+    }
+
+    #[test]
+    fn specialization_bundle_is_scoped_only_to_the_glm_finite_private_profile() {
+        let configured_glm_profile = finite_private_defaults();
+        let glm_bundle = specialization_bundle_for_finite_private_profile(&configured_glm_profile)
+            .unwrap()
+            .expect("the canonical Finite Private GLM profile should activate AEON");
+        assert_eq!(
+            glm_bundle.bundle_id,
+            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
+        );
+
+        let other_finite_private_profile = FinitePrivateRuntimeDefaults {
+            model: "another-finite-private-model".to_owned(),
+            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
+                bundle_id: "not-validated-for-this-profile".to_owned(),
+                worker_api_key: "unused-for-non-glm".to_owned(),
+            }),
+            ..FinitePrivateRuntimeDefaults::default()
+        };
+        assert!(
+            specialization_bundle_for_finite_private_profile(&other_finite_private_profile)
+                .unwrap()
+                .is_none(),
+            "specialization admission must depend on the Finite Private GLM profile, not a runner host or user"
+        );
     }
 
     #[test]

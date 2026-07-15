@@ -80,6 +80,13 @@ Hermes-native vision tool passes the fixed semantic probe for the current
 Hermes process generation. Matching configuration bytes alone are not
 sufficient, and a restart triggers a new probe.
 
+The Runner makes this admission solely from the canonical Finite Private
+`glm-5-2` profile. It has no box, user, project, or agent-name condition: every
+new runtime launched with that profile receives the bundle when its Runner is
+configured with the worker credential. A missing credential remains a
+non-blocking deployment configuration gap, so ordinary Finite Private launches
+continue without the bundle instead of failing creation.
+
 An AEON image reconciliation becomes effective only after Hermes restarts and
 its installed `vision_analyze_tool` returns exact semantic output for a fixed
 image through `auxiliary.vision`. The packaged probe uses the same
