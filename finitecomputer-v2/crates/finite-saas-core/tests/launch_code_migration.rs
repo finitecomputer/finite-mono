@@ -238,7 +238,7 @@ async fn agent_email_migration_names_self_service_projects_but_not_imports() {
                 INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
                 VALUES ('user-email', 'email@example.test', 'linked', 'workos-email', now(), now());
                 INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
-                VALUES ('org-email', 'user-email', 'Email org', 'sponsored', now(), now());
+                VALUES ('org-email', 'user-email', 'Email org', 'grandfathered', now(), now());
                 INSERT INTO project_import_candidates (
                   id, source_host_id, source_machine_id, source_import_key, owner_email,
                   pending_user_id, customer_org_id, status, host_facts, created_at, updated_at
