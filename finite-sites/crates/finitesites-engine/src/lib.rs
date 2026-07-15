@@ -272,12 +272,12 @@ impl Engine {
         }
         let finite_toml = request.config.to_toml_string()?;
         let outputs = output_apply_inputs(request);
-        let owner_viewer_pubkey = request
-            .owner_viewer_npub
+        let requesting_user_pubkey = request
+            .requesting_user_npub
             .as_deref()
             .map(npub::pubkey_from_hex_or_npub)
             .transpose()?;
-        let owner_viewer_npub = owner_viewer_pubkey
+        let requesting_user_npub = requesting_user_pubkey
             .as_deref()
             .map(npub::encode_npub)
             .transpose()?;
@@ -286,15 +286,15 @@ impl Engine {
                 owner_pubkey,
                 request,
                 &outputs,
-                owner_viewer_npub,
+                requesting_user_npub,
                 git_remote_url,
                 finite_toml,
             );
         }
 
-        let outcome = match self.store.init_project_with_owner_viewer(
+        let outcome = match self.store.init_project_with_requesting_user(
             owner_pubkey,
-            owner_viewer_pubkey.as_deref(),
+            requesting_user_pubkey.as_deref(),
             &request.config.project.slug,
             &outputs,
             now,
@@ -310,7 +310,7 @@ impl Engine {
         };
         self.project_init_response_from_store(
             request.dry_run,
-            owner_viewer_npub,
+            requesting_user_npub,
             git_remote_url,
             finite_toml,
             outcome,
@@ -323,7 +323,7 @@ impl Engine {
         owner_pubkey: &str,
         request: &ProjectInitRequest,
         outputs: &[ProjectOutputApply],
-        owner_viewer_npub: Option<String>,
+        requesting_user_npub: Option<String>,
         git_remote_url: String,
         finite_toml: String,
     ) -> Result<ProjectInitResponse, EngineError> {
@@ -365,7 +365,7 @@ impl Engine {
                 output_summaries.push(self.project_output_summary(
                     record,
                     false,
-                    owner_viewer_npub.is_some(),
+                    requesting_user_npub.is_some(),
                 )?);
                 continue;
             }
@@ -395,7 +395,7 @@ impl Engine {
                 start: output.start_command.clone(),
                 spa: output.spa,
                 created: true,
-                owner_viewer_shared: owner_viewer_npub.is_some(),
+                requesting_user_shared: requesting_user_npub.is_some(),
             });
         }
 
@@ -412,14 +412,14 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs: output_summaries,
-            owner_viewer_npub,
+            requesting_user_npub,
         })
     }
 
     fn project_init_response_from_store(
         &self,
         dry_run: bool,
-        owner_viewer_npub: Option<String>,
+        requesting_user_npub: Option<String>,
         git_remote_url: String,
         finite_toml: String,
         outcome: ProjectInitStoreOutcome,
@@ -429,7 +429,7 @@ impl Engine {
             outputs.push(self.project_output_summary(
                 &output.record,
                 output.created,
-                owner_viewer_npub.is_some(),
+                requesting_user_npub.is_some(),
             )?);
         }
         Ok(ProjectInitResponse {
@@ -441,7 +441,7 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs,
-            owner_viewer_npub,
+            requesting_user_npub,
         })
     }
 
@@ -620,7 +620,7 @@ impl Engine {
         &self,
         record: &ProjectOutputRecord,
         created: bool,
-        owner_viewer_shared: bool,
+        requesting_user_shared: bool,
     ) -> Result<ProjectOutputSummary, EngineError> {
         let site = self
             .store
@@ -646,7 +646,7 @@ impl Engine {
             start: record.start_command.clone(),
             spa: record.spa,
             created,
-            owner_viewer_shared,
+            requesting_user_shared,
         })
     }
 

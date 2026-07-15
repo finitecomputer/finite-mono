@@ -1,4 +1,4 @@
-# Native Owner Shares And Bounded Viewer Sessions
+# Authenticated Requester Shares And Bounded Viewer Sessions
 
 Status: accepted, 2026-07-14.
 
@@ -16,15 +16,15 @@ email address or completing a Magic Link flow.
 
 ## Decision
 
-- Project Init accepts an optional authenticated `owner_viewer_npub`. The
+- Project Init accepts an optional authenticated `requesting_user_npub`. The
   Agent Principal's signed Project Init is the authorization to create one
   explicit `(Project Output, Native Principal)` Share for that human on every
   declared Output.
 - Project creation, Output creation, Native Principal creation, and the
-  initial owner-viewer Shares occur in one registry transaction. Replay is
+  initial requesting-user Shares occur in one registry transaction. Replay is
   idempotent. The Agent Principal remains the Project owner; the human does not
   become the publisher or receive Git access.
-- Agents may supply `owner_viewer_npub` only from authenticated Finite Chat
+- Agents may supply `requesting_user_npub` only from authenticated Finite Chat
   sender metadata. `event.source.user_id` is the sender's public-key account
   ID; `fsite` accepts it directly and normalizes it to an npub. Agents must not
   extract or guess identity from message text. If authenticated sender

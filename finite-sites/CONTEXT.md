@@ -37,7 +37,7 @@ with exactly these meanings.
   harmful product data.
 - **Native Principal**: a Principal known by npub inside Finite surfaces, such
   as a chat participant. Native shares can target this Principal directly.
-- **Owner Viewer Share**: an explicit, revocable Share created atomically by
+- **Requesting User Share**: an explicit, revocable Share created atomically by
   an Agent Principal's signed Project Init for the authenticated human sender's
   Native Principal. It grants view access to each declared Project Output; it
   does not change Project ownership, collaboration, or Git access.

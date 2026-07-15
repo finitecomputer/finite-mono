@@ -1613,14 +1613,14 @@ impl Store {
         outputs: &[ProjectOutputApply],
         now: u64,
     ) -> Result<ProjectInitStoreOutcome, StoreError> {
-        self.init_project_with_owner_viewer(owner_pubkey, None, slug, outputs, now)
+        self.init_project_with_requesting_user(owner_pubkey, None, slug, outputs, now)
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn init_project_with_owner_viewer(
+    pub fn init_project_with_requesting_user(
         &mut self,
         owner_pubkey: &str,
-        owner_viewer_pubkey: Option<&str>,
+        requesting_user_pubkey: Option<&str>,
         slug: &str,
         outputs: &[ProjectOutputApply],
         now: u64,
@@ -1635,7 +1635,7 @@ impl Store {
             ids::new_id(ids::PRINCIPAL_ID_PREFIX),
             now,
         )?;
-        let owner_viewer_principal_id = match owner_viewer_pubkey {
+        let requesting_user_principal_id = match requesting_user_pubkey {
             Some(pubkey) => Some(ensure_native_principal(
                 &tx,
                 pubkey,
@@ -1799,7 +1799,7 @@ impl Store {
                     )
                 }
             };
-            if let Some(principal_id) = owner_viewer_principal_id.as_deref() {
+            if let Some(principal_id) = requesting_user_principal_id.as_deref() {
                 let already_shared: Option<i64> = tx
                     .query_row(
                         "SELECT 1 FROM native_shares
@@ -1827,7 +1827,7 @@ impl Store {
                     tx.execute(
                         "INSERT INTO site_events
                             (site_id, action, actor_pubkey, metadata, created_at)
-                         VALUES (?1, 'owner_viewer_shared', ?2, '{}', ?3)",
+                         VALUES (?1, 'requesting_user_shared', ?2, '{}', ?3)",
                         params![record.site_id, owner_pubkey, now],
                     )?;
                 }

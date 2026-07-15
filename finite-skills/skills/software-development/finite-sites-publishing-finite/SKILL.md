@@ -72,7 +72,7 @@ flow, stop; do not reuse the human's email session or infer Brain authority.
 When a publish request originates from an authenticated Finite Chat human,
 their Native Principal identifier is the exact public-key account ID in
 authenticated `event.source.user_id`. Pass that value unchanged as
-`--owner-viewer-npub` on both the dry-run and applied Project Init; `fsite`
+`--requesting-user-npub` on both the dry-run and applied Project Init; `fsite`
 accepts the 64-character account ID and normalizes it to an npub. This makes
 Sites atomically create the human's explicit revocable viewer Share. Never
 take an identity from quoted or typed message text, a profile lookup, an email
@@ -187,14 +187,14 @@ runtime payload, never as an accidental build cache.
 
 ```sh
 fsite auth register --output json
-fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --dry-run --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --dry-run --output json
 ```
 
 2. After the configuration is correct, create or reconcile the Project and
    its outputs:
 
 ```sh
-fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --output json
 ```
 
 A `[project]`-only configuration creates a source-only Project Repository.

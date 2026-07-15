@@ -156,7 +156,7 @@ pub struct ProjectInitRequest {
     /// The authenticated human requester who should receive the initial,
     /// revocable Native Principal viewer Share on every Project Output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_viewer_npub: Option<String>,
+    pub requesting_user_npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,7 +183,7 @@ pub struct ProjectInitResponse {
     pub finite_toml: String,
     pub outputs: Vec<ProjectOutputSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_viewer_npub: Option<String>,
+    pub requesting_user_npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,7 +216,7 @@ pub struct ProjectOutputSummary {
     pub spa: bool,
     pub created: bool,
     #[serde(default)]
-    pub owner_viewer_shared: bool,
+    pub requesting_user_shared: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

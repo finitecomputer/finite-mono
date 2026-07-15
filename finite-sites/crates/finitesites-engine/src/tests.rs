@@ -83,7 +83,7 @@ fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> Pro
             outputs,
         },
         dry_run,
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
     }
 }
 
@@ -110,7 +110,7 @@ fn app_project_request(slug: &str, site_name: &str, dry_run: bool) -> ProjectIni
             outputs,
         },
         dry_run,
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
     }
 }
 
@@ -1219,20 +1219,20 @@ fn shared_site_full_magic_link_flow() {
 #[test]
 fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
     let mut fx = fixture();
-    let mut request = project_request("native-owner", "native-owner-site", false, false);
-    request.owner_viewer_npub = Some(OTHER_OWNER.to_string());
+    let mut request = project_request("requesting-user", "requesting-user-site", false, false);
+    request.requesting_user_npub = Some(OTHER_OWNER.to_string());
     let initialized = fx
         .engine
-        .init_project(OWNER, &request, remote("native-owner"), NOW)
+        .init_project(OWNER, &request, remote("requesting-user"), NOW)
         .unwrap();
     assert_eq!(
-        initialized.owner_viewer_npub,
+        initialized.requesting_user_npub,
         Some(finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap())
     );
-    assert!(initialized.outputs[0].owner_viewer_shared);
+    assert!(initialized.outputs[0].requesting_user_shared);
     let replayed = fx
         .engine
-        .init_project(OWNER, &request, remote("native-owner"), NOW + 1)
+        .init_project(OWNER, &request, remote("requesting-user"), NOW + 1)
         .unwrap();
     assert!(!replayed.created);
     assert!(!replayed.outputs[0].created);
@@ -1249,14 +1249,14 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
     fx.engine
         .commit_project_output_version(
             site_id,
-            vec![output_file("/index.html", b"<h1>native owner</h1>")],
+            vec![output_file("/index.html", b"<h1>requesting user</h1>")],
             false,
             NOW + 1,
         )
         .unwrap();
     let site = fx
         .engine
-        .resolve_site("native-owner-site")
+        .resolve_site("requesting-user-site")
         .unwrap()
         .unwrap();
     assert_eq!(site.owner_pubkey, OWNER);
@@ -1314,7 +1314,7 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
     fx.engine
         .set_sharing(
             OWNER,
-            "native-owner-site",
+            "requesting-user-site",
             &SharingRequest {
                 visibility: None,
                 confirm_public: false,
@@ -1345,14 +1345,14 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
     };
     assert!(matches!(
         fx.engine
-            .set_sharing(OWNER, "native-owner-site", &malformed, NOW + 9),
+            .set_sharing(OWNER, "requesting-user-site", &malformed, NOW + 9),
         Err(EngineError::Proto(_))
     ));
     let restored = fx
         .engine
         .set_sharing(
             OWNER,
-            "native-owner-site",
+            "requesting-user-site",
             &SharingRequest {
                 add_npubs: vec![OTHER_OWNER.to_string()],
                 ..SharingRequest::default()

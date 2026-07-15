@@ -588,7 +588,7 @@ fn project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
         dry_run,
     }
 }
@@ -601,7 +601,7 @@ fn bare_project_init_request(slug: &str, dry_run: bool) -> ProjectInitRequest {
             },
             outputs: BTreeMap::new(),
         },
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
         dry_run,
     }
 }
@@ -634,7 +634,7 @@ fn single_site_project_init_request(
             },
             outputs,
         },
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
         dry_run,
     }
 }
@@ -674,7 +674,7 @@ fn site_and_document_project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
         dry_run,
     }
 }
@@ -701,7 +701,7 @@ fn app_project_init_request(dry_run: bool) -> ProjectInitRequest {
             },
             outputs,
         },
-        owner_viewer_npub: None,
+        requesting_user_npub: None,
         dry_run,
     }
 }
@@ -1788,7 +1788,7 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
+async fn native_requesting_user_sessions_open_private_output_without_magic_link() {
     let agent_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let viewer_pubkey = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
     let viewer_npub = finitesites_proto::npub::encode_npub(&viewer_pubkey).unwrap();
@@ -1797,7 +1797,7 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
 
     let task = tokio::task::spawn_blocking(move || {
         let mut init = project_init_request(false);
-        init.owner_viewer_npub = Some(viewer_npub.clone());
+        init.requesting_user_npub = Some(viewer_npub.clone());
         let init_body = serde_json::to_vec(&init).unwrap();
         let created: ProjectInitResponse = json_body(
             server
@@ -1810,10 +1810,10 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
                 .unwrap(),
         );
         assert_eq!(
-            created.owner_viewer_npub.as_deref(),
+            created.requesting_user_npub.as_deref(),
             Some(viewer_npub.as_str())
         );
-        assert!(created.outputs[0].owner_viewer_shared);
+        assert!(created.outputs[0].requesting_user_shared);
 
         let credential = mint_skyler_git_credential(&server);
         push_project_files(
@@ -1821,8 +1821,8 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
             &credential,
             &created.finite_toml,
             "main",
-            &[("index.html", "<h1>native owner preview</h1>")],
-            "Native owner viewer deploy",
+            &[("index.html", "<h1>requesting user preview</h1>")],
+            "Requesting user viewer deploy",
         );
         wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
 
@@ -1836,7 +1836,7 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
             purpose: "finite_site_view_session".into(),
             return_to: "/preview?owner=true".into(),
             client: "finitechat-ios".into(),
-            nonce: "direct-native-owner-proof".into(),
+            nonce: "direct-requesting-user-proof".into(),
         };
         let direct_body = serde_json::to_vec(&direct_request).unwrap();
         let direct_url = format!("{site_base}/_finite/auth/native-session");
@@ -1909,13 +1909,16 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
             .set("Cookie", &direct_cookie)
             .call()
             .unwrap();
-        assert_eq!(page.into_string().unwrap(), "<h1>native owner preview</h1>");
+        assert_eq!(
+            page.into_string().unwrap(),
+            "<h1>requesting user preview</h1>"
+        );
 
         let hosted_request = NativeViewerSessionRequest {
             purpose: "finite_site_view_session".into(),
             return_to: "/hosted-preview".into(),
             client: "finite-dashboard".into(),
-            nonce: "hosted-native-owner-proof".into(),
+            nonce: "hosted-requesting-user-proof".into(),
         };
         let signed_body = serde_json::to_string(&hosted_request).unwrap();
         let output_url = format!("{site_base}/");
@@ -1972,7 +1975,7 @@ async fn native_owner_viewer_sessions_open_private_output_without_magic_link() {
             .unwrap();
         assert_eq!(
             hosted_page.into_string().unwrap(),
-            "<h1>native owner preview</h1>"
+            "<h1>requesting user preview</h1>"
         );
 
         let revoke = SharingRequest {

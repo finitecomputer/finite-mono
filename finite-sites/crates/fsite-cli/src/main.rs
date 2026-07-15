@@ -146,7 +146,7 @@ fn usage() -> String {
      # commit finite.toml plus deploy bytes, then push the Deploy Branch\n\n\
      Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
-     fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n  \
+     fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  \
      fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  \
      fsite project revoke PROJECT --email EMAIL [--output json]\n  \
      fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
@@ -224,11 +224,11 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
 }
 
 fn project_init_help() -> &'static str {
-    "usage: fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. When an authenticated human asked an Agent Principal to publish, --owner-viewer-npub creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer it from message text. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
+    "usage: fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. When an authenticated human asked an Agent Principal to publish, --requesting-user-npub creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer it from message text. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
 }
 
 fn project_grant_help() -> &'static str {
@@ -341,7 +341,7 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "project init",
                 "summary": "Initialize a Project Repository and any finite.toml-described outputs.",
-                "usage": "fsite project init --config finite.toml [--owner-viewer-npub NPUB] [--dry-run] [--output json]"
+                "usage": "fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]"
             },
             {
                 "name": "project grant",
@@ -451,7 +451,7 @@ fn publish_static_site_workflow() -> serde_json::Value {
             "Keep the whole project source tree in the Project Repository.",
             "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
             "Create finite.toml with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -487,7 +487,7 @@ fn publish_stateful_app_workflow() -> serde_json::Value {
             "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
             "Put the app runtime files in a dedicated directory such as app/. The directory must contain everything the start command needs, or code that explicitly initializes dependencies under DATA_DIR at runtime.",
             "Create finite.toml with project.slug, one output with kind=app, site_name, branch=main, path=app, and start=\"bun server.ts\" or another supported command beginning with node, bun, or uv.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -525,7 +525,7 @@ fn publish_document_workflow() -> serde_json::Value {
             "Run fsite auth register --output json.",
             "Create Markdown in one file or a directory such as docs/.",
             "Create finite.toml with project.slug and one output with kind=document, document_name, branch=main, path=docs, and optional entry=index.md.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "Run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json.",
@@ -562,7 +562,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Run fsite auth register --output json.",
                 "Optional: run fsite auth link-email EMAIL --output json, then fsite auth redeem EMAIL TOKEN_FROM_EMAIL --output json to pair that email with this npub. If you already have a token from an invite email, run fsite auth redeem EMAIL TOKEN_FROM_EMAIL --link-native --output json.",
                 "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs an [outputs.<id>] entry.",
-                "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --owner-viewer-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+                "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
                 "Run fsite project init --config finite.toml --dry-run --output json.",
                 "Run fsite project init --config finite.toml --output json.",
                 "Run fsite auth git PROJECT --store --output json.",
@@ -672,7 +672,7 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     }
     let mut config_path: Option<PathBuf> = None;
     let mut dry_run = false;
-    let mut owner_viewer_npub: Option<String> = None;
+    let mut requesting_user_npub: Option<String> = None;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -689,13 +689,13 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
                 dry_run = true;
                 index += 1;
             }
-            "--owner-viewer-npub" => {
+            "--requesting-user-npub" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    CliError::Usage("--owner-viewer-npub needs an npub".to_string())
+                    CliError::Usage("--requesting-user-npub needs an npub".to_string())
                 })?;
-                if owner_viewer_npub.replace(value.clone()).is_some() {
+                if requesting_user_npub.replace(value.clone()).is_some() {
                     return Err(CliError::Usage(
-                        "--owner-viewer-npub may be supplied only once".to_string(),
+                        "--requesting-user-npub may be supplied only once".to_string(),
                     ));
                 }
                 index += 2;
@@ -722,7 +722,7 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     let request = ProjectInitRequest {
         config,
         dry_run,
-        owner_viewer_npub,
+        requesting_user_npub,
     };
     request
         .config
@@ -731,9 +731,13 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
 
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let recovery_owner_viewer_npub = request.owner_viewer_npub.clone();
+    let recovery_requesting_user_npub = request.requesting_user_npub.clone();
     let response = client.init_project(&identity, &request).map_err(|error| {
-        project_init_recovery_error(error, &config_path, recovery_owner_viewer_npub.as_deref())
+        project_init_recovery_error(
+            error,
+            &config_path,
+            recovery_requesting_user_npub.as_deref(),
+        )
     })?;
     if output_json {
         println!(
@@ -744,8 +748,8 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
         println!("project: {}", response.slug);
         println!("source:  {}", response.project_visibility);
         println!("git:     {}", response.git_remote_url);
-        if let Some(npub) = &response.owner_viewer_npub {
-            println!("owner viewer: {npub} (shared)");
+        if let Some(npub) = &response.requesting_user_npub {
+            println!("requesting user: {npub} (shared)");
         }
         if response.outputs.is_empty() {
             println!("outputs: none (source-only Project Repository)");
@@ -786,7 +790,7 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
 fn project_init_recovery_error(
     error: CliError,
     config_path: &Path,
-    owner_viewer_npub: Option<&str>,
+    requesting_user_npub: Option<&str>,
 ) -> CliError {
     let CliError::ApiStatus {
         method,
@@ -799,17 +803,17 @@ fn project_init_recovery_error(
         return error;
     };
 
-    let owner_viewer_arg = owner_viewer_npub
-        .map(|npub| format!(" --owner-viewer-npub {npub}"))
+    let requesting_user_arg = requesting_user_npub
+        .map(|npub| format!(" --requesting-user-npub {npub}"))
         .unwrap_or_default();
     match code.as_deref() {
         Some(ERROR_GIT_REPOSITORY_SETUP_FAILED) => message.push_str(&format!(
             "\n\nThe Project may already exist; do not change its slug or discard local source. After the service operator reports that Git repository setup is repaired, run this repair replay exactly once:\n  fsite project init --config {}{} --output json",
-            config_path.display(), owner_viewer_arg
+            config_path.display(), requesting_user_arg
         )),
         Some(ERROR_GIT_UNAVAILABLE) => message.push_str(&format!(
             "\n\nNo Project Init state changed. After service health has recovered, retry exactly once:\n  fsite project init --config {}{} --output json",
-            config_path.display(), owner_viewer_arg
+            config_path.display(), requesting_user_arg
         )),
         _ => {}
     }
@@ -2484,7 +2488,7 @@ mod tests {
         assert!(text.contains("A source-only Project Repository may contain only [project]"));
         assert!(text.contains("served website needs an [outputs.<id>] entry"));
         assert!(text.contains("event.source.user_id"));
-        assert!(text.contains("--owner-viewer-npub AUTHENTICATED_SENDER_ID"));
+        assert!(text.contains("--requesting-user-npub AUTHENTICATED_SENDER_ID"));
     }
 
     #[test]

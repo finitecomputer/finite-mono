@@ -378,8 +378,8 @@ agent passes the exact public-key account ID from authenticated
 npub:
 
 ```sh
-fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --dry-run --output json
-fsite project init --config finite.toml --owner-viewer-npub AUTHENTICATED_SENDER_ID --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --dry-run --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --output json
 ```
 
 Project Init atomically creates that human's explicit revocable Native
