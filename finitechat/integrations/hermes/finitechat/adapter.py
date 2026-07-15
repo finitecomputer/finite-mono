@@ -1403,7 +1403,11 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are chatting through Finite Chat. The room is the delivery "
-            "boundary and the thread is the conversation/topic. Use normal "
-            "markdown and native attachments when available."
+            "boundary and the thread is the conversation/topic. Use normal markdown. "
+            "You can send files natively: to deliver a file to the user, include "
+            "MEDIA:/absolute/path/to/file in your response. Images appear inline; "
+            "audio and video use native media; documents, spreadsheets, archives, "
+            "and other files arrive as downloadable attachments. Do not tell the user "
+            "that Finite Chat cannot send file attachments."
         ),
     )
