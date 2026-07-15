@@ -37,6 +37,14 @@ operations can be used, and deliberately requests no Apps Script scope. The
 Python wrapper below currently exposes Docs read only; do not imply that it can
 write a Doc or use Apps Script.
 
+## Login emails
+
+When the human explicitly asks the Agent to retrieve or use a login code for
+the current task, it may read the connected mailbox and use the newest matching
+message. Verify the connected address, service/sender, and freshness; do not
+echo the token. Ask the human only when mailbox access fails or the match is
+ambiguous.
+
 ## Scripts
 
 - `scripts/setup.py` — OAuth2 setup (run once to authorize)

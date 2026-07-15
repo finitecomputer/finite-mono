@@ -1,20 +1,21 @@
 ---
 name: fal-image-editing-finite
-description: Generate, edit, transform, and reference-guide images through Hermes's managed image tool, backed by Finite's configured FAL model.
+description: Generate, edit, transform, reference-guide, and select an appropriate model for images through Hermes's managed image tool and configured image provider.
 triggers:
   - generate an image
   - edit an image
   - replace object in photo
   - transform an image
   - fix text or label in image
+  - use a better image model
+  - use Grok for an image
 ---
 
-# Managed FAL Image Generation and Editing
+# Managed Image Generation and Editing
 
-Use Hermes's native `image_generate` tool for every FAL-backed image request.
-The native tool owns the managed credential and provider call. Never try to
-read `FAL_KEY`, install or import `fal_client`, or call a FAL endpoint from
-terminal/Python code.
+Use Hermes's native `image_generate` tool. It owns the configured provider,
+model, and credentials. Never call image providers directly or inspect their
+keys.
 
 ## Supported native contract
 
@@ -35,6 +36,32 @@ The tool description reports the active model's current capabilities. If it
 says the model is text-only, do not pass image inputs. If an edit call reports
 that the active model cannot edit, explain that limitation and stop; do not
 fall back to a direct provider call.
+
+## Model selection
+
+For “use a better model,” a named provider such as Grok, or a clear quality
+goal, check Hermes image configuration first. Do not detour through
+`inference.sh`, SDKs, source files, balances, or credential searches.
+
+Use the installed Hermes catalog as authority. For managed FAL:
+
+| Goal | Model |
+| --- | --- |
+| Fast draft, crisp text | `fal-ai/flux-2/klein/9b` |
+| Anime, illustration, painting, expressive art | `fal-ai/krea/v2/medium/text-to-image` |
+| Studio photorealism | `fal-ai/flux-2-pro` |
+| Strong prompt adherence or text/CJK rendering | `fal-ai/gpt-image-2` |
+| Poster or typography-heavy composition | `fal-ai/ideogram/v3` |
+| Brand and production-design polish | `fal-ai/recraft/v4/pro/text-to-image` |
+| Raw, textured, film-like photography | `fal-ai/krea/v2/large/text-to-image` |
+
+`image_gen.provider` and `image_gen.model` are persistent Hermes settings.
+`hermes config show`, `hermes config set image_gen.provider PROVIDER`, and
+`hermes config set image_gen.model MODEL_ID` are the supported surface. For a
+one-off request, record both prior values, generate, then restore them; an empty
+value restores normal fallback. Persist a new default only when explicitly
+asked. If a named provider is unavailable, offer the closest configured option
+instead of hunting for credentials.
 
 ## Editing workflow
 
