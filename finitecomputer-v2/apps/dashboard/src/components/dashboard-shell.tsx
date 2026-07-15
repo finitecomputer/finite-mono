@@ -55,8 +55,7 @@ function activeMachineIdFromPath(pathname: string) {
 function sectionLinks(
   pathname: string,
   machine: MachineNavItem | null,
-  saasMode: boolean,
-  isAdmin: boolean
+  saasMode: boolean
 ): SectionLink[] {
   const machineHref = machine ? `/dashboard/machines/${machine.id}` : "/dashboard";
   const chatHref = machine ? `/dashboard/machines/${machine.id}/chat` : "/dashboard";
@@ -87,14 +86,12 @@ function sectionLinks(
       active: machine ? pathname === `/dashboard/machines/${machine.id}/chat` : false,
       disabled: !machine,
     },
-    ...(isAdmin
-      ? [{
-          label: "Skills",
-          href: skillsHref,
-          icon: Layers3Icon,
-          active: pathname === "/dashboard/skills",
-        }]
-      : []),
+    {
+      label: "Skills",
+      href: skillsHref,
+      icon: Layers3Icon,
+      active: pathname === "/dashboard/skills",
+    },
   ];
 }
 
@@ -219,7 +216,7 @@ function DashboardAppSection({
   viewerEmail?: string | null;
 }) {
   const selectedMachine = activeMachine ?? machines[0] ?? null;
-  const links = sectionLinks(pathname, selectedMachine, saasMode, isAdmin);
+  const links = sectionLinks(pathname, selectedMachine, saasMode);
   const scrollRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -321,14 +318,12 @@ function AgentAppSection({
   isChatSurface,
   machine,
   machines,
-  showSkills,
   viewerEmail,
 }: {
   children: React.ReactNode;
   isChatSurface: boolean;
   machine: MachineNavItem;
   machines: MachineNavItem[];
-  showSkills: boolean;
   viewerEmail?: string | null;
 }) {
   const pathname = usePathname() ?? "";
@@ -364,7 +359,6 @@ function AgentAppSection({
           mobileOpen={mobileOpen}
           onCollapsedChange={setCollapsed}
           onMobileOpenChange={setMobileOpen}
-          showSkills={showSkills}
           viewerEmail={viewerEmail}
         />
         <main
@@ -421,7 +415,6 @@ export function DashboardShell({
           isChatSurface={isChatSurface}
           machine={activeMachine}
           machines={machines}
-          showSkills={isAdmin}
           viewerEmail={viewerEmail}
         >
           {children}

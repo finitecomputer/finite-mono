@@ -555,7 +555,18 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
       await productNav.locator('[aria-disabled="true"]', { hasText: "Brain" }).waitFor({ state: "visible" });
       assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
-      assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
+      const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
+      await skillsLink.waitFor({ state: "visible" });
+      assert.equal(
+        await skillsLink.getAttribute("href"),
+        "/dashboard/skills?machine=runtime_completed-oslo-bot"
+      );
+      await skillsLink.click();
+      await page.waitForURL(/\/dashboard\/skills\?machine=runtime_completed-oslo-bot$/u);
+      await page.getByRole("heading", { name: "Skills", exact: true }).waitFor({ state: "visible" });
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot`
+      );
       await page
         .getByRole("navigation", { name: "Agent, topics, and chats" })
         .waitFor({ state: "visible" });

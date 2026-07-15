@@ -2,24 +2,13 @@ import {
   ExternalLinkIcon,
   Layers3Icon,
 } from "lucide-react";
-import { redirect } from "next/navigation";
 
 import { SkillsCatalogBrowser } from "@/components/skills-catalog-browser";
-import { loadCoreMe } from "@/lib/core-client";
-import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import { loadBaselineSkillsCatalog } from "@/lib/skills-catalog";
 
 export const dynamic = "force-dynamic";
 
 export default async function SkillsDashboardPage() {
-  const [viewer, core] = await Promise.all([
-    loadOptionalViewerContext(),
-    loadCoreMe({ cacheMode: "swr" }),
-  ]);
-  if (core.configured && !viewer.isAdmin) {
-    redirect("/dashboard");
-  }
-
   const model = await loadBaselineSkillsCatalog().catch((error) => {
     console.error("[skills] failed to load skills catalog", error);
     return null;
