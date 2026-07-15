@@ -112,11 +112,12 @@ Runtime controls use a separate versioned `runtime_capabilities.v1` envelope
 persisted on the Runtime and advertised by the worker. Core leases an operation
 only when both envelopes explicitly enable that exact kind; missing or empty
 advertisements enable no controls. Docker, Apple Container, Enclavia, and Phala
-currently advertise restart and stop. Kata additionally advertises runtime
-upgrade. Recover-known-good and Runtime Retirement are false everywhere, and
-Phala upgrade remains false until its opaque environment-encryption boundary is
-implemented. A draining worker rejects new creation leases but may still
-service its explicitly advertised controls.
+currently advertise restart and stop. Kata additionally advertises the
+image-owned recover-known-good operation and Runtime Upgrade. Runtime
+Retirement is false everywhere, and Phala upgrade remains false until its
+opaque environment-encryption boundary is implemented. A draining worker
+rejects new creation leases but may still service its explicitly advertised
+controls.
 
 The expand migration backfills only already-running, Core-created Kata rows.
 The exact legacy Kata runner credential supplies the same narrow envelope for

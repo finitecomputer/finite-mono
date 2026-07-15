@@ -33,6 +33,9 @@ commands against the owning source folder before relying on them.
 - [`finite-agentd` is the agent-owned platform boundary](adr/0003-agentd-is-the-agent-owned-platform-boundary.md):
   typed agent-local commands and supervision over Finite Chat without widening
   Runner or the outbound-only Runtime Management Pipe.
+- [Production baseline — Sites and Agent Runtime rollout](runs/production-baseline-2026-07-15.md):
+  the first-cohort known-good production checkpoint, accepted deploy/rollout
+  behavior, regression gates, and the separately proposed recovery run.
 
 ## Imported Orientation Docs
 

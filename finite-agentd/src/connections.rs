@@ -322,16 +322,7 @@ impl ConnectionManager {
                 "redirect_uris": [request.redirect_uri],
             }
         });
-        let token = json!({
-            "token": request.access_token,
-            "refresh_token": request.refresh_token,
-            "token_uri": GOOGLE_TOKEN_URI,
-            "client_id": request.client_id,
-            "client_secret": request.client_secret,
-            "scopes": expected_scopes,
-            "universe_domain": "googleapis.com",
-            "account": "",
-        });
+        let token = google_authorized_user_token(&request, &expected_scopes);
         let metadata = json!({
             "email": request.connected_email.to_ascii_lowercase(),
             "connected_at_ms": now_ms(),
@@ -402,7 +393,6 @@ impl ConnectionManager {
             model,
         })
     }
-
     fn telegram_status(&self) -> Result<TelegramStatus, AgentdError> {
         let value = self.config.current_value(TELEGRAM_CONFIG_PATH)?;
         let object = value.as_object();
@@ -546,6 +536,20 @@ impl ConnectionManager {
             ))
         }
     }
+}
+
+fn google_authorized_user_token(request: &GoogleApplyRequest, scopes: &BTreeSet<String>) -> Value {
+    json!({
+        "type": "authorized_user",
+        "token": request.access_token,
+        "refresh_token": request.refresh_token,
+        "token_uri": GOOGLE_TOKEN_URI,
+        "client_id": request.client_id,
+        "client_secret": request.client_secret,
+        "scopes": scopes,
+        "universe_domain": "googleapis.com",
+        "account": "",
+    })
 }
 
 fn approved_offer(request_id: &str, path: &str, value: Value) -> HermesConfigOfferV1 {
@@ -723,6 +727,26 @@ mod tests {
     fn telegram_token_validation_matches_hermes_shape() {
         assert!(validate_telegram_token("123456789:abcdefghijklmnopqrstuvwxyzABCDEFGH").is_ok());
         assert!(validate_telegram_token("not-a-token").is_err());
+    }
+
+    #[test]
+    fn google_token_uses_the_standard_authorized_user_shape() {
+        let request = GoogleApplyRequest {
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            access_token: "access-token".to_owned(),
+            redirect_uri: "https://finite.example/google/callback".to_owned(),
+            connected_email: "person@example.com".to_owned(),
+            scopes: vec!["https://www.googleapis.com/auth/drive".to_owned()],
+        };
+        let scopes = request.scopes.iter().cloned().collect();
+
+        let token = google_authorized_user_token(&request, &scopes);
+
+        assert_eq!(token["type"], "authorized_user");
+        assert_eq!(token["refresh_token"], "refresh-token");
+        assert_eq!(token["scopes"][0], "https://www.googleapis.com/auth/drive");
     }
 
     #[test]
