@@ -30,8 +30,7 @@ def video_analyze_is_admitted() -> bool:
         quiet_mode=True,
     )
     return any(
-        definition.get("function", {}).get("name") == "video_analyze"
-        for definition in definitions
+        definition.get("function", {}).get("name") == "video_analyze" for definition in definitions
     )
 
 

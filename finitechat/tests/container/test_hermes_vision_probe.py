@@ -38,13 +38,11 @@ class HermesVisionProbeTest(unittest.TestCase):
             hermes_cli.mkdir()
             (hermes_cli / "__init__.py").write_text("", encoding="utf-8")
             (hermes_cli / "config.py").write_text(
-                "def load_config():\n"
-                "    return {}\n",
+                "def load_config():\n    return {}\n",
                 encoding="utf-8",
             )
             (hermes_cli / "plugins.py").write_text(
-                "def discover_plugins():\n"
-                "    return None\n",
+                "def discover_plugins():\n    return None\n",
                 encoding="utf-8",
             )
             (hermes_cli / "tools_config.py").write_text(
