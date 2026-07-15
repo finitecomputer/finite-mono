@@ -43,7 +43,14 @@ in
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box
     # (finitesitesd owns 8787). See modules/finitechat-server.nix.
     virtualHosts."chat.finite.computer".extraConfig = ''
-      reverse_proxy 127.0.0.1:8788
+      reverse_proxy 127.0.0.1:8788 {
+        # finitechat-server closes idle HTTP/1.1 connections before Caddy's
+        # two-minute default. Retire pooled connections first so POSTs never
+        # land on a stale upstream socket and surface as a spurious 502.
+        transport http {
+          keepalive 10s
+        }
+      }
     '';
 
     virtualHosts."api.finite.chat".extraConfig = ''
