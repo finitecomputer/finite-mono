@@ -68,14 +68,24 @@ At runtime creation, the trusted Runner can declare
 `FINITE_SPECIALIZATION_BUNDLE=aeon-multimodal` and provide the separate
 `FINITE_SPECIALIZATION_WORKER_API_KEY`. After Hermes prepares `config.yaml` and
 before Hermes starts, `finite-agentd` applies that bundle only when
-`auxiliary.vision` is unset or still Finite-owned. A user-owned profile is
-preserved. Automatic activation writes only native Hermes provider fields; it
-does not add capability or prompt-policy metadata. Runtime status reports the
-bundle identifier plus `desired` and `effective` booleans without serializing
-the credential. `effective` becomes true only after the installed
+`auxiliary.vision` is unset or still Finite-owned. It also adds
+`platform_toolsets.finitechat: [hermes-cli, video]` only when that platform
+toolset is absent; a user-owned toolset list is preserved rather than merged or
+replaced. Automatic activation writes native Hermes provider and toolset
+configuration only; it does not add capability or prompt-policy metadata.
+Runtime status reports the bundle identifier plus `desired` and `effective`
+booleans without serializing the credential. `effective` becomes true only
+after the running Hermes catalog admits `video_analyze` and the installed
 Hermes-native vision tool passes the fixed semantic probe for the current
 Hermes process generation. Matching configuration bytes alone are not
 sufficient, and a restart triggers a new probe.
+
+The Runner makes this admission solely from the canonical Finite Private
+`glm-5-2` profile. It has no box, user, project, or agent-name condition: every
+new runtime launched with that profile receives the bundle when its Runner is
+configured with the worker credential. A missing credential remains a
+non-blocking deployment configuration gap, so ordinary Finite Private launches
+continue without the bundle instead of failing creation.
 
 An AEON image reconciliation becomes effective only after Hermes restarts and
 its installed `vision_analyze_tool` returns exact semantic output for a fixed
