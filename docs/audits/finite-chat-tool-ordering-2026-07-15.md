@@ -5,6 +5,30 @@ Date: 2026-07-15
 Status: investigation only. No product code or production configuration was
 changed, and nothing was deployed.
 
+## Additional observation: final message appears one turn late
+
+After this audit was completed, Upgrade Canary 0715 exhibited a new symptom:
+the latest chat message did not appear until the user sent another message.
+This reportedly began during the day and had not yet been reproduced on other
+Agents when recorded. Treat it as an unconfirmed canary observation, not an
+established fleet-wide regression.
+
+It could be related to this audit if the final message is durably accepted but
+the resident bridge or dashboard subscription does not publish or apply the
+last update until another event arrives. It could also be unrelated—for
+example, a canary-specific connection, subscription, or refresh problem. The
+tool-ordering evidence does not establish either explanation: that issue
+projects received edit events into an older transcript position, whereas this
+new symptom may involve the final event not becoming visible at all.
+
+Before combining the fixes, reproduce this separately and compare four points
+for the missing final message: Hermes send completion, Core acceptance and
+sequence, the live subscription event, and the dashboard's local transcript.
+Refreshing before sending another message is also an important discriminator:
+if refresh reveals it, persistence is likely intact and live invalidation is
+the narrower suspect. Do not expand the tool-ordering fix unless that trace
+shows a shared cause.
+
 ## Executive summary
 
 The reported transcript is the result of three independent bugs at the Hermes
