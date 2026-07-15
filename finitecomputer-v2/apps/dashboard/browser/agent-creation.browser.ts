@@ -553,7 +553,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      await productNav.getByRole("link", { name: "Brain", exact: true }).waitFor({ state: "visible" });
+      await productNav.locator('[aria-disabled="true"]', { hasText: "Brain" }).waitFor({ state: "visible" });
+      assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
       assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
       await page
         .getByRole("navigation", { name: "Agent, topics, and chats" })
@@ -775,7 +776,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         element.scrollTop = 120;
       });
       await page
-        .getByRole("link", { name: "Brain", exact: true })
+        .getByRole("navigation", { name: "Agent navigation" })
+        .locator('[aria-disabled="true"]', { hasText: "Brain" })
         .waitFor({ state: "visible" });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`

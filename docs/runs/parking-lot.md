@@ -10,7 +10,7 @@ One line per idea outside the active run. This is not a queue; an item becomes w
 - 2026-07-10 — In the customer-facing run, add Finite Sites list/share only after deciding whose Projects or Outputs appear and which Principal may mutate sharing; see `docs/open-questions.md`.
 - 2026-07-10 — In the customer-facing run, replace the hidden normal-user Skills entry with a read-only canonical catalog and honest `finite skills sync` guidance; require a separate agent-owned contract before showing installed/sync state.
 - 2026-07-10 — Before customer admission, add a bounded stuck-launch escape only after defining timeout, cancellation, entitlement release, and provider-cleanup semantics; see `docs/open-questions.md`.
-- 2026-07-10 — Re-enable dashboard Brain only after resolving its Nostr Principal and Folder Key path; preserve the existing iframe/proxy work and finish an Electron signer bridge if Electron is chosen as the first usable human Brain client.
+- 2026-07-15 — Re-enable dashboard Brain only through the separately proposed [`Hosted Brain Production Readiness`](hosted-brain-production-readiness.md) run: publish the current binary, deploy Finite Identity, align Austin's UI, prove managed-email pairing and bounded Folder access, then pass production acceptance.
 - 2026-07-10 — Reduce the manual burden of provider/runtime credential rotation with a deliberate issue/revoke/replace workflow; do not make retrospective rotation of the currently named low-sensitivity keys an internal-canary blocker.
 - 2026-07-10 — Quarantine or remove the legacy `finite-core/src/control_plane.rs` anti-pattern crate.
 - 2026-07-10 — Add a Kata-path equivalent of SaaS smoke coverage to automated CI.
