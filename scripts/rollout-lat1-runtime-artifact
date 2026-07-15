@@ -151,7 +151,8 @@ run_remote_bash() {
     printf -v quoted '%q' "$argument"
     remote_command+=" $quoted"
   done
-  ssh -o BatchMode=yes -- "$LAT1" "$remote_command"
+  # Never let SSH consume a caller's loop or process-substitution input.
+  ssh -n -o BatchMode=yes -- "$LAT1" "$remote_command"
 }
 
 run_remote_cli() {
