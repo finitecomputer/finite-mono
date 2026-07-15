@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import threading
@@ -45,6 +46,7 @@ STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
+FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def _load_local_env_defaults(path: Path | None = None) -> None:
@@ -530,6 +532,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
         raw_source = raw_event.get("source")
         source_data: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
+        authenticated_user_id = _string_or_none(source_data.get("user_id"))
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
         self._remember_inbound_chat_topic(room_id, segment_id, conversation_id)
@@ -540,8 +543,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
             chat_id=str(source_data.get("chat_id") or room_id),
             chat_name=_string_or_none(source_data.get("chat_name")),
             chat_type=str(source_data.get("chat_type") or "dm"),
-            user_id=_string_or_none(source_data.get("user_id")) or "finite-user",
-            user_name=_string_or_none(source_data.get("user_name")) or "Finite user",
+            user_id=authenticated_user_id or "finite-user",
+            user_name=_string_or_none(source_data.get("user_name")),
             thread_id=segment_id
             or _string_or_none(source_data.get("thread_id"))
             or conversation_id,
@@ -562,7 +565,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
             reply_to_message_id=_string_or_none(raw_event.get("reply_to_message_id")),
             reply_to_text=_string_or_none(raw_event.get("reply_to_text")),
             auto_skill=raw_event.get("auto_skill"),
-            channel_prompt=_string_or_none(raw_event.get("channel_prompt")),
+            channel_prompt=_finite_sender_channel_prompt(
+                authenticated_user_id,
+                raw_event.get("channel_prompt"),
+            ),
             internal=bool(raw_event.get("internal") or False),
         )
         activity_metadata = self._route_metadata(conversation_id, segment_id)
@@ -1317,6 +1323,21 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _finite_sender_channel_prompt(user_id: str | None, channel_prompt: Any) -> str | None:
+    existing = _string_or_none(channel_prompt)
+    if user_id is None or FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None:
+        return existing
+    sender_context = (
+        "Authenticated Finite Chat sender metadata for this turn: "
+        f"event.source.user_id is `{user_id}`. Use this exact identifier only when a "
+        "Finite tool or skill explicitly requests event.source.user_id; never substitute "
+        "a display name."
+    )
+    if existing is None:
+        return sender_context
+    return f"{sender_context}\n\n{existing}"
 
 
 def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
