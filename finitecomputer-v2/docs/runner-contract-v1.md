@@ -139,8 +139,11 @@ Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
 root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the
 bounded map, rejects Runtime-contract keys, exposes key names only in
 diagnostics, and transports values through each adapter's secret-safe channel.
-This restores the legacy shared tool-provider set without teaching Runner what
-FAL, xAI, or any product feature means. It is transitional host-wide bootstrap,
-not a replacement for Core-owned per-Project secret references. Runtime
-restart preserves the credential set already held by the Runtime; it does not
-silently rotate shared or inference credentials.
+Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` allowlist selects
+which entries are persisted in each new RuntimeSpec; Runner resolves only those
+references from the file. This restores the shared tool-provider set without
+giving Core the values or teaching Runner what FAL, xAI, or any product feature
+means. It is transitional host-wide bootstrap, not a replacement for
+Core-owned per-Project secret references. Runtime restart preserves the
+credential set already held by the Runtime; it does not silently rotate shared
+or inference credentials.

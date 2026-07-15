@@ -31,6 +31,18 @@
         FINITE_BRAIN_SERVER_URL = "https://finite.computer";
         FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
       };
+      # Names only. Core persists these references into every new RuntimeSpec;
+      # Runner resolves their values from /etc/finite/runtime-secrets.env.
+      FC_CORE_RUNTIME_SECRET_REFERENCES_JSON = builtins.toJSON [
+        "FAL_KEY"
+        "FIRECRAWL_API_KEY"
+        "XAI_API_KEY"
+        "X_API_BEARER_TOKEN"
+        "PERPLEXITY_API_KEY"
+        "ELEVENLABS_API_KEY"
+        "FRED_API_KEY"
+        "GOOGLE_PLACES_API_KEY"
+      ];
       # Public Stripe price id (ConfigMap value; not a secret).
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
     };
