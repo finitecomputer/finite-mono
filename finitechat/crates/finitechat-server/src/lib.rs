@@ -3006,9 +3006,9 @@ async fn sync_stream(
             .rooms
             .into_iter()
             .map(|room| SyncStreamRoomCursor {
+                seen_activity_received_at_ms: state.activity_highwater_for_room(&room.room_id),
                 room_id: room.room_id,
                 after_seq: room.after_seq,
-                seen_activity_received_at_ms: 0,
             })
             .collect(),
         inbox: request.inbox.map(|inbox| SyncStreamInboxCursor {

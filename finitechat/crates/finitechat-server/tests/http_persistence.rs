@@ -8183,6 +8183,97 @@ async fn sqlite_sync_stream_emits_coalesced_high_watermark_hints() {
 }
 
 #[tokio::test]
+async fn sqlite_sync_stream_does_not_replay_old_activity_after_reconnect() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-agent");
+    let room_id = "room-sync-stream-activity".to_owned();
+    let mls_group_id = "mls-sync-stream-activity".to_owned();
+    let app = persistent_app(&db_path);
+
+    let response = post_json(
+        app.clone(),
+        "/account-rooms/bootstrap",
+        &BootstrapAccountRoomRequest {
+            room_id: room_id.clone(),
+            mls_group_id: mls_group_id.clone(),
+            creator: alice.clone(),
+            protocol: RoomProtocol::default(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let first_activity =
+        ephemeral_activity_request(&room_id, &mls_group_id, &alice, 0, None, 1_000);
+    let response = post_json(app.clone(), "/activities", &first_activity).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = post_json(
+        app.clone(),
+        "/sync/stream",
+        &SyncStreamRequest {
+            rooms: vec![SyncWaitRoom {
+                room_id: room_id.clone(),
+                after_seq: 0,
+            }],
+            inbox: None,
+            heartbeat_ms: Some(60_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            read_next_sync_hint(&mut stream),
+        )
+        .await
+        .is_err(),
+        "activity that predates the stream must be the initial baseline"
+    );
+
+    let second_activity =
+        ephemeral_activity_request(&room_id, &mls_group_id, &alice, 0, None, 2_000);
+    let response = post_json(app.clone(), "/activities", &second_activity).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        read_next_sync_hint(&mut stream).await,
+        SyncHintEvent::ActivityChanged {
+            room_id: room_id.clone(),
+            received_at_ms: 2_000,
+        }
+    );
+    drop(stream);
+
+    let response = post_json(
+        app,
+        "/sync/stream",
+        &SyncStreamRequest {
+            rooms: vec![SyncWaitRoom {
+                room_id: room_id.clone(),
+                after_seq: 0,
+            }],
+            inbox: None,
+            heartbeat_ms: Some(60_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut reconnected = response.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            read_next_sync_hint(&mut reconnected),
+        )
+        .await
+        .is_err(),
+        "reconnecting must not replay the same activity hint"
+    );
+}
+
+#[tokio::test]
 async fn sqlite_sync_stream_wakes_zero_room_device_for_persisted_welcome() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
