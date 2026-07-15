@@ -61,6 +61,13 @@ def load_scopes():
 SCOPES = load_scopes()
 
 
+def authorized_user_json(credentials):
+    """Serialize one token shape accepted by google-auth and the pinned gws CLI."""
+    payload = json.loads(credentials.to_json())
+    payload["type"] = "authorized_user"
+    return json.dumps(payload)
+
+
 def granted_scopes():
     """Prefer the scopes already granted in the stored token, if present."""
     if not TOKEN_PATH.exists():
@@ -90,7 +97,7 @@ def get_credentials():
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), granted_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        atomic_private_write_text(TOKEN_PATH, creds.to_json())
+        atomic_private_write_text(TOKEN_PATH, authorized_user_json(creds))
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
         sys.exit(1)

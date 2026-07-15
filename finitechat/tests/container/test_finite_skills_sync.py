@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -287,6 +288,39 @@ class GoogleWorkspaceSkillPackagingTest(unittest.TestCase):
             self.assertIn(module, runtime_image_workflow)
         ensure_deps = setup.split("def _ensure_deps():", 1)[1].split("def check_auth():", 1)[0]
         self.assertNotIn("install_deps()", ensure_deps)
+
+    def test_google_credentials_are_durable_and_gws_compatible(self) -> None:
+        dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
+        scripts = GOOGLE_WORKSPACE_SKILL / "scripts"
+
+        self.assertIn(
+            "ENV GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/data/agent/hermes-home/gws",
+            dockerfile,
+        )
+        self.assertIn(
+            "ENV GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/data/agent/hermes-home/google_token.json",
+            dockerfile,
+        )
+        self.assertNotIn("/root/.hermes/plugins/finitechat", dockerfile)
+
+        class FakeCredentials:
+            @staticmethod
+            def to_json() -> str:
+                return json.dumps({"refresh_token": "refresh-token"})
+
+        sys.path.insert(0, str(scripts))
+        try:
+            for name in ("setup", "google_api"):
+                path = scripts / f"{name}.py"
+                spec = importlib.util.spec_from_file_location(f"test_google_{name}", path)
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                payload = json.loads(module.authorized_user_json(FakeCredentials()))
+                self.assertEqual(payload["type"], "authorized_user")
+                self.assertEqual(payload["refresh_token"], "refresh-token")
+        finally:
+            sys.path.remove(str(scripts))
 
 
 if __name__ == "__main__":

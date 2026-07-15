@@ -18,9 +18,10 @@ Working surfaces:
 ## Implementation Pass — 2026-07-13
 
 - UI-001: implemented a shared Agent navigation above Topics. Devices is no
-  longer exposed. Sites is deliberately visible-but-disabled until it has a
-  real product destination; Skills remains permission-gated by the existing
-  dashboard authorization rule.
+  longer exposed. Sites remains a Preview-from-chat destination rather than a
+  standalone list route; its authenticated private Preview path passed
+  production acceptance on 2026-07-15. Skills remains permission-gated by the
+  existing dashboard authorization rule.
 - UI-002: implemented. Preview is the only chat top-right action.
 - UI-003: deferred. The legacy interaction was traced, but the current Hosted
   Web Device API does not expose the active runtime's slash-command/skill
@@ -52,10 +53,10 @@ Working surfaces:
   include names, aliases, descriptions, argument hints, and CLI-only
   visibility. The dashboard can then implement legacy keyboard/filtering
   parity without routing a product feature through the legacy relay protocol.
-- **Product route/data contract required for Sites navigation:** chat Preview
-  already opens real site artifacts, but there is no agent-scoped Sites page.
-  The nav stays disabled until that destination and its authorization/data
-  contract exist.
+- **Standalone Sites route remains future work:** chat Preview opens real site
+  artifacts and the authenticated private Preview path is production-proven,
+  but there is no agent-scoped Sites list page. The nav stays non-linking until
+  that distinct list destination and its authorization/data contract exist.
 - **Frontend rearchitecture completed for UI-009:** the shell split is
   dashboard-only and does not change Core or runtime behavior. A later polish
   pass may lift the chat topic state into a shared route layout if seamless

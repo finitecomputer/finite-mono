@@ -87,7 +87,6 @@ COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbra
 COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
 COPY finitechat/containers/agent/finite.py /runtime/bin/finite
 
-COPY finitechat/integrations/hermes/finitechat /root/.hermes/plugins/finitechat
 COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat
 COPY finite-skills/skills /runtime/finite-skills
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
@@ -115,6 +114,8 @@ ENV FINITECHAT_HOME=/data/agent
 # Shared Finite identity contract: identity.json on the durable mount.
 ENV FINITE_HOME=/data/agent
 ENV HERMES_HOME=/data/agent/hermes-home
+ENV GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/data/agent/hermes-home/gws
+ENV GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/data/agent/hermes-home/google_token.json
 ENV FINITECHAT_WORKSPACE=/data/workspace
 ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private

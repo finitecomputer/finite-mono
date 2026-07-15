@@ -74,6 +74,13 @@ REQUIRED_PACKAGES = [
 REDIRECT_URI = "http://localhost:1"
 
 
+def authorized_user_json(credentials):
+    """Serialize one token shape accepted by google-auth and the pinned gws CLI."""
+    payload = json.loads(credentials.to_json())
+    payload["type"] = "authorized_user"
+    return json.dumps(payload)
+
+
 def granted_scopes():
     """Prefer the scopes already granted in the stored token, if present."""
     if not TOKEN_PATH.exists():
@@ -148,13 +155,19 @@ def check_auth():
         return False
 
     if creds.valid:
+        # Older Finite tokens predate the gws-compatible type discriminator.
+        # Normalize them when the standard preflight runs so the same durable
+        # credential works for both the Python helper and gws.
+        data = json.loads(TOKEN_PATH.read_text())
+        if data.get("type") != "authorized_user":
+            atomic_private_write_text(TOKEN_PATH, authorized_user_json(creds))
         print(f"AUTHENTICATED: Token valid at {TOKEN_PATH}")
         return True
 
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            atomic_private_write_text(TOKEN_PATH, creds.to_json())
+            atomic_private_write_text(TOKEN_PATH, authorized_user_json(creds))
             print(f"AUTHENTICATED: Token refreshed at {TOKEN_PATH}")
             return True
         except Exception as e:
@@ -295,7 +308,7 @@ def exchange_auth_code(code: str):
         sys.exit(1)
 
     creds = flow.credentials
-    atomic_private_write_text(TOKEN_PATH, creds.to_json())
+    atomic_private_write_text(TOKEN_PATH, authorized_user_json(creds))
     PENDING_AUTH_PATH.unlink(missing_ok=True)
     print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
 
