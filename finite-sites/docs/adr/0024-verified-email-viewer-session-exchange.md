@@ -1,5 +1,7 @@
 # Verified Email Viewer Sessions Reuse Sites Magic Links
 
+Amended by ADR 0026: issued Magic Links are reusable until expiry.
+
 The SaaS dashboard previews Finite Sites in an iframe. A signed-in account may
 already be on an output's email Share list, but an iframe cannot complete the
 ordinary email inbox flow conveniently. WorkOS proves the dashboard account's
@@ -21,12 +23,12 @@ email; it does not own Sites grants or Sites viewer sessions.
   succeeds only for a published `shared` output when the normalized email is
   already on that output's Share list. It never adds a Share or changes
   Visibility.
-- The response is the existing 15-minute, single-use Magic Link. No new
+- The response is the existing 15-minute, reusable Magic Link. No new
   durable session, account-to-Sites principal link, or dashboard-owned cookie
   scheme is introduced. Redeeming it sets Sites' existing Viewer Cookie and
   redirects to the validated `return_to` path.
 - Viewer-session issuance has a bounded per-output/email in-memory budget.
-  Durable login-token rows are pruned when consumed or expired, and at most
+  Durable login-token rows are pruned when expired, and at most
   eight simultaneously redeemable links are retained for one output/email.
   This permits reloads and a few concurrent tabs without turning token state
   into an unbounded database or memory surface.
@@ -43,7 +45,7 @@ email; it does not own Sites grants or Sites viewer sessions.
 Before calling Sites, the dashboard derives the verified email from its
 WorkOS session and asks Core whether that account can access the selected
 Agent Runtime. It validates the preview URL, calls Sites server-to-server,
-and gives only the one-use redeem URL to the iframe. Copy and open actions keep
+and gives only the bounded redeem URL to the iframe. Copy and open actions keep
 using the original output URL. The Sites service token never enters client
 JavaScript, Runtime state, chat, or logs.
 

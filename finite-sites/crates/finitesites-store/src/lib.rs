@@ -3010,8 +3010,8 @@ impl Store {
         let tx = self.conn.transaction()?;
 
         // Token rows are operational credentials, not an audit log. Prune
-        // consumed and expired rows on every issuance so ordinary use cannot
-        // accumulate them forever.
+        // legacy consumed rows and expired rows on every issuance so ordinary
+        // use cannot accumulate them forever.
         tx.execute(
             "DELETE FROM login_tokens WHERE used_at IS NOT NULL OR expires_at < ?1",
             params![now],
@@ -3019,7 +3019,7 @@ impl Store {
 
         // Keep a durable bound even if the process-local abuse limiter resets.
         // Removing the oldest outstanding links preserves the newest reloads
-        // and concurrent tabs while retaining one-time redemption semantics.
+        // and concurrent tabs while bounding reusable redemption credentials.
         let active_count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM login_tokens
              WHERE site_id = ?1 AND email = ?2 AND used_at IS NULL AND expires_at >= ?3",
@@ -3052,41 +3052,30 @@ impl Store {
         Ok(())
     }
 
-    /// Redeem a token exactly once. Marks it used in the same transaction
-    /// that validates it, so a replayed link cannot win a race.
+    /// Validate a viewer login token without consuming it.
+    ///
+    /// Tokens remain reusable until expiry. The `used_at IS NULL` predicate
+    /// keeps links consumed before reusable login links were introduced from
+    /// becoming valid again during an upgrade.
     pub fn redeem_login_token(
-        &mut self,
+        &self,
         token_hash: &str,
         now: u64,
     ) -> Result<(String, String), StoreError> {
-        let tx = self.conn.transaction()?;
-        let row: Option<(String, String, u64, Option<u64>)> = tx
+        let row: Option<(String, String, u64)> = self
+            .conn
             .query_row(
-                "SELECT site_id, email, expires_at, used_at FROM login_tokens WHERE token_hash = ?1",
+                "SELECT site_id, email, expires_at
+                 FROM login_tokens
+                 WHERE token_hash = ?1 AND used_at IS NULL",
                 params![token_hash],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get::<_, i64>(2)? as u64,
-                        row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u64)),
             )
             .optional()?;
-        let (site_id, email, expires_at, used_at) =
-            row.ok_or(StoreError::NotFound("login token"))?;
-        if used_at.is_some() {
-            return Err(StoreError::Conflict("login token already used"));
-        }
+        let (site_id, email, expires_at) = row.ok_or(StoreError::NotFound("login token"))?;
         if now > expires_at {
             return Err(StoreError::Conflict("login token expired"));
         }
-        tx.execute(
-            "UPDATE login_tokens SET used_at = ?1 WHERE token_hash = ?2",
-            params![now, token_hash],
-        )?;
-        tx.commit()?;
         Ok((site_id, email))
     }
 
@@ -4294,7 +4283,7 @@ mod tests {
     }
 
     #[test]
-    fn login_token_single_use_and_expiry() {
+    fn login_token_is_reusable_until_expiry() {
         let mut store = store_with_site("hello");
         let hash_a = "e".repeat(64);
         store
@@ -4305,10 +4294,11 @@ mod tests {
             (site_id.as_str(), email.as_str()),
             ("site_1", "a@example.com")
         );
-        assert!(matches!(
-            store.redeem_login_token(&hash_a, NOW + 11),
-            Err(StoreError::Conflict("login token already used"))
-        ));
+        let replayed = store.redeem_login_token(&hash_a, NOW + 11).unwrap();
+        assert_eq!(
+            replayed,
+            ("site_1".to_string(), "a@example.com".to_string())
+        );
 
         let hash_b = "f".repeat(64);
         store
@@ -4325,7 +4315,7 @@ mod tests {
     }
 
     #[test]
-    fn login_token_issuance_prunes_consumed_and_expired_rows() {
+    fn login_token_issuance_prunes_legacy_consumed_and_expired_rows() {
         let mut store = store_with_site("hello");
         let consumed = format!("{:064x}", 1);
         let expired = format!("{:064x}", 2);
@@ -4334,7 +4324,13 @@ mod tests {
         store
             .create_login_token(&consumed, "site_1", "a@example.com", NOW + 900, NOW)
             .unwrap();
-        store.redeem_login_token(&consumed, NOW + 1).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE login_tokens SET used_at = ?1 WHERE token_hash = ?2",
+                params![NOW + 1, consumed],
+            )
+            .unwrap();
         store
             .create_login_token(&expired, "site_1", "b@example.com", NOW + 1, NOW)
             .unwrap();

@@ -1367,8 +1367,9 @@ async fn full_publish_share_and_view_flow() {
             .unwrap()
             .to_string();
 
-        let replayed = server.agent.get(&link).call();
-        assert!(matches!(replayed, Err(ureq::Error::Status(400, _))));
+        let replayed = server.agent.get(&link).call().unwrap();
+        assert_eq!(replayed.status(), 303);
+        assert!(replayed.header("set-cookie").is_some());
 
         for _ in 0..3 {
             server
@@ -1496,7 +1497,7 @@ async fn verified_email_viewer_session_endpoint_is_disabled_without_its_service_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immediately() {
+async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
@@ -1630,10 +1631,15 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
                 .status(),
             303
         );
-        assert!(matches!(
-            server.agent.get(&latest_redeem_url).call(),
-            Err(ureq::Error::Status(400, _))
-        ));
+        assert_eq!(
+            server
+                .agent
+                .get(&latest_redeem_url)
+                .call()
+                .unwrap()
+                .status(),
+            303
+        );
 
         let mut second_project = project_init_request(false);
         second_project.config.project.slug = "second-preview-project".into();
@@ -1663,10 +1669,15 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
             server.agent.get(&wrong_site_url).call(),
             Err(ureq::Error::Status(400, _))
         ));
-        assert!(matches!(
-            server.agent.get(&wrong_site_session.redeem_url).call(),
-            Err(ureq::Error::Status(400, _))
-        ));
+        assert_eq!(
+            server
+                .agent
+                .get(&wrong_site_session.redeem_url)
+                .call()
+                .unwrap()
+                .status(),
+            303
+        );
 
         let session: VerifiedEmailViewerSessionResponse = json_body(
             server
@@ -1712,10 +1723,15 @@ async fn verified_email_viewer_session_reuses_one_time_login_and_revokes_immedia
             .unwrap()
             .to_string();
 
-        assert!(matches!(
-            server.agent.get(&session.redeem_url).call(),
-            Err(ureq::Error::Status(400, _))
-        ));
+        assert_eq!(
+            server
+                .agent
+                .get(&session.redeem_url)
+                .call()
+                .unwrap()
+                .status(),
+            303
+        );
         let clean_agent = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
         let page = clean_agent
             .get(&format!("{site_base}/"))
