@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
 
 export const CONNECTIONS_REQUEST_TIMEOUT_MS = 20_000;
+export const CONNECTIONS_MUTATION_TIMEOUT_MS = 60_000;
 export const CONNECTIONS_TIMEOUT_MESSAGE =
   "Your agent is taking longer than expected. Try again.";
 
@@ -49,11 +50,15 @@ export function ConnectionsPanel({
     setError(null);
     try {
       setStatus(
-        await connectionRequest(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(action),
-        })
+        await connectionRequest(
+          endpoint,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(action),
+          },
+          CONNECTIONS_MUTATION_TIMEOUT_MS
+        )
       );
     } catch (requestError) {
       setError(connectionErrorMessage(requestError));

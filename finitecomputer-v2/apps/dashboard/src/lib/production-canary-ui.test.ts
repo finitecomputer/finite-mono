@@ -4,6 +4,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  CONNECTIONS_MUTATION_TIMEOUT_MS,
+  CONNECTIONS_REQUEST_TIMEOUT_MS,
   CONNECTIONS_TIMEOUT_MESSAGE,
   ConnectionsPanel,
   connectionErrorMessage,
@@ -83,6 +85,14 @@ test("Connections stops waiting at its browser deadline and offers a retry", asy
   assert.ok(caught instanceof Error);
   assert.equal(connectionErrorMessage(caught), CONNECTIONS_TIMEOUT_MESSAGE);
   assert.match(CONNECTIONS_TIMEOUT_MESSAGE, /Try again/u);
+});
+
+test("Connections mutations outlive the hosted runtime command deadline", () => {
+  assert.equal(CONNECTIONS_REQUEST_TIMEOUT_MS, 20_000);
+  assert.ok(
+    CONNECTIONS_MUTATION_TIMEOUT_MS > 45_000,
+    "mutations must not abort while the server is still waiting for Hermes to restart"
+  );
 });
 
 test("Connections keeps safe server errors and hides unknown failures", () => {
