@@ -425,9 +425,11 @@ async fn probe_hermes_vision(
         .map_err(|_| AgentdError::Config("Hermes vision probe result was invalid".to_owned()))?;
     if result.get("success").and_then(Value::as_bool) != Some(true)
         || result.get("analysis").and_then(Value::as_str) != Some("RED")
+        || result.get("video_analyze").and_then(Value::as_bool) != Some(true)
     {
         return Err(AgentdError::Config(
-            "Hermes auxiliary.vision did not return exact RED".to_owned(),
+            "Hermes did not admit video_analyze and return exact RED through auxiliary.vision"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -1169,7 +1171,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\ntest -f \"$HERMES_HOME/config.yaml\" || exit 2\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\"}}'\n",
+                "#!/bin/sh\ntest -f \"$HERMES_HOME/config.yaml\" || exit 2\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":true}}'\n",
                 AEON_HERMES_PROBE_MARKER
             ),
         )
@@ -1187,7 +1189,26 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' 'WORKER_DIRECT_HEALTHY RED'\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"BLUE\"}}'\n",
+                "#!/bin/sh\nprintf '%s\\n' 'WORKER_DIRECT_HEALTHY RED'\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"BLUE\",\"video_analyze\":true}}'\n",
+                AEON_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+
+        let error = probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn aeon_reconciliation_rejects_a_runtime_without_video_analyze() {
+        let home = tempfile::tempdir().unwrap();
+        let script = home.path().join("probe.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":false}}'\n",
                 AEON_HERMES_PROBE_MARKER
             ),
         )

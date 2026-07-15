@@ -11,6 +11,7 @@ use crate::AgentdError;
 use crate::ledger::{Ledger, hex_digest};
 
 pub const VISION_CONFIG_PATH: &str = "auxiliary.vision";
+pub const FINITECHAT_TOOLSETS_CONFIG_PATH: &str = "platform_toolsets.finitechat";
 pub const MODEL_CONFIG_PATH: &str = "model";
 pub const TELEGRAM_CONFIG_PATH: &str = "gateway.platforms.telegram";
 pub const DEFAULT_AEON_SPECIALIZATION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
@@ -391,49 +392,80 @@ impl ConfigManager {
         validate: impl FnOnce() -> Result<(), AgentdError>,
     ) -> Result<SpecializationReconcileResultV1, AgentdError> {
         validate_aeon_desired_state(desired)?;
-        let current = self.current_value(VISION_CONFIG_PATH)?;
+        let (before_bytes, mut document) = self.load_document()?;
+        let current = value_at_path(&document, VISION_CONFIG_PATH)
+            .cloned()
+            .unwrap_or(Value::Null);
         let target = aeon_specialization_provider_target(desired, &current)?;
-        if current == target {
-            return Ok(SpecializationReconcileResultV1 {
-                proposal_id: desired.proposal_id.clone(),
-                applied: false,
-                already_applied: true,
-                effective_matches_desired: true,
-                model_alias: desired.model_alias.clone(),
-                worker_base_url: desired.worker_base_url.clone(),
-                capabilities: desired.capabilities.clone(),
-                prompt_versions: desired.prompt_versions.clone(),
-                normalization_limits: desired.normalization_limits.clone(),
+        let vision_changed = current != target;
+        let vision_owned = self
+            .ledger
+            .config_ownership(VISION_CONFIG_PATH)?
+            .is_some_and(|record| {
+                value_hash(&current).is_ok_and(|hash| hash == record.applied_hash)
             });
-        }
-
-        let offer = HermesConfigOfferV1 {
-            proposal_id: desired.proposal_id.clone(),
-            path: VISION_CONFIG_PATH.to_owned(),
-            policy: ConfigOfferPolicyV1::ApplyIfUnset,
-            approved: false,
-            value: target.clone(),
-        };
-        let applied = self.apply(&offer, || {
-            validate()?;
-            if self.current_value(VISION_CONFIG_PATH)? != target {
-                return Err(AgentdError::Config(
-                    "Hermes specialization read-back did not match desired state".to_owned(),
+        if vision_changed {
+            let offer = HermesConfigOfferV1 {
+                proposal_id: desired.proposal_id.clone(),
+                path: VISION_CONFIG_PATH.to_owned(),
+                policy: ConfigOfferPolicyV1::ApplyIfUnset,
+                approved: false,
+                value: target.clone(),
+            };
+            if let Some(conflict) = self.preview(&offer)?.conflict {
+                return Err(AgentdError::ConfigConflict(conflict));
+            }
+            if self.ledger.config_history(&desired.proposal_id)?.is_some() {
+                return Err(AgentdError::ConfigConflict(
+                    "the specialization proposal was already applied and its configuration changed"
+                        .to_owned(),
                 ));
             }
-            Ok(())
-        })?;
-        Ok(SpecializationReconcileResultV1 {
-            proposal_id: desired.proposal_id.clone(),
-            applied: applied.applied,
-            already_applied: applied.already_applied,
-            effective_matches_desired: true,
-            model_alias: desired.model_alias.clone(),
-            worker_base_url: desired.worker_base_url.clone(),
-            capabilities: desired.capabilities.clone(),
-            prompt_versions: desired.prompt_versions.clone(),
-            normalization_limits: desired.normalization_limits.clone(),
-        })
+            set_value_at_path(&mut document, VISION_CONFIG_PATH, target.clone())?;
+        }
+
+        let video_toolset_changed = if desired.capabilities.video {
+            let changed = ensure_finitechat_video_toolset(&mut document)?;
+            if changed && !vision_changed && !vision_owned {
+                return Err(AgentdError::ConfigConflict(
+                    "the existing AEON profile is not Finite-owned; Finite will not alter its Finite Chat toolsets"
+                        .to_owned(),
+                ));
+            }
+            changed
+        } else {
+            false
+        };
+        if !vision_changed && !video_toolset_changed {
+            return Ok(startup_specialization_result(desired, false));
+        }
+
+        let rendered = serde_yaml::to_string(&document)?;
+        self.atomic_write(rendered.as_bytes())?;
+        if let Err(error) = validate() {
+            self.atomic_write(&before_bytes)?;
+            return Err(error);
+        }
+        if !self.startup_aeon_specialization_matches(desired)? {
+            self.atomic_write(&before_bytes)?;
+            return Err(AgentdError::Config(
+                "Hermes specialization read-back did not match the provider and video toolset contract"
+                    .to_owned(),
+            ));
+        }
+        if vision_changed {
+            let applied_hash = value_hash(&target)?;
+            if let Err(error) = self.ledger.record_config_apply(
+                &desired.proposal_id,
+                VISION_CONFIG_PATH,
+                &before_bytes,
+                &applied_hash,
+            ) {
+                self.atomic_write(&before_bytes)?;
+                return Err(error);
+            }
+        }
+        Ok(startup_specialization_result(desired, true))
     }
 
     pub fn aeon_specialization_matches(
@@ -477,8 +509,14 @@ impl ConfigManager {
         desired: &AeonSpecializationDesiredStateV1,
     ) -> Result<bool, AgentdError> {
         validate_aeon_desired_state(desired)?;
-        let current = self.current_value(VISION_CONFIG_PATH)?;
-        Ok(current == aeon_specialization_provider_target(desired, &current)?)
+        let (_bytes, document) = self.load_document()?;
+        let current = value_at_path(&document, VISION_CONFIG_PATH)
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok(
+            current == aeon_specialization_provider_target(desired, &current)?
+                && (!desired.capabilities.video || finitechat_video_toolset_is_enabled(&document)),
+        )
     }
 
     fn load_document(&self) -> Result<(Vec<u8>, Value), AgentdError> {
@@ -513,6 +551,67 @@ impl ConfigManager {
         File::open(parent)?.sync_all()?;
         Ok(())
     }
+}
+
+fn startup_specialization_result(
+    desired: &AeonSpecializationDesiredStateV1,
+    applied: bool,
+) -> SpecializationReconcileResultV1 {
+    SpecializationReconcileResultV1 {
+        proposal_id: desired.proposal_id.clone(),
+        applied,
+        already_applied: !applied,
+        effective_matches_desired: true,
+        model_alias: desired.model_alias.clone(),
+        worker_base_url: desired.worker_base_url.clone(),
+        capabilities: desired.capabilities.clone(),
+        prompt_versions: desired.prompt_versions.clone(),
+        normalization_limits: desired.normalization_limits.clone(),
+    }
+}
+
+fn ensure_finitechat_video_toolset(document: &mut Value) -> Result<bool, AgentdError> {
+    let root = document
+        .as_object_mut()
+        .ok_or_else(|| AgentdError::Config("Hermes config root must be an object".to_owned()))?;
+    let platform_toolsets = match root.entry("platform_toolsets".to_owned()) {
+        serde_json::map::Entry::Vacant(entry) => entry.insert(json!({})),
+        serde_json::map::Entry::Occupied(entry) => entry.into_mut(),
+    };
+    let platform_toolsets = platform_toolsets
+        .as_object_mut()
+        .ok_or_else(|| AgentdError::Config("platform_toolsets must be an object".to_owned()))?;
+    let Some(finitechat) = platform_toolsets.get("finitechat") else {
+        platform_toolsets.insert("finitechat".to_owned(), json!(["hermes-cli", "video"]));
+        return Ok(true);
+    };
+    let finitechat = finitechat.as_array().ok_or_else(|| {
+        AgentdError::Config("platform_toolsets.finitechat must be a list of strings".to_owned())
+    })?;
+    if !finitechat.iter().all(Value::is_string) {
+        return Err(AgentdError::Config(
+            "platform_toolsets.finitechat must be a list of strings".to_owned(),
+        ));
+    }
+    if finitechat
+        .iter()
+        .any(|toolset| toolset.as_str() == Some("video"))
+    {
+        return Ok(false);
+    }
+    Err(AgentdError::ConfigConflict(
+        "Finite Chat toolsets are user-owned and do not enable Hermes video analysis".to_owned(),
+    ))
+}
+
+fn finitechat_video_toolset_is_enabled(document: &Value) -> bool {
+    value_at_path(document, FINITECHAT_TOOLSETS_CONFIG_PATH)
+        .and_then(Value::as_array)
+        .is_some_and(|toolsets| {
+            toolsets
+                .iter()
+                .any(|toolset| toolset.as_str() == Some("video"))
+        })
 }
 
 fn aeon_specialization_target(
@@ -1062,6 +1161,13 @@ mod tests {
             manager.current_value(VISION_CONFIG_PATH).unwrap()["extra_body"].is_null(),
             "startup activation must remain a plain Hermes provider profile"
         );
+        assert_eq!(
+            manager
+                .current_value(FINITECHAT_TOOLSETS_CONFIG_PATH)
+                .unwrap(),
+            json!(["hermes-cli", "video"]),
+            "the startup bundle must opt Finite Chat into the native video tool"
+        );
 
         let after_first_apply = fs::read(manager.path()).unwrap();
         let repeated = manager
@@ -1086,6 +1192,55 @@ mod tests {
 
         assert!(matches!(error, AgentdError::ConfigConflict(_)));
         assert_eq!(fs::read(manager.path()).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn startup_aeon_activation_preserves_user_owned_finitechat_toolsets() {
+        let (_directory, manager) = manager();
+        let original = "platform_toolsets:\n  finitechat: [hermes-cli, vision]\nauxiliary: {}\n";
+        fs::write(manager.path(), original).unwrap();
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-custom-tools");
+        desired.worker_api_key = Some("dedicated-worker-secret".to_owned());
+
+        let error = manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap_err();
+
+        assert!(matches!(error, AgentdError::ConfigConflict(_)));
+        assert_eq!(fs::read(manager.path()).unwrap(), original.as_bytes());
+    }
+
+    #[test]
+    fn startup_aeon_activation_migrates_its_existing_profile_to_video_admission() {
+        let (_directory, manager) = manager();
+        let mut desired = AeonSpecializationDesiredStateV1::canonical("runtime-aeon-owned-tools");
+        desired.worker_api_key = Some("dedicated-worker-secret".to_owned());
+        manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap();
+
+        let (before, mut document) = manager.load_document().unwrap();
+        set_value_at_path(&mut document, "platform_toolsets", json!({})).unwrap();
+        manager
+            .atomic_write(serde_yaml::to_string(&document).unwrap().as_bytes())
+            .unwrap();
+        assert_ne!(fs::read(manager.path()).unwrap(), before);
+
+        let migrated = manager
+            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
+            .unwrap();
+        assert!(migrated.applied);
+        assert!(
+            manager
+                .startup_aeon_specialization_matches(&desired)
+                .unwrap()
+        );
+        assert_eq!(
+            manager
+                .current_value(FINITECHAT_TOOLSETS_CONFIG_PATH)
+                .unwrap(),
+            json!(["hermes-cli", "video"])
+        );
     }
 
     #[test]

@@ -71,7 +71,17 @@ auxiliary:
     api_key: ${AEON_API_KEY}
     model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
     timeout: 120
+platform_toolsets:
+  finitechat:
+    - hermes-cli
+    - video
 ```
+
+`video` is an explicit Hermes opt-in. The `hermes-cli` base preserves the
+ordinary Finite Chat tool catalog; a bare `video` list would replace that
+catalog rather than extend it. Runtime admission should verify that the
+installed Hermes catalog actually contains `video_analyze`, since older Hermes
+images may not provide the native tool.
 
 The same rule applies to other specialization families: prefer a model or
 provider profile behind a Hermes-native capability. Add a new generic Hermes
