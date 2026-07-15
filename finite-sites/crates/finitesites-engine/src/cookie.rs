@@ -1,9 +1,10 @@
-//! Viewer cookies: an HMAC-signed `(site_id, email, expires_at)` triple.
+//! Viewer cookies: an HMAC-signed site-scoped viewer session.
 //!
 //! The cookie is scoped to one site id, so a cookie for `a.finite.chat`
 //! says nothing about `b.finite.chat` even though both are signed with the
 //! same server secret. Share-table membership is re-checked at view time;
-//! the cookie only proves "this email completed a magic link for this site".
+//! the cookie only proves that one email or Native Principal completed the
+//! bounded authentication ceremony for this site.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
@@ -15,22 +16,40 @@ type HmacSha256 = Hmac<Sha256>;
 /// Payload fields are joined with `\n`; emails and site ids cannot contain
 /// newlines (validated at the boundary), so the encoding is unambiguous.
 const FIELD_SEPARATOR: char = '\n';
+const PRINCIPAL_COOKIE_VERSION: &str = "2";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ViewerCookieSubject {
+    PrincipalId(String),
+    ExternalEmail(String),
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ViewerCookie {
     pub site_id: String,
-    pub email: String,
+    pub subject: ViewerCookieSubject,
     pub expires_at: u64,
 }
 
 impl ViewerCookie {
     pub fn sign(&self, secret: &[u8; 32]) -> String {
         assert!(!self.site_id.contains(FIELD_SEPARATOR));
-        assert!(!self.email.contains(FIELD_SEPARATOR));
-        let payload = format!(
-            "{}{FIELD_SEPARATOR}{}{FIELD_SEPARATOR}{}",
-            self.site_id, self.email, self.expires_at
-        );
+        let payload = match &self.subject {
+            ViewerCookieSubject::PrincipalId(principal_id) => {
+                assert!(!principal_id.contains(FIELD_SEPARATOR));
+                format!(
+                    "{PRINCIPAL_COOKIE_VERSION}{FIELD_SEPARATOR}{}{FIELD_SEPARATOR}principal{FIELD_SEPARATOR}{}{FIELD_SEPARATOR}{}",
+                    self.site_id, principal_id, self.expires_at
+                )
+            }
+            ViewerCookieSubject::ExternalEmail(email) => {
+                assert!(!email.contains(FIELD_SEPARATOR));
+                format!(
+                    "{}{FIELD_SEPARATOR}{}{FIELD_SEPARATOR}{}",
+                    self.site_id, email, self.expires_at
+                )
+            }
+        };
         let mut mac = HmacSha256::new_from_slice(secret).expect("hmac accepts 32-byte keys");
         mac.update(payload.as_bytes());
         let tag = mac.finalize().into_bytes();
@@ -64,13 +83,26 @@ impl ViewerCookie {
         }
 
         let payload_text = String::from_utf8(payload).ok()?;
-        let mut parts = payload_text.split(FIELD_SEPARATOR);
-        let site_id = parts.next()?;
-        let email = parts.next()?;
-        let expires_at: u64 = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
+        let fields: Vec<&str> = payload_text.split(FIELD_SEPARATOR).collect();
+        let (site_id, subject, expires_at) = match fields.as_slice() {
+            [
+                PRINCIPAL_COOKIE_VERSION,
+                site_id,
+                "principal",
+                principal_id,
+                expires_at,
+            ] if !principal_id.is_empty() => (
+                *site_id,
+                ViewerCookieSubject::PrincipalId((*principal_id).to_string()),
+                expires_at.parse().ok()?,
+            ),
+            [site_id, email, expires_at] if !email.is_empty() => (
+                *site_id,
+                ViewerCookieSubject::ExternalEmail((*email).to_string()),
+                expires_at.parse().ok()?,
+            ),
+            _ => return None,
+        };
         if site_id != expected_site_id {
             return None;
         }
@@ -79,7 +111,7 @@ impl ViewerCookie {
         }
         Some(ViewerCookie {
             site_id: site_id.to_string(),
-            email: email.to_string(),
+            subject,
             expires_at,
         })
     }
@@ -95,7 +127,7 @@ mod tests {
     fn cookie() -> ViewerCookie {
         ViewerCookie {
             site_id: "site_abc".into(),
-            email: "a@example.com".into(),
+            subject: ViewerCookieSubject::PrincipalId("pri_abc".into()),
             expires_at: 2_000,
         }
     }
@@ -117,5 +149,19 @@ mod tests {
         let tampered = format!("x{value}");
         assert!(ViewerCookie::verify(&SECRET, &tampered, "site_abc", 1_000).is_none());
         assert!(ViewerCookie::verify(&SECRET, "garbage", "site_abc", 1_000).is_none());
+    }
+
+    #[test]
+    fn legacy_email_cookie_still_verifies() {
+        let legacy = ViewerCookie {
+            site_id: "site_abc".into(),
+            subject: ViewerCookieSubject::ExternalEmail("a@example.com".into()),
+            expires_at: 2_000,
+        };
+        let value = legacy.sign(&SECRET);
+        assert_eq!(
+            ViewerCookie::verify(&SECRET, &value, "site_abc", 1_000),
+            Some(legacy)
+        );
     }
 }

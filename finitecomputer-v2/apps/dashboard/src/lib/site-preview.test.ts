@@ -71,6 +71,11 @@ test("viewer-session responses stay on the requested output and preserve return 
   const token = "ab".repeat(32);
   const redeemUrl = `https://hello.finite.chat/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
   assert.equal(parseViewerSessionResponse({ redeem_url: redeemUrl }, target), redeemUrl);
+  const nativeRedeemUrl = `https://hello.finite.chat/_finite/auth?native_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
+  assert.equal(
+    parseViewerSessionResponse({ redeem_url: nativeRedeemUrl }, target),
+    nativeRedeemUrl
+  );
 
   for (const value of [
     `https://evil.example/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`,

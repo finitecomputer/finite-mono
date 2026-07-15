@@ -8,18 +8,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Form, Query, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION, SET_COOKIE,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION,
+    SET_COOKIE,
 };
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
 use finitesites_engine::{EngineError, ViewAccess};
-use finitesites_proto::limits::VIEWER_COOKIE_TTL_SECONDS;
+use finitesites_proto::dto::NativeViewerSessionRequest;
+use finitesites_proto::limits::{MAX_NATIVE_VIEWER_AUTH_BODY_BYTES, VIEWER_COOKIE_TTL_SECONDS};
+use finitesites_proto::nip98;
 use finitesites_store::{SiteKind, SiteRecord, SiteStatus};
 
 use crate::content_type::content_type_for_path;
@@ -33,6 +36,7 @@ const PARTITIONED_VIEWER_COOKIE_NAME: &str = "__Host-finite_site_auth_partitione
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/_finite/auth", get(redeem_link))
+        .route("/_finite/auth/native-session", post(native_session))
         .route("/_finite/request-link", post(request_link))
         .route("/_finite/logout", get(logout))
         // Any method: app sites proxy POST/PUT/etc.; static handling
@@ -94,6 +98,10 @@ fn html_response(status: StatusCode, body: String) -> Response {
 
 fn internal_page() -> Response {
     html_response(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found())
+}
+
+fn bad_request_page() -> Response {
+    html_response(StatusCode::BAD_REQUEST, pages::link_invalid())
 }
 
 fn generated_llms_response(body: String, method: &Method) -> Response {
@@ -498,9 +506,11 @@ async fn redeem_link(
             return internal_page();
         }
     };
-    let Some(token) = params.get("token") else {
+    let email_token = params.get("token");
+    let native_token = params.get("native_token");
+    if email_token.is_some() == native_token.is_some() {
         return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
-    };
+    }
     let return_to = match params.get("return_to") {
         Some(path) if crate::api::valid_return_to(path) => path.as_str(),
         Some(_) => return html_response(StatusCode::BAD_REQUEST, pages::link_invalid()),
@@ -509,7 +519,11 @@ async fn redeem_link(
 
     let redeemed = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        engine.redeem_login(token, now_unix())
+        match (email_token, native_token) {
+            (Some(token), None) => engine.redeem_login(token, now_unix()),
+            (None, Some(token)) => engine.redeem_native_viewer_link(token, now_unix()),
+            _ => unreachable!("token shape validated above"),
+        }
     };
     match redeemed {
         Ok((token_site, cookie_value)) => {
@@ -543,6 +557,105 @@ async fn redeem_link(
             internal_page()
         }
     }
+}
+
+async fn native_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if body.len() as u64 > MAX_NATIVE_VIEWER_AUTH_BODY_BYTES {
+        return bad_request_page();
+    }
+    let site = match resolve_request_site(&state, &headers) {
+        Ok(Some(site)) => site,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(error) => {
+            eprintln!("finitesitesd native auth site error: {error}");
+            return internal_page();
+        }
+    };
+    let Some(expected_url) = absolute_output_request_url(&state, &headers, &uri) else {
+        return bad_request_page();
+    };
+    let Some(auth_header) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid());
+    };
+    let now = now_unix();
+    let signer_pubkey =
+        match nip98::verify_auth_header(auth_header, &expected_url, "POST", Some(&body), now) {
+            Ok(pubkey) => pubkey,
+            Err(_) => return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid()),
+        };
+    let request: NativeViewerSessionRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return bad_request_page(),
+    };
+    if !crate::api::valid_native_viewer_session_request(&request) {
+        return bad_request_page();
+    }
+    let limiter_key = format!("native-viewer-ip:{}", client_key(&headers));
+    if !state
+        .login_limiter
+        .check_and_record(&limiter_key, crate::limiter::MAX_LINKS_PER_IP, now)
+    {
+        return html_response(StatusCode::TOO_MANY_REQUESTS, pages::link_invalid());
+    }
+    let result = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.native_viewer_session(&site, &signer_pubkey, &request.nonce, now)
+    };
+    match result {
+        Ok(cookie_value) => {
+            let mut response = Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(LOCATION, request.return_to)
+                .body(Body::empty())
+                .expect("static response builds");
+            for cookie in viewer_cookie_headers(
+                &cookie_value,
+                VIEWER_COOKIE_TTL_SECONDS,
+                &state.api_url,
+                &state.base_domain,
+            ) {
+                response.headers_mut().append(
+                    SET_COOKIE,
+                    HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
+                );
+            }
+            response
+        }
+        Err(EngineError::NotAuthorized) => {
+            html_response(StatusCode::UNAUTHORIZED, pages::link_invalid())
+        }
+        Err(EngineError::Conflict("native viewer nonce replay"))
+        | Err(EngineError::Validation(_)) => bad_request_page(),
+        Err(error) => {
+            eprintln!("finitesitesd native auth error: {error}");
+            internal_page()
+        }
+    }
+}
+
+fn absolute_output_request_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let host = headers.get(HOST)?.to_str().ok()?;
+    let is_output_host = site_label(host, &state.base_domain).is_some()
+        || site_label(host, &state.document_base_domain).is_some();
+    if !is_output_host {
+        return None;
+    }
+    let scheme = {
+        let engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.config().site_url_scheme.clone()
+    };
+    Some(format!(
+        "{scheme}://{host}{}",
+        uri.path_and_query()?.as_str()
+    ))
 }
 
 async fn logout(State(state): State<Arc<AppState>>) -> Response {

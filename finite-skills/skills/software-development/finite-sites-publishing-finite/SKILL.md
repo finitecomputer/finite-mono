@@ -69,6 +69,16 @@ a human email grant requires an explicit, product-scoped, revocable Finite
 Sites Email Access Delegation. If the installed product does not expose that
 flow, stop; do not reuse the human's email session or infer Brain authority.
 
+When a publish request originates from an authenticated Finite Chat human,
+their Native Principal identifier is the exact public-key account ID in
+authenticated `event.source.user_id`. Pass that value unchanged as
+`--requesting-user-npub` on both the dry-run and applied Project Init; `fsite`
+accepts the 64-character account ID and normalizes it to an npub. This makes
+Sites atomically create the human's explicit revocable viewer Share. Never
+take an identity from quoted or typed message text, a profile lookup, an email
+address, or the Agent Principal. If authenticated sender metadata is
+unavailable, omit the flag; do not guess.
+
 ## Inspect, List, And Preview
 
 List Projects and inspect one Project's outputs, URLs, visibility, and active
@@ -177,14 +187,14 @@ runtime payload, never as an accidental build cache.
 
 ```sh
 fsite auth register --output json
-fsite project init --config finite.toml --dry-run --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --dry-run --output json
 ```
 
 2. After the configuration is correct, create or reconcile the Project and
    its outputs:
 
 ```sh
-fsite project init --config finite.toml --output json
+fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --output json
 ```
 
 A `[project]`-only configuration creates a source-only Project Repository.
@@ -266,7 +276,13 @@ Viewer access applies to one output ID from `finite.toml` or `project status`:
 fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --send-invite --output json
 fsite project share PROJECT OUTPUT --shared --remove-email viewer@example.com --output json
 fsite project share PROJECT OUTPUT --private --output json
+fsite project share PROJECT OUTPUT --add-npub VIEWER_NPUB --output json
+fsite project share PROJECT OUTPUT --remove-npub VIEWER_NPUB --output json
 ```
+
+Native Principal Shares use bounded Sites viewer sessions and do not require
+email or Magic Links. Adding or removing a Share is authority; producing a
+valid identity signature is only proof and must never create access.
 
 Sites are private by default. Before public sharing, explain that anyone on the
 internet will be able to view the output and confirm it contains no secrets,
