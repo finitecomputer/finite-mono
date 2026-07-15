@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command lat1 deploy: prebuild on lat2, copy/switch lat1, verify by state.
 #
-# Usage: scripts/deploy-lat1 <exact-40-hex-mono-rev>
+# Usage: scripts/deploy-lat1 <exact-40-hex-mono-rev> [runtime rollout options]
 #
 # This automates STEPS 1-2 of infra/runbooks/deploy-core.md. Two hard-won
 # rules are baked in:
@@ -15,11 +15,17 @@ set -euo pipefail
 LAT1=root@64.34.82.77
 LAT2=ubuntu@finite-lat-2
 
-if [[ $# -ne 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
-  echo "usage: $0 <exact-40-hex-mono-rev>" >&2
+if [[ $# -lt 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: $0 <exact-40-hex-mono-rev> [runtime rollout options]" >&2
   exit 64
 fi
 REV="$1"
+shift
+ROLLOUT_ARGS=("$@")
+
+if [[ ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
+  scripts/rollout-lat1-runtime-artifact --validate-only "${ROLLOUT_ARGS[@]}"
+fi
 
 git fetch origin --prune
 git merge-base --is-ancestor "$REV" origin/main || {
@@ -133,3 +139,7 @@ curl -fsS -o /dev/null https://finite.computer/
 echo "==> DEPLOYED rev=$REV"
 echo "    system=$SYSTEM"
 echo "    dashboard image digest=$DIGEST"
+
+if [[ ${#ROLLOUT_ARGS[@]} -gt 0 ]]; then
+  scripts/rollout-lat1-runtime-artifact "${ROLLOUT_ARGS[@]}"
+fi

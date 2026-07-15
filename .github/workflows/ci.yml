@@ -148,6 +148,8 @@ jobs:
         run: nix develop --command just search check
       - name: Canonical Runtime image contract
         run: nix develop --command just runtime-image-contract
+      - name: lat1 existing-Runtime rollout contract
+        run: nix develop --command just lat1-rollout-contract
       - name: Stripe Price contract
         run: nix develop --command just stripe-price-contract
       - name: Evaluate production NixOS configuration

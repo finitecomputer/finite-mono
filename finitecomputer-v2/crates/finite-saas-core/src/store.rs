@@ -7,21 +7,22 @@ use crate::{
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
-    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
-    ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass, BillingOverview,
-    BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
+    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
+    AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
+    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
+    FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
+    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
+    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
@@ -29,10 +30,10 @@ use crate::{
     RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
     ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlKind,
-    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeRelayCredential, RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeStatusSnapshot,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimePlacement, RuntimeRelayCredential, RuntimeSpecEnvelope, RuntimeSpecIdentity,
+    RuntimeStatusSnapshot, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
     SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, append_provider_operation_transition,
@@ -621,6 +622,26 @@ impl CoreStore {
         }
     }
 
+    pub async fn admin_request_runtime_upgrade_exact(
+        &self,
+        input: AdminRuntimeUpgradeExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.admin_request_runtime_upgrade_exact(input).await,
+            Self::Postgres(store) => store.admin_request_runtime_upgrade_exact(input).await,
+        }
+    }
+
+    pub async fn runtime_control_request(
+        &self,
+        request_id: &str,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.runtime_control_request(request_id).await,
+            Self::Postgres(store) => store.runtime_control_request(request_id).await,
+        }
+    }
+
     pub async fn admin_issue_finite_private_friend_key(
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
@@ -1110,6 +1131,22 @@ impl MemoryCoreStore {
         state.admin_request_runtime_upgrade(input)
     }
 
+    pub async fn admin_request_runtime_upgrade_exact(
+        &self,
+        input: AdminRuntimeUpgradeExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut state = self.state.lock().await;
+        state.admin_request_runtime_upgrade_exact(input)
+    }
+
+    pub async fn runtime_control_request(
+        &self,
+        request_id: &str,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let state = self.state.lock().await;
+        state.runtime_control_request(request_id)
+    }
+
     pub async fn admin_issue_finite_private_friend_key(
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
@@ -1334,6 +1371,25 @@ impl PostgresCoreStore {
         let result = postgres_admin_request_runtime_upgrade(&tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
+    }
+
+    pub async fn admin_request_runtime_upgrade_exact(
+        &self,
+        input: AdminRuntimeUpgradeExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_request_runtime_upgrade_exact(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn runtime_control_request(
+        &self,
+        request_id: &str,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let client = self.client.lock().await;
+        postgres_runtime_control_request(&*client, request_id).await
     }
 
     pub async fn request_agent_creation(
@@ -5398,6 +5454,24 @@ const RUNTIME_CONTROL_REQUEST_COLUMNS: &str = "id, project_id, agent_runtime_id,
     status, runner_id, lease_token,
     lease_expires_at::text, failure_message, created_at::text, updated_at::text, completed_at::text";
 
+async fn postgres_runtime_control_request<C>(
+    client: &C,
+    request_id: &str,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    let sql = format!(
+        "SELECT {RUNTIME_CONTROL_REQUEST_COLUMNS} FROM runtime_control_requests WHERE id = $1"
+    );
+    let row = client
+        .query_opt(&sql, &[&request_id])
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::RuntimeControlRequestNotFound)?;
+    runtime_control_request_from_row(&row)
+}
+
 async fn locked_runtime_control_request<C>(
     client: &C,
     request_id: &str,
@@ -5439,7 +5513,7 @@ where
              JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
              WHERE link.project_id = $1 AND link.active
              LIMIT 1
-             FOR UPDATE OF runtime",
+             FOR UPDATE OF runtime, link",
             &[&project_id],
         )
         .await
@@ -5462,9 +5536,40 @@ async fn postgres_enqueue_runtime_control_request<C>(
 where
     C: GenericClient + Sync,
 {
+    postgres_enqueue_runtime_control_request_bound(
+        client,
+        project,
+        requested_by_user_id,
+        kind,
+        target_runtime_artifact_id,
+        now,
+        None,
+    )
+    .await
+}
+
+async fn postgres_enqueue_runtime_control_request_bound<C>(
+    client: &C,
+    project: &Project,
+    requested_by_user_id: &str,
+    kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
+    now: &str,
+    expected: Option<&RuntimeControlExpectedBinding>,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
     let runtime = postgres_active_runtime_for_project(client, &project.id)
         .await?
         .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    if expected.is_some_and(|expected| {
+        runtime.id != expected.agent_runtime_id
+            || runtime.source_host_id != expected.source_host_id
+            || runtime.source_machine_id != expected.source_machine_id
+    }) {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
     if !runtime.supports_runtime_control(kind) {
         return Err(CoreError::RuntimeControlUnsupported);
     }
@@ -5601,6 +5706,26 @@ async fn postgres_admin_request_runtime_control<C>(
 where
     C: GenericClient + Sync,
 {
+    postgres_admin_request_runtime_control_bound(
+        client,
+        input,
+        kind,
+        target_runtime_artifact_id,
+        None,
+    )
+    .await
+}
+
+async fn postgres_admin_request_runtime_control_bound<C>(
+    client: &C,
+    input: AdminRuntimeControlInput,
+    kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
+    expected: Option<&RuntimeControlExpectedBinding>,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
     let now = input.now.unwrap_or(current_time_iso()?);
     let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
         .ok_or(CoreError::MissingVerifiedEmail)?;
@@ -5613,13 +5738,14 @@ where
     let project = select_project(client, &input.project_id)
         .await?
         .ok_or(CoreError::ProjectNotFound)?;
-    let request = postgres_enqueue_runtime_control_request(
+    let request = postgres_enqueue_runtime_control_request_bound(
         client,
         &project,
         &admin_user.id,
         kind,
         target_runtime_artifact_id,
         &now,
+        expected,
     )
     .await?;
     let action = match kind {
@@ -5668,6 +5794,33 @@ where
         },
         RuntimeControlKind::Upgrade,
         Some(input.target_runtime_artifact_id),
+    )
+    .await
+}
+
+async fn postgres_admin_request_runtime_upgrade_exact<C>(
+    client: &C,
+    input: AdminRuntimeUpgradeExactInput,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    let expected = RuntimeControlExpectedBinding {
+        agent_runtime_id: input.expected_agent_runtime_id,
+        source_host_id: input.expected_source_host_id,
+        source_machine_id: input.expected_source_machine_id,
+    };
+    postgres_admin_request_runtime_control_bound(
+        client,
+        AdminRuntimeControlInput {
+            admin_verified_email: input.admin_verified_email,
+            admin_workos_user_id: input.admin_workos_user_id,
+            project_id: input.project_id,
+            now: input.now,
+        },
+        RuntimeControlKind::Upgrade,
+        Some(input.target_runtime_artifact_id),
+        Some(&expected),
     )
     .await
 }
@@ -7974,6 +8127,51 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn memory_runtime_control_request_reads_the_exact_request() {
+        let memory = MemoryCoreStore::default();
+        let expected = RuntimeControlRequest {
+            id: "runtime_ctl_exact".to_string(),
+            project_id: "project-exact".to_string(),
+            agent_runtime_id: "runtime-exact".to_string(),
+            source_host_id: "lat1".to_string(),
+            source_machine_id: "finite-kata-exact".to_string(),
+            requested_by_user_id: "user-admin".to_string(),
+            kind: RuntimeControlKind::Upgrade,
+            target_runtime_artifact_id: Some("artifact-v2".to_string()),
+            status: RuntimeControlRequestStatus::Running,
+            runner_id: Some("runner-lat1".to_string()),
+            lease_token: Some("lease-exact".to_string()),
+            lease_expires_at: Some("2026-07-15T01:05:00Z".to_string()),
+            failure_message: None,
+            created_at: "2026-07-15T01:00:00Z".to_string(),
+            updated_at: "2026-07-15T01:00:01Z".to_string(),
+            completed_at: None,
+        };
+        memory
+            .state
+            .lock()
+            .await
+            .runtime_control_requests
+            .insert(expected.id.clone(), expected.clone());
+        let store = CoreStore::Memory(memory);
+
+        assert_eq!(
+            store
+                .runtime_control_request("runtime_ctl_exact")
+                .await
+                .unwrap(),
+            expected
+        );
+        assert!(matches!(
+            store
+                .runtime_control_request("runtime_ctl_other")
+                .await
+                .unwrap_err(),
+            CoreError::RuntimeControlRequestNotFound
+        ));
+    }
+
     /// Ephemeral-Postgres-per-test harness.
     ///
     /// The Postgres-gated tests used to SHARE one database. Because the
@@ -9832,6 +10030,20 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let changed_binding = store
+                .admin_request_runtime_upgrade_exact(AdminRuntimeUpgradeExactInput {
+                    admin_verified_email: format!("admin-{run}@finite.vip"),
+                    admin_workos_user_id: format!("admin-workos-{run}"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: "runtime-replaced-after-plan".to_string(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_runtime_artifact_id: "artifact-rc-v2".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
             let upgrade = store
                 .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
                     admin_verified_email: format!("admin-{run}@finite.vip"),
@@ -9842,6 +10054,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            assert_eq!(
+                store.runtime_control_request(&upgrade.id).await.unwrap(),
+                upgrade,
+                "operator polling reads the exact persisted request"
+            );
             let conflicting_stop = store
                 .request_runtime_stop(RequestRuntimeStopInput {
                     verified_email: email.clone(),
