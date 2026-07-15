@@ -102,6 +102,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                   fi
                   exit 0
                 fi
+                if [[ ${FAKE_SSH_DRAIN_STDIN:-false} == true && " $* " != *" -n "* ]]; then
+                  cat >/dev/null
+                fi
                 if [[ -n ${FAKE_EXEC_RESULT:-} ]]; then
                   printf '%s\n' "$FAKE_EXEC_RESULT"
                   exit "${FAKE_EXEC_STATUS:-0}"
@@ -202,6 +205,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 ]
             )
             env, log = self.fake_ssh_environment(temp, plan)
+            env["FAKE_SSH_DRAIN_STDIN"] = "true"
             result = self.run_rollout(
                 *self.actor_args(),
                 "--roll-project-id",
