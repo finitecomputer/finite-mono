@@ -4151,7 +4151,6 @@ mod tests {
 
     #[test]
     fn run_once_binds_canonical_agent_email_before_completion() {
-        use std::io::Read;
         use std::sync::mpsc;
 
         const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
@@ -4160,16 +4159,13 @@ mod tests {
         let (sent, received) = mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut contact, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let bytes = contact.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /contact "));
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
             let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
             write_http_json(&mut contact, 200, &body);
 
             let (mut identity, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 8192];
-            let bytes = identity.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..bytes]).to_string();
+            let request = read_http_request(&mut identity);
             assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
             assert!(
                 request
@@ -4212,6 +4208,40 @@ mod tests {
         assert_eq!(runner.queue.completed.len(), 1);
         assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
         server.join().unwrap();
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let bytes = stream.read(&mut chunk).unwrap();
+            assert!(bytes > 0, "HTTP request ended before its body was complete");
+            request.extend_from_slice(&chunk[..bytes]);
+            assert!(
+                request.len() <= 16 * 1024,
+                "HTTP request fixture is too large"
+            );
+
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return String::from_utf8(request).unwrap();
+            }
+        }
     }
 
     #[test]
