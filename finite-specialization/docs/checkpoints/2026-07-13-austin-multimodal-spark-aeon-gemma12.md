@@ -2,7 +2,8 @@
 
 Date: 2026-07-13
 Status: active verified specialization
-Capability: `vision-input`, audio interpretation, sampled-video analysis
+Hermes product capability: `vision_analyze` through `vision-input`
+Raw worker capabilities: audio interpretation and sampled-video analysis
 Hermes surface: `auxiliary.vision`
 Backing plane: Spark public beta through Tyk
 
@@ -44,8 +45,9 @@ The shared worker selects the Gemma alias explicitly with
 
 Hermes `auxiliary.vision` sends image requests through the compatibility
 worker. Audio and sampled-video support are properties of the same Spark model
-route, but they are not additional Hermes auxiliary surfaces in this fragment.
-Maya owns speech generation; Gemma interprets media.
+route, but Hermes does not expose agent tools for either one today. Maya owns
+speech generation; voice-message transcription remains Hermes's own
+transcript-first flow.
 
 ## Rollback
 

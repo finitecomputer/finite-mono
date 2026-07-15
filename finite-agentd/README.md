@@ -45,9 +45,10 @@ Platform Channel:
 
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical
-model alias, independently declared image/audio/video capabilities, prompt
-versions, and normalization limits. Existing worker credentials are retained
-unless a replacement credential is supplied through the encrypted command.
+model alias, and worker capability metadata. That metadata is not the agent's
+tool list: automatic activation enables only image analysis today. Existing
+worker credentials are retained unless a replacement credential is supplied
+through the encrypted command.
 Finite-applied values carry a durable pre-image and ownership hash; validation
 failure restores the exact previous bytes, and later user/Hermes drift blocks
 automatic rollback. Remote commands fail closed unless the sending Finite Chat
@@ -56,13 +57,17 @@ Principal is in the durable authorization ledger.
 Specialization reconciliation is deliberately a model-profile operation. It
 does not register model-named tools, intercept attachments, or add behavioral
 instructions to the main agent. Hermes keeps its normal tool catalog and the
-main model decides when to use a native capability. The current AEON profile
-backs Hermes's `vision_analyze` and `video_analyze` tools through
-`auxiliary.vision`. The capability flags constrain requests accepted by the
-worker; they do not create a missing Hermes tool surface. Semantic audio
-interpretation therefore remains unavailable to the agent until Hermes has a
-generic instruction-preserving audio-analysis capability. This profile-first
-rule applies to every Finite specialization, not only AEON or vision.
+main model decides when to use a native capability.
+
+Current agent product truth:
+
+- `vision_analyze` is available and uses the AEON profile through `auxiliary.vision`.
+- `video_analyze` is unavailable because Hermes does not expose that tool.
+- Voice messages use Hermes's existing transcript-first audio flow, not AEON.
+
+The raw AEON worker can accept audio and sampled-video requests, but that does
+not create agent tools. This profile-first rule applies to every Finite
+specialization, not only AEON or vision.
 
 At runtime creation, the trusted Runner can declare
 `FINITE_SPECIALIZATION_BUNDLE=aeon-multimodal` and provide the separate

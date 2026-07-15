@@ -233,9 +233,10 @@ fn startup_specialization_desired_state(
         bundle.bundle_id,
         &credential_fingerprint[..16]
     ));
-    // Hermes owns transcript-first audio handling today. The startup bundle
-    // activates only its native image and sampled-video capability profile.
+    // The raw worker also supports audio and sampled video, but Hermes exposes
+    // only native image analysis today. Do not advertise unavailable tools.
     desired.capabilities.audio = false;
+    desired.capabilities.video = false;
     desired.worker_api_key = Some(bundle.worker_api_key.clone());
     desired
 }
@@ -1107,6 +1108,7 @@ mod tests {
         };
         let desired = startup_specialization_desired_state(&bundle);
         assert!(!desired.capabilities.audio);
+        assert!(!desired.capabilities.video);
         let verified_generation = AtomicU64::new(UNVERIFIED_HERMES_GENERATION);
         let mut processes = SupervisorStatus::default();
         processes.processes.insert(

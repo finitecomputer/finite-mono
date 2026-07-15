@@ -60,9 +60,11 @@ Hosted Web Device, Electron, or a native client starts the room independently.
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
 tools. Specializations are runtime configuration behind Hermes's existing
-tools. For example, an `auxiliary.vision` profile can route Hermes's built-in
-`vision_analyze` and `video_analyze` tools to the AEON worker while the main
-model remains responsible for deciding whether those tools are useful.
+tools. Today, an `auxiliary.vision` profile routes Hermes's built-in
+`vision_analyze` tool to the AEON worker while the main model remains
+responsible for deciding whether it is useful. Hermes does not currently expose
+`video_analyze`; raw worker support for sampled video does not make it an agent
+tool.
 
 ```yaml
 auxiliary:

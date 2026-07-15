@@ -1,7 +1,8 @@
 # Active Finite multimodal specialization fragment.
 #
 # Hermes auxiliary.vision uses the shared compatibility worker. The Spark alias
-# itself also accepts audio understanding and sampled-video input directly.
+# itself also accepts audio understanding and sampled-video input directly, but
+# Hermes currently exposes only image analysis to the agent.
 
 specialization:
   id: vision-input.spark-aeon-gemma12
