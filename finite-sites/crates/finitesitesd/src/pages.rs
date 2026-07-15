@@ -189,7 +189,7 @@ pub fn link_sent() -> String {
         "Check your email",
         "<h1>Check your email</h1>\
          <p>If that address has access to this site, a sign-in link is on \
-         its way. The link works once and expires in 15 minutes.</p>",
+         its way. The link can be reused and expires in 15 minutes.</p>",
     )
 }
 

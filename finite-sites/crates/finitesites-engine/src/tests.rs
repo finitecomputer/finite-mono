@@ -1188,10 +1188,14 @@ fn shared_site_full_magic_link_flow() {
             .unwrap(),
         ViewAccess::Allowed
     );
-    assert!(matches!(
-        fx.engine.redeem_login(&token, NOW + 61),
-        Err(EngineError::Validation(_))
-    ));
+    let (replayed_site, replayed_cookie) = fx.engine.redeem_login(&token, NOW + 61).unwrap();
+    assert_eq!(replayed_site.id, site.id);
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&replayed_cookie), NOW + 121)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
 
     fx.engine
         .set_sharing(

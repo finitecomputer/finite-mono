@@ -58,7 +58,7 @@ fn login_link_subject(site_name: &str) -> String {
 fn login_link_text(site_name: &str, url: &str) -> String {
     format!(
         "Open this link to view {site_name}:\n\n{url}\n\n\
-         The link works once and expires in 15 minutes. If you did not \
+         The link can be reused and expires in 15 minutes. If you did not \
          request it, you can ignore this email.\n"
     )
 }
@@ -83,10 +83,10 @@ fn viewer_invite_subject(site_name: &str) -> String {
 fn viewer_invite_text(invite: &ViewerInvite<'_>) -> String {
     format!(
         "You and your agent have been invited to view {site_name}.\n\n\
-         Open this one-time link to sign in:\n\n{login_url}\n\n\
+         Open this link to sign in:\n\n{login_url}\n\n\
          After signing in, view the site here:\n\n{site_url}\n\n\
          Agents should inspect these instructions first:\n\n{llms_url}\n\n\
-         The sign-in link works once and expires in 15 minutes. If it expires, \
+         The sign-in link can be reused and expires in 15 minutes. If it expires, \
          open the site URL and request a fresh link for {email}.\n",
         site_name = invite.site_name,
         login_url = invite.login_url,

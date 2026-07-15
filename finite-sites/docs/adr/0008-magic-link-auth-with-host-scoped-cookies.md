@@ -1,8 +1,11 @@
 # Magic-Link Auth With Host-Scoped HMAC Cookies
 
+Amended by ADR 0026: Magic Links are reusable until their existing 15-minute
+expiry instead of being consumed on first redemption.
+
 Viewing a shared site works like a Google Doc: enter your email on the
-site's own login page, click the mailed link, get a cookie. Tokens are
-single-use and expire in 15 minutes; cookies are HMAC-signed
+site's own login page, click the mailed link, get a cookie. Tokens expire in
+15 minutes; cookies are HMAC-signed
 `(site, email, expiry)` triples set on the site's host only, and the share
 table is re-checked on every request so revocation is immediate. The
 login endpoint answers identically whether or not the email has access.

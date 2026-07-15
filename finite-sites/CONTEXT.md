@@ -297,8 +297,8 @@ with exactly these meanings.
 - **Share**: one `(Project Output, Principal)` row granting view access to a
   served output. Removing it revokes access on the next request, even for live
   cookies.
-- **Magic Link**: a single-use, 15-minute login token mailed to a shared
-  email. Redeeming it sets a Viewer Cookie on the site's own host.
+- **Magic Link**: a reusable, 15-minute login token mailed to a shared email.
+  Each redemption sets a Viewer Cookie on the site's own host.
 - **Viewer Cookie**: an HMAC-signed `(Project Output, Principal, expiry)`
   proof, scoped to one Output host. Legacy email cookies retain their existing
   wire shape. A cookie proves a bounded session; the Share table still decides
@@ -311,8 +311,8 @@ with exactly these meanings.
 - **Verified Email Viewer Session**: a server-to-server exchange that accepts
   an email already verified by the SaaS account boundary and, only when that
   email is already on a shared output's Share list, mints the existing
-  single-use Magic Link. It never creates a Share. The browser redeems the
-  link on the output host and ordinary per-request Share checks preserve
+  reusable Magic Link. It never creates a Share. The browser redeems the link
+  on the output host and ordinary per-request Share checks preserve
   immediate revocation. Issuance and durable outstanding links are bounded per
   output/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
   `Partitioned` cookie carries iframe access.
