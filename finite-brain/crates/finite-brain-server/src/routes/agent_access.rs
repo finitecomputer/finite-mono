@@ -105,7 +105,7 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
         .sort_by(|left, right| left.npub.cmp(&right.npub));
     Ok(Json(BootstrapPersonalVaultForAgentResponse {
         vault,
-        pairing: agent_workspace_pairing_response(outcome.delegation, false),
+        pairing: agent_workspace_pairing_response(outcome.delegation, outcome.duplicate),
     }))
 }
 

@@ -3894,6 +3894,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_first_bootstrap_is_idempotent_after_user_first_pairing() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
+        let router = test_router();
+        let created = post_vault(
+            router.clone(),
+            &owner_keys,
+            &create_vault_body("personal", "personal"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+
+        let pairing_body = serde_json::json!({
+            "agentNpub": agent_npub,
+            "folderId": "agent-workspace",
+            "name": "Agent Workspace",
+            "path": "Agent Workspace",
+            "grants": [
+                folder_key_grant_value("user-first-owner-grant", 1, owner_npub.as_str()),
+                folder_key_grant_value("user-first-agent-grant", 1, agent_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-user-first-workspace",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("agent-workspace"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let paired = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/agent-workspace-pairings",
+            Some(pairing_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(paired.status(), StatusCode::OK);
+
+        let body = agent_first_bootstrap_body(
+            &owner_keys,
+            &agent_keys,
+            "bootstrap-after-user-first-pairing",
+            TEST_NOW + 60,
+        );
+        let converged = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            "/_admin/personal-vault-bootstrap",
+            Some(body.clone()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(converged.status(), StatusCode::OK);
+        let converged: serde_json::Value = read_json(converged).await;
+        assert_eq!(converged["pairing"]["duplicate"], true);
+
+        let pairings = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/_admin/vaults/personal/agent-workspace-pairings",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let pairings: AgentWorkspacePairingListResponse = read_json(pairings).await;
+        assert_eq!(pairings.pairings.len(), 1);
+        assert_eq!(pairings.pairings[0].audit.len(), 1);
+
+        let replay = authed_request(
+            router,
+            &agent_keys,
+            "POST",
+            "/_admin/personal-vault-bootstrap",
+            Some(body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            replay,
+            StatusCode::BAD_REQUEST,
+            "Personal Vault Bootstrap Authorization was already consumed",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn failed_agent_first_bootstrap_leaves_no_partial_state_or_consumption() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();

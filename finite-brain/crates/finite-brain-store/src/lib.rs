@@ -217,6 +217,7 @@ pub struct BootstrapPersonalAgentWorkspaceInput {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BootstrapPersonalAgentWorkspaceOutcome {
     pub delegation: BrainEmailAccessDelegation,
+    pub duplicate: bool,
 }
 
 /// Owner-authorized expansion of an active Agent Workspace delegation.

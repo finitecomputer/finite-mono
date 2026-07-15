@@ -80,6 +80,62 @@ impl BrainStore {
                 reason: "agent-first bootstrap names a different Personal Vault".to_owned(),
             });
         }
+        if let Some(delegation) = self.load_brain_email_access_delegation(
+            &input.pairing.vault_id,
+            &input.pairing.agent_npub,
+        )? {
+            let stored = self.load_vault(&input.pairing.vault_id)?;
+            let stored_folder = stored
+                .vault
+                .folders
+                .iter()
+                .find(|folder| folder.id == input.pairing.folder.id);
+            let stored_access = stored.folder_access.get(&input.pairing.folder.id);
+            let requested_access = BTreeSet::from([input.pairing.agent_npub.clone()]);
+            if delegation.id != input.pairing.delegation_id
+                || delegation.owner_npub != input.pairing.owner_npub
+                || delegation.workspace_folder_id != input.pairing.folder.id
+                || delegation.status != "active"
+                || stored_folder != Some(&input.pairing.folder)
+                || stored_access != Some(&requested_access)
+                || !stored
+                    .vault
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == input.pairing.agent_npub)
+            {
+                return Err(StoreError::BrokenInvariant {
+                    reason:
+                        "existing Agent Workspace delegation does not match requested bootstrap"
+                            .to_owned(),
+                });
+            }
+
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                r#"
+                INSERT INTO personal_vault_bootstrap_authorizations (
+                    authorization_id, authorization_event_id, owner_npub, agent_npub,
+                    vault_id, workspace_folder_id, expires_at, consumed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+                params![
+                    input.authorization_id,
+                    input.authorization_event_id,
+                    input.pairing.owner_npub.as_str(),
+                    input.pairing.agent_npub.as_str(),
+                    input.pairing.vault_id.as_str(),
+                    input.pairing.folder.id.as_str(),
+                    input.authorization_expires_at,
+                    input.consumed_at,
+                ],
+            )?;
+            tx.commit()?;
+            return Ok(BootstrapPersonalAgentWorkspaceOutcome {
+                delegation,
+                duplicate: true,
+            });
+        }
         let pairing_count = self.conn.query_row(
             "SELECT COUNT(*) FROM brain_email_access_delegations WHERE vault_id = ?1",
             params![input.pairing.vault_id.as_str()],
@@ -208,7 +264,10 @@ impl BrainStore {
             .ok_or_else(|| StoreError::BrokenInvariant {
                 reason: "created Brain Email Access Delegation could not be reloaded".to_owned(),
             })?;
-        Ok(BootstrapPersonalAgentWorkspaceOutcome { delegation })
+        Ok(BootstrapPersonalAgentWorkspaceOutcome {
+            delegation,
+            duplicate: false,
+        })
     }
 
     /// Atomically establish the initial restricted Agent Workspace and its durable delegation.
