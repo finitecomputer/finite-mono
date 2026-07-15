@@ -107,23 +107,14 @@ impl WorkerConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            image_canary_interval_seconds: Some(
-                non_empty_env("FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(300)
-                    .clamp(60, 3600),
+            image_canary_interval_seconds: canary_interval_from_env(
+                non_empty_env("FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS").as_deref(),
             ),
-            audio_canary_interval_seconds: Some(
-                non_empty_env("FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(300)
-                    .clamp(60, 3600),
+            audio_canary_interval_seconds: canary_interval_from_env(
+                non_empty_env("FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS").as_deref(),
             ),
-            video_canary_interval_seconds: Some(
-                non_empty_env("FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(300)
-                    .clamp(60, 3600),
+            video_canary_interval_seconds: canary_interval_from_env(
+                non_empty_env("FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS").as_deref(),
             ),
             max_audio_duration_seconds: non_empty_env(
                 "FINITE_SPECIALIZATION_MAX_AUDIO_DURATION_SECONDS",
@@ -2333,6 +2324,14 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn canary_interval_from_env(value: Option<&str>) -> Option<u64> {
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("off") => None,
+        Some(value) => Some(value.parse::<u64>().unwrap_or(300).clamp(60, 3600)),
+        None => Some(300),
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkerError {
     status: StatusCode,
@@ -3362,6 +3361,13 @@ mod tests {
         assert!(rendered.contains(
             "finite_specialization_canary_latency_milliseconds{capability=\"image\",model_alias=\"model-test\",surface=\"tyk-public-frontdoor\"} 900"
         ));
+    }
+
+    #[test]
+    fn canary_interval_allows_an_explicit_off_value() {
+        assert_eq!(canary_interval_from_env(Some("off")), None);
+        assert_eq!(canary_interval_from_env(Some("300")), Some(300));
+        assert_eq!(canary_interval_from_env(None), Some(300));
     }
 
     #[test]
