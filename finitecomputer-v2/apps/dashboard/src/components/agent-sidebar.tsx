@@ -29,7 +29,6 @@ export function AgentSidebar({
   mobileOpen,
   onCollapsedChange,
   onMobileOpenChange,
-  showSkills,
   viewerEmail,
 }: {
   collapsed: boolean;
@@ -39,7 +38,6 @@ export function AgentSidebar({
   mobileOpen: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onMobileOpenChange: (open: boolean) => void;
-  showSkills: boolean;
   viewerEmail?: string | null;
 }) {
   const pathname = usePathname() ?? "";
@@ -154,7 +152,6 @@ export function AgentSidebar({
           <AgentNavigation
             machineId={machineId}
             onNavigate={() => onMobileOpenChange(false)}
-            showSkills={showSkills}
           />
           <div className="finite-chat__sidebar-section-row">
             <span className="finite-chat__sidebar-section">Topics</span>

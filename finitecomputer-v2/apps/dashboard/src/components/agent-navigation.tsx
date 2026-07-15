@@ -28,11 +28,9 @@ import { cn } from "@/lib/utils";
 export function AgentNavigation({
   machineId,
   onNavigate,
-  showSkills,
 }: {
   machineId: string;
   onNavigate?: () => void;
-  showSkills: boolean;
 }) {
   const pathname = usePathname() ?? "";
   const root = `/dashboard/machines/${encodeURIComponent(machineId)}`;
@@ -62,14 +60,12 @@ export function AgentNavigation({
       active: false,
       note: "Temporarily unavailable",
     },
-    ...(showSkills
-      ? [{
-          label: "Skills",
-          href: `/dashboard/skills?machine=${encodeURIComponent(machineId)}`,
-          icon: WrenchIcon,
-          active: pathname === "/dashboard/skills",
-        }]
-      : []),
+    {
+      label: "Skills",
+      href: `/dashboard/skills?machine=${encodeURIComponent(machineId)}`,
+      icon: WrenchIcon,
+      active: pathname === "/dashboard/skills",
+    },
   ];
 
   return (
