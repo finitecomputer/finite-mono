@@ -62,7 +62,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: worker
-          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-14.5@sha256:ccf9df317c7d789abddd8dd8f4032fe28061991606e4c2ede7f69231fb8e5a8f
+          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-15.1@sha256:897498e565260686a2ff5bf6287d1ce977118c869d6ac901dcea6802255ed1b3
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -79,9 +79,9 @@ spec:
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
               value: "300"
             - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS
-              value: "300"
+              value: "off"
             - name: FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS
-              value: "300"
+              value: "off"
             - name: FINITE_SPECIALIZATION_MEDIA_TEMP_DIR
               value: /var/run/finite-specialization-media
             - name: FINITE_SPECIALIZATION_MEDIA_CONCURRENCY
