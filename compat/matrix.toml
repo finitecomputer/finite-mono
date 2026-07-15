@@ -39,6 +39,6 @@ notes = "Kata launches the immutable digest through a promoted Core artifact. Ex
 finitechat_server = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8788 behind chat.finite.computer" }
 finitechat_hosted_device = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :38918, shared server-only token with dashboard" }
 finite_saas_core = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :4200, native Postgres" }
-finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-15.3@sha256:e8b50909042fcd22bbdd1a3821db23ea6b56debc89fe8b32769a5b9afa825f9c", contract = "finite.computer, WorkOS + Stripe customer mode; Brain navigation disabled pending production readiness" }
+finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-15.2@sha256:8e81f701ef42d0cc6b07880cd2640dc486dc6d62dd7675d73576e00d89ec9234", contract = "finite.computer, WorkOS + Stripe customer mode; 2026-07-15.3 is pinned but not deployed because a full main switch would activate the deferred Brain Identity Authority control plane" }
 finitesitesd = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8787 behind api.finite.chat and site domains" }
 finite_brain = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :3015; WorkOS-gated /client and Brain-authorized /_admin through the dashboard proxy" }
