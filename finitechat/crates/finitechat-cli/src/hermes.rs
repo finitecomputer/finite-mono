@@ -563,17 +563,16 @@ fn request_brain_bootstrap_authorization(state: &HermesServiceState) -> Result<V
         .as_ref()
         .filter(|details| details.room_id == stored.room_id)
         .is_some_and(|details| {
-            details.members.len() == 2
-                && details.members.iter().any(|member| {
-                    member.account_id == stored.sender_account_id
-                        && member.account_id != state.account_id
-                })
+            brain_bootstrap_room_has_direct_user(
+                details
+                    .members
+                    .iter()
+                    .map(|member| member.account_id.as_str()),
+                &stored.sender_account_id,
+                &state.account_id,
+            )
         });
-    let agent_chat = opened
-        .rooms
-        .iter()
-        .any(|room| room.room_id == stored.room_id && room.is_agent_chat);
-    if !agent_chat || !direct_user {
+    if !direct_user {
         return Err(CliError::Hermes(
             "Brain setup authorization is not from the user's direct Agent Chat".to_owned(),
         ));
@@ -582,6 +581,20 @@ fn request_brain_bootstrap_authorization(state: &HermesServiceState) -> Result<V
     consumed.insert(request.request_id);
     save_consumed_brain_bootstrap_authorizations(&state.agent_home, &consumed)?;
     Ok(bundle)
+}
+
+fn brain_bootstrap_room_has_direct_user<'a>(
+    member_account_ids: impl IntoIterator<Item = &'a str>,
+    sender_account_id: &str,
+    agent_account_id: &str,
+) -> bool {
+    if sender_account_id == agent_account_id {
+        return false;
+    }
+    let members = member_account_ids.into_iter().collect::<Vec<_>>();
+    members.len() == 2
+        && members.contains(&sender_account_id)
+        && members.contains(&agent_account_id)
 }
 
 fn load_consumed_brain_bootstrap_authorizations(
@@ -3505,6 +3518,25 @@ mod tests {
     use super::*;
     use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
+
+    #[test]
+    fn brain_bootstrap_recipient_accepts_only_the_other_member_of_a_direct_room() {
+        assert!(brain_bootstrap_room_has_direct_user(
+            ["user-account", "agent-account"],
+            "user-account",
+            "agent-account",
+        ));
+        assert!(!brain_bootstrap_room_has_direct_user(
+            ["user-account", "agent-account", "other-account"],
+            "user-account",
+            "agent-account",
+        ));
+        assert!(!brain_bootstrap_room_has_direct_user(
+            ["agent-account", "other-account"],
+            "agent-account",
+            "agent-account",
+        ));
+    }
 
     #[test]
     fn consumed_brain_bootstrap_authorizations_survive_restart() {
