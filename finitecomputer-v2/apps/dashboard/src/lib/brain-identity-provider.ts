@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { BrainIdentityProviderRequest } from "@/lib/hosted-web-device";
+import { browserVisibleRequestOrigin } from "@/lib/http-headers";
 
 const BRAIN_IDENTITY_PROVIDER_VERSION = "finite-brain-identity-provider-v1";
 const BRAIN_CLIENT_CAPABILITY_VERSION = "finite-brain-client-v1";
@@ -18,11 +19,17 @@ const BRAIN_IDENTITY_OPERATIONS = new Set<BrainIdentityProviderRequest["operatio
 export type BrainClientCapabilityAccount = {
   workosUserId: string;
   emailVerified: true;
+  brainPublicOrigin: string;
 };
 
 type CurrentBrainAccount = {
   workosUserId: string | null;
   emailVerified: boolean;
+};
+
+type VerifiedBrainSessionProof = {
+  workosUserId: string;
+  emailVerified: true;
 };
 
 export function brainCapabilityMatchesCurrentAccount(
@@ -67,7 +74,7 @@ export function verifyBrainSessionProof(
   secret: string,
   requestHash: string,
   nowUnixSeconds = Math.floor(Date.now() / 1000),
-): BrainClientCapabilityAccount | null {
+): VerifiedBrainSessionProof | null {
   if (!token || !secret || !/^[0-9a-f]{64}$/u.test(requestHash)) return null;
   const [claims, signature, extra] = token.split(".");
   if (!claims || !signature || extra) return null;
@@ -102,48 +109,64 @@ export function officialBrainFrameNavigation(
   requestUrl: string,
   headers: Pick<Headers, "get">,
 ) {
+  return officialBrainFrameParentOrigin(requestUrl, headers) !== null;
+}
+
+export function officialBrainFrameOrigins(
+  requestUrl: string,
+  headers: Pick<Headers, "get">,
+  brainPublicOrigin: string | undefined,
+) {
+  const parentOrigin = officialBrainFrameParentOrigin(requestUrl, headers);
+  if (!parentOrigin || !brainPublicOrigin || !exactHttpOrigin(brainPublicOrigin)) {
+    return null;
+  }
+  return { parentOrigin, brainPublicOrigin };
+}
+
+export function officialBrainFrameParentOrigin(
+  requestUrl: string,
+  headers: Pick<Headers, "get">,
+) {
   const referer = headers.get("referer");
-  const host = headers.get("host");
+  const publicOrigin = browserVisibleRequestOrigin({ headers, url: requestUrl });
   if (
     !referer ||
-    !host ||
+    !publicOrigin ||
     headers.get("sec-fetch-dest") !== "iframe" ||
     headers.get("sec-fetch-mode") !== "navigate" ||
     headers.get("sec-fetch-site") !== "same-origin"
   ) {
-    return false;
+    return null;
   }
   try {
-    const request = new URL(requestUrl);
     const source = new URL(referer);
-    const forwardedProtocol = headers
-      .get("x-forwarded-proto")
-      ?.split(",", 1)[0]
-      ?.trim();
-    const expectedProtocol = forwardedProtocol
-      ? `${forwardedProtocol}:`
-      : request.protocol;
     return (
-      source.host === host &&
-      source.protocol === expectedProtocol &&
+      source.origin === publicOrigin &&
       /^\/dashboard\/machines\/[^/]+\/brain$/u.test(source.pathname)
+        ? source.origin
+        : null
     );
   } catch {
-    return false;
+    return null;
   }
 }
 
 export function issueBrainClientCapability(
   secret: string,
   workosUserId: string,
+  brainPublicOrigin: string,
   nowUnixSeconds = Math.floor(Date.now() / 1000),
   nonce = randomUUID(),
 ) {
-  if (!secret || !workosUserId) throw new Error("Brain client capability inputs are required.");
+  if (!secret || !workosUserId || !exactHttpOrigin(brainPublicOrigin)) {
+    throw new Error("Brain client capability inputs are required.");
+  }
   const claims = Buffer.from(
     JSON.stringify({
       version: BRAIN_CLIENT_CAPABILITY_VERSION,
       workosUserId,
+      brainPublicOrigin,
       expiresAt: nowUnixSeconds + BRAIN_CLIENT_CAPABILITY_TTL_SECONDS,
       nonce,
     }),
@@ -171,6 +194,8 @@ export function verifyBrainClientCapability(
       value.version !== BRAIN_CLIENT_CAPABILITY_VERSION ||
       typeof value.workosUserId !== "string" ||
       !value.workosUserId ||
+      typeof value.brainPublicOrigin !== "string" ||
+      !exactHttpOrigin(value.brainPublicOrigin) ||
       typeof value.expiresAt !== "number" ||
       !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt < nowUnixSeconds ||
@@ -179,9 +204,24 @@ export function verifyBrainClientCapability(
     ) {
       return null;
     }
-    return { workosUserId: value.workosUserId, emailVerified: true };
+    return {
+      workosUserId: value.workosUserId,
+      emailVerified: true,
+      brainPublicOrigin: value.brainPublicOrigin,
+    };
   } catch {
     return null;
+  }
+}
+
+function exactHttpOrigin(value: string) {
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.origin === value
+    );
+  } catch {
+    return false;
   }
 }
 

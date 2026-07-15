@@ -25,6 +25,7 @@
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
+      FC_BRAIN_PUBLIC_ORIGIN = "https://brain.finite.computer";
       FC_SITES_UPSTREAM_URL = "http://127.0.0.1:8787";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";

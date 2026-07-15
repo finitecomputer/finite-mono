@@ -33,7 +33,7 @@ pub(crate) use working_tree_security::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use finite_brain_core::portability::{
     VaultDirectoryManifest, VaultDirectoryPath, VaultDirectoryPortability,
@@ -123,7 +123,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -929,67 +929,126 @@ fn open_vault<W: Write>(
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let vault_id = args.first().ok_or(CliError::MissingArgument("vault-id"))?;
+    let vault_id = VaultId::new(
+        args.first()
+            .ok_or(CliError::MissingArgument("vault-id"))?
+            .to_owned(),
+    )
+    .map_err(|error| CliError::InvalidInput(error.to_string()))?;
     let path = positional_values(args)
         .get(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| env.cwd.join(vault_id));
+        .unwrap_or_else(|| {
+            env.working_tree_root
+                .as_ref()
+                .unwrap_or(&env.cwd)
+                .join(vault_id.as_str())
+        });
     let server_url = configured_server_url_for_open(args);
     if let Some(server_url) = server_url.as_deref() {
         validate_http_url(server_url)?;
     }
+    let agent_state_path = path.join(".finitebrain/agent-state.json");
+    let reopening = path_entry_exists(&agent_state_path)?;
+    let portable_manifest_exists =
+        path_entry_exists(&path.join(".finitebrain/vault-directory.json"))?
+            || path_entry_exists(&path.join(".finitebrain/working-tree-state.json"))?;
+    if !reopening && portable_manifest_exists {
+        return Err(CliError::InvalidInput(
+            "Working Tree has portable manifests but no fbrain Agent State; preserve it and use an explicit adoption or recovery flow"
+                .to_owned(),
+        ));
+    }
     initialize_private_working_tree(&path)?;
     let now = timestamp(env);
-    // Opening a Vault Working Tree needs the acting identity (it records the
-    // owner npub and immediately attempts a signed sync): mint on use.
+    // Opening a Vault Working Tree needs the acting identity for signed sync.
+    // The server projection supplies the actual Personal Vault owner; the
+    // acting identity may instead be a limited Agent Principal.
     let auth = load_signer(env)?;
-    let directory = VaultDirectoryManifest {
-        version: VAULT_DIRECTORY_VERSION.to_owned(),
-        vault: VaultDirectoryVaultSummary {
-            id: vault_id.to_owned(),
-            kind: "unknown".to_owned(),
-            name: vault_id.to_owned(),
-            owner_npub: Some(auth.npub.clone()),
-        },
-        working_tree: VaultDirectoryPath {
-            path: ".".to_owned(),
-        },
-        encrypted_sync: VaultDirectoryPath {
-            path: ".finitebrain/encrypted-sync".to_owned(),
-        },
-        portability: VaultDirectoryPortability {
-            owned_by_agent_runtime: true,
-            owned_by_app_surface: false,
-        },
-        created_at: now.clone(),
-        updated_at: now.clone(),
+    let mut state = if reopening {
+        let mut state = read_agent_state(&path)?;
+        if state.vault_id != vault_id.as_str() {
+            return Err(CliError::InvalidInput(format!(
+                "Working Tree is already bound to Vault {}",
+                state.vault_id
+            )));
+        }
+        if let Some(existing_npub) = state.auth_npub.as_deref()
+            && existing_npub != auth.npub
+        {
+            return Err(CliError::InvalidSigner(
+                "Working Tree is bound to a different Member Identity".to_owned(),
+            ));
+        }
+        if server_url.is_some() {
+            state.server_url = server_url.clone();
+        }
+        state
+    } else {
+        let directory = VaultDirectoryManifest {
+            version: VAULT_DIRECTORY_VERSION.to_owned(),
+            vault: VaultDirectoryVaultSummary {
+                id: vault_id.to_string(),
+                kind: "unknown".to_owned(),
+                name: vault_id.to_string(),
+                owner_npub: None,
+            },
+            working_tree: VaultDirectoryPath {
+                path: ".".to_owned(),
+            },
+            encrypted_sync: VaultDirectoryPath {
+                path: ".finitebrain/encrypted-sync".to_owned(),
+            },
+            portability: VaultDirectoryPortability {
+                owned_by_agent_runtime: true,
+                owned_by_app_surface: false,
+            },
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let tree_state = VaultWorkingTreeStateManifest {
+            version: WORKING_TREE_STATE_VERSION.to_owned(),
+            folder_roots: Vec::<WorkingTreeFolderRoot>::new(),
+            objects: Vec::<WorkingTreeObjectManifestEntry>::new(),
+            sync: WorkingTreeSyncState { latest_sequence: 0 },
+        };
+        write_json_file(&path.join(".finitebrain/vault-directory.json"), &directory)?;
+        write_json_file(
+            &path.join(".finitebrain/working-tree-state.json"),
+            &tree_state,
+        )?;
+        let mut state = AgentState::new(vault_id.as_str(), &now);
+        state.server_url = server_url.clone();
+        state
     };
-    let tree_state = VaultWorkingTreeStateManifest {
-        version: WORKING_TREE_STATE_VERSION.to_owned(),
-        folder_roots: Vec::<WorkingTreeFolderRoot>::new(),
-        objects: Vec::<WorkingTreeObjectManifestEntry>::new(),
-        sync: WorkingTreeSyncState { latest_sequence: 0 },
-    };
-    write_json_file(&path.join(".finitebrain/vault-directory.json"), &directory)?;
-    write_json_file(
-        &path.join(".finitebrain/working-tree-state.json"),
-        &tree_state,
-    )?;
-
-    let mut state = AgentState::new(vault_id, &now);
-    state.server_url = server_url;
     state.daemon.state = DaemonRunState::Running;
     state.daemon.last_started_at = Some(now.clone());
     state.auth_npub = Some(auth.npub);
     state.add_activity(
-        now,
-        "working_tree.opened",
-        "Vault Working Tree opened for agent use",
+        now.clone(),
+        if reopening {
+            "working_tree.reopened"
+        } else {
+            "working_tree.opened"
+        },
+        if reopening {
+            "Existing Vault Working Tree reopened without resetting sync state"
+        } else {
+            "Vault Working Tree opened for agent use"
+        },
     );
     write_agent_state(&path, &state)?;
     let mut opened_env = env.clone();
     opened_env.cwd = path.clone();
-    let sync_status = match sync_once(&opened_env, args, "working_tree.opened.sync") {
+    let sync_status = match sync_once(
+        &opened_env,
+        args,
+        if reopening {
+            "working_tree.reopened.sync"
+        } else {
+            "working_tree.opened.sync"
+        },
+    ) {
         Ok(report) => report.status,
         Err(error) => {
             let mut state = read_agent_state(&path)?;
@@ -1009,7 +1068,7 @@ fn open_vault<W: Write>(
         write_json(
             output,
             &serde_json::json!({
-                "vaultId": vault_id,
+                "vaultId": vault_id.as_str(),
                 "path": path,
                 "daemon": "running",
                 "syncMode": "automatic",
@@ -1024,6 +1083,14 @@ fn open_vault<W: Write>(
             "member-authored plaintext persists until this Working Tree is explicitly removed"
         )?;
         Ok(())
+    }
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1446,6 +1513,10 @@ fn vault<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("metadata") {
+        "list" | "ls" => {
+            let response = signed_json_request(env, args, "GET", "/_admin/vaults", None)?;
+            write_command_response(output, json, &response)
+        }
         "create" => {
             let values = positional_values(args);
             let vault_id = values.get(1).ok_or(CliError::MissingArgument("vault-id"))?;
@@ -2417,6 +2488,7 @@ mod tests {
         CliEnvironment {
             cwd: tmp.path().to_path_buf(),
             config_dir: tmp.path().join("config"),
+            working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(tmp.path().join("finite-home")),
@@ -3867,6 +3939,141 @@ mod tests {
         assert_eq!(json["sync"]["mode"], "automatic");
     }
 
+    #[test]
+    fn open_defaults_to_the_configured_working_tree_root() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let working_tree_root = tmp.path().join("data/workspace/finitebrain");
+        let mut env = env_for(&tmp);
+        env.working_tree_root = Some(working_tree_root.clone());
+        let mut output = Vec::new();
+
+        run_with_env(
+            [
+                "open",
+                "paired-personal-vault",
+                "--server",
+                "http://127.0.0.1:3015",
+                "--json",
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json["path"],
+            working_tree_root
+                .join("paired-personal-vault")
+                .display()
+                .to_string()
+        );
+        assert!(
+            working_tree_root
+                .join("paired-personal-vault/.finitebrain/agent-state.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn open_rejects_vault_id_path_escape_before_creating_default_tree() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let working_tree_root = tmp.path().join("data/workspace/finitebrain");
+        let mut env = env_for(&tmp);
+        env.working_tree_root = Some(working_tree_root.clone());
+
+        let error =
+            run_with_env(["open", "../outside", "--json"], env, &mut Vec::new()).unwrap_err();
+
+        assert!(matches!(error, CliError::InvalidInput(_)));
+        assert!(!working_tree_root.join("../outside").exists());
+    }
+
+    #[test]
+    fn reopening_same_vault_preserves_sync_state_and_does_not_claim_signer_ownership() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("paired-personal-vault");
+        run(
+            &tmp,
+            &["open", "paired-personal-vault", tree.to_str().unwrap()],
+        );
+        let directory_path = tree.join(".finitebrain/vault-directory.json");
+        let directory: Value = serde_json::from_slice(&fs::read(&directory_path).unwrap()).unwrap();
+        assert_eq!(directory["vault"]["ownerNpub"], Value::Null);
+
+        let state_path = tree.join(".finitebrain/working-tree-state.json");
+        let preserved = serde_json::json!({
+            "version": WORKING_TREE_STATE_VERSION,
+            "folderRoots": [{
+                "folderId": "agent-workspace",
+                "path": "agent-workspace",
+                "canRead": true,
+                "metadataOnly": false
+            }],
+            "objects": [],
+            "sync": { "latestSequence": 42 }
+        });
+        write_json_file(&state_path, &preserved).unwrap();
+        let before = fs::read(&state_path).unwrap();
+
+        run(
+            &tmp,
+            &["open", "paired-personal-vault", tree.to_str().unwrap()],
+        );
+
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        let agent_state = read_agent_state(&tree).unwrap();
+        assert_eq!(agent_state.vault_id, "paired-personal-vault");
+        assert!(
+            agent_state
+                .activity
+                .iter()
+                .any(|entry| entry.kind == "working_tree.reopened")
+        );
+    }
+
+    #[test]
+    fn open_fails_closed_on_portable_tree_without_agent_state() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("portable-vault");
+        initialize_private_working_tree(&tree).unwrap();
+        let directory_path = tree.join(".finitebrain/vault-directory.json");
+        let state_path = tree.join(".finitebrain/working-tree-state.json");
+        write_json_file(&directory_path, &serde_json::json!({ "portable": true })).unwrap();
+        write_json_file(&state_path, &serde_json::json!({ "latestSequence": 73 })).unwrap();
+        let directory_before = fs::read(&directory_path).unwrap();
+        let state_before = fs::read(&state_path).unwrap();
+
+        let error = run_with_env(
+            ["open", "portable-vault", tree.to_str().unwrap()],
+            env_for(&tmp),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::InvalidInput(_)));
+        assert!(error.to_string().contains("portable manifests"));
+        assert_eq!(fs::read(&directory_path).unwrap(), directory_before);
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+        assert!(!tree.join(".finitebrain/agent-state.json").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn insecure_working_tree_fails_closed_and_repair_does_not_touch_member_content() {
@@ -4568,6 +4775,53 @@ mod tests {
                 assert!(plaintext["markdown"].as_str().unwrap().starts_with('#'));
             }
         }
+    }
+
+    #[test]
+    fn vault_list_discovers_an_explicitly_paired_personal_vault() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, _) = read_http_request(&mut stream);
+            let body = serde_json::json!({
+                "vaults": [{
+                    "vaultId": "personal-user",
+                    "kind": "personal",
+                    "name": "Personal Vault",
+                    "role": "member",
+                    "inviteCode": null
+                }]
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request_line
+        });
+        let mut output = Vec::new();
+
+        run_with_env(
+            ["vault", "list", "--server", &server_url, "--json"],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["vaults"][0]["vaultId"], "personal-user");
+        assert_eq!(response["vaults"][0]["kind"], "personal");
+        assert_eq!(response["vaults"][0]["role"], "member");
+        assert_eq!(server.join().unwrap(), "GET /_admin/vaults HTTP/1.1");
     }
 
     #[test]
@@ -5609,6 +5863,7 @@ mod tests {
         let agent_a_auth_env = CliEnvironment {
             cwd: tmp.path().to_path_buf(),
             config_dir: agent_a_config.clone(),
+            working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(tmp.path().join("finite-home")),
@@ -5623,6 +5878,7 @@ mod tests {
         let env_b = CliEnvironment {
             cwd: agent_b_tree.clone(),
             config_dir: agent_b_config,
+            working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(tmp.path().join("finite-home")),
@@ -5645,6 +5901,7 @@ mod tests {
         let env_a = CliEnvironment {
             cwd: agent_a_tree.clone(),
             config_dir: agent_a_config,
+            working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(tmp.path().join("finite-home")),

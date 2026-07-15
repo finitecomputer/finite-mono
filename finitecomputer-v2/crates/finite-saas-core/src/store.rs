@@ -37,13 +37,13 @@ use crate::{
     SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
     SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
     agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, chat_identity_id_for_user,
-    current_time_iso, finite_private_api_key_id_for, finite_private_grant_id_for_user,
-    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
-    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
-    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
+    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
+    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
+    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
+    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
@@ -2262,6 +2262,7 @@ where
         customer_org_id: org.id.clone(),
         owner_user_id: user.id.clone(),
         display_name: display_name.clone(),
+        agent_email: Some(canonical_agent_email(&display_name, &project_id)),
         import_candidate_id: None,
         hosting_tier: Some(hosting_tier),
         placement: Some(placement),
@@ -3667,7 +3668,8 @@ where
     let rows = client
         .query(
             "SELECT project.id AS project_id, project.customer_org_id, project.owner_user_id,
-                    project.display_name, project.import_candidate_id, project.hosting_tier,
+                    project.display_name, project.agent_email, project.import_candidate_id,
+                    project.hosting_tier,
                     project.placement_runner_class, project.runtime_resource_class,
                     project.created_at::text,
                     project.updated_at::text,
@@ -3706,6 +3708,7 @@ where
                 customer_org_id: row.get("customer_org_id"),
                 owner_user_id: row.get("owner_user_id"),
                 display_name: row.get("display_name"),
+                agent_email: row.get("agent_email"),
                 import_candidate_id: row.get("import_candidate_id"),
                 hosting_tier: optional_hosting_tier_column(&row, "hosting_tier")?,
                 placement: optional_runtime_placement_columns(
@@ -3893,6 +3896,7 @@ fn project_from_row(row: &Row) -> CoreResult<Project> {
         customer_org_id: row.get("customer_org_id"),
         owner_user_id: row.get("owner_user_id"),
         display_name: row.get("display_name"),
+        agent_email: row.get("agent_email"),
         import_candidate_id: row.get("import_candidate_id"),
         hosting_tier: optional_hosting_tier_column(row, "hosting_tier")?,
         placement: optional_runtime_placement_columns(
@@ -4100,7 +4104,8 @@ where
 {
     client
         .query_opt(
-            "SELECT id, customer_org_id, owner_user_id, display_name, import_candidate_id,
+            "SELECT id, customer_org_id, owner_user_id, display_name, agent_email,
+                    import_candidate_id,
                     hosting_tier, placement_runner_class, runtime_resource_class,
                     created_at::text, updated_at::text
              FROM projects WHERE id = $1",
@@ -4586,12 +4591,14 @@ where
     client
         .execute(
             "INSERT INTO projects
-               (id, customer_org_id, owner_user_id, display_name, import_candidate_id,
-                hosting_tier, placement_runner_class, runtime_resource_class, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                     $9::text::timestamptz, $10::text::timestamptz)
+               (id, customer_org_id, owner_user_id, display_name, agent_email,
+                import_candidate_id, hosting_tier, placement_runner_class,
+                runtime_resource_class, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                     $10::text::timestamptz, $11::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                display_name = EXCLUDED.display_name,
+               agent_email = COALESCE(projects.agent_email, EXCLUDED.agent_email),
                hosting_tier = EXCLUDED.hosting_tier,
                placement_runner_class = EXCLUDED.placement_runner_class,
                runtime_resource_class = EXCLUDED.runtime_resource_class,
@@ -4601,6 +4608,7 @@ where
                 &project.customer_org_id,
                 &project.owner_user_id,
                 &project.display_name,
+                &project.agent_email,
                 &project.import_candidate_id,
                 &project.hosting_tier.map(HostingTier::as_str),
                 &placement_runner_class,
@@ -4827,8 +4835,8 @@ where
 }
 
 /// Mirror `ensure_finite_private_limit_profile`: an existing profile is
-/// returned; the DEFAULT profile is created on demand (with its weekly limit,
-/// matching the in-memory spec); any other missing profile is an error.
+/// returned; the DEFAULT profile is created on demand matching the in-memory
+/// spec; any other missing profile is an error.
 async fn ensure_finite_private_limit_profile_row<C>(
     client: &C,
     id: &str,
@@ -7129,6 +7137,7 @@ where
             customer_org_id: candidate.customer_org_id.clone(),
             owner_user_id: user.id.clone(),
             display_name: candidate.host_facts.display_name.clone(),
+            agent_email: None,
             import_candidate_id: Some(candidate.id.clone()),
             hosting_tier: Some(HostingTier::Standard),
             placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),

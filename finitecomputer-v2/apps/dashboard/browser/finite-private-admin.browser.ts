@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
 
 import { chromium, type Browser } from "playwright";
+
+import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
 const CORE_TOKEN = "browser-core-token";
 const OPERATOR_ORG_ID = "workos_org_browser_operator";
@@ -26,7 +27,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await waitForDashboard(dashboardPort, dashboardOutput);
     browser = await chromium.launch({
       headless: true,
-      ...chromeExecutable(),
+      ...chromiumLaunchOptions(),
     });
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -366,18 +367,4 @@ async function freePort() {
   server.close();
   await once(server, "close");
   return port;
-}
-
-function chromeExecutable() {
-  for (const executablePath of [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ]) {
-    if (existsSync(executablePath)) {
-      return { executablePath };
-    }
-  }
-  return { channel: "chrome" as const };
 }

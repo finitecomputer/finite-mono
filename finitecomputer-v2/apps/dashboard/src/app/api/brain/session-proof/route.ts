@@ -1,13 +1,13 @@
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { issueBrainSessionProof } from "@/lib/brain-identity-provider";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
+import { requestOriginMatchesHost } from "@/lib/http-headers";
 
 const MAX_SESSION_PROOF_REQUEST_BYTES = 1024;
 const NO_STORE_HEADERS = { "cache-control": "no-store" };
 
 export async function POST(request: Request) {
-  const requestUrl = new URL(request.url);
-  if (request.headers.get("origin") !== requestUrl.origin) {
+  if (!requestOriginMatchesHost(request)) {
     return Response.json(
       { error: "Brain session proof requires the signed-in dashboard." },
       { status: 403, headers: NO_STORE_HEADERS },

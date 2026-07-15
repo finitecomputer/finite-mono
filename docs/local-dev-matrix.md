@@ -305,7 +305,8 @@ Documented tools:
 - Static Product Client under `crates/finite-brain-server/src/product-client.*`.
 - Development Smoke UI under `crates/finite-brain-server/src/smoke-ui.*`.
 - `fbrain` CLI for trusted agent Vault Working Trees.
-- Hosted smoke service at `https://brain.smoke.finite.computer`.
+- Canonical production service at `https://brain.finite.computer`; the older
+  smoke service remains an explicit rollback target, not a replica.
 
 Primary local server loop:
 
@@ -343,8 +344,9 @@ Friction:
   Client is the user workflow. Do not treat Smoke UI behavior as production UX.
 - `fbrain` uses the shared Finite identity location, so local tests that touch
   identity should avoid printing or committing signer state.
-- No production FiniteBrain URL is canonized yet; use the smoke URL only where
-  the repo-owned docs do.
+- The canonical production FiniteBrain URL is
+  `https://brain.finite.computer`. Existing working trees stay pinned to the
+  server they were opened against; never silently move a smoke tree.
 
 ### `finite-search`
 

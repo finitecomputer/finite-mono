@@ -26,6 +26,9 @@ and audit metadata only; it never stores or returns user secret key material.
 - **Binding Proof**: a valid Email Challenge plus a NIP-98-authenticated
   redeem request signed by the target Local Identity Key.
 - **Native Principal**: a Principal backed by a Nostr public key.
+- **Managed Agent Email**: a canonical Finite VIP Email assigned by Core and
+  immutably registered to a hosted runtime's Native Principal by trusted
+  provisioning.
 - **Email-Only Principal**: a Principal backed by verified control of an
   Invited Email before that address is linked to a Native Principal.
 - **Principal Link**: a verified relationship from an email address to a
@@ -48,7 +51,6 @@ finite-identityd serve \
   --external-base-url https://identity.finite.vip \
   --finite-vip-domain finite.vip \
   --listen 127.0.0.1:8790 \
-  --operator-token "$FINITE_IDENTITY_OPERATOR_TOKEN" \
   --mailer resend \
   --mail-from "Finite Identity <identity@finite.chat>"
 ```
@@ -61,7 +63,8 @@ Runtime flags:
 | `--external-base-url URL` | Public base URL used when verifying NIP-98 request URLs. This must match the URL product clients sign. |
 | `--finite-vip-domain DOMAIN` | Finite VIP Domain. Defaults to `finite.vip`. |
 | `--listen HOST:PORT` | Local bind address. Defaults to `127.0.0.1:8790`. |
-| `--operator-token TOKEN` | Enables v1 operator endpoints. If omitted, operator endpoints reject every request. |
+| `FINITE_IDENTITY_OPERATOR_TOKEN` | Enables v1 operator endpoints without exposing the credential in process arguments. If omitted, operator endpoints reject every request. |
+| `--operator-token TOKEN` | Backward-compatible local/debug override. Production services should use `FINITE_IDENTITY_OPERATOR_TOKEN`. |
 | `--mailer dev` | Development mailer. Requires `--dev-print-email-tokens yes` so token printing is explicit. |
 | `--mailer resend` | Production mailer using the Resend JSON API. Requires `--mail-from ADDR` and `RESEND_API_KEY`. |
 | `--mailer postmark` | Production mailer using the Postmark JSON API. Requires `--mail-from ADDR` and `POSTMARK_SERVER_TOKEN`. |
@@ -80,10 +83,12 @@ finite-identityd serve \
   --data ./.dev/finite-identity \
   --external-base-url http://127.0.0.1:8790 \
   --listen 127.0.0.1:8790 \
-  --operator-token dev-operator-token \
   --mailer dev \
   --dev-print-email-tokens yes
 ```
+
+Set `FINITE_IDENTITY_OPERATOR_TOKEN` in a protected service environment file
+when operator endpoints are needed. Never place it in argv or an Agent Runtime.
 
 ## HTTP Contract
 
@@ -194,6 +199,21 @@ Operator endpoints require:
 ```http
 X-Finite-Operator-Token: <configured-token>
 ```
+
+Register a canonical Managed Agent Email after a runtime publishes its Agent
+Principal Key:
+
+```http
+POST /api/v1/operator/agent-email-bindings
+X-Finite-Operator-Token: <configured-token>
+Content-Type: application/json
+
+{ "email": "cheater-a1b2c3d4e5f6g7h8@finite.vip", "agent_npub": "npub1..." }
+```
+
+An exact retry is idempotent. A name can never be reassigned to another key,
+and a Disabled Binding is not silently re-enabled. The operator credential
+belongs only to trusted provisioning; it must never enter an Agent Runtime.
 
 Inspect public identity state:
 

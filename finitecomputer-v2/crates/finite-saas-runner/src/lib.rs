@@ -15,6 +15,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -204,6 +205,10 @@ pub enum RunnerError {
     MissingEnclaviaEnclaveId,
     #[error("Finite Chat server URL is required")]
     MissingFinitechatServerUrl,
+    #[error("Agent Identity Authority configuration is invalid")]
+    InvalidAgentIdentityAuthorityConfig,
+    #[error("Agent Identity binding failed: {0}")]
+    AgentIdentityBinding(String),
     #[error("Docker host port must be between 1 and 65535")]
     InvalidDockerHostPort,
     #[error("Apple Container host port must be between 1 and 65535")]
@@ -224,6 +229,39 @@ pub enum RunnerError {
     CommandExecution { program: String, message: String },
     #[error("command {program} timed out after {timeout_secs}s")]
     CommandTimedOut { program: String, timeout_secs: u64 },
+}
+
+#[derive(Clone)]
+pub struct AgentIdentityAuthorityConfig {
+    pub base_url: String,
+    pub operator_token: String,
+    pub timeout: Duration,
+}
+
+impl fmt::Debug for AgentIdentityAuthorityConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentIdentityAuthorityConfig")
+            .field("base_url", &self.base_url)
+            .field("operator_token", &"[redacted]")
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl AgentIdentityAuthorityConfig {
+    fn normalized(mut self) -> Result<Self, RunnerError> {
+        self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
+        self.operator_token = self.operator_token.trim().to_string();
+        if !(self.base_url.starts_with("https://") || self.base_url.starts_with("http://"))
+            || self.base_url.contains(char::is_whitespace)
+            || self.operator_token.is_empty()
+            || self.timeout.is_zero()
+        {
+            return Err(RunnerError::InvalidAgentIdentityAuthorityConfig);
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -284,6 +322,14 @@ pub enum RunOnceOutcome {
     },
 }
 
+fn identity_transport_error(error: ureq::Error) -> RunnerError {
+    let message = match error {
+        ureq::Error::Status(status, _) => format!("Identity Authority returned HTTP {status}"),
+        ureq::Error::Transport(error) => format!("Identity Authority transport error: {error}"),
+    };
+    RunnerError::AgentIdentityBinding(message)
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentCreationRunner<Q, L, T> {
     queue: Q,
@@ -296,6 +342,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     default_finite_private: Option<FinitePrivateRuntimeDefaults>,
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
+    agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -326,6 +373,7 @@ where
             default_finite_private: None,
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
+            agent_identity_authority: None,
         })
     }
 
@@ -333,6 +381,14 @@ where
         self.runtime_ready_timeout = timeout;
         self.runtime_ready_interval = interval;
         self
+    }
+
+    pub fn with_agent_identity_authority(
+        mut self,
+        config: AgentIdentityAuthorityConfig,
+    ) -> Result<Self, RunnerError> {
+        self.agent_identity_authority = Some(config.normalized()?);
+        Ok(self)
     }
 
     pub fn with_default_finite_private_inference(
@@ -457,29 +513,34 @@ where
                 );
                 let launch_result = match launch_result {
                     Ok(_) => match self.wait_for_launch_readiness(&facts.source_machine_id) {
-                        Ok(()) => self.queue.complete_agent_creation(
-                            &request_id,
-                            CompleteAgentCreationRequestInput {
-                                request_id: request_id.clone(),
-                                runner_id: self.runner_id.clone(),
-                                lease_token: lease_token.clone(),
-                                source_host_id: facts.source_host_id.clone(),
-                                source_machine_id: facts.source_machine_id.clone(),
-                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                state_schema_version: facts.state_schema_version.clone(),
-                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                contact_endpoint: facts.contact_endpoint.clone(),
-                                display_name: facts.display_name.clone(),
-                                hostname: facts.hostname.clone(),
-                                runtime_host: facts.runtime_host.clone(),
-                                runtime_status: Some(RuntimeSummaryStatus::Online),
-                                active_inference_profile: facts.active_inference_profile.clone(),
-                                hermes_available: facts.hermes_available,
-                                published_app_urls: facts.published_app_urls.clone(),
-                                runtime_capabilities: Some(runtime_capabilities),
-                                now: None,
-                            },
-                        ),
+                        Ok(()) => match self.bind_agent_identity(&lease, &facts) {
+                            Ok(()) => self.queue.complete_agent_creation(
+                                &request_id,
+                                CompleteAgentCreationRequestInput {
+                                    request_id: request_id.clone(),
+                                    runner_id: self.runner_id.clone(),
+                                    lease_token: lease_token.clone(),
+                                    source_host_id: facts.source_host_id.clone(),
+                                    source_machine_id: facts.source_machine_id.clone(),
+                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                    state_schema_version: facts.state_schema_version.clone(),
+                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                    contact_endpoint: facts.contact_endpoint.clone(),
+                                    display_name: facts.display_name.clone(),
+                                    hostname: facts.hostname.clone(),
+                                    runtime_host: facts.runtime_host.clone(),
+                                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                                    active_inference_profile: facts
+                                        .active_inference_profile
+                                        .clone(),
+                                    hermes_available: facts.hermes_available,
+                                    published_app_urls: facts.published_app_urls.clone(),
+                                    runtime_capabilities: Some(runtime_capabilities),
+                                    now: None,
+                                },
+                            ),
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
@@ -536,6 +597,76 @@ where
                 })
             }
         }
+    }
+
+    fn bind_agent_identity(
+        &self,
+        lease: &AgentCreationLease,
+        facts: &RuntimeLaunchFacts,
+    ) -> Result<(), RunnerError> {
+        let Some(agent_email) = lease.project.agent_email.as_deref() else {
+            return Ok(());
+        };
+        let config = self.agent_identity_authority.as_ref().ok_or_else(|| {
+            RunnerError::AgentIdentityBinding(
+                "Identity Authority is not configured for this managed agent email".to_string(),
+            )
+        })?;
+        let contact_endpoint = facts
+            .contact_endpoint
+            .as_deref()
+            .filter(|url| {
+                (url.starts_with("https://") || url.starts_with("http://"))
+                    && !url.contains(char::is_whitespace)
+            })
+            .ok_or_else(|| {
+                RunnerError::AgentIdentityBinding(
+                    "runtime did not publish a valid contact endpoint".to_string(),
+                )
+            })?;
+        let agent = ureq::AgentBuilder::new().timeout(config.timeout).build();
+        let contact: serde_json::Value = agent
+            .get(contact_endpoint)
+            .set("Accept", "application/json")
+            .call()
+            .map_err(identity_transport_error)?
+            .into_json()
+            .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
+        let agent_npub = contact
+            .get("agent_npub")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.starts_with("npub1") && value.len() <= 256)
+            .ok_or_else(|| {
+                RunnerError::AgentIdentityBinding(
+                    "runtime contact document has no Agent Principal".to_string(),
+                )
+            })?;
+        let response: serde_json::Value = agent
+            .post(&format!(
+                "{}/api/v1/operator/agent-email-bindings",
+                config.base_url
+            ))
+            .set("Accept", "application/json")
+            .set("X-Finite-Operator-Token", &config.operator_token)
+            .send_json(serde_json::json!({
+                "email": agent_email,
+                "agent_npub": agent_npub,
+            }))
+            .map_err(identity_transport_error)?
+            .into_json()
+            .map_err(|error| RunnerError::AgentIdentityBinding(error.to_string()))?;
+        if response.get("email").and_then(serde_json::Value::as_str) != Some(agent_email)
+            || response
+                .get("agent_npub")
+                .and_then(serde_json::Value::as_str)
+                != Some(agent_npub)
+        {
+            return Err(RunnerError::AgentIdentityBinding(
+                "Identity Authority returned a mismatched binding".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn run_runtime_control(
@@ -4057,6 +4188,135 @@ mod tests {
     }
 
     #[test]
+    fn run_once_binds_canonical_agent_email_before_completion() {
+        use std::sync::mpsc;
+
+        const AGENT_NPUB: &str = "npub1wvxx6jqkqkfmfp8xy6avumvsqyl8fdfzt2x98vrrwgl9w444cgkscsfp48";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut contact, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut contact);
+            assert!(request.starts_with("GET /contact "));
+            let body = serde_json::json!({ "agent_npub": AGENT_NPUB }).to_string();
+            write_http_json(&mut contact, 200, &body);
+
+            let (mut identity, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut identity);
+            assert!(request.starts_with("POST /api/v1/operator/agent-email-bindings "));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-finite-operator-token: identity-operator-token")
+            );
+            assert!(request.contains("\"email\":\"oslo-agent@finite.vip\""));
+            assert!(request.contains(&format!("\"agent_npub\":\"{AGENT_NPUB}\"")));
+            sent.send(request).unwrap();
+            let body = serde_json::json!({
+                "email": "oslo-agent@finite.vip",
+                "agent_npub": AGENT_NPUB,
+                "nip05": "oslo-agent@finite.vip",
+            })
+            .to_string();
+            write_http_json(&mut identity, 200, &body);
+        });
+
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_agent_identity_authority(AgentIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-operator-token".to_string(),
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.completed.len(), 1);
+        assert!(received.recv_timeout(Duration::from_secs(1)).is_ok());
+        server.join().unwrap();
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let bytes = stream.read(&mut chunk).unwrap();
+            assert!(bytes > 0, "HTTP request ended before its body was complete");
+            request.extend_from_slice(&chunk[..bytes]);
+            assert!(
+                request.len() <= 16 * 1024,
+                "HTTP request fixture is too large"
+            );
+
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return String::from_utf8(request).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn run_once_fails_closed_when_managed_agent_email_cannot_be_registered() {
+        let mut lease = sample_lease("agent_request_123");
+        lease.project.agent_email = Some("oslo-agent@finite.vip".to_string());
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
+        assert!(runner.queue.completed.is_empty());
+        assert_eq!(runner.queue.failed.len(), 1);
+        assert!(
+            runner.queue.failed[0]
+                .failure_message
+                .contains("Identity Authority is not configured")
+        );
+    }
+
+    fn write_http_json(stream: &mut impl Write, status: u16, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn run_once_uses_only_the_core_bound_spec_and_resolves_every_secret_reference() {
         let lease = sample_spec_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
@@ -4463,9 +4723,25 @@ mod tests {
         assert!(dockerfile.contains("ENV FINITE_HOME=/data/agent"));
         assert!(dockerfile.contains("ENV HERMES_HOME=/data/agent/hermes-home"));
         assert!(dockerfile.contains("ENV FINITECHAT_WORKSPACE=/data/workspace"));
+        assert!(dockerfile.contains("ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain"));
+        assert!(dockerfile.contains("ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain"));
         assert!(dockerfile.contains("ENTRYPOINT [\"/opt/agent-entrypoint.sh\"]"));
         assert!(!dockerfile.contains("finitechat-entrypoint.sh"));
         assert!(!dockerfile.contains("/finite-state"));
+    }
+
+    #[test]
+    fn bundled_finitebrain_skill_uses_runtime_brain_and_durable_paths() {
+        let bundled =
+            read_repo_file("../finite-skills/skills/software-development/finitebrain/SKILL.md");
+        let package = read_repo_file("../finite-brain/skills/finitebrain/SKILL.md");
+
+        assert_eq!(bundled, package);
+        assert!(bundled.contains("FINITE_BRAIN_SERVER_URL"));
+        assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
+        assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
+        assert!(!bundled.contains("SERVER=\"https://finite.computer\""));
+        assert!(!bundled.contains("TREE=\"$HOME/finitebrain/$VAULT\""));
     }
 
     #[test]
@@ -5587,6 +5863,7 @@ mod tests {
                 customer_org_id: "org_123".to_string(),
                 owner_user_id: "user_123".to_string(),
                 display_name: "Oslo Agent".to_string(),
+                agent_email: None,
                 import_candidate_id: None,
                 hosting_tier: None,
                 placement: None,

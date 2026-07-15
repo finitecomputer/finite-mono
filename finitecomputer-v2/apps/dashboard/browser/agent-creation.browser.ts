@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
 
 import { chromium, type Browser, type Page } from "playwright";
+
+import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
@@ -265,7 +266,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     await waitForDashboard(paidDashboardPort, paidDashboardOutput);
     browser = await chromium.launch({
       headless: true,
-      ...chromeExecutable(),
+      ...chromiumLaunchOptions(),
     });
 
     core.reset({
@@ -1372,6 +1373,7 @@ function startDashboard(
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
         FC_BRAIN_UPSTREAM_URL: brainUrl,
+        FC_BRAIN_PUBLIC_ORIGIN: `http://127.0.0.1:${port}`,
         FC_SITES_UPSTREAM_URL: sitesUrl,
         FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
         FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
@@ -1490,7 +1492,8 @@ async function startFakeSites() {
 
 async function startFakeBrain() {
   const server = http.createServer((request, response) => {
-    if (request.method === "GET" && request.url === "/client") {
+    const requestUrl = new URL(request.url ?? "/", "http://brain.test");
+    if (request.method === "GET" && requestUrl.pathname === "/client") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
       return;
@@ -2589,18 +2592,4 @@ async function freePort() {
   server.close();
   await once(server, "close");
   return port;
-}
-
-function chromeExecutable() {
-  for (const executablePath of [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ]) {
-    if (existsSync(executablePath)) {
-      return { executablePath };
-    }
-  }
-  return { channel: "chrome" as const };
 }

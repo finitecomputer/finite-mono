@@ -26,7 +26,8 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let mailer = configure_mailer(&args)?;
     let finite_vip_domain =
         flag_value(&args, "--finite-vip-domain").unwrap_or_else(|| "finite.vip".to_owned());
-    let operator_token = flag_value(&args, "--operator-token");
+    let operator_token =
+        configured_operator_token(&args, std::env::var("FINITE_IDENTITY_OPERATOR_TOKEN").ok());
     let address: SocketAddr = listen
         .parse()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
@@ -55,6 +56,13 @@ async fn run(args: Vec<String>) -> Result<(), String> {
 fn flag_value(args: &[String], name: &str) -> Option<String> {
     args.windows(2)
         .find_map(|window| (window[0] == name).then(|| window[1].clone()))
+}
+
+fn configured_operator_token(args: &[String], environment: Option<String>) -> Option<String> {
+    flag_value(args, "--operator-token")
+        .or(environment)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn configure_mailer(
@@ -138,5 +146,23 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("--mail-from"));
+    }
+
+    #[test]
+    fn operator_token_prefers_explicit_flag_and_accepts_secret_environment() {
+        assert_eq!(
+            configured_operator_token(
+                &args(&["serve", "--operator-token", "flag-token"]),
+                Some("environment-token".to_string()),
+            )
+            .as_deref(),
+            Some("flag-token")
+        );
+        assert_eq!(
+            configured_operator_token(&args(&["serve"]), Some(" environment-token ".to_string()))
+                .as_deref(),
+            Some("environment-token")
+        );
+        assert_eq!(configured_operator_token(&args(&["serve"]), None), None);
     }
 }

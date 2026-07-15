@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BotIcon,
-  BrainCircuitIcon,
+  BrainIcon,
   Building2Icon,
   CreditCardIcon,
   Globe2Icon,
@@ -59,7 +59,7 @@ export function AgentNavigation({
     {
       label: "Brain",
       href: `${root}/brain`,
-      icon: BrainCircuitIcon,
+      icon: BrainIcon,
       active: pathname === `${root}/brain`,
     },
     ...(showSkills

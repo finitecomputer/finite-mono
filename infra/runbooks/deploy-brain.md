@@ -1,11 +1,13 @@
 # Deploying finite-brain on lat1
 
 Finite Brain runs as `finite-brain-app.service` on finite-lat-1, bound only to
-`127.0.0.1:3015`. The dashboard proxies `/health`, `/client`, and `/_admin/*`
-to that loopback service. WorkOS protects the browser Product Client at
-`/client`; `/_admin/*` bypasses WorkOS so Brain can enforce its own route-level
-Nostr, invitation-proof, or other narrowly specified authorization. There is
-no second Brain vhost and no oauth2-proxy.
+`127.0.0.1:3015`. Caddy exposes its canonical signing/API origin at
+`https://brain.finite.computer`. The dashboard also proxies the embedded
+Product Client under `https://finite.computer/client`, where WorkOS protects
+the user session and issues a bounded capability naming the canonical Brain
+origin. Brain still enforces its own route-level Nostr, invitation-proof, or
+other narrowly specified authorization; no oauth2-proxy or parent-domain
+WorkOS cookie is added to the Brain subdomain.
 
 The SQLite database is `/var/lib/private/finitebrain/finite-brain.sqlite3`.
 Compute deployment and data migration are separate operations. Never replace
@@ -18,7 +20,8 @@ the database without a byte-for-byte rollback copy.
 - You can SSH from the Mac to `ubuntu@finite-lat-2` with agent forwarding for
   root access from lat2 to `64.34.82.77`. Lat2 is the only production
   build/driver host; do not evaluate or build on the Mac, clawland, or lat1.
-- `finite.computer` dashboard auth is healthy.
+- `finite.computer` dashboard auth is healthy and `brain.finite.computer`
+  resolves to lat1.
 - A consistent SQLite backup has been copied from the current source and its
   size plus SHA-256 recorded outside the database contents.
 - The previous NixOS generation and source Brain service remain available for
@@ -145,16 +148,20 @@ legacy-repo deploy is part of the path.
 set -euo pipefail
 ssh root@64.34.82.77 systemctl is-active finite-brain-app
 ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
-curl -fsS https://finite.computer/health
+curl -fsS https://brain.finite.computer/health
+curl -fsS -o /dev/null -w '%{http_code}\n' https://brain.finite.computer/client
 curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
 ```
 
-The public `/health` route must report the Brain service healthy and `/client`
-must require a WorkOS session. A signed `fbrain` request to `/_admin/*` must
-reach Brain without a WorkOS session. In an authenticated browser, verify the
-Product Client loads and completes a real `/_admin/*` request through the
-dashboard. Then run `fbrain doctor` and a write/read proof from an authorized
-Nostr identity against `https://finite.computer`.
+The canonical `/health` route must report the Brain service healthy. The
+canonical `/client` may serve the public shell, but it never receives a hosted
+user capability; the dashboard `/client` must require a WorkOS session. A
+signed `fbrain` request to `/_admin/*` must reach Brain without a WorkOS
+session. In an authenticated browser, verify the embedded Product Client loads
+and completes a real `/_admin/*` request through the dashboard while signing
+for `https://brain.finite.computer`. Then run `fbrain doctor` and a write/read
+proof from an authorized Nostr identity against
+`https://brain.finite.computer`.
 
 ## Rollback
 

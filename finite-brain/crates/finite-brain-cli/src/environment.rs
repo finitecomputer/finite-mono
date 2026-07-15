@@ -6,6 +6,10 @@ use std::path::PathBuf;
 pub struct CliEnvironment {
     pub cwd: PathBuf,
     pub config_dir: PathBuf,
+    /// Optional root for default Vault Working Tree placement. Hosted Agent
+    /// Runtimes set this to their durable workspace; native clients may leave
+    /// it unset and keep the current-directory default.
+    pub working_tree_root: Option<PathBuf>,
     pub now: Option<String>,
     /// Optional finite-identity Authority URL for email proof and native
     /// finite.vip binding flows.
@@ -28,6 +32,9 @@ impl CliEnvironment {
                 env::var_os("HOME").map(|home| PathBuf::from(home).join(".finitebrain/fbrain"))
             })
             .unwrap_or_else(|| cwd.join(".fbrain"));
+        let working_tree_root = env::var_os("FBRAIN_WORKING_TREE_ROOT")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
         let now = env::var("FBRAIN_NOW").ok();
         let identity_authority_url = env::var("FINITE_IDENTITY_AUTHORITY")
             .ok()
@@ -36,6 +43,7 @@ impl CliEnvironment {
         Self {
             cwd,
             config_dir,
+            working_tree_root,
             now,
             identity_authority_url,
             finite_home: None,

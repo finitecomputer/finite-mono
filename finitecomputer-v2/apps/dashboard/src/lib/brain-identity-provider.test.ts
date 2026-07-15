@@ -6,7 +6,9 @@ import {
   brainIdentityRequestHash,
   issueBrainClientCapability,
   issueBrainSessionProof,
+  officialBrainFrameOrigins,
   officialBrainFrameNavigation,
+  officialBrainFrameParentOrigin,
   parseBrainIdentityProviderRequest,
   verifyBrainClientCapability,
   verifyBrainSessionProof,
@@ -38,6 +40,17 @@ test("only a same-origin Brain iframe navigation can receive a client capability
       frameHeaders("https://finite.computer/dashboard/machines/machine-1/brain"),
     ),
     true,
+  );
+  assert.equal(
+    officialBrainFrameParentOrigin(
+      "http://localhost:13002/client",
+      frameHeaders(
+        "http://127.0.0.1:13002/dashboard/machines/machine-1/brain",
+        "iframe",
+        "127.0.0.1:13002",
+      ),
+    ),
+    "http://127.0.0.1:13002",
   );
   assert.equal(
     officialBrainFrameNavigation(
@@ -73,11 +86,52 @@ test("only a same-origin Brain iframe navigation can receive a client capability
   );
 });
 
-test("Brain client capabilities are signed, account-bound, and expiring", () => {
-  const token = issueBrainClientCapability("hosted-secret", "user_paul", 1_000, "nonce-1");
+test("a hosted Brain frame keeps the dashboard parent separate from Brain's signing origin", () => {
+  const headers = new Headers({
+    host: "finite.computer",
+    referer: "https://finite.computer/dashboard/machines/machine-1/brain",
+    "sec-fetch-dest": "iframe",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+  });
+
+  assert.deepEqual(
+    officialBrainFrameOrigins(
+      "https://internal-proxy:3000/client",
+      headers,
+      "https://brain.finite.computer",
+    ),
+    {
+      parentOrigin: "https://finite.computer",
+      brainPublicOrigin: "https://brain.finite.computer",
+    },
+  );
+  assert.equal(
+    officialBrainFrameOrigins("https://finite.computer/client", headers, undefined),
+    null,
+  );
+  assert.equal(
+    officialBrainFrameOrigins(
+      "https://finite.computer/client",
+      headers,
+      "https://brain.finite.computer/client",
+    ),
+    null,
+  );
+});
+
+test("Brain client capabilities are signed, account-and-origin-bound, and expiring", () => {
+  const token = issueBrainClientCapability(
+    "hosted-secret",
+    "user_paul",
+    "https://finite.computer",
+    1_000,
+    "nonce-1",
+  );
   assert.deepEqual(verifyBrainClientCapability(token, "hosted-secret", 1_001), {
     workosUserId: "user_paul",
     emailVerified: true,
+    brainPublicOrigin: "https://finite.computer",
   });
   assert.equal(verifyBrainClientCapability(token, "other-secret", 1_001), null);
   assert.equal(verifyBrainClientCapability(`${token}x`, "hosted-secret", 1_001), null);
@@ -86,7 +140,13 @@ test("Brain client capabilities are signed, account-bound, and expiring", () => 
 
 test("a Brain client capability remains usable only while its dashboard account is active", () => {
   const capability = verifyBrainClientCapability(
-    issueBrainClientCapability("hosted-secret", "user_paul", 1_000, "nonce-1"),
+    issueBrainClientCapability(
+      "hosted-secret",
+      "user_paul",
+      "https://finite.computer",
+      1_000,
+      "nonce-1",
+    ),
     "hosted-secret",
     1_001,
   );

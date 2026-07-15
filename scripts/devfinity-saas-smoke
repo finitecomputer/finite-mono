@@ -324,6 +324,107 @@ runtime_agent_npub() {
   '
 }
 
+brain_browser_smoke() {
+  local action="$1"
+  local expected_text="${2:-}"
+  (
+    cd "$dashboard_dir"
+    DEVFINITY_BRAIN_MACHINE_ID="$machine_id" \
+      DEVFINITY_BRAIN_AGENT_NPUB="$agent_npub_before" \
+      DEVFINITY_BRAIN_EXPECTED_TEXT="$expected_text" \
+      node --import tsx scripts/devfinity-brain-smoke.ts "$action"
+  )
+}
+
+paired_personal_vault_id() {
+  container exec "$container_machine_id" fbrain vault list --json >"$brain_vaults_json"
+  node - "$brain_vaults_json" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const personal = (response.vaults || []).find(
+  (vault) => vault.kind === "personal" && vault.role === "member"
+);
+if (!personal?.vaultId) {
+  throw new Error("Agent Principal cannot discover the paired user-owned Personal Vault");
+}
+process.stdout.write(personal.vaultId);
+JS
+}
+
+open_and_sync_agent_workspace() {
+  container exec "$container_machine_id" fbrain open "$brain_vault_id" --json >"$brain_open_json"
+  node - "$brain_open_json" "$brain_tree" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (response.path !== process.argv[3]) {
+  throw new Error(`fbrain opened ${response.path}, expected durable tree ${process.argv[3]}`);
+}
+JS
+  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+    >"$brain_sync_json"
+  assert_agent_workspace_scope
+  container exec "$container_machine_id" /bin/bash -lc '
+    test "$FINITE_HOME" = /data/agent
+    test "$FBRAIN_CONFIG_DIR" = /data/agent/fbrain
+    test "$FBRAIN_WORKING_TREE_ROOT" = /data/workspace/finitebrain
+    test -f /data/agent/identity/identity.json
+    test -d /data/agent/fbrain
+    test ! -e /root/.finite/identity/identity.json
+    test ! -e /root/.finitebrain
+    test ! -e /root/finitebrain
+  '
+}
+
+assert_agent_workspace_scope() {
+  container exec "$container_machine_id" cat \
+    "$brain_tree/.finitebrain/vault-directory.json" >"$brain_directory_json"
+  container exec "$container_machine_id" cat \
+    "$brain_tree/.finitebrain/working-tree-state.json" >"$brain_tree_state_json"
+  node - \
+    "$brain_directory_json" \
+    "$brain_tree_state_json" \
+    "$brain_vault_id" \
+    "$agent_npub_before" <<'JS'
+const fs = require("node:fs");
+const directory = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const treeState = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const expectedVaultId = process.argv[4];
+const agentNpub = process.argv[5];
+if (directory.vault?.id !== expectedVaultId || directory.vault?.kind !== "personal") {
+  throw new Error("Agent Working Tree is not the paired user-owned Personal Vault");
+}
+if (!directory.vault.ownerNpub || directory.vault.ownerNpub === agentNpub) {
+  throw new Error("Agent Working Tree must name the distinct user owner, never the Agent Principal");
+}
+const roots = treeState.folderRoots || [];
+if (
+  roots.length !== 1 ||
+  roots[0].folderId !== "agent-workspace" ||
+  roots[0].path !== "agent-workspace" ||
+  roots[0].canRead !== true ||
+  roots[0].metadataOnly !== false
+) {
+  throw new Error(
+    `Agent Working Tree must expose exactly one readable Agent Workspace Folder: ${JSON.stringify(roots)}`
+  );
+}
+JS
+}
+
+write_agent_workspace_note() {
+  container exec \
+    -e "DEVFINITY_BRAIN_PROOF=$brain_proof" \
+    -w "$brain_tree/agent-workspace" \
+    "$container_machine_id" \
+    /bin/bash -lc '
+      umask 077
+      printf "# %s\n\nWritten by the paired Agent Principal through fbrain.\n" \
+        "$DEVFINITY_BRAIN_PROOF" >devfinity-agent-proof.md
+    '
+  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+    >"$brain_sync_json"
+}
+
 requesting_user_account_id() {
   node - "$chat_state_json" <<'JS'
 const fs = require("node:fs");
@@ -553,6 +654,10 @@ if [[ "${DEVFINITY_PROFILE:-}" != "apple-saas" ]]; then
   echo "devfinity SaaS smoke requires the apple-saas profile" >&2
   exit 64
 fi
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "1" ]]; then
+  echo "DEVFINITY_BRAIN_ONLY_SMOKE must be 0 or 1" >&2
+  exit 64
+fi
 if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_SITES_ONLY_SMOKE must be 0 or 1" >&2
   exit 64
@@ -565,9 +670,15 @@ chat_url="${FINITECHAT_SERVER_URL:?}"
 hosted_device_url="${FC_HOSTED_WEB_DEVICE_URL:?}"
 sites_api_url="${FC_SITES_UPSTREAM_URL:?}"
 state_dir="${DEVFINITY_STATE_DIR:?}"
+dashboard_dir="$(pwd)/finitecomputer-v2/apps/dashboard"
 me_json="$state_dir/saas-smoke-core-me.json"
 chat_state_json="$state_dir/saas-smoke-chat-state.json"
 chat_action_json="$state_dir/saas-smoke-chat-action.json"
+brain_vaults_json="$state_dir/saas-smoke-brain-vaults.json"
+brain_open_json="$state_dir/saas-smoke-brain-open.json"
+brain_sync_json="$state_dir/saas-smoke-brain-sync.json"
+brain_directory_json="$state_dir/saas-smoke-brain-directory.json"
+brain_tree_state_json="$state_dir/saas-smoke-brain-tree-state.json"
 sites_auth_json="$state_dir/saas-smoke-sites-auth.json"
 sites_dry_run_json="$state_dir/saas-smoke-sites-dry-run.json"
 sites_init_json="$state_dir/saas-smoke-sites-init.json"
@@ -635,11 +746,20 @@ wait_http "Agent Runtime" "$runtime_url/healthz" 180
 wait_http "Agent contact" "$runtime_url/contact" 180
 start_chat_updates
 wait_for_connected_chat
-if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: devfinity apple chat works"
 else
-  echo "Sites-only smoke: Hosted Web Device connected; inference reply skipped"
+  echo "focused smoke: Hosted Web Device connected; real inference reply skipped"
 fi
+
+agent_npub_before="$(runtime_agent_npub)"
+brain_browser_smoke pair
+brain_vault_id="$(paired_personal_vault_id)"
+brain_tree="/data/workspace/finitebrain/$brain_vault_id"
+brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"
+open_and_sync_agent_workspace
+write_agent_workspace_note
+brain_browser_smoke assert-note "$brain_proof"
 publish_private_requesting_user_site
 
 restart_process finitechat
@@ -652,12 +772,11 @@ assert_site_cookie_works "$sites_cookie_jar_before"
 issue_and_redeem_site_preview "$sites_cookie_jar_after"
 start_chat_updates
 wait_for_connected_chat
-if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: chat services healed"
 fi
 
 runtime_started_before="$(container_started_at)"
-agent_npub_before="$(runtime_agent_npub)"
 curl_customer \
   -H 'content-type: application/json' \
   -X POST \
@@ -682,11 +801,21 @@ if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
   echo "Agent Principal changed across Apple Container restart" >&2
   exit 1
 fi
+container exec "$container_machine_id" test -f \
+  "$brain_tree/agent-workspace/devfinity-agent-proof.md"
+if [[ "$(paired_personal_vault_id)" != "$brain_vault_id" ]]; then
+  echo "Agent lost its paired Personal Vault across Apple Container restart" >&2
+  exit 1
+fi
+container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+  >"$brain_sync_json"
+assert_agent_workspace_scope
+brain_browser_smoke assert-note "$brain_proof"
 assert_site_cookie_works "$sites_cookie_jar_before"
 assert_site_cookie_works "$sites_cookie_jar_after"
 revoke_requesting_user_site
 wait_for_connected_chat
-if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: runtime restart healed"
 fi
 

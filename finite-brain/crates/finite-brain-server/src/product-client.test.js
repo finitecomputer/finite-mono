@@ -66,7 +66,12 @@ const context = {
   TextDecoder,
   TextEncoder,
   Uint8Array,
+  URL,
   URLSearchParams,
+  clearInterval,
+  clearTimeout,
+  setInterval,
+  setTimeout,
   atob: (value) => Buffer.from(value, "base64").toString("binary"),
   btoa: (value) => Buffer.from(value, "binary").toString("base64"),
   console,
@@ -108,9 +113,74 @@ context.globalThis = context;
 const source = fs.readFileSync(path.join(__dirname, "product-client.js"), "utf8");
 const htmlSource = fs.readFileSync(path.join(__dirname, "product-client.html"), "utf8");
 const cssSource = fs.readFileSync(path.join(__dirname, "product-client.css"), "utf8");
+
+const hostedStartupSource = source.slice(
+  source.indexOf("async function detectSigner()"),
+  source.indexOf("async function connectBrainIdentityProvider")
+);
+assert.match(
+  hostedStartupSource,
+  /if \(hostedState\) \{[\s\S]*await resumeSession\(\);\s*return;/u,
+  "Opening hosted Brain must explicitly resume its in-memory Vault session without replacing its connected signer state"
+);
+const hostedGrantResumeSource = source.slice(
+  source.indexOf("async function openAvailableFolderKeyGrants"),
+  source.indexOf("async function loadVaultReader")
+);
+assert.match(
+  hostedGrantResumeSource,
+  /openFolderKeyGrants\([\s\S]*expectedVaultId: vaultId/u,
+  "Hosted session resume must bind exported Folder Key Grants to their known active Vault"
+);
+const hostedGrantOpenSource = source.slice(
+  source.indexOf("async function openFolderKeyGrants"),
+  source.indexOf("async function openDevelopmentFolderKeyGrants")
+);
+assert.match(
+  hostedGrantOpenSource,
+  /options\.expectedVaultId \|\| exportedVault\?\.vault\?\.id/u,
+  "Scoped grant opening must preserve an explicit Vault ID and understand the current export shape"
+);
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
+const suggestedAgentNpub = client.npubFromHex("77".repeat(32));
+assert.equal(
+  JSON.stringify(
+    client.suggestedAgentIdentityFromNavigation(
+      `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+    )
+  ),
+  JSON.stringify({
+    email: "cheater@finite.vip",
+    name: "cheater",
+    npub: suggestedAgentNpub,
+  }),
+  "Brain should understand the selected runtime display identity as a pairing input hint"
+);
+assert.equal(
+  client.suggestedAgentIdentityFromNavigation(
+    "?agentEmail=not-an-email&agentNpub=not-an-npub"
+  ),
+  null,
+  "An invalid navigation hint must not become pairing input"
+);
+context.document.getElementById("agentWorkspaceEmailInput").value = "";
+context.document.getElementById("agentWorkspaceNpubInput").value = "";
+assert.equal(
+  client.applySuggestedAgentIdentity(
+    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+  ),
+  true
+);
+assert.equal(elements.get("agentWorkspaceEmailInput").value, "cheater@finite.vip");
+assert.equal(elements.get("agentWorkspaceNpubInput").value, suggestedAgentNpub);
+assert.equal(
+  client.agentWorkspacePairingPrompt(
+    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+  ),
+  "Pair cheater with an Agent Workspace."
+);
 
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("locked")),
@@ -850,7 +920,12 @@ assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
 assert.match(htmlSource, /id="agentWorkspacePairingSection"/);
+assert.match(htmlSource, />\s*Agent email\s*</);
+assert.match(htmlSource, /id="agentWorkspaceEmailInput"/);
+assert.match(htmlSource, /placeholder="agent@finite\.vip"/);
+assert.match(htmlSource, />\s*Advanced identity details\s*</);
 assert.match(htmlSource, /id="agentWorkspaceNpubInput"/);
+assert.doesNotMatch(htmlSource, /placeholder="Agent npub… or name@domain"/);
 assert.match(htmlSource, /id="pairAgentWorkspaceButton"/);
 assert.match(htmlSource, /id="agentWorkspacePairingList"/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
@@ -2103,11 +2178,12 @@ assert.doesNotMatch(
           audit: [{ action: "created", occurredAt: "2026-07-13T00:00:00.000Z" }],
         },
       ],
-    })),
+    }, `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${client.npubFromHex("22".repeat(32))}`)),
     JSON.stringify([
     {
       id: "delegation-1",
       agentNpub: client.npubFromHex("22".repeat(32)),
+      displayIdentity: "cheater · cheater@finite.vip",
       folderId: "agent-workspace",
       status: "active",
       title: "Agent Workspace",
@@ -2115,6 +2191,15 @@ assert.doesNotMatch(
     },
     ])
   );
+  const fallbackIdentity = await client.resolveAgentWorkspacePairingIdentity(
+    "stale@finite.vip",
+    personalMemberNpub,
+    async (value) => {
+      if (value.includes("@")) throw new Error("unresolvable email");
+      return { npub: value };
+    }
+  );
+  assert.equal(fallbackIdentity.npub, personalMemberNpub);
   assert.equal(brainIdentityProvider.version, "finite-brain-identity-provider-v1");
   assert.deepEqual(
     Object.keys(brainIdentityProvider).sort(),
@@ -2176,6 +2261,83 @@ assert.doesNotMatch(
   );
   assert.equal(
     client.deriveBrainIdentityProviderState(hostedBrainIdentityProvider).status,
+    "ready"
+  );
+  const originalParent = context.window.parent;
+  const originalAddEventListener = context.window.addEventListener;
+  const originalRemoveEventListener = context.window.removeEventListener;
+  let sessionProofMessageHandler = null;
+  let sessionProofRequestCount = 0;
+  const delayedParent = {
+    postMessage(message, origin) {
+      sessionProofRequestCount += 1;
+      if (sessionProofRequestCount !== 2) return;
+      queueMicrotask(() => {
+        sessionProofMessageHandler?.({
+          source: delayedParent,
+          origin,
+          data: {
+            type: "finite-brain-session-proof-response-v1",
+            requestId: message.requestId,
+            proof: "retried-workos-session-proof",
+          },
+        });
+      });
+    },
+  };
+  context.window.parent = delayedParent;
+  context.window.addEventListener = (type, handler) => {
+    if (type === "message") sessionProofMessageHandler = handler;
+  };
+  context.window.removeEventListener = (type, handler) => {
+    if (type === "message" && sessionProofMessageHandler === handler) {
+      sessionProofMessageHandler = null;
+    }
+  };
+  try {
+    const retriedSessionProofCalls = [];
+    const retriedSessionProofProvider = client.createHostedBrainIdentityProvider({
+      parentOrigin: "http://finite.test",
+      sessionProofRetryIntervalMs: 5,
+      fetch: async (_url, init) => {
+        retriedSessionProofCalls.push(init.headers["x-finite-brain-session-proof"]);
+        return Response.json({
+          publicKeyHex: "88".repeat(32),
+          npub: client.npubFromHex("88".repeat(32)),
+        });
+      },
+    });
+    assert.equal(
+      (await retriedSessionProofProvider.identifyMember()).publicKeyHex,
+      "88".repeat(32)
+    );
+    assert.equal(sessionProofRequestCount, 2);
+    assert.deepEqual(retriedSessionProofCalls, ["retried-workos-session-proof"]);
+  } finally {
+    context.window.parent = originalParent;
+    context.window.addEventListener = originalAddEventListener;
+    context.window.removeEventListener = originalRemoveEventListener;
+  }
+  const hostedProbeCalls = [];
+  const checkingHostedBrainIdentityProvider = client.createHostedBrainIdentityProvider({
+    sessionProof: "current-workos-session-proof",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      hostedProbeCalls.push(request.operation);
+      return Response.json({
+        publicKeyHex: "77".repeat(32),
+        npub: client.npubFromHex("77".repeat(32)),
+      });
+    },
+  });
+  client.configureBrainIdentityProvider(checkingHostedBrainIdentityProvider);
+  const connectedHostedIdentity = await client.connectBrainIdentityProvider({
+    loadVisibleVaults: false,
+  });
+  assert.equal(connectedHostedIdentity.publicKeyHex, "77".repeat(32));
+  assert.deepEqual(hostedProbeCalls, ["identifyMember"]);
+  assert.equal(
+    client.deriveBrainIdentityProviderState(checkingHostedBrainIdentityProvider).status,
     "ready"
   );
   assert.deepEqual(

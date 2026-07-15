@@ -817,7 +817,7 @@ mod tests {
             .json(&json!({
                 "model": "kimi-k2-6",
                 "messages": [{ "role": "user", "content": "too much" }],
-                "max_tokens": 2_000_000
+                "max_tokens": 20_000_000
             }))
             .send()
             .await

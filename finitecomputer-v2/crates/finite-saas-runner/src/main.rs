@@ -2,12 +2,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
-    AgentCreationRunner, AppleContainerConfig, AppleContainerLauncher, CoreHttpAgentCreationQueue,
-    DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
-    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
-    DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher, EnclaviaConfig, EnclaviaLauncher,
-    FinitePrivateRuntimeDefaults, KataConfig, KataLauncher, PhalaConfig, PhalaLauncher,
-    RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
+    AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
+    AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_FINITE_AGENT_PICTURE_URL,
+    DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL,
+    DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig,
+    DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
+    KataLauncher, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
+    RuntimeLauncher, SpecializationBundleRuntimeDefaults,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -87,6 +88,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY");
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_environment = optional_runtime_secret_environment()?;
+    let agent_identity_authority = optional_agent_identity_authority()?;
     // This identifies the adapter offered by this worker. Placement remains
     // project-selected in Core; product code never toggles a process-global
     // backend to change an existing agent's runtime.
@@ -144,6 +146,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
+                    agent_identity_authority: agent_identity_authority.clone(),
                 },
             )?
         }
@@ -207,6 +210,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
+                    agent_identity_authority: agent_identity_authority.clone(),
                 },
             )?
         }
@@ -266,6 +270,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
+                    agent_identity_authority: agent_identity_authority.clone(),
                 },
             )?
         }
@@ -307,6 +312,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
+                    agent_identity_authority: agent_identity_authority.clone(),
                 },
             )?
         }
@@ -358,6 +364,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
+                    agent_identity_authority,
                 },
             )?
         }
@@ -425,6 +432,7 @@ struct RunOnceConfig {
     finite_private_specialization_worker_api_key: Option<String>,
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
+    agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
 }
 
 fn run_once_with_launcher<L>(
@@ -456,7 +464,26 @@ where
     .with_runtime_environment(config.runtime_environment)?
     .with_runtime_secret_environment(config.runtime_secret_environment)?
     .with_runtime_ready_polling(config.runtime_ready_timeout, config.runtime_ready_interval);
+    if let Some(identity_authority) = config.agent_identity_authority {
+        runner = runner.with_agent_identity_authority(identity_authority)?;
+    }
     runner.run_once().map_err(Into::into)
+}
+
+fn optional_agent_identity_authority() -> Result<Option<AgentIdentityAuthorityConfig>> {
+    let base_url = optional_env_value("FINITE_IDENTITY_AUTHORITY");
+    let operator_token = optional_env_value("FINITE_IDENTITY_OPERATOR_TOKEN");
+    match (base_url, operator_token) {
+        (None, None) => Ok(None),
+        (Some(base_url), Some(operator_token)) => Ok(Some(AgentIdentityAuthorityConfig {
+            base_url,
+            operator_token,
+            timeout: Duration::from_secs(optional_u64("FC_RUNNER_IDENTITY_TIMEOUT_SECS", 10)?),
+        })),
+        _ => bail!(
+            "FINITE_IDENTITY_AUTHORITY and FINITE_IDENTITY_OPERATOR_TOKEN must be configured together"
+        ),
+    }
 }
 
 fn required_env(name: &str) -> Result<String> {

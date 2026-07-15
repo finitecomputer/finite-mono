@@ -190,11 +190,15 @@ Within that root, v2 reserves:
 
 `FINITECHAT_HOME` points at `/data/agent`, `HERMES_HOME` points at
 `/data/agent/hermes-home`, and `FINITECHAT_WORKSPACE` points at
-`/data/workspace`. Local Docker bind-mounts a host directory at `/data`; Kata
-and Phala attach Provider Durable Volumes at `/data`. No v2 provider should use
-a different in-container durable-state path unless this contract changes first.
-The mounted volume is primary state and never counts as its own Recovery
-Snapshot.
+`/data/workspace`. `fbrain` keeps its local control state at
+`/data/agent/fbrain` and defaults Vault Working Trees below
+`/data/workspace/finitebrain`. The Brain server remains the canonical store for
+encrypted Vault records; these Working Trees are durable client state and a
+local editing/sync surface, not a second Vault database or a backup. Local
+Docker bind-mounts a host directory at `/data`; Kata and Phala attach Provider
+Durable Volumes at `/data`. No v2 provider should use a different in-container
+durable-state path unless this contract changes first. The mounted volume is
+primary runtime state and never counts as its own Recovery Snapshot.
 
 ## Hermes Image Audit
 

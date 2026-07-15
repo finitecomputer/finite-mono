@@ -130,6 +130,16 @@ and the explicitly authorized Agent Principal can use. It is the narrow shared
 starting place for an agent, not a second Vault and not a change to Personal
 Vault ownership.
 
+In Hosted Web, the selected Runtime's Managed Agent Email and display name may
+prefill the owner's pairing input, but that navigation context carries no
+authority. Brain resolves the email through Finite Identity and grants the
+resolved Agent Principal Key only after the owner explicitly pairs it from an
+unlocked Personal Vault. The raw `npub` is an advanced fallback, not the
+primary user experience. After pairing, the Agent Principal discovers the
+user-owned Personal Vault through the signed visible-Vault list and opens its
+restricted Folder in a durable Vault Working Tree below the Runtime's
+`/data/workspace` boundary.
+
 ### Local Data Security Baseline
 
 The FiniteBrain-wide policy for how trusted clients and Agent Runtimes handle
@@ -149,6 +159,10 @@ A trusted-client state in which Session Folder Keys and temporary plaintext
 state are unavailable and automatic grant reopening is blocked until the
 Member explicitly resumes the grant-opening flow. A Session Lock hides client
 content but does not claim to erase a separately created Vault Working Tree.
+In Hosted Web, explicitly opening Brain from the authenticated dashboard is
+the Member's Resume action and may automatically reopen valid Folder Key
+Grants. After a lock, the Member must explicitly open Brain again; Account Auth
+selects the hosted session but remains neither Brain authority nor a signer.
 The browser Product Client applies the same lock before page navigation or
 back/forward-cache suspension and whenever a signed event no longer matches the
 Member Identity connected for the current session.
