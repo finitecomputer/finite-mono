@@ -181,6 +181,11 @@ assert.equal(
   ),
   "Pair cheater with an Agent Workspace."
 );
+assert.equal(client.agentWorkspaceFolderPath(0, "agent-workspace"), "Agent Workspace");
+assert.equal(
+  client.agentWorkspaceFolderPath(1, "agent-workspace-second"),
+  "agent-workspace-second"
+);
 
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("locked")),

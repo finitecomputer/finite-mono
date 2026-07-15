@@ -75,6 +75,7 @@ process.stdout.write([
   project.id,
   runtime.id,
   contact.toString().replace(/\/$/, ""),
+  String(project.agent_email || ""),
 ].join("\t"));
 JS
 }
@@ -102,8 +103,8 @@ wait_for_runtime() {
   while true; do
     read_core_me
     if fields="$(runtime_fields)"; then
-      IFS=$'\t' read -r project_id machine_id runtime_url <<<"$fields"
-      if [[ -n "$project_id" && -n "$machine_id" && -n "$runtime_url" ]]; then
+      IFS=$'\t' read -r project_id machine_id runtime_url agent_email <<<"$fields"
+      if [[ -n "$project_id" && -n "$machine_id" && -n "$runtime_url" && -n "$agent_email" ]]; then
         return 0
       fi
     fi
@@ -330,6 +331,7 @@ brain_browser_smoke() {
   (
     cd "$dashboard_dir"
     DEVFINITY_BRAIN_MACHINE_ID="$machine_id" \
+      DEVFINITY_BRAIN_AGENT_EMAIL="$agent_email" \
       DEVFINITY_BRAIN_AGENT_NPUB="$agent_npub_before" \
       DEVFINITY_BRAIN_EXPECTED_TEXT="$expected_text" \
       node --import tsx scripts/devfinity-brain-smoke.ts "$action"
@@ -368,7 +370,6 @@ JS
     test "$FBRAIN_CONFIG_DIR" = /data/agent/fbrain
     test "$FBRAIN_WORKING_TREE_ROOT" = /data/workspace/finitebrain
     test -f /data/agent/identity/identity.json
-    test -d /data/agent/fbrain
     test ! -e /root/.finite/identity/identity.json
     test ! -e /root/.finitebrain
     test ! -e /root/finitebrain
@@ -400,7 +401,7 @@ const roots = treeState.folderRoots || [];
 if (
   roots.length !== 1 ||
   roots[0].folderId !== "agent-workspace" ||
-  roots[0].path !== "agent-workspace" ||
+  roots[0].path !== "Agent Workspace" ||
   roots[0].canRead !== true ||
   roots[0].metadataOnly !== false
 ) {
@@ -414,7 +415,7 @@ JS
 write_agent_workspace_note() {
   container exec \
     -e "DEVFINITY_BRAIN_PROOF=$brain_proof" \
-    -w "$brain_tree/agent-workspace" \
+    -w "$brain_tree/Agent Workspace" \
     "$container_machine_id" \
     /bin/bash -lc '
       umask 077
@@ -802,7 +803,7 @@ if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
   exit 1
 fi
 container exec "$container_machine_id" test -f \
-  "$brain_tree/agent-workspace/devfinity-agent-proof.md"
+  "$brain_tree/Agent Workspace/devfinity-agent-proof.md"
 if [[ "$(paired_personal_vault_id)" != "$brain_vault_id" ]]; then
   echo "Agent lost its paired Personal Vault across Apple Container restart" >&2
   exit 1

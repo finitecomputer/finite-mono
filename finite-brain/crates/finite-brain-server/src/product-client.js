@@ -9569,6 +9569,10 @@ const FiniteBrainProductClient = (() => {
     return `Pair ${selectedName} with an Agent Workspace.`;
   }
 
+  function agentWorkspaceFolderPath(existingPairingCount, folderId) {
+    return existingPairingCount === 0 ? "Agent Workspace" : folderId;
+  }
+
   function agentWorkspacePairingRows(
     response,
     search = window.location?.search || ""
@@ -9711,7 +9715,7 @@ const FiniteBrainProductClient = (() => {
         folderId,
         name: "Agent Workspace",
         ownerNpub: currentActorNpub(),
-        path: folderId,
+        path: agentWorkspaceFolderPath(existingPairingCount, folderId),
         vaultId: metadata.vaultId,
       });
       requireCurrentSessionEpoch(sessionEpoch);
@@ -11846,6 +11850,7 @@ const FiniteBrainProductClient = (() => {
     accessIntentValue,
     accessPanelState,
     accessPeopleSummary,
+    agentWorkspaceFolderPath,
     agentWorkspacePairingRows,
     agentWorkspacePairingsPath,
     agentWorkspacePairingPrompt,

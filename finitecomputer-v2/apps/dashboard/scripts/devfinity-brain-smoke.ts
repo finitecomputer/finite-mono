@@ -8,6 +8,7 @@ async function main() {
   const action = process.argv[2];
   const dashboardUrl = requiredEnv("FC_DASHBOARD_URL").replace(/\/$/u, "");
   const machineId = requiredEnv("DEVFINITY_BRAIN_MACHINE_ID");
+  const agentEmail = requiredEnv("DEVFINITY_BRAIN_AGENT_EMAIL").toLowerCase();
   const agentNpub = requiredEnv("DEVFINITY_BRAIN_AGENT_NPUB");
   const expectedText = process.env.DEVFINITY_BRAIN_EXPECTED_TEXT?.trim() || "";
 
@@ -16,6 +17,9 @@ async function main() {
   }
   if (!agentNpub.startsWith("npub1")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_NPUB must be an npub");
+  }
+  if (!/^[a-z0-9._-]+@[a-z0-9.-]+$/u.test(agentEmail)) {
+    throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
   if (action === "assert-note" && !expectedText) {
     throw new Error("DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note");
@@ -41,7 +45,7 @@ async function main() {
     await waitForUnlockedBrain(brain, page);
 
     if (action === "pair") {
-      await pairAgent(brain, agentNpub);
+      await pairAgent(brain, agentEmail, agentNpub);
       console.log("brain owner pairing ok");
     } else {
       await assertOwnerSeesNote(brain, expectedText);
@@ -73,20 +77,30 @@ async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
   );
 }
 
-async function pairAgent(brain: FrameLocator, expectedAgentNpub: string) {
+async function pairAgent(
+  brain: FrameLocator,
+  expectedAgentEmail: string,
+  expectedAgentNpub: string
+) {
   await brain.locator("#sessionSettingsButton").click();
   await brain.locator("#settingsNavAccess").click();
   const section = brain.locator("#agentWorkspacePairingSection");
   await section.waitFor({ state: "visible", timeout: 30_000 });
 
   const pairingCount = brain.locator("#agentWorkspacePairingCount");
-  const input = brain.locator("#agentWorkspaceNpubInput");
+  const emailInput = brain.locator("#agentWorkspaceEmailInput");
+  const npubInput = brain.locator("#agentWorkspaceNpubInput");
   const count = Number((await pairingCount.textContent())?.trim() || "0");
   if (count === 0) {
     assert.equal(
-      await input.inputValue(),
+      await emailInput.inputValue(),
+      expectedAgentEmail,
+      "the dashboard navigation hint must prefill the selected Agent email"
+    );
+    assert.equal(
+      await npubInput.inputValue(),
       expectedAgentNpub,
-      "the dashboard navigation hint must prefill the selected Agent Principal"
+      "the dashboard navigation hint must retain the Agent Principal as an advanced fallback"
     );
     await brain.locator("#pairAgentWorkspaceButton").click();
     await brain
