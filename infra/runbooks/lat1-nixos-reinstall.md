@@ -169,6 +169,7 @@ before propagation, the challenge hits the old box (404) and Caddy backs off —
 finite.computer                          -> 200   (dashboard)
 finite.computer/internal/finite-private/ -> 401   (alive+gated)
 chat.finite.computer/health              -> 200
+brain.finite.computer/health             -> 200
 <any>.finite.chat                        -> 200
 ```
 Plus the Tinfoil limiter `/health` → `usageApi authenticated: true, 200`
@@ -180,5 +181,5 @@ Enable offsite borg backups first (single-disk = backups are the safety net),
 then a disk mirror. The Nix configuration enables the Kata Runner timer; verify
 its live credential, capacity, Runtime artifact, and readiness path before the
 internal production canary. Phala remains a fast-follow adapter and does not
-gate Kata. Brain + oauth2-proxy are deferred (still on smoke). See
-`finite-fable/notes/lat1-cutover-complete-2026-07-09.md`.
+gate Kata. Brain now runs on lat1 at its canonical
+`brain.finite.computer` origin; the smoke host remains a rollback source.

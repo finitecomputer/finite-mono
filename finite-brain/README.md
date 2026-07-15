@@ -159,7 +159,7 @@ depend on shell persistence (the identity itself always resolves from the
 shared location above):
 
 ```sh
-export FINITE_BRAIN_SERVER_URL=https://finite.computer
+export FINITE_BRAIN_SERVER_URL=https://brain.finite.computer
 export FBRAIN_CONFIG_DIR="$HOME/.config/finitebrain"
 
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" auth status --json

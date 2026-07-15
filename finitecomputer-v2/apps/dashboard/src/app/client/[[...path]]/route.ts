@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   issueBrainClientCapability,
-  officialBrainFrameParentOrigin,
+  officialBrainFrameOrigins,
 } from "@/lib/brain-identity-provider";
 import { proxyBrainRequest } from "@/lib/brain-proxy";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
@@ -15,8 +15,12 @@ type RouteContext = {
 async function proxy(request: NextRequest, context: RouteContext) {
   const { path = [] } = await context.params;
   if (request.method === "GET" && path.length === 0) {
-    const parentOrigin = officialBrainFrameParentOrigin(request.url, request.headers);
-    if (!parentOrigin) {
+    const origins = officialBrainFrameOrigins(
+      request.url,
+      request.headers,
+      process.env.FC_BRAIN_PUBLIC_ORIGIN,
+    );
+    if (!origins) {
       return Response.json(
         { error: "Brain opens only inside its dashboard frame." },
         { status: 403, headers: { "cache-control": "no-store" } },
@@ -40,9 +44,9 @@ async function proxy(request: NextRequest, context: RouteContext) {
       clientCapability: issueBrainClientCapability(
         config.apiToken,
         account.workosUserId,
-        parentOrigin,
+        origins.brainPublicOrigin,
       ),
-      parentOrigin,
+      parentOrigin: origins.parentOrigin,
     });
   }
   return proxyBrainRequest(request, "/client", path);

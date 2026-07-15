@@ -26,12 +26,15 @@ import {
 import {
   activitiesForChat,
   attachmentSendError,
+  beginPendingChatTurn,
   isUserPrincipalMessage,
   initialChatSnapshotSource,
   liveActivityLabel,
   messageContent,
   messagesForChat,
   nextChatSnapshotGeneration,
+  pendingTurnIsComplete,
+  pendingTurnMatchesSelection,
   recordChatSnapshot,
   roomDetailsForSelection,
   selectedChat as selectChat,
@@ -49,6 +52,7 @@ import {
   type ChatMediaAttachment,
   type ChatMediaKind,
   type ChatMessage,
+  type PendingChatTurn,
 } from "@finite/chat-ui";
 import { FiniteBrand } from "./components/finite-brand";
 import {
@@ -127,6 +131,7 @@ export function App() {
   const [deviceLinkStatus, setDeviceLinkStatus] = useState<DesktopDeviceLinkStatus>({ status: "idle" });
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [localPendingMessages, setLocalPendingMessages] = useState<LocalPendingMessage[]>([]);
+  const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const agentProfileInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
@@ -338,6 +343,7 @@ export function App() {
     if (!identity.hasStoredAccountSecret) {
       snapshotSourceRef.current = initialChatSnapshotSource();
       setState(null);
+      setPendingAgentTurns([]);
       setError(null);
     }
   }, []);
@@ -492,6 +498,11 @@ export function App() {
     [localPendingMessages, selectedChat?.chat_id, selectedRoom?.room_id, selectedTopic]
   );
   const hasComposerContent = Boolean(composer.trim() || composerAttachments.length > 0);
+  const awaitingSelectedAgent =
+    Boolean(selectedRoom?.is_agent_chat) &&
+    pendingAgentTurns.some((turn) => pendingTurnMatchesSelection(turn, selection)) &&
+    selectedLiveMembers.length === 0;
+
   const focusAgentInput = useCallback(() => {
     window.requestAnimationFrame(() => {
       const input = agentProfileInputRef.current;
@@ -514,6 +525,16 @@ export function App() {
     selectedTopic?.topic_id,
     selectedChat?.chat_id,
   ]);
+
+  useEffect(() => {
+    if (!state) return;
+    setPendingAgentTurns((turns) => {
+      const pending = turns.filter(
+        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      );
+      return pending.length === turns.length ? turns : pending;
+    });
+  }, [state]);
 
   useEffect(() => {
     if (
@@ -638,6 +659,15 @@ export function App() {
         created_at: "Sending",
       },
     ]);
+    const pendingTurn = selectedRoom.is_agent_chat
+      ? beginPendingChatTurn(selection, selectedMessages)
+      : null;
+    if (pendingTurn) {
+      setPendingAgentTurns((turns) => [
+        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selection)),
+        pendingTurn,
+      ]);
+    }
     const next = attachments.length
       ? selectedTopic && selectedChat
         ? await runComposerAttachmentUpload({
@@ -675,6 +705,9 @@ export function App() {
     if (next) {
       setLocalPendingMessages((messages) => messages.filter((message) => message.local_id !== pendingId));
     } else {
+      if (pendingTurn) {
+        setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
+      }
       setLocalPendingMessages((messages) =>
         messages.map((message) => (message.local_id === pendingId ? { ...message, state: "failed", created_at: "Not sent" } : message))
       );
@@ -1161,6 +1194,9 @@ export function App() {
                 {visiblePendingMessages.map((message) => (
                   <PendingMessageRow key={message.local_id} message={message} />
                 ))}
+                {awaitingSelectedAgent ? (
+                  <LiveActivityIndicator label={`${selectedRoom?.display_name || "Hermes"} is working`} />
+                ) : null}
                 {selectedLiveMembers.length > 0 ? <LiveActivityIndicator members={selectedLiveMembers} /> : null}
                 {!state ? (
                   <EmptyState title="Starting daemon" busy />

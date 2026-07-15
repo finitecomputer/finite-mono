@@ -257,14 +257,15 @@ export function pendingTurnIsComplete(
 
 export function liveActivityLabel(
   members: AppTypingMember[],
-  fallbackName = "Someone"
+  fallbackName = "Someone",
+  awaitingReply = false
 ) {
   const working = members.find((member) => member.activity_kind === "working");
   const thinking = members.find((member) => member.activity_kind === "thinking");
   const typing = members.find((member) => member.activity_kind === "typing");
   const member = working ?? thinking ?? typing ?? members[0];
   const name = member?.display_name || fallbackName;
-  if (member?.activity_kind === "working") {
+  if (member?.activity_kind === "working" || (!member && awaitingReply)) {
     return `${name} is working`;
   }
   if (member?.activity_kind === "thinking") {

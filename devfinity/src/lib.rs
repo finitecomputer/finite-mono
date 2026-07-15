@@ -1085,7 +1085,7 @@ wait "$postgres_pid"
                     "FINITE_BRAIN_ADDR",
                     format!("{}:{}", self.service_bind_host(), self.ports.finite_brain),
                 ),
-                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.finite_brain_url()),
+                ("FINITE_BRAIN_PUBLIC_BASE_URL", self.dashboard_origin()),
                 (
                     "FINITE_BRAIN_DB",
                     self.finite_brain_dir()
@@ -1506,6 +1506,7 @@ wait "$postgres_pid"
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
+            ("FC_BRAIN_PUBLIC_ORIGIN", self.dashboard_origin()),
             (
                 "FC_SITES_UPSTREAM_URL",
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
@@ -2189,7 +2190,11 @@ wait "$postgres_pid"
     }
 
     fn dashboard_url(&self) -> String {
-        format!("http://127.0.0.1:{}/dashboard", self.ports.dashboard)
+        format!("{}/dashboard", self.dashboard_origin())
+    }
+
+    fn dashboard_origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.dashboard)
     }
 
     fn finitechat_url(&self) -> String {
@@ -3134,6 +3139,7 @@ mod tests {
             yaml.contains("FINITE_BRAIN_DEVELOPMENT_HTTP_HOST\\\":\\\"host.container.internal")
         );
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
+        assert!(yaml.contains("FC_BRAIN_PUBLIC_ORIGIN=http://127.0.0.1:13002"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
         assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
         assert!(

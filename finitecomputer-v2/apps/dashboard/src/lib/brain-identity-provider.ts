@@ -112,6 +112,18 @@ export function officialBrainFrameNavigation(
   return officialBrainFrameParentOrigin(requestUrl, headers) !== null;
 }
 
+export function officialBrainFrameOrigins(
+  requestUrl: string,
+  headers: Pick<Headers, "get">,
+  brainPublicOrigin: string | undefined,
+) {
+  const parentOrigin = officialBrainFrameParentOrigin(requestUrl, headers);
+  if (!parentOrigin || !brainPublicOrigin || !exactHttpOrigin(brainPublicOrigin)) {
+    return null;
+  }
+  return { parentOrigin, brainPublicOrigin };
+}
+
 export function officialBrainFrameParentOrigin(
   requestUrl: string,
   headers: Pick<Headers, "get">,

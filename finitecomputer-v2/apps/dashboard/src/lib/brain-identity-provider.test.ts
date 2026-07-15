@@ -6,6 +6,7 @@ import {
   brainIdentityRequestHash,
   issueBrainClientCapability,
   issueBrainSessionProof,
+  officialBrainFrameOrigins,
   officialBrainFrameNavigation,
   officialBrainFrameParentOrigin,
   parseBrainIdentityProviderRequest,
@@ -82,6 +83,40 @@ test("only a same-origin Brain iframe navigation can receive a client capability
       ),
     ),
     false,
+  );
+});
+
+test("a hosted Brain frame keeps the dashboard parent separate from Brain's signing origin", () => {
+  const headers = new Headers({
+    host: "finite.computer",
+    referer: "https://finite.computer/dashboard/machines/machine-1/brain",
+    "sec-fetch-dest": "iframe",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+  });
+
+  assert.deepEqual(
+    officialBrainFrameOrigins(
+      "https://internal-proxy:3000/client",
+      headers,
+      "https://brain.finite.computer",
+    ),
+    {
+      parentOrigin: "https://finite.computer",
+      brainPublicOrigin: "https://brain.finite.computer",
+    },
+  );
+  assert.equal(
+    officialBrainFrameOrigins("https://finite.computer/client", headers, undefined),
+    null,
+  );
+  assert.equal(
+    officialBrainFrameOrigins(
+      "https://finite.computer/client",
+      headers,
+      "https://brain.finite.computer/client",
+    ),
+    null,
   );
 });
 
