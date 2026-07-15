@@ -13,8 +13,17 @@ Global flags:
   explicit `--server`, saved Vault Working Tree server, `FINITE_BRAIN_SERVER_URL`,
   then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
 
-Transport accepts `https://` endpoints and `http://` only for localhost or
-loopback IPs.
+Transport accepts `https://` endpoints and `http://` only for localhost,
+loopback IPs, or the exact host named by the local-harness-only
+`FINITE_BRAIN_DEVELOPMENT_HTTP_HOST`. An unreachable configured endpoint is a
+blocked state; `fbrain` never substitutes another Brain server.
+
+`FINITE_BRAIN_SERVER_URL` chooses the transport. When
+`FINITE_BRAIN_PUBLIC_BASE_URL` is also set, `fbrain` signs that browser-visible
+canonical origin into Nostr HTTP authorization events while sending the request
+through the transport URL. This lets the current server-side signer adapter
+behave like a future client daemon without teaching Brain multiple identities
+for the same request.
 
 ## Command Map
 
@@ -31,7 +40,7 @@ fbrain conflicts
 fbrain resolve <id>
 fbrain activity
 fbrain access explain|list|grant|revoke
-fbrain vault create|metadata|export
+fbrain vault list|create|metadata|export
 fbrain folder create|list
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
@@ -44,9 +53,8 @@ fbrain share link|accept|revoke|source|folder-invite|folder-accept
 `fbrain` signs with the current Finite Home's Local Identity Key, at
 `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
 `~/.finite/identity/identity.json` otherwise. Whichever Finite tool runs first
-mints the key in that home; `fbrain` finds it. FiniteBrain does not require a
-human/agent key split: controllers sharing one keypair are the same Member
-Identity, while separate keypairs are separate Member Identities. The first
+mints the key in that home; `fbrain` finds it. Hosted users and Agent Principals
+receive separate keys and therefore remain separate Member Identities. The first
 `fbrain` command that needs to sign mints an identity if none exists; `auth
 status` only reports and never creates one.
 
@@ -73,6 +81,7 @@ directory. Do not print or request secrets during normal agent work.
 
 ```sh
 fbrain doctor --server "$SERVER"
+fbrain vault list --server "$SERVER" --json
 fbrain open <vault-id> <tree-path> --server "$SERVER"
 cd <tree-path>
 fbrain status --json
@@ -88,6 +97,11 @@ fbrain activity
 the daemon running, and attempts an initial sync. `sync now` fetches the encrypted
 export, opens available grants, pushes local markdown changes, bootstraps latest
 state, and materializes readable Folders back into the tree.
+
+When the path is omitted, `open` uses `$FBRAIN_WORKING_TREE_ROOT/<vault-id>` if
+configured, otherwise `<current-directory>/<vault-id>`. The hosted runtime sets
+`FBRAIN_CONFIG_DIR=/data/agent/fbrain` and
+`FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain`.
 
 Useful `sync now --json` fields include `status`, `latestSequence`,
 `recordCount`, `localChanges`, `remoteChanges`, and `conflicts`. Expected status

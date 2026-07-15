@@ -2,10 +2,41 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  browserVisibleRequestOrigin,
   inlineContentDisposition,
   requestHasExactOrigin,
   requestOriginMatchesHost,
 } from "./http-headers";
+
+test("browserVisibleRequestOrigin uses the verified public host and protocol", () => {
+  assert.equal(
+    browserVisibleRequestOrigin(
+      new Request("http://internal-proxy:3000/client", {
+        headers: {
+          host: "finite.computer",
+          "x-forwarded-proto": "https",
+        },
+      })
+    ),
+    "https://finite.computer"
+  );
+  assert.equal(
+    browserVisibleRequestOrigin(
+      new Request("http://localhost:13002/client", {
+        headers: { host: "127.0.0.1:13002" },
+      })
+    ),
+    "http://127.0.0.1:13002"
+  );
+  assert.equal(
+    browserVisibleRequestOrigin(
+      new Request("https://finite.computer/client", {
+        headers: { host: "finite.computer, attacker.example" },
+      })
+    ),
+    null
+  );
+});
 
 test("inlineContentDisposition keeps headers ByteString-safe for screenshot filenames", () => {
   const header = inlineContentDisposition("Screenshot 2026-04-28 at 10.14.49\u202fPM.png");

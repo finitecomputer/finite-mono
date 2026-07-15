@@ -21,7 +21,7 @@ What the 2026-07-09 lat1 consolidation cutover changed:
 - **Native Postgres.** Postgres 16 is a `services.postgresql` systemd service
   (db `finite_core`, 87 Finite Private keys) — **no more k3s StatefulSet**.
 - **One Caddy edge.** A single Caddy on lat1 fronts `finite.computer`,
-  `chat.finite.computer`, `*.finite.chat` (Cloudflare Origin CA), and
+  `brain.finite.computer`, `chat.finite.computer`, `*.finite.chat` (Cloudflare Origin CA), and
   `*.docs.finite.chat`. **No Traefik, no k3s, no socat bridges.**
 - **`nixos-rebuild` is THE deploy.** Deploying a release pins the flake to the
   rev that tagged the binaries. The old *six distinct deploy mechanisms* — k3s
@@ -31,9 +31,9 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   ...#finite-lat-1`. On-host `podman build` is gone; first-party images are
   CI-built and digest-pinned (`infra/images/`).
 
-Deferred / still elsewhere: **finite-brain** stays on smoke (migrates later
-with the auth-integration follow-up); **the CI runners** live on lat2;
-**clawland** remains the legacy finite.vip fleet box; **Tinfoil** is unchanged.
+Still elsewhere: **the CI runners** live on lat2; **clawland** remains the
+legacy finite.vip fleet box; **Tinfoil** is unchanged. The old FiniteBrain
+smoke service remains a rollback source, not the production origin.
 
 ## First-cohort production baseline (2026-07-15)
 
@@ -56,7 +56,7 @@ infra/
   hosts/
     lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)
     lat2/      # finite-lat-2 (64.34.80.19) — mono CI + x86_64 Nix builder
-    smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — still hosts finite-brain (deferred)
+    smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
   tinfoil/     # pins + notes for the public Tinfoil satellite repos (measured enclaves)
@@ -73,21 +73,23 @@ that ARE those boxes' config, plus a captured-state appendix.
 
 | Host | Role | Services |
 |---|---|---|
-| **lat1** (64.34.82.77) | **Consolidated NixOS app server** (`infra/nixos/`) | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata; the internal production browser canary was completed by the operator on 2026-07-11), a separately fenced **dark/disabled** Phala API worker definition (not started, credentialed, or authorized for spend), **one** Caddy edge for `finite.computer` + `chat.finite.computer` + `*.finite.chat` + `*.docs.finite.chat`. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
+| **lat1** (64.34.82.77) | **Consolidated NixOS app server** (`infra/nixos/`) | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata; the internal production browser canary was completed by the operator on 2026-07-11), a separately fenced **dark/disabled** Phala API worker definition (not started, credentialed, or authorized for spend), **one** Caddy edge for `finite.computer` + `brain.finite.computer` + `chat.finite.computer` + `*.finite.chat` + `*.docs.finite.chat`. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
 | **lat2** (64.34.80.19) | **finite-mono CI + x86_64 Nix build host** (Ubuntu+nix) | Builds production lat1 closures and runs `finite-lat-2-mono` plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). This is the only current finite-mono build host; do not use clawland or build on lat1. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
-| **smoke** (15.204.56.61) | Legacy Nix-fleet box; finite-brain | finite-brain on :3015 (`brain.smoke.finite.computer`), NixOS-generated systemd unit via the legacy repo. **DEFERRED** from the cutover — migrates with the auth-integration follow-up. |
+| **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |
 | Tinfoil | Measured enclaves (unchanged) | glm-5-2 inference + finite-private-limiter enclave; searxng enclave. The limiter validates usage against **lat1** Core. Deployed from the public satellite repos (`tinfoil/`). |
 | Phala | hosted-agent CVMs | Confidential Runner fast-follow; not the internal production-canary path. |
 
 ## DNS (current)
 
-- `finite.computer`, `chat.finite.computer` → **lat1** (Namecheap).
+- `finite.computer`, `brain.finite.computer`, `chat.finite.computer` → **lat1** (Namecheap).
 - `*.finite.chat` → **Cloudflare** (Full strict) → lat1 origin (Cloudflare
   Origin CA cert); `*.docs.finite.chat` same edge.
-- `brain.finite.computer` record exists → lat1, but **brain isn't there yet**
-  (deferred); `brain.smoke.finite.computer` → **smoke** is the working URL.
-- `brain.smoke.finite.computer` / `*.smoke.finite.computer` → smoke.
+- `brain.finite.computer` is the canonical production Brain signing/API
+  origin. The WorkOS-protected embedded client remains under
+  `finite.computer/client`; its capability names the canonical Brain origin.
+- `brain.smoke.finite.computer` / `*.smoke.finite.computer` → smoke, retained
+  only as an explicit rollback target.
 
 ## Secrets policy
 

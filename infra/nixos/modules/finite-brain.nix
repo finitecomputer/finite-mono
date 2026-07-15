@@ -1,7 +1,7 @@
-# finite-brain — first-party server behind the finite.computer dashboard.
-# It binds loopback only. Next.js proxies /health, /client, and /_admin. WorkOS
-# protects the browser Product Client at /client; Brain owns route-level auth
-# for /_admin, normally through signed Nostr request proofs.
+# finite-brain — first-party server on the canonical brain.finite.computer
+# origin and behind the finite.computer dashboard's embedded client proxy. It
+# binds loopback only. WorkOS protects the embedded Product Client; Brain owns
+# route-level auth through signed Nostr request proofs.
 { finitePackages, ... }:
 {
   systemd.services.finite-brain-app = {
@@ -14,8 +14,8 @@
       FBRAIN_CONFIG_DIR = "/var/lib/finitebrain/fbrain";
       FINITE_BRAIN_ADDR = "127.0.0.1:3015";
       FINITE_BRAIN_DB = "/var/lib/finitebrain/finite-brain.sqlite3";
-      FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
-      FINITE_BRAIN_SERVER_URL = "https://finite.computer";
+      FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
+      FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
     };
 
     serviceConfig = {

@@ -15,23 +15,37 @@ export function requestHasExactOrigin(request: Request, expectedBaseUrl = reques
   }
 }
 
-/** Compare Origin to the browser-visible request host, including its port. */
-export function requestOriginMatchesHost(request: Request) {
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!origin || !host) return false;
+/** Resolve the browser-visible request origin across a trusted reverse proxy. */
+export function browserVisibleRequestOrigin(
+  request: { headers: Pick<Headers, "get">; url: string }
+) {
+  const host = request.headers.get("host")?.trim();
+  if (!host || host.includes(",")) return null;
 
   try {
-    const originUrl = new URL(origin);
-    if (originUrl.host !== host) return false;
     const forwardedProtocol = request.headers
       .get("x-forwarded-proto")
       ?.split(",", 1)[0]
       ?.trim();
-    const expectedProtocol = forwardedProtocol
+    const protocol = forwardedProtocol
       ? `${forwardedProtocol}:`
       : new URL(request.url).protocol;
-    return originUrl.protocol === expectedProtocol;
+    if (protocol !== "http:" && protocol !== "https:") return null;
+    const publicUrl = new URL(`${protocol}//${host}`);
+    return publicUrl.host === host ? publicUrl.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Compare Origin to the browser-visible request host, including its port. */
+export function requestOriginMatchesHost(request: Request) {
+  const origin = request.headers.get("origin");
+  const publicOrigin = browserVisibleRequestOrigin(request);
+  if (!origin || !publicOrigin) return false;
+
+  try {
+    return new URL(origin).origin === publicOrigin;
   } catch {
     return false;
   }

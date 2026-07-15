@@ -90,7 +90,7 @@ export async function POST(request: Request) {
       config,
       account,
       input,
-      new URL(request.url).origin
+      capability.brainPublicOrigin,
     );
     return Response.json(result, { headers: PROVIDER_HEADERS });
   } catch (error) {

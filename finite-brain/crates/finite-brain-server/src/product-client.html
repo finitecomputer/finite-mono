@@ -405,15 +405,28 @@
                 <p class="access-field-hint">Pair an Agent Principal with one dedicated restricted Folder in your Personal Vault.</p>
                 <div class="access-inline-form">
                   <label class="access-inline-field">
-                    <span class="sr-only">Agent Principal</span>
+                    <span class="access-inline-label">Agent email</span>
                     <input
-                      id="agentWorkspaceNpubInput"
-                      placeholder="Agent npub… or name@domain"
+                      id="agentWorkspaceEmailInput"
+                      type="email"
+                      placeholder="agent@finite.vip"
                       autocomplete="off"
                       spellcheck="false"
                     />
                     <button id="pairAgentWorkspaceButton" type="button" class="access-add-button">Pair</button>
                   </label>
+                  <details class="access-advanced-details">
+                    <summary>Advanced identity details</summary>
+                    <label class="access-inline-field">
+                      <span class="access-inline-label">Agent npub</span>
+                      <input
+                        id="agentWorkspaceNpubInput"
+                        placeholder="npub1…"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                  </details>
                   <p id="agentWorkspacePairingHint" class="access-field-hint">Only the Personal Vault owner can pair an agent.</p>
                 </div>
                 <ol id="agentWorkspacePairingList" class="access-who-has-list">

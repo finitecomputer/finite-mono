@@ -76,6 +76,27 @@ fn fixture() -> (
     (router(state), store, mailer, clock)
 }
 
+#[tokio::test]
+async fn health_reports_identity_authority_ready() {
+    let (app, _, _, _) = fixture();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "service": "finite-identity", "status": "ok" })
+    );
+}
+
 async fn json_request(
     app: axum::Router,
     method: &str,
@@ -179,6 +200,96 @@ async fn nip05_endpoint_serves_persisted_vip_name() {
     let (status, body) = get_json(app, "/.well-known/nostr.json?name=unknown").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, serde_json::json!({ "names": {} }));
+}
+
+#[tokio::test]
+async fn operator_can_idempotently_bind_managed_agent_email_to_agent_principal() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
+    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
+    let request = serde_json::json!({
+        "email": "cheater@finite.vip",
+        "agent_npub": agent_npub,
+    });
+
+    let (status, bound) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        request.clone(),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bound["email"], "cheater@finite.vip");
+    assert_eq!(bound["agent_npub"], agent_npub);
+    assert_eq!(bound["nip05"], "cheater@finite.vip");
+
+    let (status, nip05) = get_json(app.clone(), "/.well-known/nostr.json?name=cheater").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nip05["names"]["cheater"], ALICE_PUBKEY);
+
+    let (status, replayed) = json_request_with_headers(
+        app,
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        request,
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed, bound);
+}
+
+#[tokio::test]
+async fn managed_agent_email_binding_requires_operator_and_never_reassigns() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let alice_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
+    let bob = LocalIdentityKey::from_secret(BOB_SECRET).unwrap();
+    let bob_npub = npub::encode(&hex::decode32(bob.pubkey()).unwrap());
+    let request = serde_json::json!({
+        "email": "cheater@finite.vip",
+        "agent_npub": alice_npub,
+    });
+
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        request,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "missing_operator_token");
+
+    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        serde_json::json!({
+            "email": "cheater@finite.vip",
+            "agent_npub": alice_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request_with_headers(
+        app,
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        serde_json::json!({
+            "email": "cheater@finite.vip",
+            "agent_npub": bob_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "vip_email_already_bound");
 }
 
 #[tokio::test]

@@ -3098,6 +3098,13 @@ button.settings-nav-item.active {
   margin: 0;
 }
 
+.access-inline-field > .access-inline-label {
+  grid-column: 1 / -1;
+  color: var(--access-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .access-inline-field input {
   min-width: 0;
   flex: 1;

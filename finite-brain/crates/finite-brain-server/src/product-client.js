@@ -145,6 +145,7 @@ const FiniteBrainProductClient = (() => {
     "accessShareLinkInput",
     "accessShareMountInput",
     "accessShareTargetInput",
+    "agentWorkspaceEmailInput",
     "agentWorkspaceNpubInput",
     "commandPaletteInput",
     "manageOrganizationVaultNameInput",
@@ -2183,7 +2184,22 @@ const FiniteBrainProductClient = (() => {
       }
       const requestId = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
       return new Promise((resolve, reject) => {
+        const configuredRetryIntervalMs = Number(options.sessionProofRetryIntervalMs);
+        const retryIntervalMs =
+          Number.isFinite(configuredRetryIntervalMs) && configuredRetryIntervalMs > 0
+            ? configuredRetryIntervalMs
+            : 250;
+        const proofRequest = {
+          type: BRAIN_SESSION_PROOF_REQUEST,
+          requestId,
+          requestHash,
+        };
+        const sendProofRequest = () => {
+          window.parent.postMessage(proofRequest, trustedParentOrigin);
+        };
+        let retry = null;
         const timeout = setTimeout(() => {
+          if (retry) clearInterval(retry);
           window.removeEventListener("message", handleProof);
           reject(new Error("Your dashboard session could not be verified."));
         }, 5000);
@@ -2197,6 +2213,7 @@ const FiniteBrainProductClient = (() => {
             return;
           }
           clearTimeout(timeout);
+          if (retry) clearInterval(retry);
           window.removeEventListener("message", handleProof);
           if (typeof event.data.proof === "string" && event.data.proof) {
             resolve(event.data.proof);
@@ -2205,10 +2222,8 @@ const FiniteBrainProductClient = (() => {
           }
         }
         window.addEventListener("message", handleProof);
-        window.parent.postMessage(
-          { type: BRAIN_SESSION_PROOF_REQUEST, requestId, requestHash },
-          trustedParentOrigin
-        );
+        sendProofRequest();
+        retry = setInterval(sendProofRequest, retryIntervalMs);
       });
     };
     const providerRequest = async (operation, input = null) => {
@@ -3429,7 +3444,8 @@ const FiniteBrainProductClient = (() => {
         options.assertCurrent?.();
         const plaintext = await plaintextGrantFromGiftWrappedExportGrant(grant, expectedRecipientNpub, {
           ...options,
-          expectedVaultId: exportedVault?.vaultId,
+          expectedVaultId:
+            options.expectedVaultId || exportedVault?.vault?.id || exportedVault?.vaultId,
         });
         options.assertCurrent?.();
         await openFolderKeyGrantPlaintext(keyring, plaintext, options);
@@ -7456,16 +7472,17 @@ const FiniteBrainProductClient = (() => {
     safeSetHidden("agentWorkspacePairingSection", !visible);
     const rows = agentWorkspacePairingRows({ pairings: state.agentWorkspacePairings || [] });
     setPill("agentWorkspacePairingCount", `${rows.length}`, rows.length ? "ready" : "muted");
+    setOptionalDisabled("agentWorkspaceEmailInput", !ownerCanPair || state.accessBusy);
     setOptionalDisabled("agentWorkspaceNpubInput", !ownerCanPair || state.accessBusy);
     setOptionalDisabled("pairAgentWorkspaceButton", !ownerCanPair || state.accessBusy);
     setText(
       "agentWorkspacePairingHint",
       ownerCanPair
-        ? "Pairing creates a dedicated restricted Folder. It does not make the agent a Vault admin."
+        ? `${agentWorkspacePairingPrompt()} Pairing does not make the agent a Vault admin.`
         : "Unlock your Personal Vault as its owner to pair an agent."
     );
     setList("agentWorkspacePairingList", rows, "No agent is paired yet.", (item, row) => {
-      linkRowInfo(item, identityDisplay(row.agentNpub), row.status, row.title);
+      linkRowInfo(item, row.displayIdentity, row.status, row.title);
       const detail = document.createElement("span");
       detail.className = "access-person-role";
       detail.textContent = `${row.folderId} · ${row.detail}`;
@@ -8710,7 +8727,8 @@ const FiniteBrainProductClient = (() => {
     const hostedState = hostedIdentityProviderStates.get(state.identityProvider);
     if (hostedState) {
       try {
-        await state.identityProvider.identifyMember();
+        await resumeSession();
+        return;
       } catch (error) {
         state.lastError = error.message;
       }
@@ -8724,7 +8742,8 @@ const FiniteBrainProductClient = (() => {
     const operationEpoch = options.sessionEpoch ?? state.sessionEpoch;
     const provider = state.identityProvider;
     const derived = deriveBrainIdentityProviderState(provider);
-    if (!derived.canConnect) {
+    const hostedState = hostedIdentityProviderStates.get(provider);
+    if (!derived.canConnect && hostedState?.status !== "checking") {
       state.signerStatus = derived.status;
       render();
       return null;
@@ -8950,7 +8969,10 @@ const FiniteBrainProductClient = (() => {
     const exported = await protectedRequest(`/_admin/vaults/${encodeURIComponent(vaultId)}/export`);
     assertCurrent();
     const expectedRecipient = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
-    return openFolderKeyGrants(keyring, exported, expectedRecipient, { assertCurrent });
+    return openFolderKeyGrants(keyring, exported, expectedRecipient, {
+      assertCurrent,
+      expectedVaultId: vaultId,
+    });
   }
 
   function canLoadVault() {
@@ -9496,10 +9518,69 @@ const FiniteBrainProductClient = (() => {
     return `/_admin/vaults/${encodeURIComponent(vaultId)}/agent-workspace-pairings`;
   }
 
-  function agentWorkspacePairingRows(response) {
+  function suggestedAgentIdentityFromNavigation(search = window.location?.search || "") {
+    let params;
+    try {
+      params = new URLSearchParams(search);
+    } catch (_) {
+      return null;
+    }
+    const emailCandidate = params.get("agentEmail")?.trim().toLowerCase() || "";
+    const email =
+      emailCandidate.length <= 254 && looksLikeEmailIdentity(emailCandidate)
+        ? emailCandidate
+        : null;
+    const nameCandidate = params.get("agentName")?.trim() || "";
+    const name =
+      nameCandidate.length > 0 &&
+      nameCandidate.length <= 80 &&
+      !/[\u0000-\u001f\u007f]/u.test(nameCandidate)
+        ? nameCandidate
+        : null;
+    const npubCandidate = params.get("agentNpub")?.trim() || "";
+    const npub = publicKeyIdentityFromInput(npubCandidate)?.npub || null;
+    return email || npub ? { email, name, npub } : null;
+  }
+
+  function applySuggestedAgentIdentity(search = window.location?.search || "") {
+    const emailInput = $("agentWorkspaceEmailInput");
+    const npubInput = $("agentWorkspaceNpubInput");
+    const candidate = suggestedAgentIdentityFromNavigation(search);
+    if (!candidate) return false;
+    let populated = false;
+    if (emailInput && !emailInput.value.trim() && candidate.email) {
+      emailInput.value = candidate.email;
+      populated = true;
+    }
+    if (npubInput && !npubInput.value.trim() && candidate.npub) {
+      npubInput.value = candidate.npub;
+      populated = true;
+    }
+    return populated;
+  }
+
+  function agentWorkspacePairingPrompt(search = window.location?.search || "") {
+    const candidate = suggestedAgentIdentityFromNavigation(search);
+    const inputEmail = $("agentWorkspaceEmailInput")?.value.trim().toLowerCase() || "";
+    const selectedName =
+      candidate?.email === inputEmail && candidate?.name
+        ? candidate.name
+        : inputEmail.split("@", 1)[0] || candidate?.name || "this agent";
+    return `Pair ${selectedName} with an Agent Workspace.`;
+  }
+
+  function agentWorkspacePairingRows(
+    response,
+    search = window.location?.search || ""
+  ) {
+    const selected = suggestedAgentIdentityFromNavigation(search);
     return (response?.pairings || []).map((pairing) => ({
       id: pairing.delegationId,
       agentNpub: pairing.agentNpub,
+      displayIdentity:
+        selected?.npub === pairing.agentNpub
+          ? [selected.name, selected.email].filter(Boolean).join(" · ") || "Agent"
+          : "Agent",
       folderId: pairing.workspaceFolderId,
       status: pairing.status,
       title: "Agent Workspace",
@@ -9507,6 +9588,23 @@ const FiniteBrainProductClient = (() => {
         pairing.scope?.permission === "read_write" ? "read/write" : "scoped"
       } · explicitly paired by the Personal Vault owner`,
     }));
+  }
+
+  async function resolveAgentWorkspacePairingIdentity(
+    emailValue,
+    npubValue,
+    resolver = resolveIdentityInputValue
+  ) {
+    const email = String(emailValue || "").trim();
+    const npub = String(npubValue || "").trim();
+    if (email) {
+      try {
+        return await resolver(email, "Enter an agent email first");
+      } catch (error) {
+        if (!npub) throw error;
+      }
+    }
+    return resolver(npub, "Enter an agent email or advanced npub first");
   }
 
   async function buildAgentWorkspacePairingRequest(input) {
@@ -9592,9 +9690,9 @@ const FiniteBrainProductClient = (() => {
     }
     beginAccessOperation(sessionEpoch);
     try {
-      const identity = await resolveIdentityInputValue(
-        $("agentWorkspaceNpubInput")?.value,
-        "Enter an Agent Principal first"
+      const identity = await resolveAgentWorkspacePairingIdentity(
+        $("agentWorkspaceEmailInput")?.value,
+        $("agentWorkspaceNpubInput")?.value
       );
       requireCurrentSessionEpoch(sessionEpoch);
       if (
@@ -9630,6 +9728,7 @@ const FiniteBrainProductClient = (() => {
         },
         { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
       );
+      if ($("agentWorkspaceEmailInput")) $("agentWorkspaceEmailInput").value = "";
       if ($("agentWorkspaceNpubInput")) $("agentWorkspaceNpubInput").value = "";
       await loadVaultMetadata({ preserveActive: true });
       requireCurrentSessionEpoch(sessionEpoch);
@@ -11332,6 +11431,7 @@ const FiniteBrainProductClient = (() => {
     for (const [inputId, buttonId] of [
       ["vaultMemberNpubInput", "addVaultMemberButton"],
       ["vaultAdminNpubInput", "addVaultAdminButton"],
+      ["agentWorkspaceEmailInput", "pairAgentWorkspaceButton"],
       ["agentWorkspaceNpubInput", "pairAgentWorkspaceButton"],
     ]) {
       const input = $(inputId);
@@ -11343,6 +11443,9 @@ const FiniteBrainProductClient = (() => {
         if (!button?.disabled) button.click();
       });
     }
+    $("agentWorkspaceEmailInput")?.addEventListener("input", () => {
+      renderAgentWorkspacePairings(state.metadata);
+    });
     onOptionalClick("createShareLinkButton", () => {
       createShareLinkFromPanel().catch((error) => {
         reportClientActionFailure(error);
@@ -11730,6 +11833,7 @@ const FiniteBrainProductClient = (() => {
     mountAccessPanelInSettings();
     mountInvitationPanelInSettings();
     bind();
+    applySuggestedAgentIdentity();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();
     await loadConfig();
@@ -11744,6 +11848,9 @@ const FiniteBrainProductClient = (() => {
     accessPeopleSummary,
     agentWorkspacePairingRows,
     agentWorkspacePairingsPath,
+    agentWorkspacePairingPrompt,
+    applySuggestedAgentIdentity,
+    resolveAgentWorkspacePairingIdentity,
     buildAgentWorkspacePairingRequest,
     adminAccessChangeTags,
     buildAdminAccessChangeEvent,
@@ -11864,6 +11971,7 @@ const FiniteBrainProductClient = (() => {
     sessionGrantOpeningAllowed,
     sessionOperationIsCurrent,
     sessionStatusView,
+    suggestedAgentIdentityFromNavigation,
     signedEventMatchesPinnedIdentity,
     signerIdentityChanged,
     hasOrganizationVaultControls,

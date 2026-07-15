@@ -2276,6 +2276,7 @@ mod tests {
                 customer_org_id: "org_123".to_string(),
                 owner_user_id: "user_123".to_string(),
                 display_name: "Fixture Agent".to_string(),
+                agent_email: None,
                 import_candidate_id: None,
                 hosting_tier: None,
                 placement: None,

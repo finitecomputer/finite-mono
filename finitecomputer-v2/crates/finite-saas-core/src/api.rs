@@ -522,6 +522,7 @@ impl From<ProjectImportCandidate> for ClaimableProjectSummary {
 pub struct PublicProject {
     pub id: String,
     pub display_name: String,
+    pub agent_email: Option<String>,
     pub hosting_tier: Option<HostingTier>,
     pub created_at: String,
     pub updated_at: String,
@@ -532,6 +533,7 @@ impl From<Project> for PublicProject {
         Self {
             id: project.id,
             display_name: project.display_name,
+            agent_email: project.agent_email,
             hosting_tier: project.hosting_tier,
             created_at: project.created_at,
             updated_at: project.updated_at,
@@ -4326,6 +4328,13 @@ mod tests {
             .unwrap();
         let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
         assert_eq!(result.project.display_name, "Oslo Agent");
+        let agent_email = result
+            .project
+            .agent_email
+            .as_deref()
+            .expect("new hosted agents receive a canonical email");
+        assert!(agent_email.starts_with("oslo-agent-"));
+        assert!(agent_email.ends_with("@finite.vip"));
         assert!(result.project.import_candidate_id.is_none());
         assert!(result.request.agent_runtime_id.is_none());
         assert_eq!(result.request.runner_class, RunnerClass::Kata);
@@ -4364,6 +4373,10 @@ mod tests {
         let me: MeResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(me.projects.len(), 1);
         assert_eq!(me.projects[0].project.id, result.project.id);
+        assert_eq!(
+            me.projects[0].project.agent_email.as_deref(),
+            Some(agent_email)
+        );
         assert!(me.projects[0].runtime.is_none());
         assert_eq!(me.agent_creation_requests.len(), 1);
         assert_eq!(me.agent_creation_requests[0].project_id, result.project.id);

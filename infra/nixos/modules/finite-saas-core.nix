@@ -30,8 +30,8 @@
       # without a spec during the expand window.
       FC_CORE_RUNTIME_ENV_JSON = builtins.toJSON {
         FINITE_SITES_API = "https://api.finite.chat";
-        FINITE_BRAIN_SERVER_URL = "https://finite.computer";
-        FINITE_BRAIN_PUBLIC_BASE_URL = "https://finite.computer";
+        FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
+        FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       };
       # Names only. Core persists these references into every new RuntimeSpec;
       # Runner resolves their values from /etc/finite/runtime-secrets.env.

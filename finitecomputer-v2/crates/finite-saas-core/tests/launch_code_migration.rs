@@ -15,6 +15,7 @@ const PROVISIONAL_RUNTIME_V8: &str =
     include_str!("../migrations/0008_agent_creation_provisional_runtime.sql");
 const ARTIFACT_RECOVERY_SUPPORT_V9: &str =
     include_str!("../migrations/0009_artifact_recovery_support.sql");
+const AGENT_EMAIL_V11: &str = include_str!("../migrations/0011_agent_email.sql");
 
 static TEST_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -223,6 +224,61 @@ async fn populated_legacy_schema_migrates_launch_codes_without_retaining_plainte
             still_migrated.get::<_, Option<String>>(1).as_deref(),
             Some("code-one")
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn agent_email_migration_names_self_service_projects_but_not_imports() {
+    with_legacy_database(|client| async move {
+        client.batch_execute(CORE_SCHEMA_V1).await.unwrap();
+        client
+            .batch_execute(
+                r#"
+                INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                VALUES ('user-email', 'email@example.test', 'linked', 'workos-email', now(), now());
+                INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                VALUES ('org-email', 'user-email', 'Email org', 'grandfathered', now(), now());
+                INSERT INTO project_import_candidates (
+                  id, source_host_id, source_machine_id, source_import_key, owner_email,
+                  pending_user_id, customer_org_id, status, host_facts, created_at, updated_at
+                ) VALUES (
+                  'import-email', 'host-email', 'machine-email', 'host-email:machine-email',
+                  'email@example.test', 'user-email', 'org-email', 'pending', '{}'::jsonb,
+                  now(), now()
+                );
+                INSERT INTO projects (
+                  id, customer_org_id, owner_user_id, display_name, import_candidate_id,
+                  created_at, updated_at
+                ) VALUES
+                  ('project_abcdefghijklmnop9999', 'org-email', 'user-email', 'Cheater Bot', NULL, now(), now()),
+                  ('project_imported9999999999', 'org-email', 'user-email', 'Imported Bot', 'import-email', now(), now());
+                "#,
+            )
+            .await
+            .unwrap();
+
+        client.batch_execute(AGENT_EMAIL_V11).await.unwrap();
+
+        let self_service = client
+            .query_one(
+                "SELECT agent_email FROM projects WHERE id = 'project_abcdefghijklmnop9999'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            self_service.get::<_, Option<String>>(0).as_deref(),
+            Some("cheater-bot-abcdefghijklmnop@finite.vip")
+        );
+        let imported = client
+            .query_one(
+                "SELECT agent_email FROM projects WHERE id = 'project_imported9999999999'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.get::<_, Option<String>>(0), None);
     })
     .await;
 }

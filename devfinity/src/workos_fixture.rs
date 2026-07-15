@@ -79,6 +79,21 @@ pub fn prepare(paths: &FixturePaths, issuer: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn prepare_if_missing(paths: &FixturePaths, issuer: &str) -> Result<()> {
+    let prepared = [
+        &paths.private_key,
+        &paths.api_key,
+        &paths.customer_token,
+        &paths.operator_token,
+    ]
+    .into_iter()
+    .all(|path| path.exists());
+    if prepared {
+        return Ok(());
+    }
+    prepare(paths, issuer)
+}
+
 pub async fn serve(addr: SocketAddr, paths: FixturePaths) -> Result<()> {
     let app = router(&paths)?;
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
@@ -267,6 +282,30 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "{} must be owner-only", path.display());
         }
+
+        fs::remove_dir_all(paths.root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn fixture_process_start_preserves_prepared_tokens() {
+        let paths = fixture_paths();
+        prepare(&paths, "http://fixture.invalid").expect("prepare fixture");
+        fs::write(&paths.customer_token, "prepared-customer-token")
+            .expect("replace customer token sentinel");
+        fs::write(&paths.operator_token, "prepared-operator-token")
+            .expect("replace operator token sentinel");
+
+        prepare_if_missing(&paths, "http://fixture.invalid")
+            .expect("prepare fixture only when missing");
+
+        assert_eq!(
+            fs::read_to_string(&paths.customer_token).expect("read customer token"),
+            "prepared-customer-token"
+        );
+        assert_eq!(
+            fs::read_to_string(&paths.operator_token).expect("read operator token"),
+            "prepared-operator-token"
+        );
 
         fs::remove_dir_all(paths.root).expect("remove fixture directory");
     }

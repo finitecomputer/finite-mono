@@ -1,9 +1,9 @@
 # ONE Caddy edge for every domain on the consolidated box (replaces: lat1's
 # finite.computer Caddy, lat2's *.finite.chat Caddy, clawland's Traefik for
-# chat.finite.computer, smoke's socat->Traefik chain for brain).
+# chat.finite.computer, and smoke's socat->Traefik chain for Brain).
 #
 # TLS:
-# - finite.computer, chat.finite.computer:
+# - finite.computer, brain.finite.computer, chat.finite.computer:
 #   Let's Encrypt (ACME), automatic.
 # - *.finite.chat / *.docs.finite.chat / api.finite.chat: Cloudflare Origin
 #   CA cert pair at /etc/finite-saas/certs/finite-chat-origin.{pem,key},
@@ -33,6 +33,13 @@ in
       }
     '';
 
+    # Canonical Brain API/signing origin. The browser Product Client remains
+    # embedded through finite.computer/client so the WorkOS session cookie is
+    # never broadened to sibling subdomains.
+    virtualHosts."brain.finite.computer".extraConfig = ''
+      reverse_proxy 127.0.0.1:3015
+    '';
+
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box
     # (finitesitesd owns 8787). See modules/finitechat-server.nix.
     virtualHosts."chat.finite.computer".extraConfig = ''
@@ -51,8 +58,5 @@ in
       tls ${originCert} ${originKey}
       ${sitesBackend}
     '';
-    # Brain intentionally has no second public vhost. The dashboard proxies its
-    # client and API routes under finite.computer so WorkOS protects one
-    # coherent product session; Brain retains its own Nostr authorization.
   };
 }
