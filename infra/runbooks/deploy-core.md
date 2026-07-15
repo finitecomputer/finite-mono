@@ -54,6 +54,26 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 > calls consume the remaining script. The manual steps below remain the
 > reference for what it does and for break-glass situations.
 
+To roll a reviewed, healthy existing Runtime cohort after the deployment has
+passed its normal verification, append an exact artifact id, a real admin
+identity, and one or more explicit project ids:
+
+```sh
+just deploy-lat1 "$REV" \
+  --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
+  --roll-admin-email operator@example.com \
+  --roll-admin-workos-user-id user_operator \
+  --roll-project-id project_example
+```
+
+The helper plans the cohort first, verifies every selected canonical container
+on lat1 before enqueueing anything, and then delegates to Core's existing
+Runtime Upgrade operation one Runtime at a time. It stops on the first failure,
+timeout, or failed postcondition. Missing compute is a recovery case and fails
+closed here. Fleet scope is available only with both `--roll-all` and an
+explicit `--roll-canary-project-id`; the canary must finish healthy before the
+remaining planned projects are attempted.
+
 1. **Core (and any config/module change):** From the reviewed checkout, select
    the full commit, prove it is on `origin/main`, and prebuild it on lat2. The
    helper's stdout is the exact, GC-rooted system closure path:

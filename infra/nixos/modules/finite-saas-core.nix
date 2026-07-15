@@ -4,6 +4,8 @@
 # API — the protected invariant of the cutover).
 { finitePackages, ... }:
 {
+  environment.systemPackages = [ finitePackages.finite-saas-core ];
+
   systemd.services.finite-saas-core = {
     description = "Finite SaaS core (control plane API)";
     wants = [ "network-online.target" ];

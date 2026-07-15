@@ -1340,6 +1340,30 @@ pub struct AdminRuntimeUpgradeInput {
     pub now: Option<String>,
 }
 
+/// Operator-only upgrade input that binds enqueueing to the exact Runtime
+/// observed during a rollout plan. The binding is checked in the same critical
+/// section/transaction that creates the lifecycle request, so a changed active
+/// Runtime fails closed instead of upgrading replacement compute.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeUpgradeExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub target_runtime_artifact_id: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeControlExpectedBinding {
+    pub agent_runtime_id: String,
+    pub source_host_id: String,
+    pub source_machine_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminRuntimeControlInput {
@@ -2305,6 +2329,28 @@ impl BridgeCoreState {
         )
     }
 
+    pub fn admin_request_runtime_upgrade_exact(
+        &mut self,
+        input: AdminRuntimeUpgradeExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        self.admin_request_runtime_control_bound(
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Upgrade,
+            Some(input.target_runtime_artifact_id),
+            Some(&expected),
+        )
+    }
+
     /// Admin variant of `request_runtime_control`: the acting user does not
     /// have to own the project, and the action is written to the admin audit
     /// log with the admin's verified email as actor. The API layer requires
@@ -2314,6 +2360,16 @@ impl BridgeCoreState {
         input: AdminRuntimeControlInput,
         kind: RuntimeControlKind,
         target_runtime_artifact_id: Option<String>,
+    ) -> CoreResult<RuntimeControlRequest> {
+        self.admin_request_runtime_control_bound(input, kind, target_runtime_artifact_id, None)
+    }
+
+    fn admin_request_runtime_control_bound(
+        &mut self,
+        input: AdminRuntimeControlInput,
+        kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
+        expected: Option<&RuntimeControlExpectedBinding>,
     ) -> CoreResult<RuntimeControlRequest> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
@@ -2328,12 +2384,13 @@ impl BridgeCoreState {
             .get(&input.project_id)
             .cloned()
             .ok_or(CoreError::ProjectNotFound)?;
-        let request = self.enqueue_runtime_control_request(
+        let request = self.enqueue_runtime_control_request_bound(
             &project,
             &admin_user.id,
             kind,
             target_runtime_artifact_id,
             now.clone(),
+            expected,
         )?;
         self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
             action: match kind {
@@ -2369,9 +2426,35 @@ impl BridgeCoreState {
         target_runtime_artifact_id: Option<String>,
         now: String,
     ) -> CoreResult<RuntimeControlRequest> {
+        self.enqueue_runtime_control_request_bound(
+            project,
+            requested_by_user_id,
+            kind,
+            target_runtime_artifact_id,
+            now,
+            None,
+        )
+    }
+
+    fn enqueue_runtime_control_request_bound(
+        &mut self,
+        project: &Project,
+        requested_by_user_id: &str,
+        kind: RuntimeControlKind,
+        target_runtime_artifact_id: Option<String>,
+        now: String,
+        expected: Option<&RuntimeControlExpectedBinding>,
+    ) -> CoreResult<RuntimeControlRequest> {
         let runtime = self
             .active_runtime_for_project(&project.id)
             .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if expected.is_some_and(|expected| {
+            runtime.id != expected.agent_runtime_id
+                || runtime.source_host_id != expected.source_host_id
+                || runtime.source_machine_id != expected.source_machine_id
+        }) {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
         if !runtime.supports_runtime_control(kind) {
             return Err(CoreError::RuntimeControlUnsupported);
         }
@@ -4872,6 +4955,18 @@ impl BridgeCoreState {
                 .then_with(|| left.agent_runtime_id.cmp(&right.agent_runtime_id))
         });
         overviews
+    }
+
+    /// Read one exact lifecycle request for operator-side orchestration.
+    ///
+    /// This deliberately exposes no queue mutation or aggregate inference:
+    /// callers can only observe the request id returned by an existing control
+    /// operation and wait for that same request to become terminal.
+    pub fn runtime_control_request(&self, request_id: &str) -> CoreResult<RuntimeControlRequest> {
+        self.runtime_control_requests
+            .get(request_id)
+            .cloned()
+            .ok_or(CoreError::RuntimeControlRequestNotFound)
     }
 
     pub fn reserve_finite_private_usage(
@@ -10848,6 +10943,21 @@ mod tests {
             .get_mut("artifact-v2")
             .unwrap()
             .recover_known_good_chat = true;
+
+        let changed_binding = state
+            .admin_request_runtime_upgrade_exact(AdminRuntimeUpgradeExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: requested.project.id.clone(),
+                expected_agent_runtime_id: "runtime-replaced-after-plan".to_string(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-upgrade".to_string(),
+                target_runtime_artifact_id: "artifact-v2".to_string(),
+                now: Some("2026-05-25T13:03:30Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+        assert!(state.runtime_control_requests.is_empty());
 
         let upgrade = state
             .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
