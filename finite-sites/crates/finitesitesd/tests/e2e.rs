@@ -1394,6 +1394,7 @@ async fn full_publish_share_and_view_flow() {
             page.header("content-type").unwrap(),
             "text/html; charset=utf-8"
         );
+        assert_eq!(page.header("cache-control"), Some("private, no-store"));
         let etag = page.header("etag").unwrap().to_string();
         assert_eq!(page.into_string().unwrap(), "<h1>hello from finite</h1>");
 
@@ -1405,6 +1406,10 @@ async fn full_publish_share_and_view_flow() {
             .call()
             .unwrap();
         assert_eq!(revalidated.status(), 304);
+        assert_eq!(
+            revalidated.header("cache-control"),
+            Some("private, no-store")
+        );
 
         let css = server
             .agent
@@ -1444,6 +1449,10 @@ async fn full_publish_share_and_view_flow() {
         let open = server
             .site_get("finitechat-native-mockup", "/", port)
             .unwrap();
+        assert_eq!(
+            open.header("cache-control"),
+            Some("public, max-age=0, must-revalidate")
+        );
         assert_eq!(open.into_string().unwrap(), "<h1>hello from finite</h1>");
 
         {
@@ -3003,6 +3012,10 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
         assert_eq!(
             rendered.header("content-type").unwrap(),
             "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            rendered.header("cache-control"),
+            Some("public, max-age=0, must-revalidate")
         );
         let rendered = rendered.into_string().unwrap();
         assert!(rendered.contains("<h1>Hermes Notes</h1>"));

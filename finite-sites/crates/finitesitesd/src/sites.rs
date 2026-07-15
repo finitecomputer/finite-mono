@@ -326,6 +326,14 @@ fn blob_response(
     status: StatusCode,
 ) -> Response {
     let etag = format!("\"{sha256}\"");
+    // Public output URLs are mutable across publishes. Keep their exact ETag
+    // validators, but require browsers and intermediaries to revalidate on
+    // every use so a prior release cannot remain fresh after a new publish.
+    let cache_control = if site.visibility == finitesites_store::Visibility::Public {
+        "public, max-age=0, must-revalidate"
+    } else {
+        "private, no-store"
+    };
     let client_etag = request_headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
@@ -334,6 +342,7 @@ fn blob_response(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(ETAG, etag)
+            .header(CACHE_CONTROL, cache_control)
             .body(Body::empty())
             .expect("static response builds");
     }
@@ -344,13 +353,6 @@ fn blob_response(
             eprintln!("finitesitesd blob read error: {error}");
             return internal_page();
         }
-    };
-    // Public content may sit in shared caches briefly; gated content must
-    // never be cached beyond the browser.
-    let cache_control = if site.visibility == finitesites_store::Visibility::Public {
-        "public, max-age=60"
-    } else {
-        "private, no-store"
     };
     Response::builder()
         .status(status)
