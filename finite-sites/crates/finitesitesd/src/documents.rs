@@ -243,6 +243,7 @@ fn rendered_page_response(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(ETAG, etag)
+            .header(CACHE_CONTROL, cache_control(site))
             .body(Body::empty())
             .expect("document response builds");
     }
@@ -329,6 +330,7 @@ fn blob_response(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(ETAG, etag)
+            .header(CACHE_CONTROL, cache_control(site))
             .body(Body::empty())
             .expect("document asset response builds");
     }
@@ -369,6 +371,7 @@ fn text_response(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(ETAG, etag)
+            .header(CACHE_CONTROL, cache_control(site))
             .body(Body::empty())
             .expect("document text response builds");
     }
@@ -511,7 +514,7 @@ fn document_shell(
 
 fn cache_control(site: &SiteRecord) -> &'static str {
     if site.visibility == Visibility::Public {
-        "public, max-age=60"
+        "public, max-age=0, must-revalidate"
     } else {
         "private, no-store"
     }
