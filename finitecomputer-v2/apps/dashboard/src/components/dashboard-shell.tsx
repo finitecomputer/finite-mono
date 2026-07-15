@@ -21,6 +21,7 @@ import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
+import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
 
@@ -397,6 +398,7 @@ export function DashboardShell({
   const pathname = usePathname() ?? "/dashboard";
   const searchParams = useSearchParams();
   const activeMachineId = activeMachineIdFromPath(pathname);
+  const chatMachineId = dashboardChatMachineIdFromPath(pathname);
   const queryMachineId = searchParams.get("machine") ?? searchParams.get("machineId");
   const selectedMachineId = activeMachineId ?? queryMachineId;
   const isNewAgentFlow = pathname === "/dashboard" && searchParams.get("new") === "1";
@@ -405,7 +407,7 @@ export function DashboardShell({
     [selectedMachineId, machines]
   );
   const showMachineFleet = saasMode || machines.length > 1;
-  const isChatSurface = /^\/dashboard\/machines\/[^/]+\/chat\/?$/u.test(pathname);
+  const isChatSurface = chatMachineId !== null;
   const isAgentSurface = Boolean(
     saasMode
     && activeMachine
@@ -440,8 +442,8 @@ export function DashboardShell({
         showMachineFleet={showMachineFleet}
         viewerEmail={viewerEmail}
       >
-        {isChatSurface && activeMachine ? (
-          <HostedChatProvider key={activeMachine.id} machineId={activeMachine.id}>
+        {chatMachineId ? (
+          <HostedChatProvider key={chatMachineId} machineId={chatMachineId}>
             {children}
           </HostedChatProvider>
         ) : children}
