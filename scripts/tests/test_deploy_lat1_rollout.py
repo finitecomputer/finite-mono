@@ -16,7 +16,7 @@ def plan_entry(project: str, runtime: str, machine: str) -> dict[str, str]:
         "project_id": project,
         "agent_runtime_id": runtime,
         "project_display_name": project,
-        "source_host_id": "lat1",
+        "source_host_id": "finite-lat-1",
         "source_machine_id": machine,
         "target_artifact_id": "artifact-v2",
     }
@@ -42,7 +42,7 @@ def rollout_report(
         ]
     return {
         "target_artifact_id": "artifact-v2",
-        "source_host_id": "lat1",
+        "source_host_id": "finite-lat-1",
         "plan_only": plan_only,
         "planned": planned,
         "skipped": [],
@@ -112,7 +112,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 runtime="${BASH_REMATCH[1]}"
                 [[ $command =~ --expected-source-machine-id[[:space:]]+([A-Za-z0-9_.-]+) ]]
                 machine="${BASH_REMATCH[1]}"
-                printf '{"target_artifact_id":"artifact-v2","source_host_id":"lat1","plan_only":false,"planned":[{"project_id":"%s","agent_runtime_id":"%s","project_display_name":"%s","source_host_id":"lat1","source_machine_id":"%s","target_artifact_id":"artifact-v2"}],"skipped":[],"outcomes":[{"project_id":"%s","agent_runtime_id":"%s","request_id":"runtime_ctl_test","status":"succeeded","detail":null}],"halted":false,"halted_reason":null}\n' "$project" "$runtime" "$project" "$machine" "$project" "$runtime"
+                printf '{"target_artifact_id":"artifact-v2","source_host_id":"finite-lat-1","plan_only":false,"planned":[{"project_id":"%s","agent_runtime_id":"%s","project_display_name":"%s","source_host_id":"finite-lat-1","source_machine_id":"%s","target_artifact_id":"artifact-v2"}],"skipped":[],"outcomes":[{"project_id":"%s","agent_runtime_id":"%s","request_id":"runtime_ctl_test","status":"succeeded","detail":null}],"halted":false,"halted_reason":null}\n' "$project" "$runtime" "$project" "$machine" "$project" "$runtime"
                 exit "${FAKE_EXEC_STATUS:-0}"
                 """
             ),
@@ -158,7 +158,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         )
         self.assertEqual(mixed_scope.returncode, 64)
 
-    def test_all_plan_is_explicitly_scoped_to_lat1(self) -> None:
+    def test_all_plan_is_explicitly_scoped_to_finite_lat_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             env, log = self.fake_ssh_environment(temp, rollout_report([]))
@@ -173,7 +173,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             calls = log.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(calls), 1, calls)
             self.assertIn("--all", calls[0])
-            self.assertIn("--source-host-id lat1", calls[0])
+            self.assertIn("--source-host-id finite-lat-1", calls[0])
 
     def test_missing_canonical_aborts_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -216,7 +216,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(len(exact_calls), 2, calls)
             self.assertIn("--project-id project-z-canary", exact_calls[0])
             self.assertIn("--project-id project-a-next", exact_calls[1])
-            self.assertTrue(all("--source-host-id lat1" in call for call in exact_calls))
+            self.assertTrue(
+                all("--source-host-id finite-lat-1" in call for call in exact_calls)
+            )
 
     def test_metacharacter_is_rejected_before_first_ssh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

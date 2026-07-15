@@ -5,7 +5,7 @@
 set -euo pipefail
 
 LAT1="${LAT1:-root@64.34.82.77}"
-SOURCE_HOST_ID=lat1
+SOURCE_HOST_ID=finite-lat-1
 
 usage() {
   cat >&2 <<'EOF'
