@@ -540,6 +540,69 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertIn("could not be completed", calls[1][1]["text"])
         self.assertNotIn("npub", calls[1][1]["text"])
 
+    def test_brain_setup_binds_fbrain_to_the_resident_signer_service(self):
+        adapter = self.adapter()
+        adapter.service_url = "http://127.0.0.1:37633"
+        captured = []
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self):
+                return b"{}", b""
+
+        async def create_subprocess_exec(*args, **kwargs):
+            captured.append((args, kwargs))
+            return Process()
+
+        original_which = self.module.shutil.which
+        original = self.module.asyncio.create_subprocess_exec
+        self.module.shutil.which = lambda _name: "/usr/local/bin/fbrain"
+        self.module.asyncio.create_subprocess_exec = create_subprocess_exec
+        try:
+            self.assertTrue(asyncio.run(adapter._run_brain_personal_vault_setup()))
+        finally:
+            self.module.shutil.which = original_which
+            self.module.asyncio.create_subprocess_exec = original
+
+        self.assertEqual(captured[0][0][-3:], ("vault", "setup-personal", "--json"))
+        self.assertEqual(
+            captured[0][1]["env"]["FINITECHAT_HERMES_SERVICE_URL"],
+            adapter.service_url,
+        )
+
+    def test_brain_setup_retries_briefly_while_the_one_use_ticket_arrives(self):
+        adapter = self.adapter()
+        adapter.service_url = "http://127.0.0.1:37633"
+        returncodes = iter((1, 0))
+        attempts = []
+
+        class Process:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+            async def communicate(self):
+                return b"{}", b""
+
+        async def create_subprocess_exec(*args, **kwargs):
+            attempts.append((args, kwargs))
+            return Process(next(returncodes))
+
+        original_delay = self.module.BRAIN_SETUP_RETRY_DELAY_SECS
+        original_which = self.module.shutil.which
+        original = self.module.asyncio.create_subprocess_exec
+        self.module.BRAIN_SETUP_RETRY_DELAY_SECS = 0
+        self.module.shutil.which = lambda _name: "/usr/local/bin/fbrain"
+        self.module.asyncio.create_subprocess_exec = create_subprocess_exec
+        try:
+            self.assertTrue(asyncio.run(adapter._run_brain_personal_vault_setup()))
+        finally:
+            self.module.BRAIN_SETUP_RETRY_DELAY_SECS = original_delay
+            self.module.shutil.which = original_which
+            self.module.asyncio.create_subprocess_exec = original
+
+        self.assertEqual(len(attempts), 2)
+
     def test_poll_event_exposes_authenticated_account_id_in_ephemeral_prompt(self):
         adapter = self.adapter()
         calls = []

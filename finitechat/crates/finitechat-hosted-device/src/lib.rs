@@ -2798,14 +2798,7 @@ async fn dispatch_action(
     Json(action): Json<AppAction>,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
-    let brain_setup_room = match &action {
-        AppAction::SendMessage { room_id, text }
-            if text.trim().eq_ignore_ascii_case(BRAIN_SETUP_CHAT_COMMAND) =>
-        {
-            Some(room_id.clone())
-        }
-        _ => None,
-    };
+    let brain_setup_room = brain_setup_room(&action).map(str::to_owned);
     let next = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
         let runtime = state.runtime_for(&user_id)?;
         let mut next = runtime.dispatch_and_wait(action)?;
@@ -2818,6 +2811,19 @@ async fn dispatch_action(
     .await
     .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
+}
+
+fn brain_setup_room(action: &AppAction) -> Option<&str> {
+    match action {
+        AppAction::SendMessage { room_id, text }
+        | AppAction::SendTopicMessage { room_id, text, .. }
+        | AppAction::SendChatMessage { room_id, text, .. }
+            if text.trim().eq_ignore_ascii_case(BRAIN_SETUP_CHAT_COMMAND) =>
+        {
+            Some(room_id)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]

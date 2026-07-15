@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 FINITE_PLATFORM_NAME = "finitechat"
 BRAIN_SETUP_CHAT_COMMAND = "/brain setup"
-BRAIN_SETUP_TIMEOUT_SECS = 90
+BRAIN_SETUP_TIMEOUT_SECS = 30
+BRAIN_SETUP_MAX_ATTEMPTS = 6
+BRAIN_SETUP_RETRY_DELAY_SECS = 0.25
 BRAIN_SETUP_SUCCESS_MESSAGE = (
     "Your Personal Vault is ready. I can work only in my Agent Workspace unless "
     "you explicitly grant another folder from Brain."
@@ -609,29 +611,41 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not fbrain:
             logger.warning("[finitechat] Brain setup unavailable: fbrain is not installed")
             return False
-        try:
-            process = await asyncio.create_subprocess_exec(
-                fbrain,
-                "vault",
-                "setup-personal",
-                "--json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+        service_url = str(self.service_url or "").strip()
+        if not service_url:
+            logger.warning("[finitechat] Brain setup unavailable: signer service is not running")
+            return False
+        environment = os.environ.copy()
+        environment["FINITECHAT_HERMES_SERVICE_URL"] = service_url
+        for attempt in range(BRAIN_SETUP_MAX_ATTEMPTS):
             try:
-                await asyncio.wait_for(process.communicate(), timeout=BRAIN_SETUP_TIMEOUT_SECS)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-                logger.warning("[finitechat] Brain setup timed out")
+                process = await asyncio.create_subprocess_exec(
+                    fbrain,
+                    "vault",
+                    "setup-personal",
+                    "--json",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=environment,
+                )
+                try:
+                    await asyncio.wait_for(
+                        process.communicate(), timeout=BRAIN_SETUP_TIMEOUT_SECS
+                    )
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    logger.warning("[finitechat] Brain setup timed out")
+                    return False
+            except (OSError, asyncio.SubprocessError):
+                logger.warning("[finitechat] Brain setup could not start")
                 return False
-        except (OSError, asyncio.SubprocessError):
-            logger.warning("[finitechat] Brain setup could not start")
-            return False
-        if process.returncode != 0:
-            logger.warning("[finitechat] Brain setup failed with exit code %s", process.returncode)
-            return False
-        return True
+            if process.returncode == 0:
+                return True
+            if attempt + 1 < BRAIN_SETUP_MAX_ATTEMPTS:
+                await asyncio.sleep(BRAIN_SETUP_RETRY_DELAY_SECS)
+        logger.warning("[finitechat] Brain setup failed with exit code %s", process.returncode)
+        return False
 
     async def _set_processing_activity(
         self,

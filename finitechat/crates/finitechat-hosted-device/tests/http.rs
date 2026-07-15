@@ -604,8 +604,10 @@ async fn explicit_user_brain_setup_command_delivers_the_bounded_bundle_to_the_ag
         hosted,
         "user_paul",
         serde_json::json!({
-            "SendMessage": {
+            "SendChatMessage": {
                 "room_id": room_id,
+                "topic_id": "home",
+                "chat_id": "home-chat",
                 "text": "/brain setup"
             }
         }),
