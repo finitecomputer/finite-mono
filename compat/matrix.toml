@@ -33,7 +33,7 @@ deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "202
 digest = "sha256:1dff15eb01fbea28d59a65a0b9d0252aaea413def10ecfed254d7a333d5a0628"
 source_commit = "0284b32869b86591263805257bbdb012a25c46e3"
 hermes = "0.18.2"
-notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents can be rolled serially through Core's guarded same-volume upgrade path while preserving their Agent Principal and durable /data mount. 2026-07-15.5 includes the PR #84 skill guidance for FAL model selection and Sites/GWS authentication recovery. Upgrade Canary, Boss, Chester, MyDearPaul, and Waffle Prime were rolled to the exact digest with their existing /data mounts; Core and the containers agreed on the target afterward. New launches also use this artifact."
+notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents can be rolled serially through Core's guarded same-volume upgrade path while preserving their Agent Principal and durable /data mount. 2026-07-15.5 includes the PR #84 skill guidance for FAL model selection and Sites/GWS authentication recovery. Upgrade Canary, Boss, Chester, MyDearPaul, and Waffle Prime were rolled to the exact digest with their existing /data mounts; Core and the containers agreed on the target afterward. Each existing agent then explicitly adopted the image's tested 47-skill baseline with `finite skills sync`; the three PR #84 skill files byte-matched the bundle afterward. New launches also use this artifact."
 
 [servers]
 finitechat_server = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8788 behind chat.finite.computer" }
