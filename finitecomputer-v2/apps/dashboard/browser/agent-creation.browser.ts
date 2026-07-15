@@ -553,8 +553,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      await productNav.locator('[aria-disabled="true"]', { hasText: "Brain" }).waitFor({ state: "visible" });
-      assert.equal(await productNav.getByRole("link", { name: "Brain", exact: true }).count(), 0);
+      const brainLink = productNav.getByRole("link", { name: "Brain", exact: true });
+      await brainLink.waitFor({ state: "visible" });
+      assert.equal(
+        await brainLink.getAttribute("href"),
+        "/dashboard/machines/runtime_completed-oslo-bot/brain"
+      );
       assert.equal(await productNav.getByRole("link", { name: "Skills", exact: true }).count(), 0);
       await page
         .getByRole("navigation", { name: "Agent, topics, and chats" })
@@ -775,13 +779,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
       });
-      await page
+      const sidebarBrainLink = page
         .getByRole("navigation", { name: "Agent navigation" })
-        .locator('[aria-disabled="true"]', { hasText: "Brain" })
-        .waitFor({ state: "visible" });
-      await page.goto(
-        `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`
-      );
+        .getByRole("link", { name: "Brain", exact: true });
+      await sidebarBrainLink.waitFor({ state: "visible" });
+      await sidebarBrainLink.click();
+      await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/brain$/u);
       await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
       await brainFrame.getByText("FiniteBrain browser proof").waitFor({ state: "visible" });
