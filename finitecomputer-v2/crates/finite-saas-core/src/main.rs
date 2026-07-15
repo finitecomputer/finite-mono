@@ -774,9 +774,11 @@ async fn postgres_store_from_env() -> Result<CoreStore> {
     let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
     let retry_interval = optional_duration_millis("FC_CORE_POSTGRES_CONNECT_RETRY_MS", 1_000)?;
     let runtime_environment = optional_runtime_environment()?;
+    let runtime_secret_references = optional_runtime_secret_references()?;
     postgres_store_with_retry(&database_url, timeout, retry_interval)
         .await?
         .with_runtime_environment(runtime_environment)
+        .and_then(|store| store.with_runtime_secret_references(runtime_secret_references))
         .map_err(Into::into)
 }
 
@@ -869,6 +871,18 @@ fn optional_runtime_environment() -> Result<BTreeMap<String, String>> {
     };
     serde_json::from_str(&raw)
         .context("FC_CORE_RUNTIME_ENV_JSON must be a JSON object of string values")
+}
+
+fn optional_runtime_secret_references() -> Result<Vec<String>> {
+    let raw = match env::var("FC_CORE_RUNTIME_SECRET_REFERENCES_JSON") {
+        Ok(raw) if !raw.trim().is_empty() => raw,
+        Ok(_) | Err(env::VarError::NotPresent) => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).context("failed to read FC_CORE_RUNTIME_SECRET_REFERENCES_JSON");
+        }
+    };
+    serde_json::from_str(&raw)
+        .context("FC_CORE_RUNTIME_SECRET_REFERENCES_JSON must be a JSON array of strings")
 }
 
 fn optional_agent_creation_placement() -> Result<Option<RuntimePlacement>> {

@@ -2464,7 +2464,21 @@ impl BridgeCoreState {
         input: LeaseAgentCreationRequestInput,
         runtime_environment: &BTreeMap<String, String>,
     ) -> CoreResult<Option<AgentCreationLease>> {
+        self.lease_agent_creation_request_with_runtime_configuration(
+            input,
+            runtime_environment,
+            &[],
+        )
+    }
+
+    pub(crate) fn lease_agent_creation_request_with_runtime_configuration(
+        &mut self,
+        input: LeaseAgentCreationRequestInput,
+        runtime_environment: &BTreeMap<String, String>,
+        runtime_secret_references: &[String],
+    ) -> CoreResult<Option<AgentCreationLease>> {
         validate_runtime_spec_environment(runtime_environment)?;
+        let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -2565,7 +2579,7 @@ impl BridgeCoreState {
                 &artifact,
                 &runtime_id,
                 runtime_environment.clone(),
-                vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+                runtime_secret_references,
                 RuntimeBootIntent::Normal,
             )?;
             Some((runtime_id, artifact.id, runtime_spec))
@@ -5755,6 +5769,29 @@ pub(crate) fn build_runtime_spec_v1(
     Ok(RuntimeSpecEnvelope::V1(spec))
 }
 
+pub(crate) fn runtime_spec_secret_references(
+    configured_references: &[String],
+) -> CoreResult<Vec<String>> {
+    let mut seen = BTreeSet::from([FINITE_PRIVATE_SECRET_REFERENCE.to_string()]);
+    let mut references = vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()];
+
+    for reference in configured_references {
+        if !runtime_spec_environment_key_is_valid(reference)
+            || runtime_spec_reserved_environment_key(reference)
+            || !runtime_spec_secret_environment_key(reference)
+            || !seen.insert(reference.clone())
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        references.push(reference.clone());
+    }
+
+    if references.len() > 64 {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(references)
+}
+
 pub(crate) fn runtime_spec_v1(spec: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
     match spec {
         RuntimeSpecEnvelope::V1(spec) => spec,
@@ -7168,8 +7205,13 @@ mod tests {
             "FINITE_SITES_API".to_string(),
             "https://api.finite.chat".to_string(),
         )]);
+        let original_secret_references = vec![
+            "FAL_KEY".to_string(),
+            "FIRECRAWL_API_KEY".to_string(),
+            "XAI_API_KEY".to_string(),
+        ];
         let first = state
-            .lease_agent_creation_request_with_runtime_environment(
+            .lease_agent_creation_request_with_runtime_configuration(
                 LeaseAgentCreationRequestInput {
                     runner_id: "kata-worker-1".to_string(),
                     source_host_id: None,
@@ -7182,6 +7224,7 @@ mod tests {
                     now: Some(LATER.to_string()),
                 },
                 &original_environment,
+                &original_secret_references,
             )
             .unwrap()
             .unwrap();
@@ -7194,7 +7237,12 @@ mod tests {
         assert_eq!(first_spec_v1.environment, original_environment);
         assert_eq!(
             first_spec_v1.secret_references,
-            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()]
+            vec![
+                FINITE_PRIVATE_SECRET_REFERENCE.to_string(),
+                "FAL_KEY".to_string(),
+                "FIRECRAWL_API_KEY".to_string(),
+                "XAI_API_KEY".to_string(),
+            ]
         );
 
         promote_runtime_artifact_version(
@@ -7209,7 +7257,7 @@ mod tests {
             "2026-05-25T13:05:00Z",
         );
         let second = state
-            .lease_agent_creation_request_with_runtime_environment(
+            .lease_agent_creation_request_with_runtime_configuration(
                 LeaseAgentCreationRequestInput {
                     runner_id: "kata-worker-2".to_string(),
                     source_host_id: None,
@@ -7225,6 +7273,7 @@ mod tests {
                     "FINITE_SITES_API".to_string(),
                     "https://changed.example.test".to_string(),
                 )]),
+                &["PERPLEXITY_API_KEY".to_string()],
             )
             .unwrap()
             .unwrap();
@@ -7238,6 +7287,25 @@ mod tests {
             second.request.agent_runtime_id.as_deref(),
             Some(first_runtime_id.as_str())
         );
+    }
+
+    #[test]
+    fn configured_runtime_secret_references_are_bounded_unique_and_cannot_override_inference() {
+        assert!(
+            runtime_spec_secret_references(&[
+                "FAL_KEY".to_string(),
+                "X_API_BEARER_TOKEN".to_string(),
+            ])
+            .is_ok()
+        );
+        for invalid in [
+            vec!["OPENAI_API_KEY".to_string()],
+            vec!["FAL_KEY".to_string(), "FAL_KEY".to_string()],
+            vec!["FINITE_SITES_API".to_string()],
+            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+        ] {
+            assert!(runtime_spec_secret_references(&invalid).is_err());
+        }
     }
 
     #[test]

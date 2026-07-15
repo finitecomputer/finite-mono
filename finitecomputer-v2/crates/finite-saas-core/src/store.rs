@@ -52,11 +52,11 @@ use crate::{
     project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_v1,
-    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option, validate_runtime_capabilities_artifact_policy,
-    validate_runtime_capabilities_policy, validate_runtime_spec_binding,
-    validate_runtime_spec_environment,
+    runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
+    runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
+    should_replace_stripe_subscription, source_import_key, trim_to_option,
+    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
+    validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -78,12 +78,14 @@ pub enum CoreStore {
 pub struct MemoryCoreStore {
     state: Arc<Mutex<BridgeCoreState>>,
     runtime_environment: Arc<BTreeMap<String, String>>,
+    runtime_secret_references: Arc<Vec<String>>,
 }
 
 #[derive(Clone)]
 pub struct PostgresCoreStore {
     client: Arc<Mutex<Client>>,
     runtime_environment: Arc<BTreeMap<String, String>>,
+    runtime_secret_references: Arc<Vec<String>>,
 }
 
 struct FinitePrivateAdminAuditInsert<'a> {
@@ -118,6 +120,19 @@ impl CoreStore {
         match &mut self {
             Self::Memory(store) => store.runtime_environment = runtime_environment,
             Self::Postgres(store) => store.runtime_environment = runtime_environment,
+        }
+        Ok(self)
+    }
+
+    pub fn with_runtime_secret_references(
+        mut self,
+        runtime_secret_references: Vec<String>,
+    ) -> CoreResult<Self> {
+        runtime_spec_secret_references(&runtime_secret_references)?;
+        let runtime_secret_references = Arc::new(runtime_secret_references);
+        match &mut self {
+            Self::Memory(store) => store.runtime_secret_references = runtime_secret_references,
+            Self::Postgres(store) => store.runtime_secret_references = runtime_secret_references,
         }
         Ok(self)
     }
@@ -859,9 +874,10 @@ impl MemoryCoreStore {
         input: LeaseAgentCreationRequestInput,
     ) -> CoreResult<Option<AgentCreationLease>> {
         let mut state = self.state.lock().await;
-        state.lease_agent_creation_request_with_runtime_environment(
+        state.lease_agent_creation_request_with_runtime_configuration(
             input,
             self.runtime_environment.as_ref(),
+            self.runtime_secret_references.as_ref(),
         )
     }
 
@@ -1186,6 +1202,7 @@ impl PostgresCoreStore {
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
             runtime_environment: Arc::new(BTreeMap::new()),
+            runtime_secret_references: Arc::new(Vec::new()),
         })
     }
 
@@ -1496,9 +1513,13 @@ impl PostgresCoreStore {
     ) -> CoreResult<Option<AgentCreationLease>> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_lease_agent_creation_request(&tx, input, self.runtime_environment.as_ref())
-                .await?;
+        let result = postgres_lease_agent_creation_request(
+            &tx,
+            input,
+            self.runtime_environment.as_ref(),
+            self.runtime_secret_references.as_ref(),
+        )
+        .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2679,11 +2700,13 @@ async fn postgres_lease_agent_creation_request<C>(
     client: &C,
     input: LeaseAgentCreationRequestInput,
     runtime_environment: &BTreeMap<String, String>,
+    runtime_secret_references: &[String],
 ) -> CoreResult<Option<AgentCreationLease>>
 where
     C: GenericClient + Sync,
 {
     validate_runtime_spec_environment(runtime_environment)?;
+    let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.unwrap_or(current_time_iso()?);
     let now_time = parse_time(&now)?;
     let runner_id =
@@ -2839,7 +2862,7 @@ where
             &artifact,
             &runtime_id,
             runtime_environment.clone(),
-            vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
+            runtime_secret_references,
             RuntimeBootIntent::Normal,
         )?;
         Some((runtime_id, artifact.id, runtime_spec))
