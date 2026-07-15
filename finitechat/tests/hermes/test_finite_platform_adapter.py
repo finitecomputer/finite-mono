@@ -591,13 +591,13 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         original_delay = self.module.BRAIN_SETUP_RETRY_DELAY_SECS
         original_which = self.module.shutil.which
         original = self.module.asyncio.create_subprocess_exec
-        self.module.BRAIN_SETUP_RETRY_DELAY_SECS = 0
+        vars(self.module)["BRAIN_SETUP_RETRY_DELAY_SECS"] = 0
         self.module.shutil.which = lambda _name: "/usr/local/bin/fbrain"
         self.module.asyncio.create_subprocess_exec = create_subprocess_exec
         try:
             self.assertTrue(asyncio.run(adapter._run_brain_personal_vault_setup()))
         finally:
-            self.module.BRAIN_SETUP_RETRY_DELAY_SECS = original_delay
+            vars(self.module)["BRAIN_SETUP_RETRY_DELAY_SECS"] = original_delay
             self.module.shutil.which = original_which
             self.module.asyncio.create_subprocess_exec = original
 

@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import threading
 import time
 import urllib.error
@@ -589,9 +590,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if event.text.strip().casefold() == BRAIN_SETUP_CHAT_COMMAND:
                 setup_succeeded = await self._run_brain_personal_vault_setup()
                 response = (
-                    BRAIN_SETUP_SUCCESS_MESSAGE
-                    if setup_succeeded
-                    else BRAIN_SETUP_FAILURE_MESSAGE
+                    BRAIN_SETUP_SUCCESS_MESSAGE if setup_succeeded else BRAIN_SETUP_FAILURE_MESSAGE
                 )
                 sent = await self.send(room_id, response, metadata=activity_metadata)
                 if not sent.success:
@@ -629,15 +628,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     env=environment,
                 )
                 try:
-                    await asyncio.wait_for(
-                        process.communicate(), timeout=BRAIN_SETUP_TIMEOUT_SECS
-                    )
+                    await asyncio.wait_for(process.communicate(), timeout=BRAIN_SETUP_TIMEOUT_SECS)
                 except TimeoutError:
                     process.kill()
                     await process.wait()
                     logger.warning("[finitechat] Brain setup timed out")
                     return False
-            except (OSError, asyncio.SubprocessError):
+            except (OSError, subprocess.SubprocessError):
                 logger.warning("[finitechat] Brain setup could not start")
                 return False
             if process.returncode == 0:
