@@ -64,10 +64,10 @@ use a tested product recovery flow. Operator database edits are not recovery.
 
 Email proof and the Agent Principal are different authorities. Use
 `--link-native` only when the verified email and current Local Identity Key
-intentionally identify the same Principal. Giving an Agent Principal access to
-a human email grant requires an explicit, product-scoped, revocable Finite
-Sites Email Access Delegation. If the installed product does not expose that
-flow, stop; do not reuse the human's email session or infer Brain authority.
+intentionally identify the same Principal. An Agent may instead act through an
+External Principal email grant when the human explicitly authorizes using that
+connected mailbox for the task. This does not link the email to the Agent
+Principal or grant Finite Brain authority.
 
 When a publish request originates from an authenticated Finite Chat human,
 their Native Principal identifier is the exact public-key account ID in
@@ -257,6 +257,11 @@ fsite auth login editor@example.com
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --output json
 fsite auth git PROJECT --email editor@example.com --store --output json
 ```
+
+After `auth login`, use the Google Workspace skill to retrieve the newest Sites
+token when the human says the connected mailbox has access or tells the Agent
+to get the code. Verify the connected address matches, redeem without printing
+the token, and ask the human only if access is missing, mismatched, or ambiguous.
 
 Run the project's own checks and build, commit source plus deploy bytes, and
 push the Deploy Branch.
