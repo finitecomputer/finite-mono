@@ -60,6 +60,15 @@ a new topic plus its canonical first chat, restarted Finite Chat, Hosted Web
 Device, and Finite Sites between turns, then restarted the Agent Runtime and
 received a final reply without changing the Agent Principal.
 
+This does not prove an existing-runtime artifact upgrade. The Apple Container
+runner advertises `runtime_upgrade=false`, so the acceptance above launched the
+candidate image directly and later exercised a same-image restart. A future
+local upgrade fixture should seed chat state under an older image, replace only
+the Apple compute while retaining the exact `/data` bind, and compare the
+historical transcript before and after replacement. Until that exists, the
+production Kata canary path remains the required old-artifact-to-new-artifact
+upgrade acceptance gate.
+
 The final deterministic gates also passed:
 
 - 55 pinned Hermes 0.18.2 adapter tests and 8 runtime reconciler tests;
