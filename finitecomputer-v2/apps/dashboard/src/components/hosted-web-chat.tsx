@@ -173,7 +173,6 @@ export function HostedWebChat({
     () =>
       roomTopics.find((topic) => topic.topic_id === state?.selected_topic_id)
       ?? roomTopics.find((topic) => topic.topic_id === HOME_TOPIC_ID)
-      ?? roomTopics[0]
       ?? null,
     [roomTopics, state?.selected_topic_id]
   );
@@ -190,13 +189,15 @@ export function HostedWebChat({
     [selectedChat, selectedRoom, selectedTopic]
   );
   const messages = useMemo(
-    () =>
-      (state?.messages ?? []).filter(
+    () => {
+      if (!selectedRoom || !selectedTopic || !selectedChat) return [];
+      return (state?.messages ?? []).filter(
         (message) =>
-          (!selectedRoom || message.room_id === selectedRoom.room_id)
-          && (!selectedTopic || message.conversation_id === selectedTopic.topic_id)
-          && (!selectedChat || message.chat_id === selectedChat.chat_id)
-      ),
+          message.room_id === selectedRoom.room_id
+          && message.conversation_id === selectedTopic.topic_id
+          && message.chat_id === selectedChat.chat_id
+      );
+    },
     [selectedChat, selectedRoom, selectedTopic, state?.messages]
   );
   const transcript = useMemo(
@@ -204,21 +205,23 @@ export function HostedWebChat({
     [messages, state?.identity.account_id]
   );
   const liveMembers = useMemo(
-    () =>
-      activityLeaseIsFresh(streamConnected, activityObservedAtMs, leaseNowMs)
+    () => {
+      if (!selectedRoom || !selectedTopic || !selectedChat) return [];
+      return activityLeaseIsFresh(streamConnected, activityObservedAtMs, leaseNowMs)
         ? (state?.typing_members ?? []).filter(
         (member) =>
-          member.room_id === selectedRoom?.room_id
-          && (!member.topic_id || member.topic_id === selectedTopic?.topic_id)
-          && (!member.chat_id || member.chat_id === selectedChat?.chat_id)
+          member.room_id === selectedRoom.room_id
+          && (!member.topic_id || member.topic_id === selectedTopic.topic_id)
+          && (!member.chat_id || member.chat_id === selectedChat.chat_id)
         )
-        : [],
+        : [];
+    },
     [
       activityObservedAtMs,
       leaseNowMs,
-      selectedChat?.chat_id,
-      selectedRoom?.room_id,
-      selectedTopic?.topic_id,
+      selectedChat,
+      selectedRoom,
+      selectedTopic,
       state?.typing_members,
       streamConnected,
     ]
@@ -382,11 +385,13 @@ export function HostedWebChat({
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
-    if ((!text && attachments.length === 0) || !selectedRoom || sending) return;
-    if (attachments.length > 0 && selectedTopic && !selectedChat) {
-      setActionError("Start a chat in this topic before attaching files.");
-      return;
-    }
+    if (
+      (!text && attachments.length === 0)
+      || !selectedRoom
+      || !selectedTopic
+      || !selectedChat
+      || sending
+    ) return;
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
@@ -496,8 +501,14 @@ export function HostedWebChat({
     }
   }
 
-  const connected = ownerClaimed && selectedRoom?.state === "Connected";
+  const connected = ownerClaimed
+    && selectedRoom?.state === "Connected"
+    && Boolean(selectedTopic && selectedChat);
   const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
+  const latestTranscriptItem = transcript[transcript.length - 1];
+  const activeToolRollupId = activityLabel && latestTranscriptItem?.type === "tools"
+    ? latestTranscriptItem.id
+    : null;
 
   return (
     <div className="finite-chat finite-chat--embedded">
@@ -599,7 +610,11 @@ export function HostedWebChat({
                           ownAccountId={state?.identity.account_id ?? ""}
                         />
                       ) : (
-                        <ToolRollup key={item.id} messages={item.messages} />
+                        <ToolRollup
+                          key={item.id}
+                          messages={item.messages}
+                          active={item.id === activeToolRollupId}
+                        />
                       )
                     )}
                     {activityLabel ? <LiveActivity label={activityLabel} /> : null}
@@ -823,8 +838,14 @@ function LiveActivity({ label }: { label: string }) {
   );
 }
 
-function ToolRollup({ messages }: { messages: HostedChatMessage[] }) {
-  const running = messages.some((message) => message.status === "running");
+function ToolRollup({
+  messages,
+  active,
+}: {
+  messages: HostedChatMessage[];
+  active: boolean;
+}) {
+  const running = active || messages.some((message) => message.status === "running");
   const steps = messages.flatMap((message) => messageContent(message).split(/\n+/u).filter(Boolean));
   const label = running
     ? steps.length > 0 ? `Working · ${steps.length} ${pluralize("step", steps.length)}` : "Working"
