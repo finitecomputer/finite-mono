@@ -108,6 +108,7 @@ export function HostedWebChat({
     transportError,
     claimError,
     bindingRecoveryRequired,
+    selectionPending,
     streamConnected,
     ownerClaimed,
     load,
@@ -580,7 +581,10 @@ export function HostedWebChat({
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
-                {selectedRoom && messages.length === 0 ? (
+                {selectedRoom && selectionPending && messages.length === 0 ? (
+                  <ChatLoading label="Opening chat…" />
+                ) : null}
+                {selectedRoom && !selectionPending && messages.length === 0 ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
                 {messages.length > 0 ? (

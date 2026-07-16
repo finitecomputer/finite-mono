@@ -1209,18 +1209,25 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
 
       // Hold a selection-only OpenChat while a newer stream revision lands.
-      // The clicked selection is pinned client-side immediately, so the pane
-      // switches at once, the stale-selection stream snapshot applies its
-      // content without yanking the selection back, and the equal-revision
-      // mutation response still triggers a full state refetch to reconcile.
+      // Starting outside chat also proves route navigation does not wait for
+      // the high-latency mutation response. The clicked selection is pinned
+      // client-side immediately, so the pane switches at once, the stale
+      // stream snapshot applies its content without yanking the selection
+      // back, and the equal-revision response still triggers reconciliation.
       const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
         (request) => request.path === "/v1/app/agent-bindings/open"
       ).length;
+      await page
+        .getByRole("navigation", { name: "Agent navigation" })
+        .getByRole("link", { name: "Connections", exact: true })
+        .click();
+      await page.waitForURL(/\/connections$/u);
       hostedDevice.holdNextNavigationAction();
       await page
         .locator(".finite-chat__folder-body")
         .getByRole("button", { name: "Browser QA", exact: true })
         .click();
+      await page.waitForURL(/\/chat$/u);
       await page
         .locator(".finite-chat__topbar")
         .getByText("Browser QA", { exact: true })

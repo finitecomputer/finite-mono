@@ -55,6 +55,7 @@ type HostedChatContextValue = {
   streamConnected: boolean;
   ownerClaimed: boolean;
   bindingRecoveryRequired: boolean;
+  selectionPending: boolean;
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   claimOwner: () => Promise<HostedChatRetryAttempt>;
   recoverBinding: () => Promise<HostedChatRetryAttempt>;
@@ -79,6 +80,7 @@ export function HostedChatProvider({
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [bindingRecoveryRequired, setBindingRecoveryRequired] = useState(false);
+  const [selectionPending, setSelectionPending] = useState(false);
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const lastLoadErrorRef = useRef<string | null>(null);
@@ -99,7 +101,10 @@ export function HostedChatProvider({
   const setMergedState = useCallback((next: HostedChatState) => {
     serverSelectionRef.current = hostedChatSelectionFromState(next);
     const applied = applyHostedChatSelectionIntent(selectionIntentRef.current, next);
-    if (applied.confirmed) selectionIntentRef.current = null;
+    if (applied.confirmed) {
+      selectionIntentRef.current = null;
+      setSelectionPending(false);
+    }
     setState((current) => ({
       ...applied.state,
       hosted_agent_binding: applied.state.hosted_agent_binding === undefined
@@ -267,11 +272,13 @@ export function HostedChatProvider({
     if (target) {
       token = ++selectionIntentTokenRef.current;
       selectionIntentRef.current = { ...target, token };
+      setSelectionPending(true);
       setState((current) => (current ? { ...current, ...target } : current));
     }
     const releaseIntent = () => {
       if (token === null || selectionIntentRef.current?.token !== token) return;
       selectionIntentRef.current = null;
+      setSelectionPending(false);
       const serverSelection = serverSelectionRef.current;
       if (serverSelection) {
         setState((current) => (current ? { ...current, ...serverSelection } : current));
@@ -399,6 +406,7 @@ export function HostedChatProvider({
       streamConnected,
       ownerClaimed,
       bindingRecoveryRequired,
+      selectionPending,
       load,
       claimOwner,
       recoverBinding,
