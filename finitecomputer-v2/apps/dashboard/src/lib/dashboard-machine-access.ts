@@ -33,8 +33,11 @@ export async function loadDashboardMachineAccess(
   routeIdentifier: string,
   options: DashboardMachineAccessOptions = {}
 ): Promise<DashboardMachineAccess | null> {
-  const viewer = await loadOptionalViewerContext();
-  let core = await loadCoreMe({ cacheMode: options.coreCacheMode });
+  const [viewer, initialCore] = await Promise.all([
+    loadOptionalViewerContext(),
+    loadCoreMe({ cacheMode: options.coreCacheMode }),
+  ]);
+  let core = initialCore;
   let coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
   if (!coreProject && options.coreCacheMode === "swr") {
     core = await loadCoreMe();

@@ -59,6 +59,7 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
+import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
   activityLeaseIsFresh,
@@ -107,6 +108,7 @@ export function HostedWebChat({
     transportError,
     claimError,
     bindingRecoveryRequired,
+    selectionPending,
     streamConnected,
     ownerClaimed,
     load,
@@ -579,7 +581,10 @@ export function HostedWebChat({
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
-                {selectedRoom && messages.length === 0 ? (
+                {selectedRoom && selectionPending && messages.length === 0 ? (
+                  <ChatLoading label="Opening chat…" />
+                ) : null}
+                {selectedRoom && !selectionPending && messages.length === 0 ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
                 {messages.length > 0 ? (
@@ -1071,10 +1076,8 @@ function messageAction(roomId: string, text: string, topic: HostedChatTopic | nu
 function sitesFromMessages(messages: HostedChatMessage[]) {
   const seen = new Set<string>();
   const sites: PreviewSite[] = [];
-  const urlPattern = /https?:\/\/[^\s<>()\[\]{}"']+/giu;
   for (const message of [...messages].reverse()) {
-    for (const raw of messageContent(message).match(urlPattern) ?? []) {
-      const value = raw.replace(/[.,;:!?]+$/u, "");
+    for (const value of chatPreviewUrls(messageContent(message))) {
       try {
         const url = new URL(value);
         const local = url.hostname.endsWith(".localhost");

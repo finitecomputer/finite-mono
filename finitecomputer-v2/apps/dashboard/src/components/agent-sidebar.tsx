@@ -83,12 +83,20 @@ export function AgentSidebar({
   const act = useCallback(async (action: HostedChatAction) => {
     setBusy(true);
     try {
-      const next = await dispatch(action);
-      setActionError(null);
-      if (!pathname.endsWith("/chat")) {
+      const canNavigateImmediately = "OpenTopic" in action || "OpenChat" in action;
+      const pending = dispatch(action);
+      if (canNavigateImmediately && !pathname.endsWith("/chat")) {
         router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
       }
-      onMobileOpenChange(false);
+      if (canNavigateImmediately) onMobileOpenChange(false);
+      const next = await pending;
+      setActionError(null);
+      if (!canNavigateImmediately) {
+        if (!pathname.endsWith("/chat")) {
+          router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+        }
+        onMobileOpenChange(false);
+      }
       return next;
     } catch (caught) {
       setActionError(caught instanceof Error
