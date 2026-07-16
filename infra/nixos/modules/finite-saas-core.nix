@@ -33,8 +33,9 @@
         FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
         FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       };
-      # Names only. Core persists these references into every new RuntimeSpec;
-      # Runner resolves their values from /etc/finite/runtime-secrets.env.
+      # Names only. Core persists these references into every new RuntimeSpec
+      # and refreshes the snapshot on explicit image upgrade; Runner resolves
+      # their values from /etc/finite/runtime-secrets.env.
       FC_CORE_RUNTIME_SECRET_REFERENCES_JSON = builtins.toJSON [
         "FAL_KEY"
         "FIRECRAWL_API_KEY"

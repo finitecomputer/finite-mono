@@ -2756,15 +2756,17 @@ impl BridgeCoreState {
         &mut self,
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
-        self.lease_runtime_control_request_with_runtime_environment(input, &BTreeMap::new())
+        self.lease_runtime_control_request_with_runtime_configuration(input, &BTreeMap::new(), &[])
     }
 
-    pub(crate) fn lease_runtime_control_request_with_runtime_environment(
+    pub(crate) fn lease_runtime_control_request_with_runtime_configuration(
         &mut self,
         input: LeaseRuntimeControlRequestInput,
         runtime_environment: &BTreeMap<String, String>,
+        runtime_secret_references: &[String],
     ) -> CoreResult<Option<RuntimeControlLease>> {
         validate_runtime_spec_environment(runtime_environment)?;
+        runtime_spec_secret_references(runtime_secret_references)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -2966,6 +2968,8 @@ impl BridgeCoreState {
                         current_artifact,
                         desired_artifact,
                         boot_intent,
+                        (pending.kind == RuntimeControlKind::Upgrade)
+                            .then_some(runtime_secret_references),
                     )
                 })
                 .transpose()?;
@@ -2994,6 +2998,15 @@ impl BridgeCoreState {
         &mut self,
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
+        self.complete_runtime_control_request_with_runtime_secret_references(input, &[])
+    }
+
+    pub(crate) fn complete_runtime_control_request_with_runtime_secret_references(
+        &mut self,
+        input: CompleteRuntimeControlRequestInput,
+        runtime_secret_references: &[String],
+    ) -> CoreResult<RuntimeControlRequest> {
+        runtime_spec_secret_references(runtime_secret_references)?;
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified = self.verified_runtime_control_request(
             &input.request_id,
@@ -3066,6 +3079,7 @@ impl BridgeCoreState {
                         current_artifact,
                         &target,
                         RuntimeBootIntent::Normal,
+                        Some(runtime_secret_references),
                     )
                 })
                 .transpose()?;
@@ -5929,6 +5943,7 @@ pub(crate) fn runtime_operation_spec_v1(
     current_artifact: &RuntimeArtifact,
     desired_artifact: &RuntimeArtifact,
     boot_intent: RuntimeBootIntent,
+    refreshed_secret_references: Option<&[String]>,
 ) -> CoreResult<RuntimeSpecEnvelope> {
     validate_runtime_spec_binding(
         current,
@@ -5939,12 +5954,17 @@ pub(crate) fn runtime_operation_spec_v1(
         current_artifact,
     )?;
     let current = runtime_spec_v1(current);
+    let secret_references = if let Some(configured) = refreshed_secret_references {
+        runtime_spec_secret_references(configured)?
+    } else {
+        current.secret_references.clone()
+    };
     build_runtime_spec_v1(
         identity,
         desired_artifact,
         &current.durable_state_id,
         current.environment.clone(),
-        current.secret_references.clone(),
+        secret_references,
         boot_intent,
     )
 }
@@ -11116,19 +11136,24 @@ mod tests {
                 now: Some("2026-05-25T13:04:55Z".to_string()),
             })
             .unwrap();
+        let refreshed_secret_references = vec!["FAL_KEY".to_string(), "XAI_API_KEY".to_string()];
         let lease = state
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: "kata-runner".to_string(),
-                lease_token: "upgrade-lease".to_string(),
-                lease_seconds: Some(300),
-                source_host_id: Some("oslo-host-1".to_string()),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    ..RunnerLeaseCapacity::default()
-                }),
-                now: Some("2026-05-25T13:05:00Z".to_string()),
-            })
+            .lease_runtime_control_request_with_runtime_configuration(
+                LeaseRuntimeControlRequestInput {
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "upgrade-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                },
+                &BTreeMap::new(),
+                &refreshed_secret_references,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -11147,6 +11172,10 @@ mod tests {
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).operation_id,
             upgrade.id
+        );
+        assert_eq!(
+            runtime_spec_v1(synthesized_upgrade_spec).secret_references,
+            vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
         );
 
         let mismatch = state
@@ -11183,22 +11212,25 @@ mod tests {
             .unwrap()
             .retired_at = Some("2026-05-25T13:06:30Z".to_string());
         state
-            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
-                request_id: upgrade.id.clone(),
-                runner_id: "kata-runner".to_string(),
-                lease_token: "upgrade-lease".to_string(),
-                runtime_artifact_id: Some("artifact-v2".to_string()),
-                state_schema_version: Some("state-v1".to_string()),
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        recover_known_good_chat: true,
-                        ..*kata_runtime_capabilities().v1()
-                    },
-                )),
-                runtime_host: Some("http://127.0.0.1:41002".to_string()),
-                published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
-                now: Some("2026-05-25T13:06:40Z".to_string()),
-            })
+            .complete_runtime_control_request_with_runtime_secret_references(
+                CompleteRuntimeControlRequestInput {
+                    request_id: upgrade.id.clone(),
+                    runner_id: "kata-runner".to_string(),
+                    lease_token: "upgrade-lease".to_string(),
+                    runtime_artifact_id: Some("artifact-v2".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            recover_known_good_chat: true,
+                            ..*kata_runtime_capabilities().v1()
+                        },
+                    )),
+                    runtime_host: Some("http://127.0.0.1:41002".to_string()),
+                    published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                    now: Some("2026-05-25T13:06:40Z".to_string()),
+                },
+                &refreshed_secret_references,
+            )
             .unwrap();
         let runtime = &state.agent_runtimes[&runtime_id];
         assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
@@ -11213,6 +11245,16 @@ mod tests {
                 .recover_known_good_chat
         );
         assert!(state.runtime_relay_credentials.contains_key(&runtime_id));
+        let persisted_spec = state
+            .agent_creation_requests
+            .values()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .and_then(|request| request.runtime_spec.as_ref())
+            .unwrap();
+        assert_eq!(
+            runtime_spec_v1(persisted_spec).secret_references,
+            vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+        );
         assert!(
             state
                 .project_runtime_links

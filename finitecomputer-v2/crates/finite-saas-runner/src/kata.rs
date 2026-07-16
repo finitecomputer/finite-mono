@@ -2326,6 +2326,7 @@ fn kata_upgrade_environment(
         })
         .collect();
     public_keys.extend(options.environment().keys().cloned());
+    secret_keys.extend(options.secret_environment().keys().cloned());
     let entries = merge_desired_runtime_environment(retained, options);
     Ok(KataUpgradeEnvironment {
         entries,
@@ -4668,8 +4669,13 @@ esac
                 "HOSTNAME=discard-me".to_string(),
             ],
         };
-        let environment =
-            kata_upgrade_environment(&inspected, &RuntimeRestartOptions::default()).unwrap();
+        let options = RuntimeRestartOptions::default()
+            .with_secret_environment(BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal-added-by-upgrade".to_string(),
+            )]))
+            .unwrap();
+        let environment = kata_upgrade_environment(&inspected, &options).unwrap();
         assert!(
             environment
                 .entries
@@ -4683,6 +4689,12 @@ esac
             "FINITE_PRIVATE_API_KEY".to_string(),
             "secret-kept".to_string()
         )));
+        assert!(
+            environment
+                .entries
+                .contains(&("FAL_KEY".to_string(), "fal-added-by-upgrade".to_string()))
+        );
+        assert!(environment.secret_keys.contains("FAL_KEY"));
         assert!(
             environment
                 .entries
@@ -4718,6 +4730,10 @@ esac
         assert!(args.windows(2).any(|pair| pair == ["--pull", "never"]));
         assert_eq!(args.last(), Some(&target_artifact().reference));
         assert!(args.iter().all(|value| !value.contains("secret-kept")));
+        assert!(
+            args.iter()
+                .all(|value| !value.contains("fal-added-by-upgrade"))
+        );
     }
 
     #[test]

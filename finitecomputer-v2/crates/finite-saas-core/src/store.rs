@@ -915,9 +915,10 @@ impl MemoryCoreStore {
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
         let mut state = self.state.lock().await;
-        state.lease_runtime_control_request_with_runtime_environment(
+        state.lease_runtime_control_request_with_runtime_configuration(
             input,
             self.runtime_environment.as_ref(),
+            self.runtime_secret_references.as_ref(),
         )
     }
 
@@ -926,7 +927,10 @@ impl MemoryCoreStore {
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
         let mut state = self.state.lock().await;
-        state.complete_runtime_control_request(input)
+        state.complete_runtime_control_request_with_runtime_secret_references(
+            input,
+            self.runtime_secret_references.as_ref(),
+        )
     }
 
     pub async fn fail_runtime_control_request(
@@ -1597,9 +1601,13 @@ impl PostgresCoreStore {
     ) -> CoreResult<Option<RuntimeControlLease>> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_lease_runtime_control_request(&tx, input, self.runtime_environment.as_ref())
-                .await?;
+        let result = postgres_lease_runtime_control_request(
+            &tx,
+            input,
+            self.runtime_environment.as_ref(),
+            self.runtime_secret_references.as_ref(),
+        )
+        .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1610,7 +1618,12 @@ impl PostgresCoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_complete_runtime_control_request(&tx, input).await?;
+        let result = postgres_complete_runtime_control_request(
+            &tx,
+            input,
+            self.runtime_secret_references.as_ref(),
+        )
+        .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -5842,11 +5855,13 @@ async fn postgres_lease_runtime_control_request<C>(
     client: &C,
     input: LeaseRuntimeControlRequestInput,
     runtime_environment: &BTreeMap<String, String>,
+    runtime_secret_references: &[String],
 ) -> CoreResult<Option<RuntimeControlLease>>
 where
     C: GenericClient + Sync,
 {
     validate_runtime_spec_environment(runtime_environment)?;
+    runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.unwrap_or(current_time_iso()?);
     let now_time = parse_time(&now)?;
     let runner_id =
@@ -6088,6 +6103,7 @@ where
                 &current_artifact,
                 desired_artifact,
                 boot_intent,
+                (request.kind == RuntimeControlKind::Upgrade).then_some(runtime_secret_references),
             )?)
         } else {
             None
@@ -6205,10 +6221,12 @@ where
 async fn postgres_complete_runtime_control_request<C>(
     client: &C,
     input: CompleteRuntimeControlRequestInput,
+    runtime_secret_references: &[String],
 ) -> CoreResult<RuntimeControlRequest>
 where
     C: GenericClient + Sync,
 {
+    runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
     verify_runtime_control_lease(&locked, &input.runner_id, &input.lease_token)?;
@@ -6279,6 +6297,7 @@ where
                 &current_artifact,
                 &target,
                 RuntimeBootIntent::Normal,
+                Some(runtime_secret_references),
             )?)
         } else {
             None
@@ -10175,6 +10194,14 @@ mod tests {
             )
             .await
             .unwrap();
+            let upgrade_store = store
+                .store
+                .clone()
+                .with_runtime_secret_references(vec![
+                    "FAL_KEY".to_string(),
+                    "XAI_API_KEY".to_string(),
+                ])
+                .unwrap();
             let upgrade = store
                 .admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
                     admin_verified_email: format!("admin-{run}@finite.vip"),
@@ -10185,7 +10212,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let upgrade_lease = store
+            let upgrade_lease = upgrade_store
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-upgrade-{run}"),
@@ -10209,6 +10236,10 @@ mod tests {
                     .map(|artifact| artifact.id.as_str()),
                 Some("artifact-rc-v2")
             );
+            assert_eq!(
+                runtime_spec_v1(upgrade_lease.runtime_spec.as_ref().unwrap()).secret_references,
+                vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+            );
             raw.execute(
                 "UPDATE runtime_artifacts
                  SET retired_at = GREATEST(clock_timestamp(), promoted_at)
@@ -10217,7 +10248,7 @@ mod tests {
             )
             .await
             .unwrap();
-            store
+            upgrade_store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                     request_id: upgrade.id.clone(),
                     runner_id: format!("runner-{run}"),
@@ -10258,6 +10289,10 @@ mod tests {
                 .unwrap()
                 .get(0);
             assert_eq!(upgraded_spec["spec"]["runtimeArtifactId"], "artifact-rc-v2");
+            assert_eq!(
+                upgraded_spec["spec"]["secretReferences"],
+                serde_json::json!(["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"])
+            );
             assert_eq!(
                 upgraded_spec["spec"]["durableStateId"], machine,
                 "legacy synthesis preserves the source-machine /data directory"
