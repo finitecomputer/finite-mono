@@ -32,8 +32,7 @@ FINITE_PLATFORM_NAME = "finitechat"
 LOCAL_ENV_FILE = "finitechat.env"
 DEFAULT_POLL_LIMIT = 10
 DEFAULT_POLL_TIMEOUT_SECS = 20
-DEFAULT_ACTIVITY_REFRESH_SECS = 30.0
-DEFAULT_ACTIVITY_START_GRACE_SECS = 0.1
+DEFAULT_ACTIVITY_REFRESH_SECS = 10.0
 ACTIVE_TURN_POLL_TIMEOUT_MILLIS = 100
 DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
@@ -47,6 +46,102 @@ SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+# Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
+# Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
+# pairs instead of accepting the unsafe cross-product of any tool emoji and
+# any tool-looking prose. Variation selectors are removed before matching.
+HERMES_018_RAW_TOOL_NAMES_BY_PREFIX = {
+    "video": frozenset({"xai_video_edit", "xai_video_extend"}),
+    "⌨": frozenset({"browser_press", "browser_type"}),
+    "⏰": frozenset({"cronjob"}),
+    "⏸": frozenset({"kanban_block"}),
+    "▶": frozenset({"kanban_unblock"}),
+    "◀": frozenset({"browser_back"}),
+    "⚙": frozenset(
+        {
+            "computer_use",
+            "discord",
+            "discord_admin",
+            "process",
+            "project_create",
+            "project_list",
+            "project_switch",
+        }
+    ),
+    "✉": frozenset({"feishu_drive_add_comment", "feishu_drive_reply_comment", "yb_send_dm"}),
+    "✍": frozenset({"write_file"}),
+    "✔": frozenset({"kanban_complete"}),
+    "❓": frozenset({"clarify"}),
+    "\u2795": frozenset({"kanban_create"}),
+    "🌐": frozenset({"browser_navigate"}),
+    "🎨": frozenset({"image_generate", "yb_send_sticker"}),
+    "🎬": frozenset({"video_analyze", "video_generate"}),
+    "🏠": frozenset({"ha_call_service", "ha_get_state", "ha_list_entities", "ha_list_services"}),
+    "🐍": frozenset({"execute_code"}),
+    "🐦": frozenset({"x_search"}),
+    "👁": frozenset({"browser_vision", "vision_analyze"}),
+    "👆": frozenset({"browser_click"}),
+    "👥": frozenset({"yb_query_group_info"}),
+    "💓": frozenset({"kanban_heartbeat"}),
+    "💬": frozenset(
+        {
+            "browser_dialog",
+            "feishu_drive_list_comment_replies",
+            "feishu_drive_list_comments",
+            "kanban_comment",
+        }
+    ),
+    "💻": frozenset({"terminal"}),
+    "📄": frozenset({"feishu_doc_read", "web_extract"}),
+    "📋": frozenset({"kanban_list", "kanban_show", "todo", "yb_query_group_members"}),
+    "📖": frozenset({"read_file"}),
+    "📚": frozenset({"skill_view", "skills_list"}),
+    "📜": frozenset({"browser_scroll"}),
+    "📝": frozenset({"skill_manage"}),
+    "📸": frozenset({"browser_snapshot"}),
+    "🔀": frozenset({"delegate_task"}),
+    "🔊": frozenset({"text_to_speech"}),
+    "🔍": frozenset({"session_search", "web_search", "yb_search_sticker"}),
+    "🔎": frozenset({"search_files"}),
+    "🔗": frozenset({"kanban_link"}),
+    "🔧": frozenset({"patch"}),
+    "🖥": frozenset({"browser_console", "close_terminal", "read_terminal"}),
+    "🖼": frozenset({"browser_get_images"}),
+    "🧠": frozenset({"memory"}),
+    "🧪": frozenset({"browser_cdp"}),
+}
+HERMES_018_FRIENDLY_TOOL_PREFIXES = frozenset(
+    {
+        ("🔍", "Searching the web"),
+        ("📄", "Reading"),
+        ("🌐", "Browsing"),
+        ("👆", "Clicking"),
+        ("⌨", "Typing"),
+        ("📖", "Reading"),
+        ("✍", "Writing"),
+        ("🔧", "Editing"),
+        ("🔎", "Searching files"),
+        ("💻", "Running"),
+        ("🐍", "Running code"),
+        ("🎨", "Generating image"),
+        ("🎬", "Generating video"),
+        ("🔊", "Generating speech"),
+        ("👁", "Looking at the image"),
+        ("🔍", "Searching past sessions"),
+        ("📚", "Reading skill"),
+        ("📚", "Listing skills"),
+        ("📝", "Updating skill"),
+        ("🔀", "Delegating"),
+        ("⏰", "Scheduling"),
+        ("❓", "Asking"),
+        ("🧠", "Updating memory"),
+        ("📋", "Updating tasks"),
+    }
+)
+HERMES_018_RAW_TOOL_PROGRESS_PATTERN = re.compile(
+    r"^(?P<name>[a-z][a-z0-9_.-]*)(?:\([^\n]*\)|:\s*(?:\"|')|\.\.\.)"
+)
 
 
 def _load_local_env_defaults(path: Path | None = None) -> None:
@@ -145,13 +240,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._finitechat_lock = asyncio.Lock()
         self._delivered_event_keys: set[str] = set()
         self._delivered_event_order: list[str] = []
-        self._activity_conversations: dict[str, str | None] = {}
-        self._activity_segments: dict[str, str | None] = {}
+        self._typing_paused: set[str] = set()
+        self._active_activity_routes: set[tuple[str, str | None, str | None]] = set()
         self._outbound_message_conversations: dict[str, str | None] = {}
         self._outbound_message_segments: dict[str, str | None] = {}
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
-        self._inbound_chat_topics: dict[tuple[str, str], str | None] = {}
+        self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
         if not self.home:
@@ -263,33 +358,27 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         payload = self._activity_payload(chat_id, metadata, action="set")
-        self._activity_conversations[payload["room_id"]] = payload["conversation_id"]
-        self._activity_segments[payload["room_id"]] = payload["segment_id"]
-        await self._finitechat_json("activity", payload, timeout=15)
+        route = self._activity_route(payload)
+        if await self._run_activity_control(
+            "set",
+            self._finitechat_json("activity", payload, timeout=15),
+        ):
+            self._active_activity_routes.add(route)
 
     async def stop_typing(self, chat_id: str, metadata=None) -> None:
-        room_id = self._room_id(chat_id)
-        conversation_id = None
-        segment_id = None
-        has_remembered_conversation = room_id in self._activity_conversations
-        if metadata is None and has_remembered_conversation:
-            conversation_id = self._activity_conversations[room_id]
-            segment_id = self._activity_segments.get(room_id)
-        payload = self._activity_payload(
-            chat_id,
-            metadata,
-            action="clear",
-            conversation_id=conversation_id,
-            segment_id=segment_id,
-        )
-        if (
-            has_remembered_conversation
-            and self._activity_conversations.get(room_id) == payload["conversation_id"]
-            and self._activity_segments.get(room_id) == payload["segment_id"]
+        if metadata is None:
+            # Hermes performs a room-only cleanup after cancelling the typing
+            # task. Finite activity is scoped to an exact topic/chat route, and
+            # guessing here can clear a different concurrent turn. The exact
+            # _keep_typing task owns its matching clear in finally instead.
+            return
+        payload = self._activity_payload(chat_id, metadata, action="clear")
+        route = self._activity_route(payload)
+        if await self._run_activity_control(
+            "clear",
+            self._finitechat_json("activity", payload, timeout=15),
         ):
-            self._activity_conversations.pop(room_id, None)
-            self._activity_segments.pop(room_id, None)
-        await self._finitechat_json("activity", payload, timeout=15)
+            self._active_activity_routes.discard(route)
 
     async def _keep_typing(
         self,
@@ -298,22 +387,45 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata=None,
         stop_event: asyncio.Event | None = None,
     ) -> None:
-        grace_deadline = asyncio.get_running_loop().time() + DEFAULT_ACTIVITY_START_GRACE_SECS
-        while asyncio.get_running_loop().time() < grace_deadline:
-            if stop_event is not None and stop_event.is_set():
-                return
-            await asyncio.sleep(0.05)
-
         refresh_secs = self.activity_refresh_secs if self.activity_refresh_secs > 0 else interval
-        while stop_event is None or not stop_event.is_set():
-            await self.send_typing(chat_id, metadata=metadata)
-            if stop_event is None:
-                await asyncio.sleep(refresh_secs)
-                continue
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=refresh_secs)
-            except TimeoutError:
-                continue
+        send_timeout = max(0.25, min(ACTIVITY_CONTROL_TIMEOUT_SECS, refresh_secs - 0.25))
+        try:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if chat_id not in self._typing_paused:
+                    try:
+                        await asyncio.wait_for(
+                            self.send_typing(chat_id, metadata=metadata),
+                            timeout=send_timeout,
+                        )
+                    except TimeoutError:
+                        pass
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.debug("[finitechat] activity refresh failed: %s", exc)
+                if stop_event is None:
+                    await asyncio.sleep(refresh_secs)
+                    continue
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + refresh_secs
+                while not stop_event.is_set():
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    # Polling avoids leaving an Event.wait task behind when
+                    # Hermes cancels the refresh task during turn shutdown.
+                    await asyncio.sleep(min(0.25, remaining))
+                if stop_event.is_set():
+                    return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # An empty mapping still denotes the exact unscoped Home route;
+            # None is reserved for Hermes' later room-only cleanup call.
+            await self.stop_typing(chat_id, metadata=metadata if metadata is not None else {})
+            self._typing_paused.discard(chat_id)
 
     async def send_image(
         self,
@@ -535,7 +647,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
         authenticated_user_id = _string_or_none(source_data.get("user_id"))
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
-        self._remember_inbound_chat_topic(room_id, segment_id, conversation_id)
+        source_thread_id = (
+            segment_id or _string_or_none(source_data.get("thread_id")) or conversation_id
+        )
+        self._remember_inbound_chat_route(
+            room_id,
+            source_thread_id,
+            conversation_id,
+            segment_id,
+        )
         raw_attachments = raw_event.get("attachments")
         attachments: list[Any] = raw_attachments if isinstance(raw_attachments, list) else []
         media_urls, media_types = _event_media(attachments)
@@ -545,9 +665,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             chat_type=str(source_data.get("chat_type") or "dm"),
             user_id=authenticated_user_id or "finite-user",
             user_name=_string_or_none(source_data.get("user_name")),
-            thread_id=segment_id
-            or _string_or_none(source_data.get("thread_id"))
-            or conversation_id,
+            thread_id=source_thread_id,
             chat_topic=_string_or_none(source_data.get("chat_topic")),
             user_id_alt=_string_or_none(source_data.get("user_id_alt")),
             chat_id_alt=_string_or_none(source_data.get("chat_id_alt")),
@@ -590,20 +708,20 @@ class FiniteChatAdapter(BasePlatformAdapter):
     ) -> bool:
         payload = self._activity_payload(room_id, metadata, action="set")
         payload["expires_in_millis"] = PROCESSING_ACTIVITY_TTL_MILLIS
-        return await self._run_activity_control(
+        activity_set = await self._run_activity_control(
             "set",
             self._finitechat_json("activity", payload, timeout=15),
         )
+        if activity_set:
+            self._active_activity_routes.add(self._activity_route(payload))
+        return activity_set
 
     async def _clear_processing_activity(
         self,
         room_id: str,
         metadata: dict[str, Any] | None,
     ) -> None:
-        await self._run_activity_control(
-            "clear",
-            self.stop_typing(room_id, metadata=metadata),
-        )
+        await self.stop_typing(room_id, metadata=metadata if metadata is not None else {})
 
     async def _run_activity_control(self, action: str, operation: Any) -> bool:
         try:
@@ -635,15 +753,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
             evicted = self._delivered_event_order.pop(0)
             self._delivered_event_keys.discard(evicted)
 
-    def _remember_inbound_chat_topic(
+    def _remember_inbound_chat_route(
         self,
         room_id: str,
-        segment_id: str | None,
+        thread_id: str | None,
         conversation_id: str | None,
+        segment_id: str | None,
     ) -> None:
-        if not segment_id:
+        if not thread_id or (conversation_id is None and segment_id is None):
             return
-        self._inbound_chat_topics[(room_id, segment_id)] = conversation_id
+        self._inbound_chat_routes[(room_id, thread_id)] = (conversation_id, segment_id)
 
     @staticmethod
     def _route_metadata(
@@ -750,6 +869,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
             "expires_in_millis": 60 * 1000,
         }
 
+    @staticmethod
+    def _activity_route(payload: dict[str, Any]) -> tuple[str, str | None, str | None]:
+        return (
+            str(payload["room_id"]),
+            _string_or_none(payload.get("conversation_id")),
+            _string_or_none(payload.get("segment_id")),
+        )
+
     def _has_active_turn(self) -> bool:
         active_sessions = getattr(self, "_active_sessions", None)
         return bool(active_sessions)
@@ -769,21 +896,26 @@ class FiniteChatAdapter(BasePlatformAdapter):
         segment_id = _string_or_none(metadata.pop("segment_id", None)) or _string_or_none(
             metadata.pop("chat_id", None)
         )
-        if segment_id is None and thread_id is not None:
-            routed_conversation_id = self._inbound_chat_topics.get((room_id, thread_id))
-            if (
-                routed_conversation_id is not None
-                or (room_id, thread_id) in self._inbound_chat_topics
-            ):
+        route_key = segment_id or thread_id
+        remembered_route = (
+            self._inbound_chat_routes.get((room_id, route_key)) if route_key else None
+        )
+        if remembered_route is not None:
+            remembered_conversation_id, remembered_segment_id = remembered_route
+            if conversation_id is None:
+                conversation_id = remembered_conversation_id
+            if segment_id is None:
+                segment_id = remembered_segment_id
+        elif conversation_id is not None:
+            # An explicit Finite conversation makes a generic Hermes thread a
+            # valid segment hint. A thread on its own is not a Finite topic id.
+            if segment_id is None and thread_id is not None:
                 segment_id = thread_id
-                if conversation_id is None:
-                    conversation_id = routed_conversation_id
-            elif conversation_id is None:
-                conversation_id = thread_id
-            else:
-                segment_id = thread_id
-        if conversation_id is None and segment_id is not None:
-            conversation_id = self._inbound_chat_topics.get((room_id, segment_id))
+        else:
+            # Unknown Hermes thread/chat identifiers stay unscoped so Core can
+            # apply the canonical Home/Home-chat fallback. Promoting them into
+            # conversation ids manufactures phantom top-level topics.
+            segment_id = None
         return conversation_id, segment_id
 
     @staticmethod
@@ -1275,8 +1407,29 @@ def _infer_finitechat_kind(content: str) -> str:
         return "message"
     if text == "Hermes is working":
         return "status"
-    first_line = text.splitlines()[0].lstrip()
-    if first_line.startswith(("⚙", "🔧", "🛠", "🔍", "🔎", "📖", "💻", "🌐", "⚡")):
+    lines = text.splitlines()
+    first_line = lines[0].lstrip()
+    first_parts = first_line.split(maxsplit=1)
+    first_token = first_parts[0].replace("\ufe0f", "")
+    progress_label = first_parts[1].strip() if len(first_parts) > 1 else ""
+    friendly_progress = any(
+        first_token == prefix and (progress_label == verb or progress_label.startswith(f"{verb} "))
+        for prefix, verb in HERMES_018_FRIENDLY_TOOL_PREFIXES
+    )
+    raw_match = HERMES_018_RAW_TOOL_PROGRESS_PATTERN.match(progress_label)
+    raw_tool_name = raw_match.group("name") if raw_match else None
+    known_raw_progress = raw_tool_name in HERMES_018_RAW_TOOL_NAMES_BY_PREFIX.get(first_token, ())
+    # Third-party Hermes tools without a registry emoji use the gateway's
+    # default gear. Keep that one extension point while retaining the strict
+    # icon/name pairs for every pinned built-in.
+    custom_default_progress = first_token == "⚙" and raw_tool_name is not None
+    terminal_code_block = (
+        first_token == "💻"
+        and progress_label == "terminal"
+        and len(lines) > 1
+        and lines[1].lstrip().startswith("```")
+    )
+    if friendly_progress or known_raw_progress or custom_default_progress or terminal_code_block:
         return "tool"
     return "message"
 

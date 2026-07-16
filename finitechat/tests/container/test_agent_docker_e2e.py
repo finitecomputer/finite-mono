@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -202,6 +203,73 @@ class ResticRepositoryHelperTest(unittest.TestCase):
 
 
 class AgentRuntimeLauncherConfigTest(unittest.TestCase):
+    @staticmethod
+    def _reconcile_config(existing: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
+        namespace = runpy.run_path(str(REPO_ROOT / "containers/agent/reconcile_hermes_config.py"))
+        return namespace["reconcile_config"](existing, settings)
+
+    @staticmethod
+    def _reconciler_settings() -> dict[str, str]:
+        return {
+            "FINITE_CONFIG_PLUGIN_NAME": "finitechat",
+            "FINITE_CONFIG_AGENT_HOME": "/data/agent",
+            "FINITE_CONFIG_FINITECHAT_BIN": "/usr/local/bin/finitechat",
+            "FINITE_CONFIG_SERVICE_ADDR": "127.0.0.1:4321",
+            "FINITE_CONFIG_POLL_TIMEOUT_SECS": "30",
+            "FINITE_CONFIG_POLL_LIMIT": "100",
+        }
+
+    def test_reconciler_seeds_finitechat_display_defaults_without_touching_other_platforms(
+        self,
+    ) -> None:
+        existing = {
+            "display": {
+                "streaming": True,
+                "platforms": {
+                    "telegram": {
+                        "streaming": True,
+                        "tool_progress_grouping": "accumulate",
+                    }
+                },
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertTrue(reconciled["display"]["streaming"])
+        self.assertEqual(
+            reconciled["display"]["platforms"]["telegram"],
+            existing["display"]["platforms"]["telegram"],
+        )
+        self.assertEqual(
+            reconciled["display"]["platforms"]["finitechat"],
+            {
+                "streaming": False,
+                "tool_progress_grouping": "separate",
+            },
+        )
+
+    def test_reconciler_repairs_incompatible_finitechat_display_overrides(self) -> None:
+        finitechat_display = {
+            "streaming": True,
+            "tool_progress_grouping": "accumulate",
+            "interim_assistant_messages": True,
+            "custom_user_setting": "preserved",
+        }
+        existing = {"display": {"platforms": {"finitechat": finitechat_display.copy()}}}
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(
+            reconciled["display"]["platforms"]["finitechat"],
+            {
+                "streaming": False,
+                "tool_progress_grouping": "separate",
+                "interim_assistant_messages": True,
+                "custom_user_setting": "preserved",
+            },
+        )
+
     def test_gateway_launcher_does_not_persist_raw_finite_private_key(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 

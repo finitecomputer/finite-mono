@@ -137,6 +137,17 @@ def reconcile_config(
         }
     )
 
+    display = _mapping(config, "display")
+    display_platforms = _mapping(display, "platforms")
+    finitechat_display = _mapping(display_platforms, "finitechat")
+    # Finite Chat is append-only. Hermes' edit-based token streaming and
+    # accumulated progress bubbles cannot be represented faithfully, so keep
+    # these adapter capabilities authoritative even when an older resident
+    # config contains incompatible values. Interim assistant commentary stays
+    # enabled by Hermes' normal default and is delivered as separate messages.
+    finitechat_display["streaming"] = False
+    finitechat_display["tool_progress_grouping"] = "separate"
+
     home_channel = settings.get("FINITE_CONFIG_HOME_CHANNEL", "")
     if home_channel:
         finitechat["home_channel"] = {

@@ -3232,14 +3232,17 @@ fn load_or_generate_agent_secret() -> Result<NostrSecretKey, CliError> {
 type AgentDelivery = HttpRuntimeDelivery<ReqwestHttpRuntimeTransport>;
 
 fn open_agent_runtime(home: &AgentHome) -> Result<Arc<FiniteChatRuntime>, CliError> {
-    FiniteChatRuntime::open(OpenOptions {
+    FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(map_core_hermes_error)
+}
+
+fn agent_runtime_open_options(home: &AgentHome) -> OpenOptions {
+    OpenOptions {
         data_dir: home.dir.to_string_lossy().into_owned(),
         server_url: home.config.server_url.clone(),
         device_id: home.config.device_id.clone(),
         account_secret_hex: Some(hex_lower(home.secret.as_bytes())),
-        now_unix_seconds: Some(now_secs()),
-    })
-    .map_err(map_core_hermes_error)
+        now_unix_seconds: None,
+    }
 }
 
 fn map_core_hermes_error(error: FiniteChatCoreError) -> CliError {
@@ -3376,6 +3379,31 @@ mod tests {
         )
         .expect("encrypt attachment");
         (uploaded.ciphertext, uploaded.reference)
+    }
+
+    #[test]
+    fn resident_agent_runtime_uses_the_live_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AgentHome {
+            dir: dir.path().join("agent-home"),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id: "agent-account".to_owned(),
+            },
+            secret: NostrSecretKey::from_bytes([0x17; 32]).unwrap(),
+        };
+
+        let options = agent_runtime_open_options(&home);
+
+        assert_eq!(options.now_unix_seconds, None);
+        assert_eq!(options.data_dir, home.dir.to_string_lossy());
+        assert_eq!(options.server_url, home.config.server_url);
+        assert_eq!(options.device_id, home.config.device_id);
+        assert_eq!(
+            options.account_secret_hex,
+            Some(hex_lower(home.secret.as_bytes()))
+        );
     }
 
     fn encoded_media_payload(reference: AttachmentBlobReferenceV1, text: &str) -> Vec<u8> {

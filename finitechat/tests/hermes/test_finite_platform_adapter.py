@@ -666,6 +666,80 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(send_payload["conversation_id"], "topic-build")
         self.assertEqual(send_payload["segment_id"], "chat-build-1")
 
+    def test_reply_restores_legacy_conversation_only_route(self):
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if action == "send":
+                return self.module._FiniteChatResult(
+                    True, {"message_id": "out-legacy"}, None, False
+                )
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        asyncio.run(
+            adapter._handle_finitechat_event(
+                {
+                    "room_id": "room-agent-1",
+                    "seq": 8,
+                    "message_id": "msg-8",
+                    "conversation_id": "topic-legacy",
+                    "text": "legacy topic message",
+                }
+            )
+        )
+
+        result = asyncio.run(
+            adapter.send(
+                "room-agent-1",
+                "legacy reply",
+                metadata={"thread_id": "topic-legacy"},
+            )
+        )
+
+        self.assertTrue(result.success)
+        send_payload = next(call[1] for call in calls if call[0] == "send")
+        self.assertEqual(send_payload["conversation_id"], "topic-legacy")
+        self.assertIsNone(send_payload["segment_id"])
+
+    def test_unknown_hermes_thread_or_segment_stays_unscoped(self):
+        adapter = self.adapter()
+        calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            return self.module._FiniteChatResult(
+                True, {"message_id": f"out-{len(calls)}"}, None, False
+            )
+
+        adapter._finitechat_json = fake_json
+        asyncio.run(
+            adapter.send(
+                "room-agent-1",
+                "thread reply",
+                metadata={"thread_id": "hermes-session-random"},
+            )
+        )
+        asyncio.run(
+            adapter.send(
+                "room-agent-1",
+                "segment reply",
+                metadata={"segment_id": "hermes-chat-random"},
+            )
+        )
+        asyncio.run(
+            adapter.send_typing(
+                "room-agent-1",
+                metadata={"thread_id": "hermes-session-random"},
+            )
+        )
+
+        payloads = [call[1] for call in calls]
+        self.assertEqual([payload["conversation_id"] for payload in payloads], [None, None, None])
+        self.assertEqual([payload["segment_id"] for payload in payloads], [None, None, None])
+
     def test_duplicate_redelivery_is_acked_without_second_dispatch(self):
         adapter = self.adapter()
         calls = []
@@ -798,12 +872,54 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             return self.module._FiniteChatResult(True, {"message_id": "tool-1"}, None, False)
 
         adapter._finitechat_json = fake_json
-        result = asyncio.run(adapter.send("room-agent-1", "💻 shell\ncargo test ▉"))
+        result = asyncio.run(adapter.send("room-agent-1", "💻 Running cargo test ▉"))
 
         self.assertTrue(result.success)
         self.assertEqual(calls[0][0], "send")
         self.assertEqual(calls[0][1]["kind"], "tool")
         self.assertEqual(calls[0][1]["status"], "running")
+
+    def test_tool_kind_inference_covers_pinned_hermes_018_registry_pairs(self):
+        for prefix, tool_names in self.module.HERMES_018_RAW_TOOL_NAMES_BY_PREFIX.items():
+            for tool_name in tool_names:
+                with self.subTest(prefix=prefix, tool_name=tool_name):
+                    self.assertEqual(
+                        self.module._infer_finitechat_kind(f'{prefix} {tool_name}: "preview"'),
+                        "tool",
+                    )
+
+        self.assertEqual(
+            self.module._infer_finitechat_kind('⚙️ third_party_tool: "preview"'),
+            "tool",
+        )
+
+    def test_tool_kind_inference_covers_hermes_friendly_progress_labels(self):
+        for prefix, verb in self.module.HERMES_018_FRIENDLY_TOOL_PREFIXES:
+            content = f"{prefix} {verb} preview"
+            with self.subTest(prefix=prefix, verb=verb):
+                self.assertEqual(self.module._infer_finitechat_kind(content), "tool")
+        self.assertEqual(
+            self.module._infer_finitechat_kind("💻 terminal\n```\nnode --check app.js\n```"),
+            "tool",
+        )
+
+    def test_tool_kind_inference_does_not_treat_arbitrary_emoji_as_progress(self):
+        for content in (
+            "🎉 shipped",
+            "😀 hello",
+            "plain assistant response",
+            "💻not a tool",
+            "✔ Done",
+            "✔ Done...",
+            "❓ What do you think?",
+            "💬 Here is the result",
+            "💬 Reading this carefully",
+            "📝 Notes",
+            "📖 Writing this up",
+            "video finished",
+        ):
+            with self.subTest(content=content):
+                self.assertEqual(self.module._infer_finitechat_kind(content), "message")
 
     def test_send_infers_status_kind_for_working_message(self):
         adapter = self.adapter()
@@ -835,7 +951,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 metadata={"conversation_id": "topic-build", "thread_id": "chat-build-1"},
             )
         )
-        asyncio.run(adapter.stop_typing("room-agent-1"))
+        asyncio.run(
+            adapter.stop_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-build", "thread_id": "chat-build-1"},
+            )
+        )
 
         self.assertEqual(calls[0][0], "activity")
         self.assertEqual(calls[0][1]["action"], "set")
@@ -846,8 +967,188 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["action"], "clear")
         self.assertEqual(calls[1][1]["conversation_id"], "topic-build")
         self.assertEqual(calls[1][1]["segment_id"], "chat-build-1")
-        self.assertEqual(adapter._activity_conversations, {})
-        self.assertEqual(adapter._activity_segments, {})
+        self.assertEqual(adapter._active_activity_routes, set())
+
+    def test_quiet_turn_refreshes_before_the_fifteen_second_activity_lease(self):
+        self.assertLess(
+            self.module.DEFAULT_ACTIVITY_REFRESH_SECS * 1000,
+            self.module.PROCESSING_ACTIVITY_TTL_MILLIS,
+        )
+        adapter = self.adapter()
+        adapter.activity_refresh_secs = 0.01
+        calls = []
+        stop_event = asyncio.Event()
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if payload["action"] == "set" and len(calls) == 3:
+                stop_event.set()
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        asyncio.run(
+            adapter._keep_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+                stop_event=stop_event,
+            )
+        )
+
+        self.assertEqual([call[1]["action"] for call in calls], ["set", "set", "set", "clear"])
+
+    def test_concurrent_typing_activity_clears_only_the_matching_chat_route(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        async def exercise():
+            await adapter.send_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+            )
+            await adapter.send_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-b", "thread_id": "chat-b"},
+            )
+            await adapter.stop_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+            )
+            self.assertEqual(
+                adapter._active_activity_routes,
+                {("room-agent-1", "topic-b", "chat-b")},
+            )
+            await adapter.stop_typing("room-agent-1")
+            self.assertEqual(
+                adapter._active_activity_routes,
+                {("room-agent-1", "topic-b", "chat-b")},
+            )
+            await adapter.stop_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-b", "thread_id": "chat-b"},
+            )
+
+        asyncio.run(exercise())
+
+        self.assertEqual(
+            [
+                (call[1]["action"], call[1]["conversation_id"], call[1]["segment_id"])
+                for call in calls
+            ],
+            [
+                ("set", "topic-a", "chat-a"),
+                ("set", "topic-b", "chat-b"),
+                ("clear", "topic-a", "chat-a"),
+                ("clear", "topic-b", "chat-b"),
+            ],
+        )
+        self.assertEqual(adapter._active_activity_routes, set())
+
+    def test_typing_activity_timeout_does_not_stall_or_remember_failed_route(self):
+        adapter = self.adapter()
+
+        async def never_returns(_action, _payload, *, timeout):
+            del timeout
+            await asyncio.Event().wait()
+
+        adapter._finitechat_json = never_returns
+        module = cast(Any, self.module)
+        original_timeout = module.ACTIVITY_CONTROL_TIMEOUT_SECS
+        module.ACTIVITY_CONTROL_TIMEOUT_SECS = 0.01
+        try:
+            asyncio.run(
+                adapter.send_typing(
+                    "room-agent-1",
+                    metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+                )
+            )
+        finally:
+            module.ACTIVITY_CONTROL_TIMEOUT_SECS = original_timeout
+
+        self.assertEqual(adapter._active_activity_routes, set())
+
+    def test_keep_typing_sets_immediately_and_clears_exact_route_on_stop(self):
+        adapter = self.adapter()
+        calls = []
+        stop_event = asyncio.Event()
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if payload["action"] == "set":
+                stop_event.set()
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        asyncio.run(
+            adapter._keep_typing(
+                "room-agent-1",
+                metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+                stop_event=stop_event,
+            )
+        )
+
+        self.assertEqual([call[1]["action"] for call in calls], ["set", "clear"])
+        self.assertEqual(calls[-1][1]["conversation_id"], "topic-a")
+        self.assertEqual(calls[-1][1]["segment_id"], "chat-a")
+        self.assertEqual(adapter._active_activity_routes, set())
+
+    def test_keep_typing_clears_unscoped_home_route_without_room_guessing(self):
+        adapter = self.adapter()
+        calls = []
+        stop_event = asyncio.Event()
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if payload["action"] == "set":
+                stop_event.set()
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        asyncio.run(
+            adapter._keep_typing(
+                "room-agent-1",
+                stop_event=stop_event,
+            )
+        )
+
+        self.assertEqual([call[1]["action"] for call in calls], ["set", "clear"])
+        self.assertIsNone(calls[-1][1]["conversation_id"])
+        self.assertIsNone(calls[-1][1]["segment_id"])
+        self.assertEqual(adapter._active_activity_routes, set())
+
+    def test_keep_typing_honors_pause_and_cancels_without_waiting_for_interval(self):
+        adapter = self.adapter()
+        adapter.activity_refresh_secs = 30
+        calls = []
+        first_set = asyncio.Event()
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if payload["action"] == "set":
+                first_set.set()
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        async def exercise():
+            adapter._finitechat_json = fake_json
+            adapter._typing_paused.add("room-agent-1")
+            task = asyncio.create_task(
+                adapter._keep_typing(
+                    "room-agent-1",
+                    metadata={"conversation_id": "topic-a", "thread_id": "chat-a"},
+                )
+            )
+            await asyncio.sleep(0.05)
+            self.assertEqual(calls, [])
+            adapter._typing_paused.discard("room-agent-1")
+            task.cancel()
+            await asyncio.wait_for(task, timeout=0.5)
+
+        asyncio.run(exercise())
+
+        self.assertFalse(first_set.is_set())
+        self.assertEqual([call[1]["action"] for call in calls], ["clear"])
+        self.assertEqual(calls[0][1]["conversation_id"], "topic-a")
+        self.assertEqual(calls[0][1]["segment_id"], "chat-a")
 
     def test_poll_loop_uses_short_poll_while_agent_turn_is_active(self):
         adapter = self.adapter()
