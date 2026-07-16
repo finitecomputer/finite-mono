@@ -31,6 +31,8 @@ import {
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
+const AGENT_BINDING_AUTHORIZATION_REQUIRED =
+  "first-time binding bootstrap was not authorized by Project creation";
 
 export class HostedWebChatError extends Error {
   constructor(
@@ -44,6 +46,14 @@ export class HostedWebChatError extends Error {
 
 export function hostedWebChatErrorMessage(error: unknown) {
   return error instanceof HostedWebChatError ? error.message : CHAT_UNAVAILABLE_MESSAGE;
+}
+
+export function isAgentBindingAuthorizationRequired(error: unknown) {
+  return (
+    error instanceof HostedDeviceRequestError &&
+    (error.status === 409 || error.status === 503) &&
+    error.message === AGENT_BINDING_AUTHORIZATION_REQUIRED
+  );
 }
 
 export async function bootstrapHostedWebChat(machineId: string) {
@@ -76,12 +86,7 @@ async function bootstrapHostedWebChatWithContext(
       display_name: `Chat with ${context.agentName}`,
     });
   } catch (error) {
-    if (
-      error instanceof HostedDeviceRequestError &&
-      error.status === 409 &&
-      error.message ===
-        "first-time binding bootstrap was not authorized by Project creation"
-    ) {
+    if (isAgentBindingAuthorizationRequired(error)) {
       throw new HostedWebChatError(
         "Finish chat setup to continue.",
         409,
