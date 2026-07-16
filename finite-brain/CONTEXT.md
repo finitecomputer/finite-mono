@@ -82,9 +82,11 @@ keypairs, but that client-side policy does not create a different FiniteBrain
 authorization class. In particular, an Agent Principal Key receives no Brain
 access merely because it belongs to the same Project or dashboard account as a
 user; an authorized Member must explicitly grant it the required access and
-Folder Key Grants. In a Personal Vault, a limited Member Identity may receive
-only explicit restricted-Folder access; it never becomes the Vault owner or an
-admin.
+Folder Key Grants. In a Personal Vault, the owner or the first account-bound
+agent's bootstrap flow may establish one distinct Agent Principal as the
+Personal Agent; that relationship grants full operational Vault access without
+transferring ownership. Other limited Member Identities receive only their
+explicit restricted-Folder access.
 
 ### User Nostr Identity
 
@@ -102,43 +104,104 @@ it does not, Brain fails closed with a basic setup-required state and never
 creates another User Nostr Identity. This is a Greenfield boundary: Brain
 carries no legacy Vault or user-key migration path into the first release.
 
-### Personal Vault Agent Access
+### Personal Agent Access
 
 The explicit, revocable way a user's distinct Agent Principal Key works in that
 user's Personal Vault. The User Nostr Identity remains the Vault's sole owner.
-The agent is a limited Member Identity with its own Folder Key Grants, starting
-with access only to the dedicated restricted **Agent Workspace Folder**. It may
-read and write that Folder, but cannot see owner-only folders, change Vault
-access, or use the user's Brain Identity Provider. The owner may later grant
-the agent another restricted Folder deliberately; Project or dashboard
-association never creates that access.
+The **Personal Agent** has full operational access to every current and future
+Folder: it may read, write, organize, share, invite collaborators, and directly
+delete content or Folders on the user's behalf. Brain automatically maintains
+the Folder Key Grants needed for that access: every new Personal Vault Folder
+automatically grants its owner and current Personal Agent, regardless of which
+one creates it. There is no Agent Workspace or Folder-by-Folder agent delegation
+product flow. The Personal Agent cannot
+transfer or delete the Vault, change its owner or Recovery Principals, add or
+remove a Personal Agent, or use the user's Brain Identity Provider. Project or
+dashboard navigation alone never creates Personal Agent Access. An
+authenticated account-agent binding may establish the initial Personal Agent
+during Personal Vault Bootstrap; after bootstrap, an unpaired agent cannot
+self-enroll and the owner controls removal or replacement.
 
-### Personal Vault Bootstrap Authorization
+Personal Agent actions remain signed and audited as that Agent Principal, with
+its Managed Agent Email used as the readable display identity where Brain
+already shows history; Brain does not impersonate the human owner.
 
-A short-lived, single-use Brain authorization created by the user's explicit
-Chat request to set up Brain. It is bound to that User Nostr Identity, one Agent
-Principal, and the initial Agent Workspace Folder only. A successful agent-first
-setup consumes it atomically while creating the user-owned Personal Vault,
-durable delegated access, and both parties' Folder Key Grants. It is not a
-user-facing second approval and cannot later create another Vault or broaden the
-agent's access.
+### Personal Agent
 
-### Agent Workspace Folder
+The product role of an Agent Principal added by the owner or established during
+account-bound agent bootstrap in a Personal Vault. A Personal Agent has full
+operational and collaboration authority across all current and future Vault
+content, while ownership, recovery, Vault deletion, and post-bootstrap control
+of the Personal Agent relationship remain exclusive to the human owner. A
+Personal Vault has exactly one Personal Agent in the current product scope;
+multi-agent operation belongs in Organization Vaults. The owner may replace the
+Personal Agent through one atomic key-rotating relationship swap, but the
+removed agent cannot re-enroll itself. _Avoid_: Delegated Agent, Personal Vault
+Admin.
 
-The initial dedicated restricted Folder in a Personal Vault that both the owner
-and the explicitly authorized Agent Principal can use. It is the narrow shared
-starting place for an agent, not a second Vault and not a change to Personal
-Vault ownership.
+Permanent deletion of the underlying agent in Core revokes the Personal Agent
+relationship and rotates current Folder Keys without deleting the Personal
+Vault or its content. Runtime stops and restarts leave the relationship intact.
+
+### Direct Deletion
+
+A permanent removal from Brain's live product state with no Trash, undo, or
+restore workflow. Brain retains only the minimal deletion marker and audit
+metadata needed to synchronize clients and prevent stale or offline edits from
+resurrecting the deleted identity; it does not claim erasure of downloaded
+plaintext, backups, snapshots, or storage history. _Avoid_: Secure Erasure,
+Trash.
+
+### Personal Vault Bootstrap
+
+The creation of a user's single Personal Vault with that user's User Nostr
+Identity as sole owner. It seeds no default Folders or Folder Objects; Folders
+appear only through an explicit user action or a product workflow the user
+authorizes. An account-bound agent may perform bootstrap under its standing
+Agent Bootstrap Authority and atomically establish itself as a Personal Agent
+without creating a Folder merely for the relationship. In user-first setup, the
+owner atomically creates the Vault and adds the currently selected,
+identity-resolved agent as the one Personal Agent; if that agent cannot be
+verified, neither relationship is created.
+
+### Agent Bootstrap Authority
+
+The standing authority of an authenticated account-bound Agent Principal to
+create its user's single Personal Vault and atomically establish itself in that
+Vault's one Personal Agent role. The FiniteBrain skill asks the user once in
+natural language before exercising this authority, but that confirmation is
+behavioral guidance, not a server-enforced authorization boundary. If the Vault
+already exists, an unpaired agent cannot enroll itself. Agent Bootstrap
+Authority cannot create a second Personal Vault, transfer or delete the Vault,
+change ownership or Recovery Principals, or manage another agent. _Avoid_: Setup
+Ticket, Bootstrap Approval.
+
+After successful agent-first bootstrap, the agent resumes the user's original
+request without requiring another prompt.
+
+Core is the source of truth for the WorkOS account-to-agent association. Finite
+Identity manages the Agent Principal Key inside the agent's protected
+environment and resolves its Managed Agent Email to the public key; its server
+never returns the private key. Brain combines Core's association with Identity's
+public Principal facts and owns the resulting Personal Agent Access. Finite Chat
+Hosted Device remains the hosted human-key custodian and signer, not part of the
+Personal Agent bootstrap path or Brain access authority.
+
+The agent never supplies the Personal Vault owner. Brain derives the owning
+account from Core's authenticated account-agent association and resolves that
+account's existing User Nostr Identity through Finite Identity; missing,
+ambiguous, or conflicting facts fail without creating or changing a Vault.
 
 In Hosted Web, the selected Runtime's Managed Agent Email and display name may
 prefill the owner's pairing input, but that navigation context carries no
 authority. Brain resolves the email through Finite Identity and grants the
-resolved Agent Principal Key only after the owner explicitly pairs it from an
-unlocked Personal Vault. The raw `npub` is an advanced fallback, not the
-primary user experience. After pairing, the Agent Principal discovers the
-user-owned Personal Vault through the signed visible-Vault list and opens its
-restricted Folder in a durable Vault Working Tree below the Runtime's
-`/data/workspace` boundary.
+resolved Agent Principal Key Personal Agent Access after the owner pairs it from
+an unlocked Personal Vault or after that bound agent completes agent-first
+bootstrap. The raw `npub` is an advanced fallback, not the primary user
+experience. After pairing, the Agent Principal discovers the user-owned
+Personal Vault through the signed visible-Vault list and opens its accessible
+Folders in a durable Vault Working Tree below the Runtime's `/data/workspace`
+boundary.
 
 ### Local Data Security Baseline
 
@@ -307,13 +370,12 @@ A distinct, narrowly authorized Principal whose Folder Key Grants provide an ind
 ### Email Access Delegation
 
 A revocable, Brain-owned product authorization connecting one verified email
-Principal's user-approved account context to one Agent Principal. It records
-the delegated relationship for audit and revocation but does not make the two
-the same Principal or convey Folder Keys. In a Personal Vault it authorizes
-only the explicit limited-member and Folder Key Grant setup described by
-Personal Vault Agent Access; it is not itself content access. It is the durable
-relationship after setup, distinct from the one-use Personal Vault Bootstrap
-Authorization.
+Principal's account context to one Agent Principal. It records the relationship
+for audit and revocation but does not make the two the same Principal or convey
+Folder Keys. In a Personal Vault it authorizes the Personal Agent Access
+relationship; Brain separately and automatically maintains the Folder Key
+Grants that make the Vault's current and future Folders readable. The
+delegation is not itself a content key.
 
 ### Email Invite Bootstrap
 

@@ -1,6 +1,6 @@
 # Keep Personal Vaults User-Owned And Grant Agents Folder-Scoped Access
 
-Status: accepted 2026-07-13.
+Status: superseded by ADR-0023 on 2026-07-16.
 
 Implementation note: phase one now includes limited Personal Vault members,
 idempotent owner-first pairing, Chat-issued one-use agent-first bootstrap,
