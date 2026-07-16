@@ -1803,8 +1803,28 @@ fn spawn_app_runtime_worker(
                             Err(error)
                         }
                     };
+                    let run_selection_housekeeping = result.is_ok()
+                        && matches!(
+                            completed_action,
+                            AppAction::OpenRoom { .. }
+                                | AppAction::OpenTopic { .. }
+                                | AppAction::OpenChat { .. }
+                        );
                     if let Some(response) = response {
                         let _ = response.send(result);
+                    }
+                    if run_selection_housekeeping {
+                        let before = state.app.clone();
+                        if let Err(error) = state.run_selection_housekeeping()
+                            && std::env::var_os("FINITECHAT_DEBUG_SELECTION_HOUSEKEEPING").is_some()
+                        {
+                            eprintln!("finitechat selection housekeeping error: {error:?}");
+                        }
+                        if state.app != before {
+                            state.bump_rev();
+                            let snapshot = state.app.clone();
+                            publish_app_update(&snapshot, &shared_state, &reconciler);
+                        }
                     }
                 }
                 AppRuntimeCommand::WaitPlan {
@@ -2752,8 +2772,6 @@ impl AppRuntimeState {
         self.persist_app_state()?;
         self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
-        self.refresh_ephemeral_activity_for_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
     }
 
@@ -2782,8 +2800,6 @@ impl AppRuntimeState {
         self.persist_app_state()?;
         self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
-        self.refresh_ephemeral_activity_for_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
     }
 
@@ -2809,6 +2825,10 @@ impl AppRuntimeState {
         self.persist_app_state()?;
         self.selection_is_explicit_or_bootstrapped = true;
         self.sync_selected_room_messages();
+        Ok(())
+    }
+
+    fn run_selection_housekeeping(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
