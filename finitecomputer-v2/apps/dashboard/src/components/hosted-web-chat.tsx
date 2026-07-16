@@ -59,6 +59,7 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
+import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
   activityLeaseIsFresh,
@@ -1071,10 +1072,8 @@ function messageAction(roomId: string, text: string, topic: HostedChatTopic | nu
 function sitesFromMessages(messages: HostedChatMessage[]) {
   const seen = new Set<string>();
   const sites: PreviewSite[] = [];
-  const urlPattern = /https?:\/\/[^\s<>()\[\]{}"']+/giu;
   for (const message of [...messages].reverse()) {
-    for (const raw of messageContent(message).match(urlPattern) ?? []) {
-      const value = raw.replace(/[.,;:!?]+$/u, "");
+    for (const value of chatPreviewUrls(messageContent(message))) {
       try {
         const url = new URL(value);
         const local = url.hostname.endsWith(".localhost");
