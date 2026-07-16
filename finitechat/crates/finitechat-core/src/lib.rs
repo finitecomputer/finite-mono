@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -817,6 +817,7 @@ pub trait AppReconciler: Send + Sync + 'static {
 struct CoreState {
     data_dir: PathBuf,
     server_url: String,
+    http_client: OnceLock<reqwest::blocking::Client>,
     account_secret: NostrSecretKey,
     fixed_now_unix_seconds: Option<u64>,
     store: SqliteClientStore,
@@ -7000,6 +7001,7 @@ impl CoreState {
         Ok(Self {
             data_dir,
             server_url: options.server_url,
+            http_client: OnceLock::new(),
             account_secret,
             fixed_now_unix_seconds,
             store,
@@ -7037,7 +7039,15 @@ impl CoreState {
     }
 
     fn home_delivery(&self) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-        delivery_for(&self.server_url)
+        self.delivery_for(&self.server_url)
+    }
+
+    fn delivery_for(&self, server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
+        let client = self
+            .http_client
+            .get_or_init(reqwest::blocking::Client::new)
+            .clone();
+        delivery_for_with_client(server_url, client)
     }
 
     fn generate_object_id(&mut self, prefix: &str) -> Result<String, FiniteChatCoreError> {
@@ -7306,7 +7316,7 @@ impl CoreState {
         message: &StoredOutboundMessage,
     ) -> Result<(EventAccepted, SyncResult), FiniteChatCoreError> {
         let room_server_url = self.room_server_url(&message.room_id);
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         let accepted = match delivery.append_event(
             &message.append_request,
             DurableAppEventKind::ChatMessage.delivery_policy(),
@@ -7593,7 +7603,7 @@ impl CoreState {
                 .saturating_add(GenericActivityKindV1::Typing.recommended_expiry_millis()),
         };
         let room_server_url = self.room_server_url(room_id);
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         delivery.append_activity(&request).map_err(delivery_error)?;
         Ok(())
     }
@@ -7646,7 +7656,7 @@ impl CoreState {
             expires_at_ms: now_ms.saturating_add(expires_in_millis),
         };
         let room_server_url = self.room_server_url(&room_id);
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         delivery.append_activity(&request).map_err(delivery_error)
     }
 
@@ -7663,7 +7673,7 @@ impl CoreState {
             now_ms,
         };
         let room_server_url = self.room_server_url(room_id);
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         delivery
             .get_ephemeral_activities(&request)
             .map(|response| response.records)
@@ -7727,7 +7737,7 @@ impl CoreState {
             .room_server_url(room_id)
             .map(str::to_owned)
             .unwrap_or_else(|| self.server_url.clone());
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         let accepted = delivery
             .append_event(&request, kind.delivery_policy())
             .map_err(delivery_error)?;
@@ -7787,7 +7797,7 @@ impl CoreState {
             .room_server_url(room_id)
             .map(str::to_owned)
             .unwrap_or_else(|| self.server_url.clone());
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         let accepted = delivery
             .append_event(
                 &request,
@@ -7856,7 +7866,7 @@ impl CoreState {
             .room_server_url(room_id)
             .map(str::to_owned)
             .unwrap_or_else(|| self.server_url.clone());
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         let accepted = delivery
             .append_event(&request, DurableAppEventKind::ChatReceipt.delivery_policy())
             .map_err(delivery_error)?;
@@ -7916,7 +7926,7 @@ impl CoreState {
             .room_server_url(room_id)
             .map(str::to_owned)
             .unwrap_or_else(|| self.server_url.clone());
-        let mut delivery = delivery_for(&room_server_url);
+        let mut delivery = self.delivery_for(&room_server_url);
         let accepted = delivery
             .append_event(&request, kind.delivery_policy())
             .map_err(delivery_error)?;
@@ -7971,7 +7981,7 @@ impl CoreState {
             .filter_map(|cursor| cursor.server_url)
             .collect::<BTreeSet<_>>();
         for server_url in room_servers {
-            let mut delivery = delivery_for(&server_url);
+            let mut delivery = self.delivery_for(&server_url);
             match run_room_server_sync_setup_tick(
                 &mut self.store,
                 &mut self.device,
@@ -8001,7 +8011,7 @@ impl CoreState {
             };
             let mut candidate = self.store.load_device(config).map_err(store_error)?;
             let server_url = cursor.server_url.unwrap_or_else(|| self.server_url.clone());
-            let mut delivery = delivery_for(&server_url);
+            let mut delivery = self.delivery_for(&server_url);
             match run_room_sync_tick(
                 &mut self.store,
                 &mut candidate,
@@ -10575,7 +10585,14 @@ fn nostr_identity_from_secret(
 }
 
 fn delivery_for(server_url: &str) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
-    HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url))
+    delivery_for_with_client(server_url, reqwest::blocking::Client::new())
+}
+
+fn delivery_for_with_client(
+    server_url: &str,
+    client: reqwest::blocking::Client,
+) -> HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
+    HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::with_client(server_url, client))
 }
 
 fn device_room_counts<D: RuntimeDelivery>(
