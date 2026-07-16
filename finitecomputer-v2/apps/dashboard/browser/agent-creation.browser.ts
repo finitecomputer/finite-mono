@@ -1829,9 +1829,9 @@ async function handleHostedDeviceRequest(
           (authorization) => authorization.project_id === projectId
         )
       ) {
-        writeJson(response, 409, {
+        writeJson(response, 503, {
           error:
-            "first-time binding bootstrap was not authorized by Project creation",
+            "canonical Agent conversation requires recovery: first-time binding bootstrap was not authorized by Project creation",
         });
         return;
       }
