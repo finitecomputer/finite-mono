@@ -87,7 +87,7 @@ test("hosted-device authorization recovery recognizes its service-unavailable co
   assert.equal(
     isAgentBindingAuthorizationRequired(
       new HostedDeviceRequestError(
-        "first-time binding bootstrap was not authorized by Project creation",
+        "canonical Agent conversation requires recovery: first-time binding bootstrap was not authorized by Project creation",
         503
       )
     ),
@@ -110,6 +110,15 @@ test("hosted-device authorization recovery recognizes its service-unavailable co
       )
     ),
     true
+  );
+  assert.equal(
+    isAgentBindingAuthorizationRequired(
+      new HostedDeviceRequestError(
+        "first-time binding bootstrap was not authorized by Project creation",
+        503
+      )
+    ),
+    false
   );
 });
 

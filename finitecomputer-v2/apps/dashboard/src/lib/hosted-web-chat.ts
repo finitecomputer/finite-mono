@@ -33,6 +33,8 @@ const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
 const AGENT_BINDING_AUTHORIZATION_REQUIRED =
   "first-time binding bootstrap was not authorized by Project creation";
+const AGENT_BINDING_RECOVERY_REQUIRED =
+  `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
 
 export class HostedWebChatError extends Error {
   constructor(
@@ -51,8 +53,8 @@ export function hostedWebChatErrorMessage(error: unknown) {
 export function isAgentBindingAuthorizationRequired(error: unknown) {
   return (
     error instanceof HostedDeviceRequestError &&
-    (error.status === 409 || error.status === 503) &&
-    error.message === AGENT_BINDING_AUTHORIZATION_REQUIRED
+    ((error.status === 409 && error.message === AGENT_BINDING_AUTHORIZATION_REQUIRED) ||
+      (error.status === 503 && error.message === AGENT_BINDING_RECOVERY_REQUIRED))
   );
 }
 
