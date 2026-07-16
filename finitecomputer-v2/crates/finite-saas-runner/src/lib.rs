@@ -731,10 +731,22 @@ where
                 .map(|heartbeat| heartbeat.last_seen_at),
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
         };
-        let desired_environment = control_runtime_spec(&lease, self.launcher.runner_class())?
+        let runtime_spec = control_runtime_spec(&lease, self.launcher.runner_class())?;
+        let desired_environment = runtime_spec
             .map(|spec| spec.environment.clone())
             .unwrap_or_else(|| self.runtime_environment.clone());
-        let restart_options = RuntimeRestartOptions::new(desired_environment)?;
+        let desired_secret_environment = if kind == RuntimeControlKind::Upgrade {
+            runtime_spec
+                .map(|spec| {
+                    resolve_runtime_secret_environment(spec, &self.runtime_secret_environment)
+                })
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        let restart_options = RuntimeRestartOptions::new(desired_environment)?
+            .with_secret_environment(desired_secret_environment)?;
         let operation_result: Result<Option<RuntimeUpgradeFacts>, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
                 .launcher
@@ -859,23 +871,7 @@ where
             .map(|spec| spec.environment.clone())
             .unwrap_or_else(|| self.runtime_environment.clone());
         let secret_environment = if let Some(spec) = runtime_spec {
-            let mut resolved = BTreeMap::new();
-            for reference in &spec.secret_references {
-                if reference == "FINITE_PRIVATE_API_KEY" {
-                    continue;
-                }
-                let value = self
-                    .runtime_secret_environment
-                    .get(reference)
-                    .cloned()
-                    .ok_or_else(|| {
-                        RunnerError::InvalidRuntimeEnvironment(format!(
-                            "RuntimeSpec secret reference {reference} is unavailable"
-                        ))
-                    })?;
-                resolved.insert(reference.clone(), value);
-            }
-            resolved
+            resolve_runtime_secret_environment(spec, &self.runtime_secret_environment)?
         } else {
             self.runtime_secret_environment.clone()
         };
@@ -1396,13 +1392,15 @@ pub struct RuntimeLaunchOptions {
     pub secret_environment: BTreeMap<String, String>,
 }
 
-/// Provider-neutral desired environment carried through a state-preserving
-/// Runtime restart. The map is intentionally limited to the same bounded,
-/// non-secret opaque values accepted at launch; inference credentials and
-/// Runtime-contract variables remain owned by the existing Runtime.
+/// Provider-neutral desired environment carried through state-preserving
+/// Runtime lifecycle operations. Public values may be reconciled by replacement;
+/// secret values are populated only for an explicit image upgrade from a
+/// Core-bound RuntimeSpec. Runtime-contract variables remain owned by the
+/// existing Runtime.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RuntimeRestartOptions {
     environment: BTreeMap<String, String>,
+    secret_environment: BTreeMap<String, String>,
 }
 
 fn runtime_spec_v1(envelope: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
@@ -1549,11 +1547,28 @@ fn runtime_spec_image_is_immutable(reference: &str) -> bool {
 impl RuntimeRestartOptions {
     pub fn new(environment: BTreeMap<String, String>) -> Result<Self, RunnerError> {
         validate_runtime_environment(&environment)?;
-        Ok(Self { environment })
+        Ok(Self {
+            environment,
+            secret_environment: BTreeMap::new(),
+        })
     }
 
     pub fn environment(&self) -> &BTreeMap<String, String> {
         &self.environment
+    }
+
+    pub fn with_secret_environment(
+        mut self,
+        secret_environment: BTreeMap<String, String>,
+    ) -> Result<Self, RunnerError> {
+        validate_runtime_secret_environment(&secret_environment)?;
+        validate_runtime_environment_disjoint(&self.environment, &secret_environment)?;
+        self.secret_environment = secret_environment;
+        Ok(self)
+    }
+
+    pub fn secret_environment(&self) -> &BTreeMap<String, String> {
+        &self.secret_environment
     }
 }
 
@@ -1603,14 +1618,17 @@ impl std::fmt::Debug for RuntimeRestartOptions {
                 "environment_keys",
                 &self.environment.keys().collect::<Vec<_>>(),
             )
+            .field(
+                "secret_environment_keys",
+                &self.secret_environment.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
 
-/// Reconcile only the explicitly desired non-secret opaque keys. Existing
-/// Runtime-contract values, provider settings, and credentials are retained
-/// byte-for-byte so compute replacement does not silently rotate or erase
-/// them.
+/// Reconcile only the explicitly desired opaque keys. Existing Runtime-contract
+/// values, provider settings, and credentials are retained byte-for-byte so
+/// compute replacement does not silently erase them.
 fn merge_desired_runtime_environment(
     mut existing: Vec<(String, String)>,
     options: &RuntimeRestartOptions,
@@ -1625,7 +1643,38 @@ fn merge_desired_runtime_environment(
             existing.push((key.clone(), value.clone()));
         }
     }
+    for (key, value) in options.secret_environment() {
+        if let Some((_, existing_value)) = existing
+            .iter_mut()
+            .rfind(|(existing_key, _)| existing_key == key)
+        {
+            *existing_value = value.clone();
+        } else {
+            existing.push((key.clone(), value.clone()));
+        }
+    }
     existing
+}
+
+fn resolve_runtime_secret_environment(
+    spec: &RuntimeSpecV1,
+    available: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, RunnerError> {
+    let mut resolved = BTreeMap::new();
+    for reference in &spec.secret_references {
+        if reference == "FINITE_PRIVATE_API_KEY" {
+            continue;
+        }
+        let value = available.get(reference).cloned().ok_or_else(|| {
+            RunnerError::InvalidRuntimeEnvironment(format!(
+                "RuntimeSpec secret reference {reference} is unavailable"
+            ))
+        })?;
+        resolved.insert(reference.clone(), value);
+    }
+    validate_runtime_secret_environment(&resolved)?;
+    validate_runtime_environment_disjoint(&spec.environment, &resolved)?;
+    Ok(resolved)
 }
 
 fn validate_runtime_environment(environment: &BTreeMap<String, String>) -> Result<(), RunnerError> {
@@ -3816,7 +3865,7 @@ mod tests {
                 "FINITE_SITES_API".to_string(),
                 "https://api.finite.chat".to_string(),
             )]),
-            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+            vec!["FINITE_PRIVATE_API_KEY".to_string(), "FAL_KEY".to_string()],
         ));
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
@@ -3840,6 +3889,11 @@ mod tests {
             "FINITE_SITES_API".to_string(),
             "https://runner-default.invalid".to_string(),
         )]))
+        .unwrap()
+        .with_runtime_secret_environment(BTreeMap::from([(
+            "FAL_KEY".to_string(),
+            "restart-must-not-refresh".to_string(),
+        )]))
         .unwrap();
 
         let outcome = runner.run_once().unwrap();
@@ -3851,6 +3905,12 @@ mod tests {
                 "FINITE_SITES_API".to_string(),
                 "https://api.finite.chat".to_string(),
             )])
+        );
+        assert!(
+            runner.launcher.restart_options[0]
+                .secret_environment()
+                .is_empty(),
+            "ordinary restart must not refresh Runtime secrets"
         );
     }
 
@@ -3953,6 +4013,26 @@ mod tests {
     #[test]
     fn run_once_upgrades_only_the_core_bound_artifact_and_reports_actual_facts() {
         let mut runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade");
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        runtime_control.runtime.placement = Some(placement);
+        let mut runtime_spec = sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::Kata,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string(), "FAL_KEY".to_string()],
+        );
+        let RuntimeSpecEnvelope::V1(spec) = &mut runtime_spec;
+        spec.runtime_artifact_id = "artifact-v2".to_string();
+        spec.runtime_image_digest = runtime_control
+            .target_runtime_artifact
+            .as_ref()
+            .unwrap()
+            .reference
+            .clone();
+        runtime_control.runtime_spec = Some(runtime_spec);
         runtime_control
             .target_runtime_artifact
             .as_mut()
@@ -3967,6 +4047,11 @@ mod tests {
             "runner-1",
             300,
         )
+        .unwrap()
+        .with_runtime_secret_environment(BTreeMap::from([(
+            "FAL_KEY".to_string(),
+            "fal-added-on-upgrade".to_string(),
+        )]))
         .unwrap();
 
         let outcome = runner.run_once().unwrap();
@@ -3979,6 +4064,10 @@ mod tests {
             }
         );
         assert_eq!(runner.launcher.upgraded, vec!["oslo-agent-001"]);
+        assert_eq!(
+            runner.launcher.restart_options[0].secret_environment(),
+            &BTreeMap::from([("FAL_KEY".to_string(), "fal-added-on-upgrade".to_string(),)])
+        );
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
         let completion = &runner.queue.completed_runtime_control[0];
         assert_eq!(
@@ -5105,6 +5194,14 @@ mod tests {
             .contains("fal_debug_secret")
         );
         assert!(!format!("{restart_options:?}").contains("192.168.64.1"));
+        let secret_restart_options = RuntimeRestartOptions::default()
+            .with_secret_environment(BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal_refresh_secret".to_string(),
+            )]))
+            .unwrap();
+        assert!(!format!("{secret_restart_options:?}").contains("fal_refresh_secret"));
+        assert!(format!("{secret_restart_options:?}").contains("FAL_KEY"));
         assert!(
             RuntimeRestartOptions::new(BTreeMap::from([(
                 "GOOGLE_OAUTH_TOKEN".to_string(),
