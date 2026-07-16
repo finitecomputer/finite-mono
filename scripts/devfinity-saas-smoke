@@ -166,13 +166,43 @@ JS
 }
 
 max_remote_seq() {
+  local room_id="$1"
+  local topic_id="$2"
+  local chat_id="$3"
+  node - "$chat_state_json" "$room_id" "$topic_id" "$chat_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [roomId, topicId, chatId] = process.argv.slice(3);
+const seq = (state.messages || [])
+  .filter((message) =>
+    message.sender_account_id !== state.identity?.account_id
+    && message.room_id === roomId
+    && message.conversation_id === topicId
+    && message.chat_id === chatId
+  )
+  .reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
+process.stdout.write(String(seq));
+JS
+}
+
+selected_chat_route() {
   node - "$chat_state_json" <<'JS'
 const fs = require("node:fs");
 const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const seq = (state.messages || [])
-  .filter((message) => !message.is_mine)
-  .reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
-process.stdout.write(String(seq));
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+const room = (state.rooms || []).find((candidate) =>
+  candidate.room_id === roomId && candidate.state === "Connected"
+);
+const topics = (state.topics || []).filter((candidate) =>
+  candidate.room_id === room?.room_id && !candidate.archived
+);
+const topic = topics.find((candidate) => candidate.topic_id === state.selected_topic_id)
+  || topics.find((candidate) => candidate.topic_id === "home");
+const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id)
+  || topic?.chats?.find((candidate) => candidate.active)
+  || topic?.chats?.[0];
+if (!room || !topic || !chat) throw new Error("canonical Home chat is unavailable");
+process.stdout.write([room.room_id, topic.topic_id, chat.chat_id].join("\t"));
 JS
 }
 
@@ -182,16 +212,28 @@ send_chat_message() {
 const fs = require("node:fs");
 const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const text = process.argv[3];
-const room = (state.rooms || []).find((candidate) => candidate.is_agent_chat && candidate.state === "Connected");
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+const room = (state.rooms || []).find((candidate) =>
+  candidate.room_id === roomId && candidate.state === "Connected"
+);
 if (!room) throw new Error("no connected agent room");
-const topic = (state.topics || []).find((candidate) => candidate.room_id === room.room_id);
+const topics = (state.topics || []).filter((candidate) =>
+  candidate.room_id === room.room_id && !candidate.archived
+);
+const topic = topics.find((candidate) => candidate.topic_id === state.selected_topic_id)
+  || topics.find((candidate) => candidate.topic_id === "home");
 const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id)
-  || topic?.chats?.find((candidate) => candidate.active);
-const action = topic && chat
-  ? { SendChatMessage: { room_id: room.room_id, topic_id: topic.topic_id, chat_id: chat.chat_id, text } }
-  : topic
-    ? { SendTopicMessage: { room_id: room.room_id, topic_id: topic.topic_id, text } }
-    : { SendMessage: { room_id: room.room_id, text } };
+  || topic?.chats?.find((candidate) => candidate.active)
+  || topic?.chats?.[0];
+if (!topic || !chat) throw new Error("canonical Home chat is unavailable");
+const action = {
+  SendChatMessage: {
+    room_id: room.room_id,
+    topic_id: topic.topic_id,
+    chat_id: chat.chat_id,
+    text,
+  },
+};
 process.stdout.write(JSON.stringify(action));
 JS
   curl -fsS --max-time 30 \
@@ -201,36 +243,249 @@ JS
     >"$chat_state_json"
 }
 
-wait_for_remote_reply_after() {
-  local previous_seq="$1"
+create_topic_and_require_first_chat() {
+  local title="$1"
+  local room_id
+  chat_state
+  room_id="$(node - "$chat_state_json" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const roomId = state.hosted_agent_binding?.canonical_room_id;
+if (!roomId) throw new Error("canonical room is unavailable");
+process.stdout.write(roomId);
+JS
+)"
+  node - "$room_id" "$title" >"$chat_action_json" <<'JS'
+const roomId = process.argv[2];
+const title = process.argv[3];
+if (!roomId || !title) throw new Error("canonical room or topic title is unavailable");
+process.stdout.write(JSON.stringify({ CreateTopic: { room_id: roomId, title } }));
+JS
+  curl -fsS --max-time 30 \
+    -H 'content-type: application/json' \
+    --data-binary "@$chat_action_json" \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/actions" \
+    >"$chat_state_json"
+  node - "$chat_state_json" "$title" "$room_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const title = process.argv[3];
+const roomId = process.argv[4];
+const topic = (state.topics || []).find((candidate) =>
+  candidate.room_id === roomId
+  && candidate.topic_id === state.selected_topic_id
+  && candidate.title === title
+);
+const chat = topic?.chats?.find((candidate) => candidate.chat_id === state.selected_chat_id);
+if (!topic || !chat) {
+  throw new Error("CreateTopic did not select its canonical first chat");
+}
+JS
+}
+
+scoped_working_present() {
+  local room_id="$1"
+  local topic_id="$2"
+  local chat_id="$3"
+  node - "$chat_state_json" "$room_id" "$topic_id" "$chat_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [roomId, topicId, chatId] = process.argv.slice(3);
+process.exit((state.typing_members || []).some((member) =>
+  member.room_id === roomId
+  && member.topic_id === topicId
+  && member.chat_id === chatId
+  && member.activity_kind === "working"
+) ? 0 : 1);
+JS
+}
+
+wait_for_scoped_working_clear() {
+  local room_id="$1"
+  local topic_id="$2"
+  local chat_id="$3"
+  local timeout_secs="${4:-5}"
   local started
   started="$(date +%s)"
   while true; do
     chat_state
-    if node - "$chat_state_json" "$previous_seq" <<'JS'
+    if ! scoped_working_present "$room_id" "$topic_id" "$chat_id"; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      echo "scoped Working activity did not clear after Hermes completed" >&2
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
+wait_for_remote_reply_after() {
+  local previous_seq="$1"
+  local room_id="$2"
+  local topic_id="$3"
+  local chat_id="$4"
+  local require_working="${5:-0}"
+  local started
+  local working_seen=0
+  started="$(date +%s)"
+  while true; do
+    chat_state
+    if scoped_working_present "$room_id" "$topic_id" "$chat_id"; then
+      working_seen=1
+    fi
+    if node - "$chat_state_json" "$previous_seq" "$room_id" "$topic_id" "$chat_id" <<'JS'
 const fs = require("node:fs");
 const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const previous = Number(process.argv[3]);
-process.exit((state.messages || []).some((message) => !message.is_mine && Number(message.seq) > previous) ? 0 : 1);
+const [roomId, topicId, chatId] = process.argv.slice(4);
+process.exit((state.messages || []).some((message) =>
+  message.sender_account_id !== state.identity?.account_id
+  && Number(message.seq) > previous
+  && message.room_id === roomId
+  && message.conversation_id === topicId
+  && message.chat_id === chatId
+  && message.final_delivery === true
+) ? 0 : 1);
 JS
     then
+      if [[ "$require_working" == "1" && "$working_seen" != "1" ]]; then
+        echo "Hermes completed without observable scoped Working activity" >&2
+        return 1
+      fi
+      wait_for_scoped_working_clear "$room_id" "$topic_id" "$chat_id"
       return 0
     fi
+    # Finite Chat activity is ephemeral and may clear as soon as Hermes sends
+    # its final response, before the Hosted Web Device has projected that
+    # durable message. The dashboard keeps the submitted turn visibly Working
+    # until final_delivery arrives, so require an observed activity handoff and
+    # the durable final below without treating that transport race as failure.
     if (( "$(date +%s)" - started >= 240 )); then
       echo "Hermes did not answer the real Hosted Web Device message within 240s" >&2
       return 1
     fi
-    sleep 2
+    sleep 0.25
   done
 }
 
 send_and_require_reply() {
   local text="$1"
   local before
+  local room_id
+  local topic_id
+  local chat_id
   chat_state
-  before="$(max_remote_seq)"
+  IFS=$'\t' read -r room_id topic_id chat_id <<<"$(selected_chat_route)"
+  wait_for_scoped_working_clear "$room_id" "$topic_id" "$chat_id"
+  before="$(max_remote_seq "$room_id" "$topic_id" "$chat_id")"
   send_chat_message "$text"
-  wait_for_remote_reply_after "$before"
+  wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id"
+}
+
+last_site_final_timestamp=0
+sites_acceptance_room_id=""
+sites_acceptance_topic_id=""
+sites_acceptance_chat_id=""
+
+send_site_and_require_ordered_chat() {
+  local marker="$1"
+  local before
+  local room_id
+  local topic_id
+  local chat_id
+  local result
+  local final_timestamp
+  local site_url
+  local site_body
+  chat_state
+  IFS=$'\t' read -r room_id topic_id chat_id <<<"$(selected_chat_route)"
+  if [[ -z "$sites_acceptance_room_id" ]]; then
+    sites_acceptance_room_id="$room_id"
+    sites_acceptance_topic_id="$topic_id"
+    sites_acceptance_chat_id="$chat_id"
+  elif [[ "$room_id" != "$sites_acceptance_room_id" \
+    || "$topic_id" != "$sites_acceptance_topic_id" \
+    || "$chat_id" != "$sites_acceptance_chat_id" ]]; then
+    echo "selected chat route changed between Sites turns" >&2
+    return 1
+  fi
+  wait_for_scoped_working_clear "$room_id" "$topic_id" "$chat_id"
+  before="$(max_remote_seq "$room_id" "$topic_id" "$chat_id")"
+  send_chat_message \
+    "Use the installed Finite Sites skill to publish a minimal public Finite Site whose rendered page visibly contains only the exact marker ${marker}. This marker contains no private data, and this request is explicit approval to make that output public with the skill's documented public-sharing command. Actually publish it, verify it, and return verbatim the exact outputs[].output_url reported by fsite project status --output json in your final response. In this local test that authoritative URL will be an http://*.sites.localhost:<port>/ URL; never translate or synthesize a production hostname."
+  wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id" 1
+
+  result="$(node - "$chat_state_json" "$before" "$room_id" "$topic_id" "$chat_id" "$sites_api_url" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const previous = Number(process.argv[3]);
+const [roomId, topicId, chatId] = process.argv.slice(4, 7);
+const sitesApi = new URL(process.argv[7]);
+const remote = (state.messages || []).filter((message) =>
+  message.sender_account_id !== state.identity?.account_id
+  && Number(message.seq) > previous
+  && message.room_id === roomId
+  && message.conversation_id === topicId
+  && message.chat_id === chatId
+);
+if (remote.length === 0) throw new Error("site turn produced no scoped Agent messages");
+for (let index = 1; index < remote.length; index += 1) {
+  if (Number(remote[index].seq) <= Number(remote[index - 1].seq)) {
+    throw new Error("site turn messages are not in strictly increasing durable order");
+  }
+}
+const tools = remote.filter((message) => message.kind === "tool");
+if (tools.length < 2) throw new Error("site turn did not expose representative tool progress");
+if (tools.some((message) => message.edit_of_message_id)) {
+  throw new Error("site turn rewrote an earlier tool bubble instead of appending progress");
+}
+const final = remote.findLast((message) => message.final_delivery === true);
+if (!final) throw new Error("site turn has no final delivery");
+const content = String(final.display_content || final.text || "");
+const match = content.match(/https?:\/\/[^\s<>)\]},"'`*]+/u);
+if (!match) throw new Error("site turn final delivery has no public URL");
+const candidate = match[0].replace(/[.,;:!?]+$/u, "");
+const url = new URL(candidate);
+const oneLabelUnder = (hostname, base) => {
+  const suffix = `.${base}`;
+  if (!hostname.endsWith(suffix)) return false;
+  const label = hostname.slice(0, -suffix.length);
+  return Boolean(label) && !label.includes(".") && !["api", "git"].includes(label);
+};
+const productionOutput = url.protocol === "https:"
+  && !url.port
+  && (oneLabelUnder(url.hostname, "finite.chat")
+    || oneLabelUnder(url.hostname, "docs.finite.chat"));
+const localOutput = url.protocol === "http:"
+  && sitesApi.protocol === "http:"
+  && Boolean(url.port)
+  && url.port === sitesApi.port
+  && (oneLabelUnder(url.hostname, "sites.localhost")
+    || oneLabelUnder(url.hostname, "docs.sites.localhost"));
+if (url.username || url.password || (!productionOutput && !localOutput)) {
+  throw new Error("site turn final delivery URL is not a Finite Sites output");
+}
+process.stdout.write(`${Number(final.timestamp_unix_seconds) || 0}\t${url.href}`);
+JS
+)"
+  IFS=$'\t' read -r final_timestamp site_url <<<"$result"
+  if (( final_timestamp <= 0 )); then
+    echo "site turn final delivery has no live timestamp" >&2
+    return 1
+  fi
+  if (( last_site_final_timestamp > 0 && final_timestamp <= last_site_final_timestamp )); then
+    echo "resident Hermes timestamps did not advance between site turns" >&2
+    return 1
+  fi
+  last_site_final_timestamp="$final_timestamp"
+  site_body="$state_dir/saas-smoke-agent-site-${marker}.html"
+  track_sensitive_file "$site_body"
+  if ! curl -fsS --max-time 30 "$site_url" >"$site_body" \
+    || ! grep -Fq -- "$marker" "$site_body"; then
+    echo "published Finite Site did not render marker $marker at $site_url" >&2
+    return 1
+  fi
 }
 
 restart_process() {
@@ -662,6 +917,11 @@ if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE
   echo "DEVFINITY_SITES_ONLY_SMOKE must be 0 or 1" >&2
   exit 64
 fi
+if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "0" \
+  && "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+  echo "DEVFINITY_CHAT_SITES_ACCEPTANCE must be 0 or 1" >&2
+  exit 64
+fi
 
 core_url="${FC_CORE_URL:?}"
 dashboard_url="${FC_DASHBOARD_URL:?}"
@@ -747,20 +1007,26 @@ wait_http "Agent contact" "$runtime_url/contact" 180
 start_chat_updates
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
-  send_and_require_reply "Reply briefly with: devfinity apple chat works"
+  if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" == "1" ]]; then
+    send_site_and_require_ordered_chat "finite-chat-site-round-1-${run_id:-$$}"
+  else
+    send_and_require_reply "Reply briefly with: devfinity apple chat works"
+  fi
 else
   echo "focused smoke: Hosted Web Device connected; real inference reply skipped"
 fi
 
 agent_npub_before="$(runtime_agent_npub)"
-brain_browser_smoke pair
-brain_vault_id="$(paired_personal_vault_id)"
-brain_tree="/data/workspace/finitebrain/$brain_vault_id"
-brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"
-open_and_sync_agent_workspace
-write_agent_workspace_note
-brain_browser_smoke assert-note "$brain_proof"
-publish_private_requesting_user_site
+if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+  brain_browser_smoke pair
+  brain_vault_id="$(paired_personal_vault_id)"
+  brain_tree="/data/workspace/finitebrain/$brain_vault_id"
+  brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"
+  open_and_sync_agent_workspace
+  write_agent_workspace_note
+  brain_browser_smoke assert-note "$brain_proof"
+  publish_private_requesting_user_site
+fi
 
 restart_process finitechat
 wait_http "Finite Chat after restart" "$chat_url/health" 120
@@ -768,12 +1034,19 @@ restart_process hosted-web-device
 wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
 restart_process finitesites
 wait_http "Finite Sites after restart" "$sites_api_url/api/v1/healthz" 120
-assert_site_cookie_works "$sites_cookie_jar_before"
-issue_and_redeem_site_preview "$sites_cookie_jar_after"
+if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+  assert_site_cookie_works "$sites_cookie_jar_before"
+  issue_and_redeem_site_preview "$sites_cookie_jar_after"
+fi
 start_chat_updates
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
-  send_and_require_reply "Reply briefly with: chat services healed"
+  if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" == "1" ]]; then
+    send_site_and_require_ordered_chat "finite-chat-site-round-2-${run_id:-$$}"
+    create_topic_and_require_first_chat "Sites acceptance ${run_id:-$$}"
+  else
+    send_and_require_reply "Reply briefly with: chat services healed"
+  fi
 fi
 
 runtime_started_before="$(container_started_at)"
@@ -801,19 +1074,21 @@ if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
   echo "Agent Principal changed across Apple Container restart" >&2
   exit 1
 fi
-container exec "$container_machine_id" test -f \
-  "$brain_tree/agent-workspace/devfinity-agent-proof.md"
-if [[ "$(paired_personal_vault_id)" != "$brain_vault_id" ]]; then
-  echo "Agent lost its paired Personal Vault across Apple Container restart" >&2
-  exit 1
+if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+  container exec "$container_machine_id" test -f \
+    "$brain_tree/agent-workspace/devfinity-agent-proof.md"
+  if [[ "$(paired_personal_vault_id)" != "$brain_vault_id" ]]; then
+    echo "Agent lost its paired Personal Vault across Apple Container restart" >&2
+    exit 1
+  fi
+  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+    >"$brain_sync_json"
+  assert_agent_workspace_scope
+  brain_browser_smoke assert-note "$brain_proof"
+  assert_site_cookie_works "$sites_cookie_jar_before"
+  assert_site_cookie_works "$sites_cookie_jar_after"
+  revoke_requesting_user_site
 fi
-container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
-  >"$brain_sync_json"
-assert_agent_workspace_scope
-brain_browser_smoke assert-note "$brain_proof"
-assert_site_cookie_works "$sites_cookie_jar_before"
-assert_site_cookie_works "$sites_cookie_jar_after"
-revoke_requesting_user_site
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: runtime restart healed"

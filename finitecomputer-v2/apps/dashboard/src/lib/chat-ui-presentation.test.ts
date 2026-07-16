@@ -178,6 +178,24 @@ test("the shared transcript hides status, groups tools, and collapses edits", ()
   assert.equal(transcript[1]?.type, "message");
 });
 
+test("append-only tools remain interspersed around assistant commentary", () => {
+  const toolA = message({ messageId: "tool-a", seq: 2, kind: "tool", status: "running" });
+  const commentary = message({ messageId: "commentary", seq: 3 });
+  const toolB = message({ messageId: "tool-b", seq: 4, kind: "tool", status: "running" });
+  const final = message({ messageId: "final", seq: 5, finalDelivery: true });
+
+  const transcript = transcriptItems([toolA, commentary, toolB, final], "user-account");
+
+  assert.deepEqual(
+    transcript.map((item) =>
+      item.type === "tools"
+        ? item.messages.map((entry) => entry.message_id).join(",")
+        : item.message.message_id
+    ),
+    ["tool-a", "commentary", "tool-b", "final"]
+  );
+});
+
 test("a swallowed Core attachment failure remains a composer error", () => {
   assert.equal(
     attachmentSendError({

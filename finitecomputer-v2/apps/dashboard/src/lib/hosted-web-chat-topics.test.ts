@@ -28,5 +28,10 @@ test("the global New chat target comes only from canonical topics", () => {
 
   assert.equal(legacySelection.room_id, "legacy-room");
   assert.deepEqual(canonicalNewChatTopic(canonicalTopics), canonicalTopics[1]);
+  assert.equal(
+    canonicalNewChatTopic([topic("canonical-room", "brain-stuff")]),
+    null,
+    "a missing Home topic must not silently redirect New chat into an arbitrary topic"
+  );
   assert.equal(canonicalNewChatTopic([]), null);
 });

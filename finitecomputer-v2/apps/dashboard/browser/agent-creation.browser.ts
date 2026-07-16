@@ -858,7 +858,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.deepEqual(sendAction, {
         SendChatMessage: {
           room_id: "room_browser_agent",
-          topic_id: "topic_browser_agent",
+          topic_id: "home",
           chat_id: "chat_browser_agent",
           text: message,
         },
@@ -941,7 +941,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
-          topic_id: "topic_browser_agent",
+          topic_id: "home",
           chat_id: "chat_browser_agent",
           account_id: "agent-account-browser",
           device_id: "agent",
@@ -952,17 +952,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Completed Oslo Bot is working");
 
-      hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
         ...hostedMessage("💻 Running browser QA", false, 7),
         kind: "tool",
-        status: "running",
+        status: "complete",
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
 
-      hostedDevice.state.app.messages[hostedDevice.state.app.messages.length - 1]!.status =
-        "complete";
+      hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
         ...hostedMessage("Browser QA complete.", false, 8),
         final_delivery: true,
@@ -979,7 +977,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
-          topic_id: "topic_browser_agent",
+          topic_id: "home",
           chat_id: "chat_browser_agent",
           account_id: "agent-account-browser",
           device_id: "agent",
@@ -1099,7 +1097,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.deepEqual(canonicalSend, {
         SendChatMessage: {
           room_id: "room_browser_agent",
-          topic_id: "topic_browser_agent",
+          topic_id: "home",
           chat_id: "chat_browser_agent",
           text: canonicalReply,
         },
@@ -1114,18 +1112,80 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       assert.deepEqual(hostedDevice.state.newChatRequests[0], {
         project_id: "project_running",
         room_id: "room_browser_agent",
-        topic_id: "topic_browser_agent",
+        topic_id: "home",
         reason: null,
         intent_key: hostedDevice.state.newChatRequests[0]!.intent_key,
       });
       assert.match(String(hostedDevice.state.newChatRequests[0]!.intent_key), /.+/);
       assert.equal(hostedDevice.state.app.selected_room_id, "room_browser_agent");
-      assert.equal(hostedDevice.state.app.selected_topic_id, "topic_browser_agent");
+      assert.equal(hostedDevice.state.app.selected_topic_id, "home");
       assert(
         hostedDevice.state.app.topics
           .find((topic) => topic.room_id === "room_browser_agent")
           ?.chats.some((chat) => chat.chat_id === "chat_browser_new_1")
       );
+
+      // Creating a topic also changes the selected Room/Topic/Chat, so it must
+      // share the ordered navigation lane with a subsequent chat click.
+      const topicTitle = "Launch planning";
+      const topicActionsBefore = hostedDevice.state.actions.length;
+      const completedTopicMutations = hostedDevice.state.completedSelectionMutations;
+      hostedDevice.holdNextNavigationAction();
+      await page.getByRole("button", { name: "New topic", exact: true }).click();
+      const newTopicDialog = page.getByRole("dialog", { name: "New topic" });
+      await newTopicDialog.getByLabel("Name").fill(topicTitle);
+      await newTopicDialog.getByRole("button", { name: "Create topic" }).click();
+      await waitFor(
+        () => hostedDevice.state.navigationActionGate === null,
+        5_000,
+        () => "CreateTopic did not enter the ordered navigation lane"
+      );
+      assert.deepEqual(hostedDevice.state.actions[topicActionsBefore], {
+        CreateTopic: {
+          room_id: "room_browser_agent",
+          title: topicTitle,
+        },
+      });
+
+      // The modal intentionally blocks a second human click. Trigger the
+      // underlying existing-chat handler directly to prove the provider still
+      // serializes the two selection-changing mutations if they overlap.
+      await page
+        .locator(".finite-chat__folder-body")
+        .locator("button")
+        .filter({ hasText: "Browser QA" })
+        .first()
+        .evaluate((element) => (element as HTMLButtonElement).click());
+      await waitFor(
+        () => hostedDevice.state.actions.length > topicActionsBefore + 1,
+        750
+      ).catch(() => undefined);
+      assert.equal(
+        hostedDevice.state.actions.length,
+        topicActionsBefore + 1,
+        "a later OpenChat reached the daemon before CreateTopic completed"
+      );
+      hostedDevice.releaseNavigationAction();
+      await waitFor(
+        () => hostedDevice.state.completedSelectionMutations === completedTopicMutations + 2,
+        5_000,
+        () => "CreateTopic and the subsequent OpenChat did not both finish"
+      );
+      assert(
+        hostedDevice.state.app.topics.some(
+          (topic) => topic.room_id === "room_browser_agent" && topic.title === topicTitle
+        )
+      );
+      assert.equal(
+        hostedDevice.state.app.selected_chat_id,
+        "chat_browser_agent",
+        "the delayed CreateTopic response overrode the user's later chat selection"
+      );
+      await newTopicDialog.waitFor({ state: "hidden" });
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
 
       hostedDevice.state.app.messages.push({
         ...hostedMessage("Remembered transcript only.", false, 13),
@@ -1801,7 +1861,7 @@ async function handleHostedDeviceRequest(
     state.newChatRequests.push(body);
     assert.equal(body.project_id, "project_running");
     assert.equal(body.room_id, "room_browser_agent");
-    assert.equal(body.topic_id, "topic_browser_agent");
+    assert.equal(body.topic_id, "home");
     if (state.navigationActionGate) {
       const gate = state.navigationActionGate;
       state.navigationActionGate = null;
@@ -1828,7 +1888,7 @@ async function handleHostedDeviceRequest(
 
   if (request.method === "POST" && path === "/v1/app/actions") {
     const action = (await readJson(request)) as Record<string, unknown>;
-    const navigationAction = ["OpenRoom", "OpenTopic", "OpenChat"].includes(
+    const navigationAction = ["OpenRoom", "OpenTopic", "OpenChat", "CreateTopic"].includes(
       actionName(action)
     );
     state.actions.push(action);
@@ -1984,7 +2044,7 @@ function applyHostedAction(
       state.topics = [
         {
           room_id: "room_browser_agent",
-          topic_id: "topic_browser_agent",
+          topic_id: "home",
           title: "General",
           active_chat_id: "chat_browser_agent",
           chats: [
@@ -2015,7 +2075,7 @@ function applyHostedAction(
     );
     state.selected_room_id = "room_browser_agent";
     if (!selectedChatStillExists) {
-      state.selected_topic_id = "topic_browser_agent";
+      state.selected_topic_id = "home";
       state.selected_chat_id = "chat_browser_agent";
     }
   } else if (operation === "OpenChat") {
@@ -2054,6 +2114,27 @@ function applyHostedAction(
     );
     assert(topic);
     const chatId = topic.active_chat_id ?? topic.chats[0]?.chat_id ?? null;
+    state.selected_room_id = roomId;
+    state.selected_topic_id = topicId;
+    state.selected_chat_id = chatId;
+  } else if (operation === "CreateTopic") {
+    const payload = action.CreateTopic as Record<string, unknown> | undefined;
+    assert(payload);
+    const roomId = String(payload.room_id ?? "");
+    const title = String(payload.title ?? "");
+    assert(title && state.rooms.some((room) => room.room_id === roomId));
+    const createdCount = state.topics.filter(
+      (topic) => topic.room_id === roomId && topic.topic_id.startsWith("topic_browser_created_")
+    ).length;
+    const topicId = `topic_browser_created_${createdCount + 1}`;
+    const chatId = `chat_browser_created_${createdCount + 1}`;
+    state.topics.push({
+      room_id: roomId,
+      topic_id: topicId,
+      title,
+      active_chat_id: chatId,
+      chats: [{ chat_id: chatId, title: "New chat", active: true }],
+    });
     state.selected_room_id = roomId;
     state.selected_topic_id = topicId;
     state.selected_chat_id = chatId;
@@ -2110,7 +2191,7 @@ function hostedMessage(
     room_id: "room_browser_agent",
     seq,
     message_id: `message_${seq}`,
-    conversation_id: "topic_browser_agent",
+    conversation_id: "home",
     chat_id: "chat_browser_agent",
     sender_account_id: isMine ? "browser-user-account" : "agent-account-browser",
     sender_display_name: isMine ? "You" : "Completed Oslo Bot",

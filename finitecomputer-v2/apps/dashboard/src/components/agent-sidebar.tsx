@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, FormEvent, ReactNode } from "react";
 import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -14,6 +14,16 @@ import { AccountMenu, AgentNavigation } from "@/components/agent-navigation";
 import { FiniteBrand } from "@/components/finite-brand";
 import { useHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { CHAT_TOPIC_DESCRIPTION } from "@/lib/chat-product-copy";
 import type {
   HostedChatAction,
   HostedChatSummary,
@@ -52,6 +62,8 @@ export function AgentSidebar({
   } = useHostedChat();
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [createTopicOpen, setCreateTopicOpen] = useState(false);
+  const [createTopicTitle, setCreateTopicTitle] = useState("");
 
   const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
@@ -114,6 +126,18 @@ export function AgentSidebar({
     });
   }
 
+  async function createTopic(event: FormEvent) {
+    event.preventDefault();
+    const title = createTopicTitle.trim();
+    if (!canonicalRoomId || !title || busy) return;
+    const next = await act({
+      CreateTopic: { room_id: canonicalRoomId, title },
+    });
+    if (!next) return;
+    setCreateTopicTitle("");
+    setCreateTopicOpen(false);
+  }
+
   return (
     <>
       {mobileOpen ? (
@@ -155,6 +179,15 @@ export function AgentSidebar({
           />
           <div className="finite-chat__sidebar-section-row">
             <span className="finite-chat__sidebar-section">Topics</span>
+            <button
+              type="button"
+              className="ocean-icon-button"
+              aria-label="New topic"
+              disabled={busy || !canonicalRoomId}
+              onClick={() => setCreateTopicOpen(true)}
+            >
+              <PlusIcon className="size-3.5" />
+            </button>
           </div>
           {!state && !transportError ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
           {transportError ? (
@@ -238,6 +271,35 @@ export function AgentSidebar({
           <AccountMenu fallbackLabel={machineLabel} viewerEmail={viewerEmail} side="top" />
         </div>
       </aside>
+
+      <Dialog open={createTopicOpen} onOpenChange={setCreateTopicOpen}>
+        <DialogContent>
+          <form className="finite-chat__rename-form" onSubmit={createTopic}>
+            <DialogHeader>
+              <DialogTitle>New topic</DialogTitle>
+              <DialogDescription>{CHAT_TOPIC_DESCRIPTION}</DialogDescription>
+            </DialogHeader>
+            <div className="finite-chat__rename-field">
+              <label htmlFor="finite-chat-topic-title">Name</label>
+              <Input
+                id="finite-chat-topic-title"
+                autoFocus
+                maxLength={120}
+                value={createTopicTitle}
+                onChange={(event) => setCreateTopicTitle(event.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setCreateTopicOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !canonicalRoomId || !createTopicTitle.trim()}>
+                {busy ? "Creating…" : "Create topic"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

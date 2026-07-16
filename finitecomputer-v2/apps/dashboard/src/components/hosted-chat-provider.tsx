@@ -461,5 +461,6 @@ function isHostedChatNavigationAction(action: HostedChatAction) {
   return "OpenRoom" in action
     || "OpenTopic" in action
     || "OpenChat" in action
+    || "CreateTopic" in action
     || "StartTopicChatIntent" in action;
 }
