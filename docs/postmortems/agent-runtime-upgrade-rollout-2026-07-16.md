@@ -5,6 +5,12 @@ Date: 2026-07-16
 Status: complete analysis; recommended follow-up work is not implemented by
 this report.
 
+Scope note: this report covers Agent compute replacement and the
+missing-canonical-compute stranding class. The immediate Boss/Skyler dashboard
+incident, including the ineffective first fix, misleading tests, and stale
+browser behavior, is documented separately in
+[`boss-hosted-chat-recovery-2026-07-16.md`](boss-hosted-chat-recovery-2026-07-16.md).
+
 ## Executive summary
 
 Finite did not have one upgrade bug. We crossed several lifecycle boundaries
