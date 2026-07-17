@@ -2053,7 +2053,11 @@ fn ensure_metadata_visible(stored: &StoredVault, actor_npub: &str) -> Result<(),
                     .folders
                     .iter()
                     .any(|folder| folder_visible(stored, &folder.id, actor_npub));
-            if is_owner || is_limited_member {
+            let is_personal_agent = stored
+                .personal_agent
+                .as_ref()
+                .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
+            if is_owner || is_personal_agent || is_limited_member {
                 Ok(())
             } else {
                 Err(ApiError::new(
@@ -2801,6 +2805,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_creates_empty_personal_vault_with_one_personal_agent_atomically() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let replacement_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let router = test_router();
+        let body = serde_json::json!({
+            "vaultId": "personal",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentNpub": agent_npub,
+        })
+        .to_string();
+
+        let created = post_vault(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: VaultMetadataResponse = read_json(created).await;
+        assert_eq!(created.kind, VaultKind::Personal);
+        assert_eq!(
+            created.owner_user_id.as_deref(),
+            Some(npub(&owner_keys).as_str())
+        );
+        assert!(created.folders.is_empty());
+        assert_eq!(created.grant_count, 0);
+        assert_eq!(
+            created
+                .personal_agent
+                .as_ref()
+                .map(|relationship| relationship.agent_npub.as_str()),
+            Some(agent_npub.as_str())
+        );
+
+        let agent_vaults = authed_request(
+            router.clone(),
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(agent_vaults.status(), StatusCode::OK);
+        let agent_vaults: VisibleVaultsResponse = read_json(agent_vaults).await;
+        assert_eq!(agent_vaults.vaults.len(), 1);
+        assert_eq!(agent_vaults.vaults[0].vault_id, "personal");
+        assert_eq!(agent_vaults.vaults[0].role, "personal_agent");
+
+        let duplicate = post_vault(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW + 2,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(duplicate.status(), StatusCode::OK);
+
+        let conflicting_body = serde_json::json!({
+            "vaultId": "personal",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentNpub": npub(&replacement_keys),
+        })
+        .to_string();
+        let conflict = post_vault(
+            router.clone(),
+            &owner_keys,
+            &conflicting_body,
+            TEST_NOW + 3,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            conflict,
+            StatusCode::BAD_REQUEST,
+            "personal vault already has a different personal agent",
+        )
+        .await;
+
+        let metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 4).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: VaultMetadataResponse = read_json(metadata).await;
+        assert_eq!(
+            metadata
+                .personal_agent
+                .as_ref()
+                .map(|relationship| relationship.agent_npub.as_str()),
+            Some(agent_npub.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn same_owner_cannot_create_multiple_personal_vaults() {
         let keys = Keys::generate();
         let router = test_router();
@@ -3100,13 +3209,8 @@ mod tests {
         .await;
         assert_eq!(create.status(), StatusCode::OK);
         let metadata: VaultMetadataResponse = read_json(create).await;
-        let restricted = metadata
-            .folders
-            .iter()
-            .find(|folder| folder.id == "restricted")
-            .expect("restricted default folder");
-        assert_eq!(restricted.access, FolderAccessMode::Restricted);
-        assert!(restricted.access_user_ids.is_empty());
+        assert!(metadata.folders.is_empty());
+        assert_eq!(metadata.grant_count, 0);
 
         let body = serde_json::json!({
             "folderId": "notes",
@@ -3666,24 +3770,7 @@ mod tests {
             "folderId": "agent-workspace",
             "folderName": "Agent Workspace",
             "folderPath": "Agent Workspace",
-            "bootstrapGrants": [
-                {
-                    "folderId": "getting-started",
-                    "grant": folder_key_grant_value(
-                        "grant-getting-started-owner-v1",
-                        1,
-                        owner_npub.as_str(),
-                    ),
-                },
-                {
-                    "folderId": "restricted",
-                    "grant": folder_key_grant_value(
-                        "grant-restricted-owner-v1",
-                        1,
-                        owner_npub.as_str(),
-                    ),
-                },
-            ],
+            "bootstrapGrants": [],
             "workspaceGrants": [
                 folder_key_grant_value(
                     "grant-agent-workspace-owner-v1",
@@ -3774,7 +3861,7 @@ mod tests {
         let owner_metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 1).await;
         assert_eq!(owner_metadata.status(), StatusCode::OK);
         let owner_metadata: VaultMetadataResponse = read_json(owner_metadata).await;
-        assert_eq!(owner_metadata.folders.len(), 3);
+        assert_eq!(owner_metadata.folders.len(), 1);
     }
 
     #[tokio::test]
@@ -4086,6 +4173,41 @@ mod tests {
         )
         .await;
         assert_eq!(create.status(), StatusCode::OK);
+
+        let restricted_body = serde_json::json!({
+            "folderId": "restricted",
+            "name": "Restricted",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "Restricted",
+            "sharedFolderSource": false,
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-restricted-owner-v1", 1, owner_npub.as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "change-create-restricted",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("restricted"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let restricted = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/_admin/vaults/personal/folders",
+            Some(restricted_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(restricted.status(), StatusCode::OK);
+
         let pairing_body = serde_json::json!({
             "agentNpub": agent_npub,
             "folderId": "agent-workspace",
@@ -7584,24 +7706,7 @@ mod tests {
             "folderId": "agent-workspace",
             "folderName": "Agent Workspace",
             "folderPath": "Agent Workspace",
-            "bootstrapGrants": [
-                {
-                    "folderId": "getting-started",
-                    "grant": folder_key_grant_value(
-                        "grant-getting-started-owner-v1",
-                        1,
-                        owner_npub.as_str(),
-                    ),
-                },
-                {
-                    "folderId": "restricted",
-                    "grant": folder_key_grant_value(
-                        "grant-restricted-owner-v1",
-                        1,
-                        owner_npub.as_str(),
-                    ),
-                },
-            ],
+            "bootstrapGrants": [],
             "workspaceGrants": [
                 folder_key_grant_value(
                     "grant-agent-workspace-owner-v1",

@@ -1,6 +1,110 @@
 use crate::*;
 
 impl BrainStore {
+    pub fn create_personal_vault_bootstrap(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        agent_npub: &UserId,
+        created_by_npub: &UserId,
+        created_at: &str,
+    ) -> Result<(), StoreError> {
+        validate_bootstrap_output(output)?;
+        validate_required_grants(&output.vault, &output.required_key_grants, grants)?;
+        if output.vault.kind != VaultKind::Personal {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Agent bootstrap requires a personal vault".to_owned(),
+            });
+        }
+        let owner_npub =
+            output
+                .vault
+                .owner_user_id
+                .as_ref()
+                .ok_or_else(|| StoreError::BrokenInvariant {
+                    reason: "Personal Agent bootstrap requires a vault owner".to_owned(),
+                })?;
+        if owner_npub == agent_npub {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Agent must use a distinct Agent Principal".to_owned(),
+            });
+        }
+        if created_by_npub != owner_npub && created_by_npub != agent_npub {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Agent bootstrap actor must be the owner or agent".to_owned(),
+            });
+        }
+
+        let existing_vault_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM vaults WHERE kind = 'personal' AND owner_user_id = ?1",
+                params![owner_npub.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_vault_id) = existing_vault_id {
+            if existing_vault_id != output.vault.id.as_str() {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "user already has a personal vault".to_owned(),
+                });
+            }
+            let existing = self.load_personal_agent(&output.vault.id)?;
+            return match existing {
+                Some(existing) if existing.agent_npub == *agent_npub => Ok(()),
+                Some(_) => Err(StoreError::BrokenInvariant {
+                    reason: "personal vault already has a different personal agent".to_owned(),
+                }),
+                None => Err(StoreError::BrokenInvariant {
+                    reason: "personal vault already exists without a personal agent".to_owned(),
+                }),
+            };
+        }
+
+        let audit_id = format!("{}-personal-agent-established", output.vault.id);
+        let tx = self.conn.transaction()?;
+        insert_vault(&tx, &output.vault)?;
+        insert_members_and_admins(&tx, &output.vault)?;
+        for folder in &output.vault.folders {
+            insert_folder(&tx, &output.vault.id, folder, false)?;
+        }
+        for grant in grants {
+            insert_grant(&tx, &output.vault.id, grant)?;
+        }
+        tx.execute(
+            r#"
+            INSERT INTO personal_agents (
+                vault_id, owner_npub, agent_npub, status, created_by_npub,
+                created_at, updated_at
+            ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5)
+            "#,
+            params![
+                output.vault.id.as_str(),
+                owner_npub.as_str(),
+                agent_npub.as_str(),
+                created_by_npub.as_str(),
+                created_at,
+            ],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO personal_agent_audit (
+                id, vault_id, action, actor_npub, previous_agent_npub,
+                agent_npub, occurred_at
+            ) VALUES (?1, ?2, 'established', ?3, NULL, ?4, ?5)
+            "#,
+            params![
+                audit_id,
+                output.vault.id.as_str(),
+                created_by_npub.as_str(),
+                agent_npub.as_str(),
+                created_at,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn create_vault_bootstrap(
         &mut self,
         output: &BootstrapOutput,
@@ -45,6 +149,7 @@ impl BrainStore {
                 SELECT v.id, v.kind, v.name,
                        CASE
                            WHEN v.owner_user_id = ?1 THEN 'owner'
+                           WHEN pa.agent_npub = ?1 THEN 'personal_agent'
                            WHEN va.user_id IS NOT NULL THEN 'admin'
                            ELSE 'member'
                        END AS role,
@@ -52,9 +157,12 @@ impl BrainStore {
                 FROM vaults v
                 LEFT JOIN vault_admins va
                   ON va.vault_id = v.id AND va.user_id = ?1
+                LEFT JOIN personal_agents pa
+                  ON pa.vault_id = v.id AND pa.agent_npub = ?1 AND pa.status = 'active'
                 LEFT JOIN vault_members vm
                   ON vm.vault_id = v.id AND vm.user_id = ?1
                 WHERE v.owner_user_id = ?1
+                   OR pa.agent_npub = ?1
                    OR (
                        vm.user_id IS NOT NULL
                        AND (
@@ -107,6 +215,7 @@ impl BrainStore {
                 name,
                 role: match role.as_str() {
                     "owner" => VisibleVaultRole::Owner,
+                    "personal_agent" => VisibleVaultRole::PersonalAgent,
                     "admin" => VisibleVaultRole::Admin,
                     "member" => VisibleVaultRole::Member,
                     "invited" => VisibleVaultRole::Invited,

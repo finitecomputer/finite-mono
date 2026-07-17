@@ -10,6 +10,8 @@ pub struct CreateVaultRequest {
     pub name: String,
     #[serde(default)]
     pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
+    #[serde(default)]
+    pub personal_agent_npub: Option<String>,
 }
 
 /// Supported Vault creation kinds.
@@ -36,12 +38,24 @@ pub struct VaultMetadataResponse {
     pub kind: VaultKind,
     pub name: String,
     pub owner_user_id: Option<String>,
+    pub personal_agent: Option<PersonalAgentResponse>,
     pub members: Vec<String>,
     pub admins: Vec<String>,
     pub identities: Vec<IdentityResponse>,
     pub folders: Vec<FolderMetadataResponse>,
     pub mounted_folders: Vec<MountedFolderResponse>,
     pub grant_count: usize,
+}
+
+/// The one active Personal Agent relationship for a Personal Vault.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalAgentResponse {
+    pub owner_npub: String,
+    pub agent_npub: String,
+    pub created_by_npub: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Display metadata for one canonical Nostr identity.

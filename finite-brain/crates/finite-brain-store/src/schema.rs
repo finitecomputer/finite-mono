@@ -84,6 +84,14 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 10)? {
+            tx.execute_batch(SCHEMA_V10)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![10, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -498,6 +506,34 @@ DROP TABLE brain_email_access_delegation_audit_old;
 
 CREATE INDEX brain_email_access_delegation_audit_by_delegation
     ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);
+"#;
+
+const SCHEMA_V10: &str = r#"
+CREATE TABLE personal_agents (
+    vault_id TEXT PRIMARY KEY NOT NULL,
+    owner_npub TEXT NOT NULL,
+    agent_npub TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status = 'active'),
+    created_by_npub TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (owner_npub <> agent_npub),
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+);
+
+CREATE TABLE personal_agent_audit (
+    id TEXT PRIMARY KEY NOT NULL,
+    vault_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('established', 'replaced', 'revoked')),
+    actor_npub TEXT NOT NULL,
+    previous_agent_npub TEXT,
+    agent_npub TEXT,
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+);
+
+CREATE INDEX personal_agent_audit_by_vault
+    ON personal_agent_audit(vault_id, occurred_at, id);
 "#;
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {

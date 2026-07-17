@@ -27,6 +27,19 @@ pub(crate) async fn create_vault_handler(
     let request: CreateVaultRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
+    let personal_agent = match (&request.kind, request.personal_agent_npub.as_deref()) {
+        (CreateVaultKind::Personal, Some(agent)) => {
+            let identity = resolve_and_record_identity(&state, agent)?;
+            Some(UserId::new(identity.npub)?)
+        }
+        (CreateVaultKind::Organization, Some(_)) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "personalAgentNpub is only valid for a Personal Vault",
+            ));
+        }
+        (_, None) => None,
+    };
     let output = match request.kind {
         CreateVaultKind::Personal => {
             bootstrap_personal_vault(request.vault_id, request.name, actor_npub.clone())?
@@ -49,7 +62,17 @@ pub(crate) async fn create_vault_handler(
 
     let stored = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        store.create_vault_bootstrap(&output, &grants)?;
+        if let Some(agent_npub) = personal_agent.as_ref() {
+            store.create_personal_vault_bootstrap(
+                &output,
+                &grants,
+                agent_npub,
+                &UserId::new(actor_npub.clone())?,
+                &server_timestamp(&state),
+            )?;
+        } else {
+            store.create_vault_bootstrap(&output, &grants)?;
+        }
         store.load_vault(&vault_id)?
     };
 

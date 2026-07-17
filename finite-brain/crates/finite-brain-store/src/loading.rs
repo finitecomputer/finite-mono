@@ -1,6 +1,45 @@
 use crate::*;
 
 impl BrainStore {
+    pub fn load_personal_agent(
+        &self,
+        vault_id: &VaultId,
+    ) -> Result<Option<PersonalAgent>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                r#"
+                SELECT owner_npub, agent_npub, created_by_npub, created_at, updated_at
+                FROM personal_agents
+                WHERE vault_id = ?1 AND status = 'active'
+                "#,
+                params![vault_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(
+            |(owner_npub, agent_npub, created_by_npub, created_at, updated_at)| {
+                Ok(PersonalAgent {
+                    vault_id: vault_id.clone(),
+                    owner_npub: UserId::new(owner_npub)?,
+                    agent_npub: UserId::new(agent_npub)?,
+                    created_by_npub: UserId::new(created_by_npub)?,
+                    created_at,
+                    updated_at,
+                })
+            },
+        )
+        .transpose()
+    }
+
     pub(crate) fn load_core_vault(&self, vault_id: &VaultId) -> Result<Vault, StoreError> {
         let row = self
             .conn

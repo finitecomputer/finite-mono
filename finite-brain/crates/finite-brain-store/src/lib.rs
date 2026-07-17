@@ -146,12 +146,25 @@ pub struct FolderKeyGrantMetadata {
 pub struct StoredVault {
     /// Core Vault metadata.
     pub vault: Vault,
+    /// The one active Personal Agent relationship, when occupied.
+    pub personal_agent: Option<PersonalAgent>,
     /// Explicit restricted Folder access by Folder id.
     pub folder_access: BTreeMap<FolderId, BTreeSet<UserId>>,
     /// Stored Folder Key Grant metadata.
     pub grants: Vec<FolderKeyGrantMetadata>,
     /// Folders that still need current grants.
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
+}
+
+/// One active Personal Agent relationship owned by a Personal Vault.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalAgent {
+    pub vault_id: VaultId,
+    pub owner_npub: UserId,
+    pub agent_npub: UserId,
+    pub created_by_npub: UserId,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Durable product-scoped delegation between a Personal Vault owner and one Agent Principal.
@@ -288,6 +301,8 @@ pub struct VisibleVault {
 pub enum VisibleVaultRole {
     /// Personal Vault owner.
     Owner,
+    /// Personal Vault's one fully trusted agent.
+    PersonalAgent,
     /// Organization Vault admin.
     Admin,
     /// Organization Vault member.
@@ -874,6 +889,7 @@ impl BrainStore {
 
         Ok(StoredVault {
             vault,
+            personal_agent: self.load_personal_agent(vault_id)?,
             folder_access,
             grants: self.load_grants(vault_id)?,
             setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(vault_id)?,
@@ -2018,9 +2034,9 @@ fn to_store_from_sql_error(
 
 fn validate_bootstrap_output(output: &BootstrapOutput) -> Result<(), StoreError> {
     validate_loaded_vault(&output.vault)?;
-    if output.vault.folders.is_empty() {
+    if output.vault.kind == VaultKind::Organization && output.vault.folders.is_empty() {
         return Err(StoreError::BrokenInvariant {
-            reason: "bootstrap must create at least one folder".to_owned(),
+            reason: "organization bootstrap must create at least one folder".to_owned(),
         });
     }
     Ok(())
@@ -2898,30 +2914,9 @@ mod tests {
             stored.vault.owner_user_id,
             Some(UserId::new("npub-owner").unwrap())
         );
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["getting-started".to_owned(), "restricted".to_owned()])
-        );
-        let restricted = FolderId::new("restricted").unwrap();
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .find(|folder| folder.id == restricted)
-                .map(|folder| folder.access),
-            Some(FolderAccessMode::Restricted)
-        );
-        assert!(!stored.folder_access.contains_key(&restricted));
-        assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == restricted
-                && grant.recipient_npub == UserId::new("npub-owner").unwrap()
-        }));
+        assert!(stored.vault.folders.is_empty());
+        assert!(stored.folder_access.is_empty());
+        assert!(stored.grants.is_empty());
         assert_same_grants(&stored.grants, &grants);
         assert!(stored.setup_incomplete_folder_ids.is_empty());
     }
@@ -4942,7 +4937,11 @@ mod tests {
         store.create_vault_bootstrap(&output, &grants).unwrap();
         let vault_id = VaultId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        let folder = strategy_folder();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
         store
             .create_folder(
                 &vault_id,

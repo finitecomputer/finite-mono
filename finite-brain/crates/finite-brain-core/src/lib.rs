@@ -1023,43 +1023,19 @@ pub fn bootstrap_personal_vault(
     let name = DisplayName::new("vault_name", name)?;
     let owner_user_id = UserId::new(owner_user_id)?;
 
-    let folders = vec![
-        root_folder(
-            "getting-started",
-            "getting-started",
-            FolderRole::PersonalHome,
-            FolderAccessMode::Owner,
-        )?,
-        root_folder(
-            "restricted",
-            "restricted",
-            FolderRole::Folder,
-            FolderAccessMode::Restricted,
-        )?,
-    ];
-
-    let required_key_grants = folders
-        .iter()
-        .map(|folder| RequiredFolderKeyGrant {
-            folder_id: folder.id.clone(),
-            recipient_user_id: owner_user_id.clone(),
-            key_version: 1,
-        })
-        .collect();
-
     let vault = Vault {
         id: vault_id,
         kind: VaultKind::Personal,
         name,
         owner_user_id: Some(owner_user_id),
-        folders,
+        folders: Vec::new(),
         members: Vec::new(),
         admins: Vec::new(),
     };
 
     Ok(BootstrapOutput {
         vault,
-        required_key_grants,
+        required_key_grants: Vec::new(),
     })
 }
 
@@ -3194,46 +3170,8 @@ mod tests {
         );
         assert!(output.vault.members.is_empty());
         assert!(output.vault.admins.is_empty());
-        assert_eq!(output.vault.folders.len(), 2);
-
-        let getting_started = &output.vault.folders[0];
-        assert_eq!(
-            getting_started.id,
-            FolderId::new("getting-started").unwrap()
-        );
-        assert_eq!(getting_started.role, FolderRole::PersonalHome);
-        assert_eq!(getting_started.access, FolderAccessMode::Owner);
-        assert_eq!(getting_started.current_key_version, 1);
-        assert_eq!(
-            getting_started.path,
-            SafeRelativePath::new("folder_path", "getting-started").unwrap()
-        );
-
-        let restricted = &output.vault.folders[1];
-        assert_eq!(restricted.id, FolderId::new("restricted").unwrap());
-        assert_eq!(restricted.role, FolderRole::Folder);
-        assert_eq!(restricted.access, FolderAccessMode::Restricted);
-        assert_eq!(
-            restricted.path,
-            SafeRelativePath::new("folder_path", "restricted").unwrap()
-        );
-        assert_eq!(
-            output
-                .required_key_grants
-                .iter()
-                .map(|grant| grant.folder_id.to_string())
-                .collect::<Vec<_>>(),
-            vec!["getting-started", "restricted"]
-        );
-        assert!(
-            output
-                .required_key_grants
-                .iter()
-                .all(
-                    |grant| grant.recipient_user_id == UserId::new("npub-owner").unwrap()
-                        && grant.key_version == 1
-                )
-        );
+        assert!(output.vault.folders.is_empty());
+        assert!(output.required_key_grants.is_empty());
     }
 
     #[test]
@@ -3438,11 +3376,8 @@ mod tests {
         let summary = smoke_bootstrap_summary().unwrap();
 
         assert_eq!(summary.personal.kind, VaultKind::Personal);
-        assert_eq!(
-            summary.personal.folder_ids,
-            vec!["getting-started", "restricted"]
-        );
-        assert_eq!(summary.personal.required_grants, 2);
+        assert!(summary.personal.folder_ids.is_empty());
+        assert_eq!(summary.personal.required_grants, 0);
 
         assert_eq!(summary.organization.kind, VaultKind::Organization);
         assert_eq!(

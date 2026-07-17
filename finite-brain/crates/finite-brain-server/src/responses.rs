@@ -84,6 +84,15 @@ pub(crate) fn metadata_response_with_mounts(
         kind: stored.vault.kind,
         name: stored.vault.name.to_string(),
         owner_user_id: stored.vault.owner_user_id.map(|owner| owner.to_string()),
+        personal_agent: stored
+            .personal_agent
+            .map(|relationship| PersonalAgentResponse {
+                owner_npub: relationship.owner_npub.to_string(),
+                agent_npub: relationship.agent_npub.to_string(),
+                created_by_npub: relationship.created_by_npub.to_string(),
+                created_at: relationship.created_at,
+                updated_at: relationship.updated_at,
+            }),
         members: stored
             .vault
             .members
@@ -132,6 +141,7 @@ pub(crate) fn visible_vaults_response(vaults: Vec<VisibleVault>) -> VisibleVault
                 name: vault.name,
                 role: match vault.role {
                     VisibleVaultRole::Owner => "owner",
+                    VisibleVaultRole::PersonalAgent => "personal_agent",
                     VisibleVaultRole::Admin => "admin",
                     VisibleVaultRole::Member => "member",
                     VisibleVaultRole::Invited => "invited",
