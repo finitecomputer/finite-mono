@@ -586,7 +586,7 @@ pub fn crate_name() -> &'static str {
 /// Default encrypted Pages clients should write after new Vault bootstrap.
 pub fn default_vault_pages(kind: VaultKind) -> &'static [DefaultVaultPage] {
     match kind {
-        VaultKind::Personal => &PERSONAL_DEFAULT_VAULT_PAGES,
+        VaultKind::Personal => &[],
         VaultKind::Organization => &ORGANIZATION_DEFAULT_VAULT_PAGES,
     }
 }
@@ -1715,6 +1715,8 @@ pub enum AdminAccessAction {
     RotateFolderKey,
     /// Change Folder Access mode.
     SetFolderAccessMode,
+    /// Permanently delete a Folder subtree.
+    DeleteFolder,
 }
 
 impl AdminAccessAction {
@@ -1729,6 +1731,7 @@ impl AdminAccessAction {
             Self::RemoveFolderAccess => "remove-folder-access",
             Self::RotateFolderKey => "rotate-folder-key",
             Self::SetFolderAccessMode => "set-folder-access-mode",
+            Self::DeleteFolder => "delete-folder",
         }
     }
 }
@@ -1746,6 +1749,7 @@ impl TryFrom<&str> for AdminAccessAction {
             "remove-folder-access" => Ok(Self::RemoveFolderAccess),
             "rotate-folder-key" => Ok(Self::RotateFolderKey),
             "set-folder-access-mode" => Ok(Self::SetFolderAccessMode),
+            "delete-folder" => Ok(Self::DeleteFolder),
             _ => Err(CryptoRecordError::BadOperation {
                 operation: value.to_owned(),
             }),
@@ -2292,22 +2296,6 @@ fn absolute_http_url_parts(value: &str) -> Option<(&str, &str)> {
     Some((origin, &path_and_suffix[..path_end]))
 }
 
-/// Maximum lifetime of a user-approved Personal Vault bootstrap authorization.
-pub const PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS: u64 = 5 * 60;
-
-/// Signed, one-use authority for an Agent Principal to initialize a user's Personal Vault.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PersonalVaultBootstrapAuthorizationPayload {
-    pub version: String,
-    pub authorization_id: String,
-    pub owner_npub: String,
-    pub agent_npub: String,
-    pub vault_id: String,
-    pub workspace_folder_id: String,
-    pub expires_at: u64,
-}
-
 /// One client-generated encrypted Folder Key Grant ready for the Brain HTTP contract.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2639,169 +2627,6 @@ pub fn issue_folder_key_grant(
     })
 }
 
-impl PersonalVaultBootstrapAuthorizationPayload {
-    /// Canonical JSON signed by the Personal Vault owner.
-    pub fn canonical_json(&self) -> String {
-        format!(
-            concat!(
-                "{{\"version\":{},",
-                "\"authorizationId\":{},",
-                "\"ownerNpub\":{},",
-                "\"agentNpub\":{},",
-                "\"vaultId\":{},",
-                "\"workspaceFolderId\":{},",
-                "\"expiresAt\":{}}}"
-            ),
-            json_string(&self.version),
-            json_string(&self.authorization_id),
-            json_string(&self.owner_npub),
-            json_string(&self.agent_npub),
-            json_string(&self.vault_id),
-            json_string(&self.workspace_folder_id),
-            self.expires_at,
-        )
-    }
-}
-
-/// Issue the bounded owner authorization used by the hosted Chat setup action.
-pub fn issue_personal_vault_bootstrap_authorization_event(
-    owner_keys: &Keys,
-    authorization_id: impl Into<String>,
-    agent_npub: impl Into<String>,
-    vault_id: &VaultId,
-    workspace_folder_id: &FolderId,
-    created_at_unix_seconds: u64,
-) -> Result<Event, CryptoRecordError> {
-    let owner_npub = NostrPublicKey::from_protocol(owner_keys.public_key())
-        .to_npub()
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })?;
-    let agent_npub = agent_npub.into();
-    let agent_hex = NostrPublicKey::parse(&agent_npub)
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })?
-        .to_hex();
-    let authorization_id = authorization_id.into();
-    let expires_at = created_at_unix_seconds
-        .checked_add(PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS)
-        .ok_or_else(|| CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap authorization expiry overflowed".to_owned(),
-        })?;
-    let payload = PersonalVaultBootstrapAuthorizationPayload {
-        version: "finitebrain-personal-vault-bootstrap-authorization-v1".to_owned(),
-        authorization_id: authorization_id.clone(),
-        owner_npub,
-        agent_npub,
-        vault_id: vault_id.to_string(),
-        workspace_folder_id: workspace_folder_id.to_string(),
-        expires_at,
-    };
-    let tags = vec![
-        vec![
-            "d".to_owned(),
-            format!("finitebrain-personal-vault-bootstrap:{authorization_id}"),
-        ],
-        vec!["vault".to_owned(), vault_id.to_string()],
-        vec!["folder".to_owned(), workspace_folder_id.to_string()],
-        vec!["p".to_owned(), agent_hex],
-        vec!["expires".to_owned(), expires_at.to_string()],
-    ]
-    .into_iter()
-    .map(|parts| {
-        Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })
-    })
-    .collect::<Result<Vec<_>, _>>()?;
-    EventBuilder::new(Kind::ApplicationSpecificData, payload.canonical_json())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(created_at_unix_seconds))
-        .finalize(owner_keys)
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })
-}
-
-/// Validate the signed bounds of an agent-first Personal Vault bootstrap.
-pub fn validate_personal_vault_bootstrap_authorization_event(
-    event: &Event,
-    expected_agent_npub: &str,
-    expected_vault_id: &VaultId,
-    expected_workspace_folder_id: &FolderId,
-    now_unix_seconds: u64,
-) -> Result<PersonalVaultBootstrapAuthorizationPayload, CryptoRecordError> {
-    validate_event_integrity(event)?;
-    let payload: PersonalVaultBootstrapAuthorizationPayload = parse_event_content(event)?;
-    if payload.canonical_json() != event.content {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap authorization payload is not canonical".to_owned(),
-        });
-    }
-    if payload.version != "finitebrain-personal-vault-bootstrap-authorization-v1" {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "unsupported Personal Vault bootstrap authorization version".to_owned(),
-        });
-    }
-    if payload.authorization_id.trim().is_empty()
-        || payload.authorization_id.len() > 128
-        || payload.authorization_id.chars().any(char::is_control)
-    {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap authorization id is invalid".to_owned(),
-        });
-    }
-    if payload.agent_npub != expected_agent_npub
-        || payload.vault_id != expected_vault_id.as_str()
-        || payload.workspace_folder_id != expected_workspace_folder_id.as_str()
-    {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap authorization does not match requested scope"
-                .to_owned(),
-        });
-    }
-    if payload.owner_npub == payload.agent_npub {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap owner and Agent Principal must be distinct"
-                .to_owned(),
-        });
-    }
-    let created_at = event.created_at.as_secs();
-    if payload.expires_at <= created_at
-        || payload.expires_at.saturating_sub(created_at) > PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS
-        || now_unix_seconds > payload.expires_at
-    {
-        return Err(CryptoRecordError::EventMismatch {
-            reason: "Personal Vault bootstrap authorization is expired or exceeds its lifetime"
-                .to_owned(),
-        });
-    }
-    validate_signer(event, &payload.owner_npub)?;
-    let agent_hex = NostrPublicKey::parse(&payload.agent_npub)
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })?
-        .to_hex();
-    require_exact_tags(
-        event,
-        vec![
-            vec![
-                "d".to_owned(),
-                format!(
-                    "finitebrain-personal-vault-bootstrap:{}",
-                    payload.authorization_id
-                ),
-            ],
-            vec!["vault".to_owned(), payload.vault_id.clone()],
-            vec!["folder".to_owned(), payload.workspace_folder_id.clone()],
-            vec!["p".to_owned(), agent_hex],
-            vec!["expires".to_owned(), payload.expires_at.to_string()],
-        ],
-    )?;
-    Ok(payload)
-}
-
 fn validate_envelope_header(
     aad: &FolderObjectAad,
     envelope: &EncryptedFolderObjectEnvelope,
@@ -3037,87 +2862,7 @@ mod tests {
     #[test]
     fn exposes_default_vault_pages() {
         let pages = default_vault_pages(VaultKind::Personal);
-
-        assert_eq!(
-            pages
-                .iter()
-                .take(5)
-                .map(|page| (page.folder_id, page.object_id, page.path))
-                .collect::<Vec<_>>(),
-            vec![
-                ("getting-started", "obj_default_agents", "AGENTS.md"),
-                ("getting-started", "obj_default_humans", "HUMANS.md"),
-                (
-                    "getting-started",
-                    "obj_default_getting-started_scope_config",
-                    "config.md"
-                ),
-                (
-                    "getting-started",
-                    "obj_default_getting-started_scope_index",
-                    "_index.md"
-                ),
-                (
-                    "getting-started",
-                    "obj_default_getting-started_scope_log",
-                    "log.md"
-                )
-            ]
-        );
-        assert_eq!(pages.len(), 12);
-        assert_eq!(
-            pages
-                .iter()
-                .map(|page| page.object_id)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            pages.len()
-        );
-        assert!(pages.iter().any(|page| page.path == "README.md"));
-        let getting_started_readme = pages
-            .iter()
-            .find(|page| page.path == "README.md")
-            .expect("getting-started README exists");
-        assert!(getting_started_readme.markdown.contains("Default Folders"));
-        assert!(
-            getting_started_readme
-                .markdown
-                .contains("encrypted Assets under")
-        );
-        assert!(getting_started_readme.markdown.contains("Source Note"));
-        assert!(
-            pages
-                .iter()
-                .any(|page| page.path == "wiki/access-and-folders.md")
-        );
-        assert!(pages.iter().any(|page| page.folder_id == "restricted"));
-        assert!(pages[0].markdown.contains("Use `fbrain`"));
-        assert!(pages[0].markdown.contains("LLM Wiki Rules"));
-        assert!(pages[0].markdown.contains("raw/assets/"));
-        assert!(pages[0].markdown.contains("Source Note"));
-        assert!(
-            pages[1]
-                .markdown
-                .contains("private, encrypted knowledge workspace")
-        );
-        assert!(pages[1].markdown.contains("Source Notes"));
-        assert!(pages[2].markdown.contains("raw/assets/"));
-        assert!(pages[2].markdown.contains("Source Note"));
-        assert!(pages[2].markdown.contains("# Getting Started Config"));
-        assert!(pages[3].markdown.contains("# Getting Started Index"));
-        assert!(pages[4].markdown.contains("# Getting Started Log"));
-        assert_eq!(
-            pages
-                .iter()
-                .filter(|page| page.markdown.contains("[["))
-                .count(),
-            pages.len()
-        );
-        assert!(
-            !pages
-                .iter()
-                .any(|page| page.markdown.contains("[[wikilinks]]"))
-        );
+        assert!(pages.is_empty());
         let organization_pages = default_vault_pages(VaultKind::Organization);
         assert_eq!(organization_pages.len(), 12);
         assert_eq!(

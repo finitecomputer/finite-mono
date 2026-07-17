@@ -22,6 +22,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+    let core_authority_url = std::env::var("FC_CORE_API_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let core_authority_token = std::env::var("FC_CORE_API_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let identity_operator_token = std::env::var("FINITE_IDENTITY_OPERATOR_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let smoke_nip07_secret = std::env::var("FINITE_BRAIN_SMOKE_NIP07_SECRET")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -47,8 +59,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut state =
         finite_brain_server::server_state_with_sqlite_path(database_path, public_base_url)?;
-    if let Some(url) = identity_authority_url {
-        state = state.with_identity_authority_url(url);
+    if let Some(url) = identity_authority_url.as_ref() {
+        state = state.with_identity_authority_url(url.clone());
+    }
+    match (
+        core_authority_url,
+        core_authority_token,
+        identity_authority_url,
+        identity_operator_token,
+    ) {
+        (Some(core_url), Some(core_token), Some(identity_url), Some(identity_token)) => {
+            state = state.with_agent_bootstrap_authorities(
+                core_url,
+                core_token,
+                identity_url,
+                identity_token,
+            );
+        }
+        (None, None, _, None) => {}
+        _ => {
+            return Err(
+                "agent-first Brain bootstrap requires FC_CORE_API_BASE_URL, FC_CORE_API_TOKEN, FINITE_IDENTITY_AUTHORITY, and FINITE_IDENTITY_OPERATOR_TOKEN together"
+                    .into(),
+            );
+        }
     }
     if let Some(secret) = smoke_nip07_secret {
         state = state.with_smoke_nip07_signer(secret).map_err(|error| {

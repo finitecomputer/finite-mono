@@ -487,14 +487,9 @@ impl BrainStore {
         created_at: &str,
     ) -> Result<StoredShareLink, StoreError> {
         let stored = self.load_vault(vault_id)?;
-        if stored.vault.kind != VaultKind::Organization {
+        if !has_vault_operational_authority(&stored, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "share links require an organization source vault".to_owned(),
-            });
-        }
-        if !stored.vault.admins.contains(created_by_npub) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "share links must be created by a vault admin".to_owned(),
+                reason: "share links require vault operational authority".to_owned(),
             });
         }
         let folder = stored
@@ -513,7 +508,14 @@ impl BrainStore {
         validate_link_id("share_link_id", id)?;
         validate_link_timestamp("expiresAt", expires_at)?;
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(&stored.vault, grant)?;
+        validate_grant_issuer(
+            &stored.vault,
+            grant,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         if grant.folder_id != *folder_id
             || grant.key_version != folder.current_key_version
             || grant.recipient_npub != *recipient_npub
@@ -634,10 +636,10 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredShareLink, StoreError> {
         let share_link = self.load_share_link(share_link_id)?;
-        let vault = self.load_core_vault(&share_link.vault_id)?;
-        if !vault.admins.contains(actor_npub) {
+        let stored = self.load_vault(&share_link.vault_id)?;
+        if !has_vault_operational_authority(&stored, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "share link revocation requires a vault admin".to_owned(),
+                reason: "share link revocation requires vault operational authority".to_owned(),
             });
         }
         self.conn.execute(
@@ -679,7 +681,14 @@ impl BrainStore {
             });
         }
         validate_grant_metadata(&share_link.folder_key_grant)?;
-        validate_grant_issuer(&stored.vault, &share_link.folder_key_grant)?;
+        validate_grant_issuer(
+            &stored.vault,
+            &share_link.folder_key_grant,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         if share_link.folder_key_grant.key_version != folder.current_key_version {
             return Err(StoreError::BrokenInvariant {
                 reason: "share link grant key version must match folder current key version"

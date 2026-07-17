@@ -4,7 +4,7 @@ use std::fs;
 use finite_brain_core::portability::WorkingTreeFolderRoot;
 use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, FolderId, FolderKey,
-    SafeRelativePath, VaultId,
+    FolderKeyGrantPayload, SafeRelativePath, VaultId,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Kind, Tag};
@@ -89,6 +89,11 @@ pub(crate) fn folder_required_recipients(
             )));
         }
     }
+    if metadata.kind == "personal"
+        && let Some(personal_agent) = &metadata.personal_agent
+    {
+        recipients.insert(personal_agent.agent_npub.clone());
+    }
     if recipients.is_empty() {
         return Err(CliError::InvalidInput(
             "folder key needs at least one recipient".to_owned(),
@@ -109,6 +114,7 @@ pub(crate) fn folder_key_grant_request(
     let keys = auth.keys.clone();
     let recipient = NostrPublicKey::parse(recipient_npub)
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
+    let created_at = timestamp(env);
     let grant_id = deterministic_id(
         "grant",
         &[
@@ -116,20 +122,20 @@ pub(crate) fn folder_key_grant_request(
             folder_id,
             &key_version.to_string(),
             recipient_npub,
-            &timestamp(env),
+            &created_at,
         ],
     );
-    let content = serde_json::json!({
-        "version": "finite-folder-key-grant-v1",
-        "vaultId": vault_id,
-        "folderId": folder_id,
-        "keyVersion": key_version,
-        "folderKey": folder_key.to_base64(),
-        "issuerNpub": auth.npub,
-        "recipientNpub": recipient_npub,
-        "createdAt": timestamp(env)
-    })
-    .to_string();
+    let content = FolderKeyGrantPayload {
+        version: "finite-folder-key-grant-v1".to_owned(),
+        vault_id: vault_id.to_owned(),
+        folder_id: folder_id.to_owned(),
+        key_version,
+        folder_key: folder_key.to_base64(),
+        issuer_npub: auth.npub.clone(),
+        recipient_npub: recipient_npub.to_owned(),
+        created_at: created_at.clone(),
+    }
+    .canonical_json();
     let rumor = build_rumor(
         NostrPublicKey::from_protocol(keys.public_key()),
         Kind::Custom(APP_SPECIFIC_KIND),
@@ -152,7 +158,7 @@ pub(crate) fn folder_key_grant_request(
         "keyVersion": key_version,
         "recipientNpub": recipient_npub,
         "wrappedEventJson": wrapped.as_json(),
-        "createdAt": timestamp(env)
+        "createdAt": created_at
     }))
 }
 

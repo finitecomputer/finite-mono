@@ -397,41 +397,20 @@
             </div>
 
             <div class="access-state-stack" aria-label="Access details">
-              <section id="agentWorkspacePairingSection" class="vault-management-section" hidden>
+              <section id="personalAgentSection" class="vault-management-section" hidden>
                 <div class="access-section-header">
                   <span class="section-title">Personal Agent</span>
-                  <span id="agentWorkspacePairingCount" class="pill muted">0</span>
                 </div>
-                <p class="access-field-hint">Add your selected agent by email. Brain resolves its cryptographic identity through Finite Identity.</p>
-                <div class="access-inline-form">
-                  <label class="access-inline-field">
-                    <span class="access-inline-label">Agent email</span>
-                    <input
-                      id="agentWorkspaceEmailInput"
-                      type="email"
-                      placeholder="agent@finite.vip"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                    <button id="pairAgentWorkspaceButton" type="button" class="access-add-button">Pair</button>
-                  </label>
-                  <details class="access-advanced-details">
-                    <summary>Advanced identity details</summary>
-                    <label class="access-inline-field">
-                      <span class="access-inline-label">Agent npub</span>
-                      <input
-                        id="agentWorkspaceNpubInput"
-                        placeholder="npub1…"
-                        autocomplete="off"
-                        spellcheck="false"
-                      />
-                    </label>
-                  </details>
-                  <p id="agentWorkspacePairingHint" class="access-field-hint">Only the Personal Vault owner can add its Personal Agent.</p>
+                <p id="personalAgentCurrent" class="access-field-hint"></p>
+                <label class="access-field">
+                  <span>Replacement agent email</span>
+                  <input id="personalAgentEmailInput" type="email" autocomplete="off" placeholder="agent@finite.computer" />
+                </label>
+                <p class="access-field-hint">Replacing or removing rotates every Folder Key. Your Vault and content stay intact.</p>
+                <div class="access-button-row">
+                  <button id="replacePersonalAgentButton" type="button">Replace agent</button>
+                  <button id="removePersonalAgentButton" type="button" class="danger">Remove agent</button>
                 </div>
-                <ol id="agentWorkspacePairingList" class="access-who-has-list">
-                  <li class="access-empty-state">No agent is paired yet.</li>
-                </ol>
               </section>
 
               <section id="accessWhoHasSection" class="access-who-has-section vault-management-section">

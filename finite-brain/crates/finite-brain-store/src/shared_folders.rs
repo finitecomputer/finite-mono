@@ -55,9 +55,9 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: source_folder_id.to_string(),
             })?;
-        if !source.vault.admins.contains(created_by_npub) {
+        if !has_vault_operational_authority(&source, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitations must be created by a source vault admin"
+                reason: "shared folder invitations require source vault operational authority"
                     .to_owned(),
             });
         }
@@ -91,7 +91,14 @@ impl BrainStore {
         }
         validate_link_id("shared_folder_invitation_id", id)?;
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(&source.vault, grant)?;
+        validate_grant_issuer(
+            &source.vault,
+            grant,
+            source
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         if grant.folder_id != *source_folder_id
             || grant.key_version != source_folder.current_key_version
             || grant.recipient_npub != *destination_admin_npub
@@ -246,10 +253,10 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
         let invitation = self.load_shared_folder_invitation(invitation_id)?;
-        let source = self.load_core_vault(&invitation.source_vault_id)?;
-        if !source.admins.contains(actor_npub) {
+        let source = self.load_vault(&invitation.source_vault_id)?;
+        if !has_vault_operational_authority(&source, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation revocation requires a source vault admin"
+                reason: "shared folder invitation revocation requires source vault operational authority"
                     .to_owned(),
             });
         }
@@ -305,7 +312,14 @@ impl BrainStore {
             });
         }
         validate_grant_metadata(&invitation.folder_key_grant)?;
-        validate_grant_issuer(&source.vault, &invitation.folder_key_grant)?;
+        validate_grant_issuer(
+            &source.vault,
+            &invitation.folder_key_grant,
+            source
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         if invitation.folder_key_grant.key_version != source_folder.current_key_version {
             return Err(StoreError::BrokenInvariant {
                 reason: "shared folder invitation grant key version must match source folder"
@@ -570,10 +584,10 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
-        let source = self.load_core_vault(&connection.source_vault_id)?;
-        if !source.admins.contains(actor_npub) {
+        let source = self.load_vault(&connection.source_vault_id)?;
+        if !has_vault_operational_authority(&source, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder connection revocation requires a source vault admin"
+                reason: "shared folder connection revocation requires source vault operational authority"
                     .to_owned(),
             });
         }

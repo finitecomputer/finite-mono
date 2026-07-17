@@ -159,6 +159,7 @@ pub(crate) fn accept_object_tombstone(
         store.load_vault(&vault_id)?
     };
     ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
+    ensure_direct_delete_authority(&stored, &actor_npub)?;
 
     let expected = TombstoneValidation {
         vault_id: vault_id.clone(),
@@ -182,6 +183,7 @@ pub(crate) fn accept_object_tombstone(
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_vault(&vault_id)?;
         ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
+        ensure_direct_delete_authority(&stored, &actor_npub)?;
         store.submit_sync_record(
             &vault_id,
             &SyncRecordInput::FolderObjectTombstone(FolderObjectTombstoneSyncRecord {

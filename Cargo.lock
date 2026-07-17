@@ -1419,6 +1419,7 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+ "ureq",
 ]
 
 [[package]]

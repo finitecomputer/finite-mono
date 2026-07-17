@@ -58,9 +58,9 @@ fbrain -- <args>` may be the available entrypoint.
 1. Verify runtime state with `doctor`, `auth status --json`, and `status --json`.
    Completion: acting identity, working tree path, server source, daemon state,
    sync state, and blockers are known.
-   Before creating any Vault, run `vault list --json`. An Agent Principal paired
-   by a user discovers that user's Personal Vault there with role `member`; use
-   that Vault and never create a second agent-owned Personal Vault.
+   Before creating any Vault, run `vault list --json`. The user's one Personal
+   Agent discovers the Personal Vault there with role `personal_agent`; use that
+   Vault and never create an agent-owned Personal Vault.
 2. Sync before reading broadly with `sync now --summary`, then finish with
    `conflicts --json`.
    Completion: latest sequence is recorded, encrypted grants were reopened for
@@ -84,6 +84,25 @@ fbrain -- <args>` may be the available entrypoint.
    `conflicts --json`.
    Completion: pushed/applied status, latest sequence, and conflict state are
    known.
+
+## First-Time Personal Vault Setup
+
+When the user's request requires Brain but `vault list --json` shows no Personal
+Vault, ask once in ordinary language whether they want you to set up their
+empty Personal Vault. Keep this to one short question; do not require exact
+wording, a slash command, a button, or a setup ticket.
+
+- On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" vault
+  bootstrap-personal --server "$SERVER" --json`, list Vaults again, open the
+  returned Personal Vault, and continue the user's original task immediately.
+- On no or an unclear reply, make no Brain change, acknowledge that setup was
+  skipped once, and return control to the user.
+- If a Personal Vault exists but this agent does not have role
+  `personal_agent`, do not attempt to join it. Explain briefly that the owner
+  must replace the Personal Agent in Brain settings.
+
+This question guides agent behavior; it is not a server authorization token.
+Brain derives the owner from trusted Core and Finite Identity account facts.
 
 ## LLM Wiki Rules
 
@@ -147,8 +166,9 @@ Core wiki rules:
   mutable data stays outside the wiki.
 - Use `output/` for generated reports, plans, summaries, study guides, and other
   deliverables that should compound future work.
-- Archive quietly instead of deleting superseded topics. Prefer `.archive/` or
-  the local Folder convention, update indexes, and log the archive.
+- Prefer updating an existing topic over deleting it. When the user asks for
+  permanent deletion, briefly double-check once in ordinary language, then
+  delete on a clear yes; do not silently substitute an archive.
 - When querying, answer from curated wiki pages first. If the wiki lacks enough
   evidence, say what is missing and suggest what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do

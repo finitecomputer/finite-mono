@@ -16,10 +16,11 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-mod agent_access;
 mod folder_access;
+mod folder_deletion;
 mod links;
 mod loading;
+mod personal_agents;
 mod schema;
 mod shared_folders;
 mod sync_records;
@@ -167,103 +168,6 @@ pub struct PersonalAgent {
     pub updated_at: String,
 }
 
-/// Durable product-scoped delegation between a Personal Vault owner and one Agent Principal.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BrainEmailAccessDelegation {
-    pub id: String,
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub workspace_folder_id: FolderId,
-    pub folder_ids: Vec<FolderId>,
-    pub status: String,
-    pub created_by_npub: UserId,
-    pub created_at: String,
-    pub updated_at: String,
-    pub audit: Vec<BrainEmailAccessDelegationAudit>,
-}
-
-/// One durable explanation of a delegation lifecycle change.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BrainEmailAccessDelegationAudit {
-    pub id: String,
-    pub action: String,
-    pub actor_npub: UserId,
-    pub subject_npub: UserId,
-    pub folder_ids: Vec<FolderId>,
-    pub occurred_at: String,
-}
-
-/// Validated store input for the initial user-first Agent Workspace pairing.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct EnsurePersonalAgentWorkspaceInput {
-    pub delegation_id: String,
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folder: Folder,
-    pub grants: Vec<FolderKeyGrantMetadata>,
-    pub sync_records: Vec<SyncRecordInput>,
-    pub created_at: String,
-}
-
-/// Result of creating or safely retrying one initial Agent Workspace pairing.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct EnsurePersonalAgentWorkspaceOutcome {
-    pub delegation: BrainEmailAccessDelegation,
-    pub duplicate: bool,
-}
-
-/// Validated all-or-nothing input for the agent-first Personal Vault path.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BootstrapPersonalAgentWorkspaceInput {
-    pub authorization_id: String,
-    pub authorization_event_id: String,
-    pub authorization_expires_at: u64,
-    pub vault: BootstrapOutput,
-    pub bootstrap_grants: Vec<FolderKeyGrantMetadata>,
-    pub pairing: EnsurePersonalAgentWorkspaceInput,
-    pub consumed_at: String,
-}
-
-/// Result of consuming one agent-first bootstrap authorization.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BootstrapPersonalAgentWorkspaceOutcome {
-    pub delegation: BrainEmailAccessDelegation,
-}
-
-/// Owner-authorized expansion of an active Agent Workspace delegation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ExpandPersonalAgentWorkspaceInput {
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folder_id: FolderId,
-    pub grant: FolderKeyGrantMetadata,
-    pub sync_records: Vec<SyncRecordInput>,
-    pub changed_at: String,
-}
-
-/// One Folder Key rotation inside an all-or-nothing agent-delegation revocation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RevokePersonalAgentFolderInput {
-    pub folder_id: FolderId,
-    pub new_key_version: u32,
-    pub grants: Vec<FolderKeyGrantMetadata>,
-    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
-    pub sync_records: Vec<SyncRecordInput>,
-}
-
-/// Owner-authorized removal and key rotation for every Folder in an agent delegation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RevokePersonalAgentWorkspaceInput {
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folders: Vec<RevokePersonalAgentFolderInput>,
-    pub changed_at: String,
-}
-
 /// Verified display metadata for one canonical Nostr identity.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct IdentityAlias {
@@ -407,6 +311,34 @@ pub struct SubmitRecordOutcome {
     pub sequence: u64,
     /// True when this event id was already accepted.
     pub duplicate: bool,
+}
+
+/// Result of atomically deleting one Folder subtree.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderSubtreeDeletion {
+    pub sequence: u64,
+    pub duplicate: bool,
+    pub folder_count: usize,
+    pub object_count: usize,
+}
+
+/// Retained facts needed to validate an exact retry after a Folder is gone.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionReplay {
+    pub deletion_event_id: String,
+    pub actor_npub: UserId,
+    pub root_key_version: u32,
+    pub folder_count: usize,
+    pub object_count: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalAgentFolderRotation {
+    pub folder_id: FolderId,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
+    pub control_records: Vec<ControlSyncRecord>,
 }
 
 /// Stored accepted sync record.
@@ -1065,20 +997,28 @@ impl BrainStore {
         actor_npub: &UserId,
     ) -> Result<EncryptedVaultExport, StoreError> {
         let stored = self.load_vault(vault_id)?;
+        let is_personal_agent = stored
+            .personal_agent
+            .as_ref()
+            .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
         let has_personal_folder_scope = stored.vault.kind != VaultKind::Personal
             || stored.vault.owner_user_id.as_ref() == Some(actor_npub)
+            || is_personal_agent
             || stored
                 .folder_access
                 .values()
                 .any(|users| users.contains(actor_npub));
-        if !vault_visible_to_actor(&stored.vault, actor_npub) || !has_personal_folder_scope {
+        if (!vault_visible_to_actor(&stored.vault, actor_npub) && !is_personal_agent)
+            || !has_personal_folder_scope
+        {
             return Err(StoreError::BrokenInvariant {
                 reason: "vault access required for encrypted export".to_owned(),
             });
         }
         let is_admin = stored.vault.admins.contains(actor_npub);
         let is_limited_personal_member = stored.vault.kind == VaultKind::Personal
-            && stored.vault.owner_user_id.as_ref() != Some(actor_npub);
+            && stored.vault.owner_user_id.as_ref() != Some(actor_npub)
+            && !is_personal_agent;
         let folders = stored
             .vault
             .folders
@@ -1258,8 +1198,12 @@ impl BrainStore {
         validate_hierarchy(&self.conn, &vault.id, folder)?;
         validate_access_list_shape(folder, access_user_ids)?;
         validate_access_membership(vault, access_user_ids)?;
-        let required = required_recipients(vault, folder, access_user_ids)?;
-        validate_folder_grants(vault, folder, &required, grants)
+        let personal_agent = self
+            .load_personal_agent(&vault.id)?
+            .map(|relationship| relationship.agent_npub);
+        let required =
+            required_recipients(vault, folder, access_user_ids, personal_agent.as_ref())?;
+        validate_folder_grants(vault, folder, &required, grants, personal_agent.as_ref())
     }
 
     fn actor_has_current_source_access_and_grant(
@@ -1374,7 +1318,15 @@ impl BrainStore {
         }
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = rotation.new_key_version;
-        let required = required_recipients(&stored.vault, &rotated_folder, &remaining_access)?;
+        let required = required_recipients(
+            &stored.vault,
+            &rotated_folder,
+            &remaining_access,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         validate_connection_rotation_grants(
             &rotated_folder,
             &required,
@@ -2117,7 +2069,7 @@ fn validate_required_grants(
 
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(vault, grant)?;
+        validate_grant_issuer(vault, grant, None)?;
     }
     Ok(())
 }
@@ -2127,11 +2079,12 @@ fn validate_folder_grants(
     folder: &Folder,
     required_recipients: &BTreeSet<UserId>,
     grants: &[FolderKeyGrantMetadata],
+    personal_agent: Option<&UserId>,
 ) -> Result<(), StoreError> {
     let mut provided = BTreeSet::new();
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(vault, grant)?;
+        validate_grant_issuer(vault, grant, personal_agent)?;
         if grant.folder_id != folder.id {
             return Err(StoreError::BrokenInvariant {
                 reason: "grant folder id must match folder metadata".to_owned(),
@@ -2161,12 +2114,19 @@ fn validate_folder_grants(
     Ok(())
 }
 
-fn validate_grant_issuer(vault: &Vault, grant: &FolderKeyGrantMetadata) -> Result<(), StoreError> {
+fn validate_grant_issuer(
+    vault: &Vault,
+    grant: &FolderKeyGrantMetadata,
+    personal_agent: Option<&UserId>,
+) -> Result<(), StoreError> {
     match vault.kind {
         VaultKind::Personal => {
-            if vault.owner_user_id.as_ref() != Some(&grant.issuer_npub) {
+            if vault.owner_user_id.as_ref() != Some(&grant.issuer_npub)
+                && personal_agent != Some(&grant.issuer_npub)
+            {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "personal vault grants must be issued by the owner".to_owned(),
+                    reason: "personal vault grants must be issued by the owner or Personal Agent"
+                        .to_owned(),
                 });
             }
         }
@@ -2508,6 +2468,7 @@ fn required_recipients(
     vault: &Vault,
     folder: &Folder,
     access_user_ids: &BTreeSet<UserId>,
+    personal_agent: Option<&UserId>,
 ) -> Result<BTreeSet<UserId>, StoreError> {
     let mut recipients = BTreeSet::new();
     match folder.access {
@@ -2534,6 +2495,10 @@ fn required_recipients(
             recipients.extend(vault.admins.iter().cloned());
             recipients.extend(access_user_ids.iter().cloned());
         }
+    }
+
+    if vault.kind == VaultKind::Personal {
+        recipients.extend(personal_agent.cloned());
     }
 
     if recipients.is_empty() {
@@ -2563,6 +2528,19 @@ fn vault_visible_to_actor(vault: &Vault, actor_npub: &UserId) -> bool {
     }
 }
 
+pub(crate) fn has_vault_operational_authority(stored: &StoredVault, actor_npub: &UserId) -> bool {
+    match stored.vault.kind {
+        VaultKind::Personal => {
+            stored.vault.owner_user_id.as_ref() == Some(actor_npub)
+                || stored
+                    .personal_agent
+                    .as_ref()
+                    .is_some_and(|relationship| relationship.agent_npub == *actor_npub)
+        }
+        VaultKind::Organization => stored.vault.admins.contains(actor_npub),
+    }
+}
+
 fn folder_visible_to_actor(
     stored: &StoredVault,
     folder_id: &FolderId,
@@ -2582,11 +2560,19 @@ fn folder_visible_to_actor(
         .as_ref()
         .is_some_and(|owner| owner == actor_npub);
     let is_admin = stored.vault.admins.contains(actor_npub);
+    let is_personal_agent = stored
+        .personal_agent
+        .as_ref()
+        .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
     let is_member = stored
         .vault
         .members
         .iter()
         .any(|member| member.user_id == *actor_npub);
+
+    if is_personal_agent {
+        return true;
+    }
 
     match folder.access {
         FolderAccessMode::Owner => is_owner,
@@ -3879,6 +3865,284 @@ mod tests {
         assert_eq!(
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([recipient]))
+        );
+    }
+
+    #[test]
+    fn personal_agent_can_share_a_restricted_personal_vault_folder() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let recipient = UserId::new("npub-recipient").unwrap();
+        let vault_id = output.vault.id.clone();
+        store
+            .create_personal_vault_bootstrap(&output, &[], &agent, &owner, "2026-06-23T00:00:00Z")
+            .unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &vault_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-personal-owner",
+                        "strategy",
+                        1,
+                        agent.as_str(),
+                        owner.as_str(),
+                    ),
+                    grant(
+                        "grant-personal-agent",
+                        "strategy",
+                        1,
+                        agent.as_str(),
+                        agent.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let recipient_grant = grant(
+            "grant-personal-recipient",
+            "strategy",
+            1,
+            agent.as_str(),
+            recipient.as_str(),
+        );
+
+        let share = store
+            .create_share_link(
+                &vault_id,
+                &folder.id,
+                "share-link-personal-agent",
+                &recipient,
+                &agent,
+                "2026-06-30T00:00:00Z",
+                "/_admin/share-links/share-link-personal-agent/accept",
+                &recipient_grant,
+                true,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(share.created_by_npub, agent);
+        assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn folder_subtree_deletion_is_atomic_and_folder_identities_stay_dead() {
+        let mut store = store_with_strategy_folder();
+        let vault_id = VaultId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let child = Folder {
+            id: FolderId::new("strategy-child").unwrap(),
+            name: DisplayName::new("folder_name", "Child").unwrap(),
+            parent_folder_id: Some(FolderId::new("strategy").unwrap()),
+            path: SafeRelativePath::new("folder_path", "Strategy/Child").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &vault_id,
+                &child,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-strategy-child-admin",
+                    "strategy-child",
+                    1,
+                    admin.as_str(),
+                    admin.as_str(),
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &vault_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    2,
+                    "event-delete-strategy",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder Key version changed before deletion".to_owned(),
+                current_revision: Some(1),
+            }
+        );
+        assert!(store.folder_exists(&vault_id, &child.id).unwrap());
+
+        let deleted = store
+            .delete_folder_subtree(
+                &vault_id,
+                &FolderId::new("strategy").unwrap(),
+                &admin,
+                1,
+                "event-delete-strategy",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+            )
+            .unwrap();
+        assert_eq!(deleted.folder_count, 2);
+        let retry = store
+            .delete_folder_subtree(
+                &vault_id,
+                &FolderId::new("strategy").unwrap(),
+                &admin,
+                1,
+                "event-delete-strategy",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+            )
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.folder_count, deleted.folder_count);
+        assert_eq!(retry.object_count, deleted.object_count);
+        assert!(!store.folder_exists(&vault_id, &child.id).unwrap());
+        assert_eq!(
+            store
+                .create_folder(
+                    &vault_id,
+                    &strategy_folder(),
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-recreated-strategy",
+                        "strategy",
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "deleted Folder identities cannot be reused".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn folder_subtree_deletion_fails_closed_on_corrupt_invitation_scope() {
+        let mut store = store_with_strategy_folder();
+        let vault_id = VaultId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let invitee = UserId::new("npub-invitee").unwrap();
+        store
+            .create_vault_invitation(
+                &vault_id,
+                "invite-corrupt-scope",
+                &invitee,
+                "invite-code-corrupt-scope",
+                "/invite/corrupt-scope",
+                &[FolderId::new("strategy").unwrap()],
+                &admin,
+                "2026-07-01T00:00:00Z",
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE vault_invitations SET initial_folder_access_json = '{' WHERE id = ?1",
+                params!["invite-corrupt-scope"],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &vault_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    1,
+                    "event-delete-corrupt-scope",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                )
+                .unwrap_err(),
+            StoreError::InvalidRecord {
+                reason: "stored Vault Invitation Folder scope is invalid".to_owned(),
+            }
+        );
+        assert!(
+            store
+                .folder_exists(&vault_id, &FolderId::new("strategy").unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM vault_invitations WHERE id = ?1",
+                    params!["invite-corrupt-scope"],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .folder_deletion_replay(&vault_id, &FolderId::new("strategy").unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_personal_vault_agent_replacement_is_owner_only_and_atomic() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        let new_agent = UserId::new("npub-new-agent").unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+
+        store
+            .replace_personal_agent(
+                &output.vault.id,
+                &owner,
+                Some(&new_agent),
+                &[],
+                "2026-06-23T00:01:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_personal_agent(&output.vault.id)
+                .unwrap()
+                .unwrap()
+                .agent_npub,
+            new_agent
+        );
+        assert!(
+            store
+                .replace_personal_agent(
+                    &output.vault.id,
+                    &old_agent,
+                    None,
+                    &[],
+                    "2026-06-23T00:02:00Z",
+                )
+                .is_err()
         );
     }
 

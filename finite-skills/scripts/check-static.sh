@@ -110,6 +110,9 @@ else:
         'FBRAIN_WORKING_TREE_ROOT',
         'VAULT="replace-with-vault-id"',
         "A Working Tree remembers the server",
+        "bootstrap-personal",
+        "role `personal_agent`",
+        "do not require exact",
     ):
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
@@ -120,6 +123,15 @@ else:
         if forbidden_server in brain_text:
             errors.append(
                 f"{brain_path}: active server must come from the runtime, not {forbidden_server!r}"
+            )
+    for retired_contract in (
+        "/brain setup",
+        "personal-vault-bootstrap-authorizations",
+        "role `member`",
+    ):
+        if retired_contract in brain_text:
+            errors.append(
+                f"{brain_path}: retired Personal Agent contract remains {retired_contract!r}"
             )
 
 compat_path = root / "software-development/publish-web-apps-finite/SKILL.md"

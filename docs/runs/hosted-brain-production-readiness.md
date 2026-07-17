@@ -4,9 +4,9 @@ Status: PROPOSED
 Owner: Paul
 Opened: 2026-07-15
 Acceptance: a signed-in user can open the production Brain UI from an Agent,
-pair that Agent by its canonical managed email, write inside its bounded Agent
-Workspace Folder, and read the result as the Personal Vault owner after a
-service restart.
+confirm that Agent by its canonical managed email, write anywhere in the empty
+Personal Vault as its one Personal Agent, and read the result as the Personal
+Vault owner after a service restart.
 Expiry: 2026-07-22; stop and rescope if the identity, release, or durable-data
 boundary changes before activation.
 
@@ -22,8 +22,9 @@ not ready to expose:
   merged implementation.
 - The production dashboard Brain UI does not match the current UI Austin has
   validated locally.
-- lat1 does not run the Finite Identity Authority required for canonical
-  managed Agent Email registration and email-first Brain pairing.
+- The reviewed lat1 definition now includes Finite Identity, the bounded
+  Brain/Core authority chain, and service-consistent Brain/Identity backups,
+  but those definitions have not yet been activated and accepted in production.
 - Core, Runner, Brain, dashboard, and the Identity Authority have not yet been
   deployed and accepted together as one production revision.
 
@@ -35,9 +36,8 @@ an incomplete production flow.
 
 - Reuse the merged Finite Identity and Brain contracts; do not introduce a
   second identity store, pairing protocol, or product-specific email resolver.
-- Choose and document one canonical Identity Authority origin before deploy;
-  reconcile the current `identity.finite.chat` configuration examples with the
-  `identity.finite.vip` operations example.
+- Use `https://identity.finite.chat` as the canonical public Identity Authority
+  origin; trusted co-located services use its loopback transport.
 - Keep Identity Authority operator credentials on trusted services only. They
   never enter an Agent Runtime.
 - Treat the Identity Authority SQLite directory and Brain SQLite database as
@@ -52,20 +52,18 @@ an incomplete production flow.
    dashboard iframe/proxy flow locally.
 2. Publish a component-scoped `fbrain` release from the exact reviewed mono
    revision and verify the rolling `fbrain-latest` assets and installer.
-3. Add the existing `finite-identityd` to the lat1 NixOS deployment with a
-   loopback listener, Caddy route, root-only environment, production mailer,
-   operator token, durable state directory, health check, backup, and rollback
-   procedure.
-4. Configure Runner with the Identity Authority URL and operator token; configure
-   Brain with the public authority URL. Deploy matching Core, Runner, Brain,
-   dashboard, and Caddy configuration from one reviewed revision.
+3. Review and activate the checked-in `finite-identityd` loopback service,
+   Caddy route, root-only credentials, production mailer, durable state, and
+   service-consistent Brain/Identity backup boundary.
+4. Deploy matching Core, Runner, Hosted Device, Brain, Identity, dashboard, and
+   Caddy configuration from one reviewed revision.
 5. Launch a disposable Agent and prove its canonical managed email binds
    immutably to its retained Agent Principal. Stop on a mismatch or failed
    authority call; do not bypass the fail-closed launch contract.
-6. Run the hosted Brain acceptance flow: initialize one Personal Vault, pair
-   the disposable Agent by managed email, grant only its Agent Workspace
-   Folder, write as the Agent, read as the owner, restart services, and repeat
-   the readback.
+6. Run the hosted Brain acceptance flow: initialize one empty Personal Vault,
+   establish the disposable Agent as its Personal Agent by managed email,
+   write as the Agent, read as the owner, restart services, and repeat the
+   readback.
 7. Re-enable the Brain sidebar link in a separate small dashboard change, build
    and deploy its digest-pinned image, and repeat the production browser flow.
 

@@ -212,7 +212,11 @@ check_native_requesting_user_site() {
     "${FINITE_SITES_VIEWER_SESSION_TOKEN:?}" \
     >"$sites_config"
 
-  curl -fsS --config "$hosted_config" \
+  # The HTTP listener can become healthy just before its first authenticated
+  # app-state projection is ready. Retry only this startup read; curl's
+  # default retry policy remains limited to transient transport and 5xx errors.
+  curl -fsS --retry 10 --retry-connrefused --retry-delay 1 \
+    --config "$hosted_config" \
     "$hosted_device_url/v1/app/state" >"$user_state_json"
   requesting_user_id="$(node - "$user_state_json" <<'JS'
 const fs = require("node:fs");

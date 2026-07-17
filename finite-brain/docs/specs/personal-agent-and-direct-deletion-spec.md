@@ -220,9 +220,9 @@ Trash or restore workflow.
   replacement identity, rotate every current Folder key, remove old grants,
   create replacement grants, and swap the role. Failure preserves the old
   relationship and all current Folder state.
-- Permanent deletion of the underlying Core agent immediately blocks new Brain
-  actions, removes the Personal Agent relationship, and rotates every current
-  Folder key. Runtime restart with the same principal does not revoke.
+- A future permanent Core-agent deletion integration must immediately block new
+  Brain actions, remove the Personal Agent relationship, and rotate every
+  current Folder key. Runtime restart with the same principal does not revoke.
 - Personal Agent actions remain signed by the Agent Principal and use Managed
   Agent Email only as the readable actor where history is already shown. No
   extra confirmation or impersonation is introduced.
@@ -277,8 +277,9 @@ Trash or restore workflow.
   derivation, one-Personal-Agent uniqueness, full current and future Folder
   visibility, automatic grants, idempotent retry, competing-agent rejection,
   and rollback.
-- The same Brain integration seam covers atomic replacement, Core-deletion
-  revocation, retained human access, key rotation, and failure rollback.
+- The same Brain integration seam covers atomic replacement, retained human
+  access, key rotation, and failure rollback. It will also cover Core-deletion
+  revocation once Core exposes a permanent-agent deletion event.
 - Direct-deletion integration tests cover owner, Personal Agent, Personal Vault
   collaborator, Organization Vault admin, and Organization Vault non-admin
   authorization matrices.
@@ -336,3 +337,9 @@ Trash or restore workflow.
 - The implementation must preserve the recoverability-first invariant: agent
   removal, replacement, runtime teardown, and Folder deletion must never delete
   the human-owned Personal Vault itself.
+- Delivery note: Core does not currently expose a permanent-agent deletion
+  operation or event. Brain also cannot rotate client-held Folder Keys in an
+  unattended server callback without violating the accepted identity-provider
+  and content-crypto boundary. Owner-authorized Personal Agent removal and
+  replacement are implemented; automatic Core-deletion revocation remains open
+  in issue #116 until those prerequisites have an accepted design.

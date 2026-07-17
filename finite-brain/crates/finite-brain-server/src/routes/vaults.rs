@@ -41,23 +41,26 @@ pub(crate) async fn create_vault_handler(
             let email_identity = request
                 .personal_agent_email
                 .as_deref()
-                .map(|email| resolve_and_record_identity(&state, email))
+                .map(|email| resolve_managed_agent_email(&state, email))
                 .transpose()?;
             let npub_identity = request
                 .personal_agent_npub
                 .as_deref()
-                .map(|npub| resolve_and_record_identity(&state, npub))
+                .map(|npub| resolve_identity_input(&state, npub))
                 .transpose()?;
-            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity) {
-                if email.npub != npub.npub {
-                    return Err(ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
-                    ));
-                }
+            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
+                && email.npub != npub.npub
+            {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
+                ));
             }
-            email_identity
-                .or(npub_identity)
+            let identity = email_identity.or(npub_identity);
+            if let Some(identity) = identity.as_ref() {
+                record_resolved_identity(&state, identity.clone())?;
+            }
+            identity
                 .map(|identity| UserId::new(identity.npub))
                 .transpose()?
         }

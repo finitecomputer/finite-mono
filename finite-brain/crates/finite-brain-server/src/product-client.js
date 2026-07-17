@@ -55,7 +55,6 @@ const FiniteBrainProductClient = (() => {
     folderShareLinksFolderId: null,
     sharedFolderInvitations: null,
     sharedFolderConnections: null,
-    agentWorkspacePairings: null,
     editorMode: "visual",
     expandedFolderIds: new Set(),
     contextMenuTarget: null,
@@ -109,6 +108,10 @@ const FiniteBrainProductClient = (() => {
   const BRAIN_SESSION_PROOF_REQUEST = "finite-brain-session-proof-request-v1";
   const BRAIN_SESSION_PROOF_RESPONSE = "finite-brain-session-proof-response-v1";
   const BRAIN_SESSION_ENDED = "finite-brain-session-ended-v1";
+  const BRAIN_PERSONAL_AGENT_CONFIRMATION_REQUEST =
+    "finite-brain-personal-agent-confirmation-request-v1";
+  const BRAIN_PERSONAL_AGENT_CONFIRMATION_RESPONSE =
+    "finite-brain-personal-agent-confirmation-response-v1";
   const BRAIN_EVENT_KIND_BY_INTENT = Object.freeze({
     "folder-object-revision": APP_EVENT_KIND,
     "folder-object-tombstone": APP_EVENT_KIND,
@@ -145,14 +148,13 @@ const FiniteBrainProductClient = (() => {
     "accessShareLinkInput",
     "accessShareMountInput",
     "accessShareTargetInput",
-    "agentWorkspaceEmailInput",
-    "agentWorkspaceNpubInput",
     "commandPaletteInput",
     "manageOrganizationVaultNameInput",
     "pageBaseRevisionInput",
     "pageDraftInput",
     "pageFolderIdInput",
     "pageObjectIdInput",
+    "personalAgentEmailInput",
     "sidebarSearchInput",
     "vaultAdminNpubInput",
     "vaultInviteCodeInput",
@@ -2632,7 +2634,6 @@ const FiniteBrainProductClient = (() => {
     target.folderShareLinksFolderId = null;
     target.sharedFolderInvitations = null;
     target.sharedFolderConnections = null;
-    target.agentWorkspacePairings = null;
     target.selectedFolderId = null;
     target.selectedPageKey = null;
     target.graphZoom = 1;
@@ -5189,29 +5190,38 @@ const FiniteBrainProductClient = (() => {
       }));
   }
 
-  function contextMenuItemsForTarget(target) {
+  function contextMenuItemsForTarget(
+    target,
+    metadata = state.metadata,
+    actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null
+  ) {
     if (!target) return [];
     if (target.type === "page") {
       const discardLocalDraft = pageDeletionDisposition(target) === "discard-local";
       const pageKeyValue = target.pageKey || pageKey(target.folderId, target.objectId);
       const saveInFlight = state.pageSaveInFlight?.key === pageKeyValue;
-      return [
+      const items = [
         { action: "open-page", label: "Open Page" },
         { action: "new-page", label: "New Page in Folder" },
         { action: "open-graph", label: "Show in Graph View" },
         { separator: true },
         { action: "copy-page-id", label: "Copy Page ID" },
         { action: "copy-folder-id", label: "Copy Folder ID" },
-        { separator: true },
-        {
+      ];
+      if (discardLocalDraft || actorHasDestructiveAuthority(metadata, actorNpub)) {
+        items.push(
+          { separator: true },
+          {
           action: "delete-page",
           label: saveInFlight ? "Saving Page…" : discardLocalDraft ? "Discard unsaved Page" : "Delete Page",
           disabled: saveInFlight,
           danger: true,
-        },
-      ];
+          }
+        );
+      }
+      return items;
     }
-    return [
+    const items = [
       { action: "open-folder", label: "Open Folder" },
       { action: "new-page", label: "New Page" },
       { action: "new-folder", label: "New Folder Inside" },
@@ -5220,6 +5230,32 @@ const FiniteBrainProductClient = (() => {
       { action: "manage-access", label: "Manage Access" },
       { action: "share-folder", label: "Share Folder" },
     ];
+    if (actorHasDestructiveAuthority(metadata, actorNpub)) {
+      items.push(
+        { separator: true },
+        { action: "delete-folder", label: "Delete Folder", danger: true }
+      );
+    }
+    return items;
+  }
+
+  function folderSubtreeSummary(folderId, metadata = state.metadata, pages = projectionPages()) {
+    const folders = metadata?.folders || [];
+    const ids = new Set([folderId]);
+    for (;;) {
+      const before = ids.size;
+      for (const folder of folders) {
+        if (folder.parentFolderId && ids.has(folder.parentFolderId)) ids.add(folder.id);
+      }
+      if (ids.size === before) break;
+    }
+    const root = folders.find((folder) => folder.id === folderId);
+    return {
+      folderIds: [...ids],
+      folderCount: [...ids].filter((id) => folders.some((folder) => folder.id === id)).length,
+      objectCount: (pages || []).filter((page) => ids.has(page.folderId) && !page.deleted).length,
+      name: root?.name || root?.path || folderId,
+    };
   }
 
   function setSidebarMode(mode) {
@@ -5344,11 +5380,17 @@ const FiniteBrainProductClient = (() => {
     const title = pageTitleForPage(page);
     const disposition = pageDeletionDisposition(page);
     if (
+      disposition !== "discard-local" &&
+      !actorHasDestructiveAuthority(state.metadata, currentActorNpub())
+    ) {
+      throw new Error("Your Vault role cannot permanently delete Pages");
+    }
+    if (
       window.confirm &&
       !window.confirm(
         disposition === "discard-local"
           ? `Discard unsaved "${title}"? This only removes the local draft.`
-          : `Delete "${title}"? This writes a signed tombstone.`
+          : `Permanently delete "${title}"? This cannot be undone. Downloaded copies and backups may still exist.`
       )
     ) {
       return;
@@ -5392,12 +5434,64 @@ const FiniteBrainProductClient = (() => {
     state.projection.localDrafts.delete(key);
     if (state.selectedPageKey === key) state.selectedPageKey = null;
     selectDefaultReaderTargets();
-    log("Deleted Page through signed tombstone.", {
+    log("Permanently deleted Page.", {
       folderId: page.folderId,
       objectId: page.objectId,
       revision: result.revision,
       sequence: result.sequence,
     });
+    render();
+  }
+
+  async function deleteFolderFromContextTarget(target) {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const vaultId = state.activeVaultId;
+    const folder = (state.metadata?.folders || []).find((row) => row.id === target.folderId);
+    if (!folder) throw new Error("Select an existing Folder before deleting");
+    if (!actorHasDestructiveAuthority(state.metadata, currentActorNpub())) {
+      throw new Error("Your Vault role cannot permanently delete Folders");
+    }
+    const summary = folderSubtreeSummary(folder.id);
+    const folderLabel = summary.folderCount === 1 ? "1 Folder" : `${summary.folderCount} Folders`;
+    const objectLabel = summary.objectCount === 1 ? "1 item" : `${summary.objectCount} items`;
+    if (
+      window.confirm &&
+      !window.confirm(
+        `Permanently delete "${summary.name}" and its complete subtree (${folderLabel}, ${objectLabel})? This cannot be undone. Downloaded copies and backups may still exist.`
+      )
+    ) {
+      return;
+    }
+    const deletionEvent = await buildAdminAccessChangeEvent({
+      action: "delete-folder",
+      folderId: folder.id,
+      keyVersion: folder.currentKeyVersion || 1,
+      note: "permanent Folder subtree deletion",
+      vaultId,
+    });
+    requireCurrentSessionEpoch(sessionEpoch);
+    const route = `/_admin/vaults/${encodeURIComponent(vaultId)}/folders/${encodeURIComponent(folder.id)}`;
+    const result = await protectedRequest(route, {
+      method: "DELETE",
+      body: JSON.stringify({ deletionEvent }),
+    });
+    requireCurrentSessionEpoch(sessionEpoch);
+    const deletedIds = new Set(summary.folderIds);
+    for (const [key, page] of state.projection.pages) {
+      if (deletedIds.has(page.folderId)) state.projection.pages.delete(key);
+    }
+    for (const [key, page] of state.projection.localDrafts) {
+      if (deletedIds.has(page.folderId)) state.projection.localDrafts.delete(key);
+    }
+    for (const key of [...(state.keyring?.keys?.keys?.() || [])]) {
+      if (summary.folderIds.some((folderId) => key.startsWith(`${vaultId}:${folderId}:`))) {
+        state.keyring.keys.delete(key);
+      }
+    }
+    await loadVaultMetadata({ preserveActive: true });
+    requireCurrentSessionEpoch(sessionEpoch);
+    selectDefaultReaderTargets();
+    log("Permanently deleted Folder subtree.", { ...result, folderId: folder.id });
     render();
   }
 
@@ -6925,6 +7019,14 @@ const FiniteBrainProductClient = (() => {
       });
       return;
     }
+    if (item.action === "delete-folder") {
+      deleteFolderFromContextTarget(target).catch((error) => {
+        state.lastError = error.message;
+        log("Failed to permanently delete Folder.", { error: error.message });
+        render();
+      });
+      return;
+    }
   }
 
   function openContextMenu(target, x, y, previousFocus = document.activeElement || null) {
@@ -7205,8 +7307,15 @@ const FiniteBrainProductClient = (() => {
 
   function actorIsVaultAdmin(metadata) {
     const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
-    if (metadata?.kind === "personal") return Boolean(actorNpub && metadata.ownerUserId === actorNpub);
-    return Boolean(actorNpub && (metadata?.admins || []).includes(actorNpub));
+    return actorHasDestructiveAuthority(metadata, actorNpub);
+  }
+
+  function actorHasDestructiveAuthority(metadata, actorNpub) {
+    if (!metadata || !actorNpub) return false;
+    if (metadata.kind === "personal") {
+      return metadata.ownerUserId === actorNpub || metadata.personalAgent?.agentNpub === actorNpub;
+    }
+    return (metadata.admins || []).includes(actorNpub);
   }
 
   function hasOrganizationVaultControls(metadata) {
@@ -7456,38 +7565,17 @@ const FiniteBrainProductClient = (() => {
     });
     renderVaultPeopleList(metadata);
     renderVaultPeopleControls(metadata);
-    renderAgentWorkspacePairings(metadata);
+    const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    const showPersonalAgent = metadata?.kind === "personal" && metadata.ownerUserId === actorNpub;
+    safeSetHidden("personalAgentSection", !showPersonalAgent);
+    safeSetText(
+      "personalAgentCurrent",
+      metadata?.personalAgent
+        ? `Current: ${identityDisplay(metadata.personalAgent.agentNpub)}`
+        : "No Personal Agent is assigned."
+    );
     renderVaultInvitationList();
     renderSharedFolderList();
-  }
-
-  function renderAgentWorkspacePairings(metadata) {
-    const ownerCanPair = Boolean(
-      metadata?.kind === "personal" &&
-        actorIsVaultAdmin(metadata) &&
-        state.sessionStatus === SESSION_STATUS.UNLOCKED &&
-        state.signerStatus === "connected"
-    );
-    const visible = metadata?.kind === "personal" && actorIsVaultAdmin(metadata);
-    safeSetHidden("agentWorkspacePairingSection", !visible);
-    const rows = agentWorkspacePairingRows({ pairings: state.agentWorkspacePairings || [] });
-    setPill("agentWorkspacePairingCount", `${rows.length}`, rows.length ? "ready" : "muted");
-    setOptionalDisabled("agentWorkspaceEmailInput", !ownerCanPair || state.accessBusy);
-    setOptionalDisabled("agentWorkspaceNpubInput", !ownerCanPair || state.accessBusy);
-    setOptionalDisabled("pairAgentWorkspaceButton", !ownerCanPair || state.accessBusy);
-    setText(
-      "agentWorkspacePairingHint",
-      ownerCanPair
-        ? `${agentWorkspacePairingPrompt()} Pairing does not make the agent a Vault admin.`
-        : "Unlock your Personal Vault as its owner to pair an agent."
-    );
-    setList("agentWorkspacePairingList", rows, "No agent is paired yet.", (item, row) => {
-      linkRowInfo(item, row.displayIdentity, row.status, row.title);
-      const detail = document.createElement("span");
-      detail.className = "access-person-role";
-      detail.textContent = `${row.folderId} · ${row.detail}`;
-      item.appendChild(detail);
-    });
   }
 
   function renderVaultPeopleList(metadata) {
@@ -8057,14 +8145,12 @@ const FiniteBrainProductClient = (() => {
       if (row.accessUserIds) {
         row.accessUserIds.forEach(userId => {
           const member = metadata?.members?.find((candidate) => accessPersonId(candidate) === userId);
-          const agentPairing = agentWorkspacePairingRows({
-            pairings: state.agentWorkspacePairings || [],
-          }).find((pairing) => pairing.agentNpub === userId && pairing.folderId === row.id);
+          const personalAgent = metadata?.personalAgent?.agentNpub === userId;
           addAccessListPerson(
             accessList,
             member || userId,
-            agentPairing ? "agent workspace" : "explicit access",
-            agentPairing ? "agent" : "explicit",
+            personalAgent ? "personal agent" : "explicit access",
+            personalAgent ? "agent" : "explicit",
             true
           );
         });
@@ -8647,6 +8733,11 @@ const FiniteBrainProductClient = (() => {
     if (kind === "personal" && !body.personalAgentEmail && !body.personalAgentNpub) {
       throw new Error("Select your agent by email before creating your Personal Vault");
     }
+    if (kind === "personal" && options.confirmPersonalAgent !== false) {
+      if (!(await confirmPersonalVaultAgent(body))) {
+        throw new Error("Personal Vault setup was cancelled");
+      }
+    }
     requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest("/_admin/vaults", {
       method: "POST",
@@ -8663,6 +8754,58 @@ const FiniteBrainProductClient = (() => {
     requireCurrentSessionEpoch(sessionEpoch);
     state.keyring = plan.keyring;
     return metadata;
+  }
+
+  function personalVaultAgentConfirmationMessage(body) {
+    const agentLabel = body?.personalAgentEmail || body?.personalAgentNpub;
+    if (!agentLabel) throw new Error("Personal Agent identity is required for confirmation");
+    return `Create your Personal Vault and pair ${agentLabel} as your Personal Agent?`;
+  }
+
+  async function confirmPersonalVaultAgent(body) {
+    const message = personalVaultAgentConfirmationMessage(body);
+    const identity = String(body?.personalAgentEmail || body?.personalAgentNpub || "")
+      .trim()
+      .toLowerCase();
+    const parentOrigin = String(
+      document.querySelector('meta[name="finite-brain-parent-origin"]')?.getAttribute("content") || ""
+    ).replace(/\/$/, "");
+    if (!parentOrigin || !window.parent || window.parent === window) {
+      return window.confirm ? window.confirm(message) : false;
+    }
+    const requestId = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+    return new Promise((resolve, reject) => {
+      const request = {
+        type: BRAIN_PERSONAL_AGENT_CONFIRMATION_REQUEST,
+        requestId,
+        identity,
+      };
+      const send = () => window.parent.postMessage(request, parentOrigin);
+      let retry = null;
+      const timeout = setTimeout(() => {
+        if (retry) clearInterval(retry);
+        window.removeEventListener("message", handleResponse);
+        reject(new Error("Your dashboard could not confirm Personal Agent setup."));
+      }, 5000);
+      function handleResponse(event) {
+        if (
+          event.source !== window.parent ||
+          event.origin !== parentOrigin ||
+          event.data?.type !== BRAIN_PERSONAL_AGENT_CONFIRMATION_RESPONSE ||
+          event.data?.requestId !== requestId ||
+          typeof event.data.confirmed !== "boolean"
+        ) {
+          return;
+        }
+        clearTimeout(timeout);
+        if (retry) clearInterval(retry);
+        window.removeEventListener("message", handleResponse);
+        resolve(event.data.confirmed);
+      }
+      window.addEventListener("message", handleResponse);
+      send();
+      retry = setInterval(send, 250);
+    });
   }
 
   async function ensurePersonalVaultForActiveSelection() {
@@ -8813,12 +8956,6 @@ const FiniteBrainProductClient = (() => {
     const path = `/_admin/vaults/${encodeURIComponent(state.activeVaultId)}/metadata`;
     const metadata = await protectedRequest(path);
     state.metadata = metadata;
-    if (metadata.kind === "personal" && actorIsVaultAdmin(metadata)) {
-      const pairingList = await protectedRequest(agentWorkspacePairingsPath(metadata.vaultId));
-      state.agentWorkspacePairings = pairingList.pairings || [];
-    } else {
-      state.agentWorkspacePairings = null;
-    }
     rememberVisibleVault(metadata);
     log("Loaded Vault metadata.", metadata);
     render();
@@ -9214,21 +9351,24 @@ const FiniteBrainProductClient = (() => {
     return { parentFolderId, path: `${parentPath}/${normalizedName}` };
   }
 
-  function folderRecipientsForAccess(access, accessUserIds = []) {
+  function folderRecipientsForAccess(access, accessUserIds = [], metadata = state.metadata) {
     const recipients = new Set();
     if (access === "owner") {
-      if (state.metadata?.ownerUserId) recipients.add(state.metadata.ownerUserId);
+      if (metadata?.ownerUserId) recipients.add(metadata.ownerUserId);
       else recipients.add(currentActorNpub());
-      return [...recipients];
+    } else {
+      if (access === "admin_only" || access === "all_members" || access === "restricted") {
+        for (const admin of metadata?.admins || []) recipients.add(admin);
+      }
+      if (access === "all_members") {
+        for (const member of metadata?.members || []) recipients.add(member);
+      }
+      if (access === "restricted") {
+        for (const user of accessUserIds) recipients.add(user);
+      }
     }
-    if (access === "admin_only" || access === "all_members" || access === "restricted") {
-      for (const admin of state.metadata?.admins || []) recipients.add(admin);
-    }
-    if (access === "all_members") {
-      for (const member of state.metadata?.members || []) recipients.add(member);
-    }
-    if (access === "restricted") {
-      for (const user of accessUserIds) recipients.add(user);
+    if (metadata?.kind === "personal" && metadata.personalAgent?.agentNpub) {
+      recipients.add(metadata.personalAgent.agentNpub);
     }
     if (!recipients.size) recipients.add(currentActorNpub());
     return [...recipients];
@@ -9527,10 +9667,6 @@ const FiniteBrainProductClient = (() => {
     return `/_admin/vaults/${encodeURIComponent(vaultId)}/invitations`;
   }
 
-  function agentWorkspacePairingsPath(vaultId) {
-    return `/_admin/vaults/${encodeURIComponent(vaultId)}/agent-workspace-pairings`;
-  }
-
   function suggestedAgentIdentityFromNavigation(search = window.location?.search || "") {
     let params;
     try {
@@ -9555,34 +9691,6 @@ const FiniteBrainProductClient = (() => {
     return email || npub ? { email, name, npub } : null;
   }
 
-  function applySuggestedAgentIdentity(search = window.location?.search || "") {
-    const emailInput = $("agentWorkspaceEmailInput");
-    const npubInput = $("agentWorkspaceNpubInput");
-    const candidate = suggestedAgentIdentityFromNavigation(search);
-    if (!candidate) return false;
-    let populated = false;
-    if (emailInput && !emailInput.value.trim() && candidate.email) {
-      emailInput.value = candidate.email;
-      populated = true;
-    }
-    if (npubInput && !npubInput.value.trim() && candidate.npub) {
-      npubInput.value = candidate.npub;
-      populated = true;
-    }
-    return populated;
-  }
-
-  function agentWorkspacePairingPrompt(search = window.location?.search || "") {
-    const candidate = suggestedAgentIdentityFromNavigation(search);
-    const inputEmail = $("agentWorkspaceEmailInput")?.value.trim().toLowerCase() || "";
-    const selectedName =
-      candidate?.email === inputEmail && candidate?.name
-        ? candidate.name
-        : inputEmail.split("@", 1)[0] || candidate?.name || "this agent";
-    const selectedEmail = inputEmail || candidate?.email;
-    return `Add ${selectedName}${selectedEmail ? ` (${selectedEmail})` : ""} as your Personal Agent.`;
-  }
-
   function vaultCreateBody(input) {
     const body = {
       vaultId: input.vaultId,
@@ -9599,187 +9707,6 @@ const FiniteBrainProductClient = (() => {
     const npub = publicKeyIdentityFromInput(input.agentIdentity?.npub)?.npub;
     if (npub) body.personalAgentNpub = npub;
     return body;
-  }
-
-  function agentWorkspacePairingRows(
-    response,
-    search = window.location?.search || ""
-  ) {
-    const selected = suggestedAgentIdentityFromNavigation(search);
-    return (response?.pairings || []).map((pairing) => ({
-      id: pairing.delegationId,
-      agentNpub: pairing.agentNpub,
-      displayIdentity:
-        selected?.npub === pairing.agentNpub
-          ? [selected.name, selected.email].filter(Boolean).join(" · ") || "Agent"
-          : "Agent",
-      folderId: pairing.workspaceFolderId,
-      status: pairing.status,
-      title: "Agent Workspace",
-      detail: `${pairing.status === "active" ? "Active" : "Revoked"} · ${
-        pairing.scope?.permission === "read_write" ? "read/write" : "scoped"
-      } · explicitly paired by the Personal Vault owner`,
-    }));
-  }
-
-  async function resolveAgentWorkspacePairingIdentity(
-    emailValue,
-    npubValue,
-    resolver = resolveIdentityInputValue
-  ) {
-    const email = String(emailValue || "").trim();
-    const npub = String(npubValue || "").trim();
-    if (email) {
-      try {
-        return await resolver(email, "Enter an agent email first");
-      } catch (error) {
-        if (!npub) throw error;
-      }
-    }
-    return resolver(npub, "Enter an agent email or advanced npub first");
-  }
-
-  async function buildAgentWorkspacePairingRequest(input) {
-    const vaultId = String(input.vaultId || state.activeVaultId || "").trim();
-    const ownerNpub = input.ownerNpub || currentActorNpub();
-    const agentNpub = publicKeyIdentityFromInput(input.agentNpub)?.npub;
-    if (!vaultId) throw new Error("Agent Workspace pairing requires a Personal Vault");
-    if (!agentNpub) throw new Error("Agent Workspace pairing requires an Agent Principal npub");
-    if (agentNpub === ownerNpub) {
-      throw new Error("Agent Workspace pairing requires a distinct Agent Principal");
-    }
-    const folderId = String(input.folderId || "agent-workspace").trim();
-    const name = String(input.name || "Agent Workspace").trim();
-    const path = String(input.path || name).trim();
-    const rawKey = input.rawKey || randomFolderKeyBytes();
-    const createdAtUnix = input.createdAtUnix || Math.floor(Date.now() / 1000);
-    const grants = [];
-    for (const recipientNpub of [ownerNpub, agentNpub]) {
-      grants.push(
-        await buildFolderKeyGrantRequest({
-          brainIdentityProvider: input.brainIdentityProvider,
-          createdAtUnix,
-          encrypt: input.encrypt,
-          folderId,
-          issuerNpub: ownerNpub,
-          keyVersion: 1,
-          provider: input.provider,
-          rawKey,
-          recipientNpub,
-          signEvent: input.signEvent,
-          vaultId,
-        })
-      );
-    }
-    const accessChangeEvent = await buildAdminAccessChangeEvent({
-      action: "set-folder-access-mode",
-      adminNpub: ownerNpub,
-      brainIdentityProvider: input.brainIdentityProvider,
-      createdAtUnix,
-      folderId,
-      keyVersion: 1,
-      provider: input.provider,
-      signEvent: input.signEvent,
-      vaultId,
-    });
-    return {
-      path: agentWorkspacePairingsPath(vaultId),
-      rawKey,
-      body: {
-        agentNpub,
-        folderId,
-        name,
-        path,
-        grants,
-        accessChangeEvent,
-      },
-    };
-  }
-
-  async function ensureAgentWorkspacePairing(input) {
-    const plan = await buildAgentWorkspacePairingRequest(input);
-    const pairing = await protectedRequest(plan.path, {
-      method: "POST",
-      body: JSON.stringify(plan.body),
-    });
-    state.agentWorkspacePairings = [
-      pairing,
-      ...(state.agentWorkspacePairings || []).filter(
-        (candidate) => candidate.delegationId !== pairing.delegationId
-      ),
-    ];
-    return { pairing, rawKey: plan.rawKey };
-  }
-
-  async function pairAgentWorkspaceFromPanel() {
-    const sessionEpoch = captureSessionOperationEpoch();
-    const metadata = state.metadata;
-    if (metadata?.kind !== "personal" || !actorIsVaultAdmin(metadata)) {
-      throw new Error("Only the Personal Vault owner can pair an Agent Principal");
-    }
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Unlock your Personal Vault before pairing an Agent Principal");
-    }
-    beginAccessOperation(sessionEpoch);
-    try {
-      const identity = await resolveAgentWorkspacePairingIdentity(
-        $("agentWorkspaceEmailInput")?.value,
-        $("agentWorkspaceNpubInput")?.value
-      );
-      requireCurrentSessionEpoch(sessionEpoch);
-      if (
-        (state.agentWorkspacePairings || []).some(
-          (pairing) => pairing.agentNpub === identity.npub
-        )
-      ) {
-        throw new Error("This Agent Principal is already paired with the Personal Vault");
-      }
-      const existingPairingCount = (state.agentWorkspacePairings || []).length;
-      const folderId = existingPairingCount
-        ? `agent-workspace-${npubToHex(identity.npub).slice(0, 12)}`
-        : "agent-workspace";
-      const result = await ensureAgentWorkspacePairing({
-        agentNpub: identity.npub,
-        folderId,
-        name: "Agent Workspace",
-        ownerNpub: currentActorNpub(),
-        path: folderId,
-        vaultId: metadata.vaultId,
-      });
-      requireCurrentSessionEpoch(sessionEpoch);
-      await openFolderKeyGrantPlaintext(
-        state.keyring,
-        {
-          version: "finite-folder-key-grant-v1",
-          vaultId: metadata.vaultId,
-          folderId: result.pairing.workspaceFolderId,
-          keyVersion: 1,
-          folderKey: bytesToBase64(result.rawKey),
-          issuerNpub: currentActorNpub(),
-          recipientNpub: currentActorNpub(),
-        },
-        { assertCurrent: () => requireCurrentSessionEpoch(sessionEpoch) }
-      );
-      if ($("agentWorkspaceEmailInput")) $("agentWorkspaceEmailInput").value = "";
-      if ($("agentWorkspaceNpubInput")) $("agentWorkspaceNpubInput").value = "";
-      await loadVaultMetadata({ preserveActive: true });
-      requireCurrentSessionEpoch(sessionEpoch);
-      setAccessResult(
-        "ready",
-        "Agent paired",
-        `${identityDisplay(identity.npub)} can read and write only ${result.pairing.workspaceFolderId}.`,
-        { delegationId: result.pairing.delegationId }
-      );
-      log("Paired Agent Principal with a restricted Personal Vault Folder.", {
-        agentNpub: identityDisplay(identity.npub),
-        folderId: result.pairing.workspaceFolderId,
-      });
-    } catch (error) {
-      failAccessOperation(sessionEpoch, "Agent pairing failed", error);
-      throw error;
-    } finally {
-      finishAccessOperation(sessionEpoch);
-    }
   }
 
   function vaultInvitationLinkPath(code) {
@@ -9824,9 +9751,15 @@ const FiniteBrainProductClient = (() => {
     const rows = (objects || [])
       .filter((object) => object.folderId === folderId && !object.deleted)
       .sort((left, right) => String(left.objectId).localeCompare(String(right.objectId)));
-    const unreadable = rows.filter((object) => object.status !== "ready" || typeof object.text !== "string");
+    const unreadable = rows.filter(
+      (object) =>
+        object.status !== "ready" ||
+        (isAssetObject(object)
+          ? typeof object.bytesBase64 !== "string"
+          : typeof object.text !== "string")
+    );
     if (unreadable.length) {
-      throw new Error("Every live Page in this Folder must be readable before rotating access");
+      throw new Error("Every live object in this Folder must be readable before rotating access");
     }
     return rows;
   }
@@ -10577,12 +10510,17 @@ const FiniteBrainProductClient = (() => {
     const vaultId = input.vaultId || state.activeVaultId;
     const metadata = input.metadata || state.metadata;
     const targetNpub = input.targetNpub;
-    npubToHex(targetNpub);
+    if (targetNpub) npubToHex(targetNpub);
+    if (!targetNpub && !input.recipients) {
+      throw new Error("Folder access removal requires a target identity");
+    }
     const currentKeyVersion = row.currentKeyVersion || 1;
     const currentKey = keyring.keys.get(folderKeyId(vaultId, row.id, currentKeyVersion));
     if (!currentKey) throw new Error(`Open the Folder Key for ${row.path} before removing access`);
 
-    const { recipients } = folderAccessRemovalRecipients(metadata, row, targetNpub);
+    const recipients = input.recipients
+      ? uniqueNpubs(input.recipients)
+      : folderAccessRemovalRecipients(metadata, row, targetNpub).recipients;
     const newKeyVersion = input.newKeyVersion || currentKeyVersion + 1;
     if (newKeyVersion !== currentKeyVersion + 1) {
       throw new Error("Folder access removal must rotate to the next key version");
@@ -10620,6 +10558,13 @@ const FiniteBrainProductClient = (() => {
 
     const reencryptedRecords = [];
     for (const object of liveReadableFolderObjects(input.objects, row.id)) {
+      const plaintext = isAssetObject(object)
+        ? await encodeFolderObjectAssetPlaintext(
+            object.path,
+            base64ToBytes(object.bytesBase64),
+            object.contentType || "application/octet-stream"
+          )
+        : encodeFolderObjectPagePlaintext(object.path || `${object.objectId}.md`, object.text);
       const write = await buildPageWriteRequest(keyring, {
         authorNpub: actorNpub,
         baseRevision: object.revision,
@@ -10628,7 +10573,7 @@ const FiniteBrainProductClient = (() => {
         keyVersion: newKeyVersion,
         objectId: object.objectId,
         operation: "update",
-        plaintext: encodeFolderObjectPagePlaintext(object.path || `${object.objectId}.md`, object.text),
+        plaintext,
         signEvent: requireBrainEventAuthorizer("folder-object-revision", input),
         vaultId,
       });
@@ -10639,7 +10584,7 @@ const FiniteBrainProductClient = (() => {
     }
 
     const accessChangeEvent = await buildAdminAccessChangeEvent({
-      action: "remove-folder-access",
+      action: input.action || "remove-folder-access",
       adminNpub: actorNpub,
       createdAtUnix,
       folderId: row.id,
@@ -10647,7 +10592,7 @@ const FiniteBrainProductClient = (() => {
       brainIdentityProvider: input.brainIdentityProvider,
       provider: input.provider,
       signEvent: input.signEvent,
-      targetNpub,
+      targetNpub: input.eventTargetNpub === undefined ? targetNpub : input.eventTargetNpub,
       vaultId,
     });
 
@@ -10659,6 +10604,65 @@ const FiniteBrainProductClient = (() => {
       folderKey,
       recipientNpubs: recipients,
     };
+  }
+
+  async function replacePersonalAgentFromPanel(remove = false) {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const metadata = state.metadata;
+    const vaultId = state.activeVaultId;
+    const actorNpub = currentActorNpub();
+    if (metadata?.kind !== "personal" || metadata.ownerUserId !== actorNpub) {
+      throw new Error("Only the Personal Vault owner can replace its Personal Agent");
+    }
+    const oldAgent = metadata.personalAgent?.agentNpub;
+    if (remove && !oldAgent) throw new Error("No Personal Agent is assigned");
+    const agentEmail = remove ? null : $("personalAgentEmailInput")?.value.trim().toLowerCase();
+    if (!remove && !looksLikeEmailIdentity(agentEmail)) throw new Error("Enter the replacement agent email");
+    if (
+      window.confirm &&
+      !window.confirm(
+        remove
+          ? "Remove your Personal Agent and rotate every Folder Key? Your Vault and content will remain."
+          : oldAgent
+            ? `Replace your Personal Agent with ${agentEmail} and rotate every Folder Key?`
+            : `Assign ${agentEmail} as your Personal Agent and rotate every Folder Key?`
+      )
+    ) return;
+    const replacementNpub = remove
+      ? null
+      : await normalizedNpubValue(agentEmail, "Enter the replacement agent email");
+    requireCurrentSessionEpoch(sessionEpoch);
+    const rotationMetadata = {
+      ...metadata,
+      personalAgent: replacementNpub ? { agentNpub: replacementNpub } : null,
+    };
+    const rotations = [];
+    for (const row of metadataFolderRows(metadata)) {
+      const rotation = await buildFolderAccessRemovalRequest(state.keyring, {
+        action: "rotate-folder-key",
+        actorNpub,
+        eventTargetNpub: replacementNpub,
+        metadata: rotationMetadata,
+        objects: projectionPages(),
+        recipients: uniqueNpubs([metadata.ownerUserId, replacementNpub]),
+        row,
+        targetNpub: oldAgent || null,
+        vaultId,
+      });
+      rotations.push({ folderId: row.id, ...rotation });
+      requireCurrentSessionEpoch(sessionEpoch);
+    }
+    const updated = await protectedRequest(
+      `/_admin/vaults/${encodeURIComponent(vaultId)}/personal-agent`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ agentEmail, rotations }),
+      }
+    );
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.metadata = updated;
+    if ($("personalAgentEmailInput")) $("personalAgentEmailInput").value = "";
+    await refreshReader();
   }
 
   async function grantFolderAccessFromPanel(targetValue) {
@@ -11454,17 +11458,16 @@ const FiniteBrainProductClient = (() => {
         log("Failed to add Vault admin.", { error: error.message });
       });
     });
-    onOptionalClick("pairAgentWorkspaceButton", () => {
-      pairAgentWorkspaceFromPanel().catch((error) => {
-        reportClientActionFailure(error);
-        log("Failed to pair Agent Principal.", { error: error.message });
-      });
+    onOptionalClick("replacePersonalAgentButton", () => {
+      replacePersonalAgentFromPanel(false).catch((error) => reportClientActionFailure(error));
+    });
+    onOptionalClick("removePersonalAgentButton", () => {
+      replacePersonalAgentFromPanel(true).catch((error) => reportClientActionFailure(error));
     });
     for (const [inputId, buttonId] of [
       ["vaultMemberNpubInput", "addVaultMemberButton"],
       ["vaultAdminNpubInput", "addVaultAdminButton"],
-      ["agentWorkspaceEmailInput", "pairAgentWorkspaceButton"],
-      ["agentWorkspaceNpubInput", "pairAgentWorkspaceButton"],
+      ["personalAgentEmailInput", "replacePersonalAgentButton"],
     ]) {
       const input = $(inputId);
       if (!input) continue;
@@ -11475,9 +11478,6 @@ const FiniteBrainProductClient = (() => {
         if (!button?.disabled) button.click();
       });
     }
-    $("agentWorkspaceEmailInput")?.addEventListener("input", () => {
-      renderAgentWorkspacePairings(state.metadata);
-    });
     onOptionalClick("createShareLinkButton", () => {
       createShareLinkFromPanel().catch((error) => {
         reportClientActionFailure(error);
@@ -11865,7 +11865,6 @@ const FiniteBrainProductClient = (() => {
     mountAccessPanelInSettings();
     mountInvitationPanelInSettings();
     bind();
-    applySuggestedAgentIdentity();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();
     await loadConfig();
@@ -11878,12 +11877,7 @@ const FiniteBrainProductClient = (() => {
     accessIntentValue,
     accessPanelState,
     accessPeopleSummary,
-    agentWorkspacePairingRows,
-    agentWorkspacePairingsPath,
-    agentWorkspacePairingPrompt,
-    applySuggestedAgentIdentity,
-    resolveAgentWorkspacePairingIdentity,
-    buildAgentWorkspacePairingRequest,
+    actorHasDestructiveAuthority,
     adminAccessChangeTags,
     buildAdminAccessChangeEvent,
     buildFolderKeyGrantRequest,
@@ -11929,7 +11923,6 @@ const FiniteBrainProductClient = (() => {
     emailInviteInstructionsPath,
     emailInviteScope,
     emailInviteScopeJson,
-    ensureAgentWorkspacePairing,
     decodeFolderObjectPlaintext,
     encryptFolderObject,
     encodeFolderObjectAssetPlaintext,
@@ -11939,6 +11932,8 @@ const FiniteBrainProductClient = (() => {
     folderAllowsDirectGrant,
     folderCreationHierarchy,
     folderCreationParent,
+    folderRecipientsForAccess,
+    folderSubtreeSummary,
     folderShareLinkRows,
     graphEmptyStateCopy,
     graphLayout,
@@ -11980,6 +11975,7 @@ const FiniteBrainProductClient = (() => {
     pageReferencesForPage,
     pagePathLabel,
     pageStatsForText,
+    personalVaultAgentConfirmationMessage,
     personalVaultIdForPubkey,
     plaintextDevelopmentGrantFromExportGrant,
     plaintextGrantFromGiftWrappedExportGrant,

@@ -4829,6 +4829,10 @@ mod tests {
         assert!(bundled.contains("FINITE_BRAIN_SERVER_URL"));
         assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
         assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
+        assert!(bundled.contains("bootstrap-personal --server"));
+        assert!(bundled.contains("role `personal_agent`"));
+        assert!(!bundled.contains("/brain setup"));
+        assert!(!bundled.contains("personal-vault-bootstrap-authorizations"));
         assert!(!bundled.contains("SERVER=\"https://finite.computer\""));
         assert!(!bundled.contains("TREE=\"$HOME/finitebrain/$VAULT\""));
     }

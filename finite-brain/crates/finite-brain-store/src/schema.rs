@@ -92,6 +92,14 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 11)? {
+            tx.execute_batch(SCHEMA_V11)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![11, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -429,85 +437,10 @@ CREATE UNIQUE INDEX vault_invitations_pending_email_target
     WHERE status = 'pending' AND target_kind = 'email_bootstrap';
 "#;
 
-const SCHEMA_V7: &str = r#"
-CREATE TABLE brain_email_access_delegations (
-    id TEXT PRIMARY KEY NOT NULL,
-    vault_id TEXT NOT NULL,
-    owner_npub TEXT NOT NULL,
-    agent_npub TEXT NOT NULL,
-    workspace_folder_id TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
-    created_by_npub TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    revoked_at TEXT,
-    UNIQUE (vault_id, agent_npub),
-    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE,
-    FOREIGN KEY (vault_id, workspace_folder_id)
-        REFERENCES folders(vault_id, id) ON DELETE RESTRICT
-);
+const SCHEMA_V7: &str = "";
+const SCHEMA_V8: &str = "";
 
-CREATE TABLE brain_email_access_delegation_audit (
-    id TEXT PRIMARY KEY NOT NULL,
-    delegation_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('created', 'revoked')),
-    actor_npub TEXT NOT NULL,
-    subject_npub TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX brain_email_access_delegation_audit_by_delegation
-    ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);
-"#;
-
-const SCHEMA_V8: &str = r#"
-CREATE TABLE personal_vault_bootstrap_authorizations (
-    authorization_id TEXT PRIMARY KEY NOT NULL,
-    authorization_event_id TEXT NOT NULL UNIQUE,
-    owner_npub TEXT NOT NULL,
-    agent_npub TEXT NOT NULL,
-    vault_id TEXT NOT NULL,
-    workspace_folder_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL,
-    consumed_at TEXT NOT NULL,
-    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE,
-    FOREIGN KEY (vault_id, workspace_folder_id)
-        REFERENCES folders(vault_id, id) ON DELETE RESTRICT
-);
-"#;
-
-const SCHEMA_V9: &str = r#"
-ALTER TABLE brain_email_access_delegation_audit
-    RENAME TO brain_email_access_delegation_audit_old;
-
-CREATE TABLE brain_email_access_delegation_audit (
-    id TEXT PRIMARY KEY NOT NULL,
-    delegation_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('created', 'scope_expanded', 'revoked')),
-    actor_npub TEXT NOT NULL,
-    subject_npub TEXT NOT NULL,
-    scope_json TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
-        ON DELETE CASCADE
-);
-
-INSERT INTO brain_email_access_delegation_audit (
-    id, delegation_id, action, actor_npub, subject_npub, scope_json, occurred_at
-)
-SELECT id, delegation_id, action, actor_npub, subject_npub, scope_json, occurred_at
-FROM brain_email_access_delegation_audit_old;
-
-DROP TABLE brain_email_access_delegation_audit_old;
-
-CREATE INDEX brain_email_access_delegation_audit_by_delegation
-    ON brain_email_access_delegation_audit(delegation_id, occurred_at, id);
-"#;
-
+const SCHEMA_V9: &str = "";
 const SCHEMA_V10: &str = r#"
 CREATE TABLE personal_agents (
     vault_id TEXT PRIMARY KEY NOT NULL,
@@ -534,6 +467,35 @@ CREATE TABLE personal_agent_audit (
 
 CREATE INDEX personal_agent_audit_by_vault
     ON personal_agent_audit(vault_id, occurred_at, id);
+"#;
+
+const SCHEMA_V11: &str = r#"
+CREATE TABLE deleted_folder_identities (
+    vault_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    root_folder_id TEXT NOT NULL,
+    deletion_event_id TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    root_key_version INTEGER NOT NULL CHECK (root_key_version > 0),
+    folder_count INTEGER NOT NULL CHECK (folder_count > 0),
+    object_count INTEGER NOT NULL CHECK (object_count >= 0),
+    PRIMARY KEY (vault_id, folder_id),
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+);
+
+CREATE TABLE deleted_object_identities (
+    vault_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    root_folder_id TEXT NOT NULL,
+    deletion_event_id TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (vault_id, folder_id, object_id),
+    FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
+);
 "#;
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {

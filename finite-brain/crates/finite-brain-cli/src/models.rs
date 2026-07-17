@@ -377,6 +377,8 @@ pub(crate) struct VaultMetadataView {
     pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) owner_user_id: Option<String>,
+    #[serde(default)]
+    pub(crate) personal_agent: Option<PersonalAgentView>,
     pub(crate) members: Vec<String>,
     pub(crate) admins: Vec<String>,
     pub(crate) folders: Vec<FolderMetadataView>,
@@ -384,6 +386,12 @@ pub(crate) struct VaultMetadataView {
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     #[serde(default)]
     pub(crate) grant_count: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersonalAgentView {
+    pub(crate) agent_npub: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]

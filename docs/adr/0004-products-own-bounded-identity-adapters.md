@@ -97,7 +97,11 @@ product's adapter to the client environment.
   addressed to it. It never uses the user's Brain adapter to act as the user.
 - An Agent Principal Key receives no Brain access merely because it belongs to
   the same Project or dashboard account. An authorized Brain Member must issue
-  the agent's access and Folder Key Grants explicitly.
+  the agent's access and Folder Key Grants explicitly, except for Brain's one
+  narrow initial Personal Agent bootstrap defined by ADR-0024. In that case,
+  Brain derives the account-bound human owner and Agent Principal from Core and
+  Finite Identity and atomically creates the user's first Personal Vault; the
+  standing authority cannot join an existing Vault or broaden later access.
 
 ## Consequences
 

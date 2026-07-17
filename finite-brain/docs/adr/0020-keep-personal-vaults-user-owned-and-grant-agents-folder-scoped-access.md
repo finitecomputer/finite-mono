@@ -2,12 +2,11 @@
 
 Status: superseded by ADR-0023 on 2026-07-16.
 
-Implementation note: phase one now includes limited Personal Vault members,
-idempotent owner-first pairing, Chat-issued one-use agent-first bootstrap,
-owner-only Folder-by-Folder expansion, and atomic delegation revocation with
-key rotation across the complete delegated scope. Public API tests cover both
-principals, convergence/replay failures, rollback, filtered visibility, live
-object re-encryption, and retained owner access.
+Historical implementation note: this ADR described the former limited-member,
+Chat setup-ticket, Agent Workspace, and Folder-by-Folder delegation design.
+ADR-0023 and ADR-0024 replace that design with one fully trusted Personal Agent
+and standing account-bound bootstrap authority. This document is retained only
+as decision history and is not current implementation guidance.
 
 ## Context
 

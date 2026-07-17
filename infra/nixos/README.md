@@ -214,6 +214,9 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/runtime-secrets.env` | the shared tool-provider names selected by Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` and listed in `infra/hosts/lat1/systemd/runtime-secrets.env.example` | legacy `../finitecomputer/secrets/shared-provider-keys.env`; values remain host-only, OpenRouter is not selected for the new platform, and specialization credentials stay in their owning service |
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FC_WORKOS_OPERATOR_ORG_ID`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` (+ optional `FC_RELAY_ADMIN_TOKEN`, `FC_RELAY_HOST_ENDPOINTS_JSON`) | Existing names come from the k8s Secret on old lat1; provision the same missing operator-org predicate used by Core before rollout |
 | `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
+| `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | generate one authority credential shared only by Finite Identity and its trusted Brain/Hosted Device clients; never expose it to a browser or Agent Runtime |
+| `/etc/finite/identity-mailer.env` | `RESEND_API_KEY` | provision the Finite Identity transactional-mail credential; keep delivery credentials separate from the operator credential |
+| `/etc/finite/brain-authority.env` | `FC_CORE_API_TOKEN` | provision Brain's trusted service credential for the narrow Core account/Agent resolution routes; never expose it to the Product Client |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
 | `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env` |
@@ -222,8 +225,9 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
-finite-brain has **no** secret env (plain-config `Environment=` lines only,
-per the smoke capture).
+Finite Brain reads only `/etc/finite/identity-operator.env` and
+`/etc/finite/brain-authority.env`; the Product Client and Agent Runtime never
+receive either credential.
 
 ## Google Workspace OAuth production setup
 

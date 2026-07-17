@@ -242,6 +242,84 @@ async fn operator_can_idempotently_bind_managed_agent_email_to_agent_principal()
 }
 
 #[tokio::test]
+async fn brain_resolves_account_bound_agent_and_user_principals_without_private_keys() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
+    let user = LocalIdentityKey::from_secret(BOB_SECRET).unwrap();
+    let user_npub = npub::encode(&hex::decode32(user.pubkey()).unwrap());
+    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
+
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        serde_json::json!({
+            "email": "cheater@finite.vip",
+            "agent_npub": agent_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, bound) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/account-principal-bindings",
+        serde_json::json!({
+            "workosUserId": "user_workos_owner",
+            "userNpub": user_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bound["workosUserId"], "user_workos_owner");
+    assert_eq!(bound["userNpub"], user_npub);
+    assert!(bound.get("privateKey").is_none());
+
+    let (status, agent) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/brain/agent-resolution",
+        serde_json::json!({ "agentNpub": agent_npub }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agent["agentNpub"], agent_npub);
+    assert_eq!(agent["managedAgentEmail"], "cheater@finite.vip");
+
+    let (status, owner) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/brain/user-resolution",
+        serde_json::json!({ "workosUserId": "user_workos_owner" }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(owner["workosUserId"], "user_workos_owner");
+    assert_eq!(owner["userNpub"], user_npub);
+
+    let other = LocalIdentityKey::from_secret([5_u8; 32]).unwrap();
+    let other_npub = npub::encode(&hex::decode32(other.pubkey()).unwrap());
+    let (status, conflict) = json_request_with_headers(
+        app,
+        "POST",
+        "/api/v1/operator/account-principal-bindings",
+        serde_json::json!({
+            "workosUserId": "user_workos_owner",
+            "userNpub": other_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"], "workos_account_already_bound");
+}
+
+#[tokio::test]
 async fn managed_agent_email_binding_requires_operator_and_never_reassigns() {
     let (app, _store, _mailer, _clock) = fixture();
     let alice_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());

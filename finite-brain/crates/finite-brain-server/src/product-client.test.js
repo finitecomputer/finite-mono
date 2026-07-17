@@ -156,30 +156,14 @@ assert.equal(
     name: "cheater",
     npub: suggestedAgentNpub,
   }),
-  "Brain should understand the selected runtime display identity as a pairing input hint"
+  "Brain should understand the selected runtime identity as a Personal Agent hint"
 );
 assert.equal(
   client.suggestedAgentIdentityFromNavigation(
     "?agentEmail=not-an-email&agentNpub=not-an-npub"
   ),
   null,
-  "An invalid navigation hint must not become pairing input"
-);
-context.document.getElementById("agentWorkspaceEmailInput").value = "";
-context.document.getElementById("agentWorkspaceNpubInput").value = "";
-assert.equal(
-  client.applySuggestedAgentIdentity(
-    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
-  ),
-  true
-);
-assert.equal(elements.get("agentWorkspaceEmailInput").value, "cheater@finite.vip");
-assert.equal(elements.get("agentWorkspaceNpubInput").value, suggestedAgentNpub);
-assert.equal(
-  client.agentWorkspacePairingPrompt(
-    `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
-  ),
-  "Add cheater (cheater@finite.vip) as your Personal Agent."
+  "An invalid navigation hint must not become a Personal Agent identity"
 );
 assert.equal(
   JSON.stringify(client.vaultCreateBody({
@@ -216,6 +200,20 @@ assert.equal(
     personalAgentNpub: suggestedAgentNpub,
   }),
   "Raw npub remains an advanced setup fallback when no Managed Agent Email is available"
+);
+assert.equal(
+  client.personalVaultAgentConfirmationMessage({ personalAgentEmail: "cheater@finite.vip" }),
+  "Create your Personal Vault and pair cheater@finite.vip as your Personal Agent?",
+  "User-first setup must show the readable Managed Agent Email before creation"
+);
+assert.equal(
+  JSON.stringify(client.folderRecipientsForAccess("owner", [], {
+    kind: "personal",
+    ownerUserId: client.npubFromHex("11".repeat(32)),
+    personalAgent: { agentNpub: suggestedAgentNpub },
+  }).sort()),
+  JSON.stringify([client.npubFromHex("11".repeat(32)), suggestedAgentNpub].sort()),
+  "Every Personal Vault Folder must wrap its key for both the owner and Personal Agent"
 );
 
 assert.equal(
@@ -955,15 +953,7 @@ assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeho
 assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="vaultPeopleList"/);
 assert.match(htmlSource, /id="vaultPeopleSection"/);
-assert.match(htmlSource, /id="agentWorkspacePairingSection"/);
-assert.match(htmlSource, />\s*Agent email\s*</);
-assert.match(htmlSource, /id="agentWorkspaceEmailInput"/);
-assert.match(htmlSource, /placeholder="agent@finite\.vip"/);
-assert.match(htmlSource, />\s*Advanced identity details\s*</);
-assert.match(htmlSource, /id="agentWorkspaceNpubInput"/);
-assert.doesNotMatch(htmlSource, /placeholder="Agent npub… or name@domain"/);
-assert.match(htmlSource, /id="pairAgentWorkspaceButton"/);
-assert.match(htmlSource, /id="agentWorkspacePairingList"/);
+assert.doesNotMatch(htmlSource, /agentWorkspacePairing/);
 assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
 assert.match(htmlSource, /class="vault-access-action-grid"/);
 assert.match(htmlSource, />\s*Manage members\s*</);
@@ -987,11 +977,7 @@ assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="vaultInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
-assert.match(
-  source,
-  /onOptionalClick\("pairAgentWorkspaceButton"/,
-  "The Personal Vault owner pairing control must invoke the pairing flow"
-);
+assert.doesNotMatch(source, /pairAgentWorkspace/);
 assert.match(
   source,
   /window\.addEventListener\?\.\("finite:account-session-ended", expireBrainIdentitySession\)/,
@@ -2182,10 +2168,6 @@ assert.doesNotMatch(
     },
   };
   const brainIdentityProvider = client.createNip07BrainIdentityProvider(rawNip07Provider);
-  assert.equal(
-    client.agentWorkspacePairingsPath("personal/user"),
-    "/_admin/vaults/personal%2Fuser/agent-workspace-pairings"
-  );
   const personalOwnerNpub = client.npubFromHex("33".repeat(32));
   const personalMemberNpub = client.npubFromHex("44".repeat(32));
   assert.equal(
@@ -2202,40 +2184,6 @@ assert.doesNotMatch(
     ),
     "member"
   );
-  assert.equal(
-    JSON.stringify(client.agentWorkspacePairingRows({
-      pairings: [
-        {
-          delegationId: "delegation-1",
-          agentNpub: client.npubFromHex("22".repeat(32)),
-          workspaceFolderId: "agent-workspace",
-          status: "active",
-          scope: { folderIds: ["agent-workspace"], permission: "read_write" },
-          audit: [{ action: "created", occurredAt: "2026-07-13T00:00:00.000Z" }],
-        },
-      ],
-    }, `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${client.npubFromHex("22".repeat(32))}`)),
-    JSON.stringify([
-    {
-      id: "delegation-1",
-      agentNpub: client.npubFromHex("22".repeat(32)),
-      displayIdentity: "cheater · cheater@finite.vip",
-      folderId: "agent-workspace",
-      status: "active",
-      title: "Agent Workspace",
-      detail: "Active · read/write · explicitly paired by the Personal Vault owner",
-    },
-    ])
-  );
-  const fallbackIdentity = await client.resolveAgentWorkspacePairingIdentity(
-    "stale@finite.vip",
-    personalMemberNpub,
-    async (value) => {
-      if (value.includes("@")) throw new Error("unresolvable email");
-      return { npub: value };
-    }
-  );
-  assert.equal(fallbackIdentity.npub, personalMemberNpub);
   assert.equal(brainIdentityProvider.version, "finite-brain-identity-provider-v1");
   assert.deepEqual(
     Object.keys(brainIdentityProvider).sort(),
@@ -2441,26 +2389,6 @@ assert.doesNotMatch(
   });
   assert.equal(connectedBrainIdentity.publicKeyHex, "11".repeat(32));
   assert.match(connectedBrainIdentity.npub, /^npub1/);
-  const agentNpub = client.npubFromHex("22".repeat(32));
-  const pairingPlan = await client.buildAgentWorkspacePairingRequest({
-    vaultId: "personal",
-    ownerNpub: connectedBrainIdentity.npub,
-    agentNpub,
-    folderId: "agent-workspace",
-    name: "Agent Workspace",
-    path: "Agent Workspace",
-    rawKey: new Uint8Array(32).fill(9),
-    createdAtUnix: 1_780_000_000,
-    encrypt: async (_peerHex, plaintext) => `wrapped:${plaintext}`,
-    signEvent: rawNip07Provider.signEvent,
-  });
-  assert.equal(pairingPlan.path, "/_admin/vaults/personal/agent-workspace-pairings");
-  assert.equal(pairingPlan.body.agentNpub, agentNpub);
-  assert.equal(
-    JSON.stringify(pairingPlan.body.grants.map((grant) => grant.recipientNpub).sort()),
-    JSON.stringify([agentNpub, connectedBrainIdentity.npub].sort())
-  );
-  assert.equal(pairingPlan.body.accessChangeEvent.kind, 30078);
   await assert.rejects(
     () =>
       brainIdentityProvider.authorizeHttpRequest({
@@ -3950,6 +3878,23 @@ assert.doesNotMatch(
     signEvent: signDeterministically,
     vaultId: "smoke",
   });
+  const restrictedAssetBytes = new TextEncoder().encode("%PDF restricted asset\n");
+  const restrictedAssetWrite = await client.buildPageWriteRequest(keyring, {
+    authorNpub,
+    baseRevision: null,
+    createdAtUnix: 1780000002,
+    folderId: "restricted",
+    keyVersion: 1,
+    nonceBytes: new Uint8Array(12).fill(2),
+    objectId: "obj_restrictedasset1",
+    plaintext: await client.encodeFolderObjectAssetPlaintext(
+      "raw/assets/restricted.pdf",
+      restrictedAssetBytes,
+      "application/pdf"
+    ),
+    signEvent: signDeterministically,
+    vaultId: "smoke",
+  });
   const targetNpub = client.npubFromHex("11".repeat(32));
   const remainingNpub = client.npubFromHex("22".repeat(32));
   const removal = await client.buildFolderAccessRemovalRequest(keyring, {
@@ -3973,6 +3918,18 @@ assert.doesNotMatch(
         text: "# Restricted\n\nRotate this page.",
         ciphertext: restrictedWrite.ciphertext,
       },
+      {
+        vaultId: "smoke",
+        folderId: "restricted",
+        objectId: "obj_restrictedasset1",
+        revision: 1,
+        status: "ready",
+        type: "asset",
+        path: "raw/assets/restricted.pdf",
+        bytesBase64: Buffer.from(restrictedAssetBytes).toString("base64"),
+        contentType: "application/pdf",
+        ciphertext: restrictedAssetWrite.ciphertext,
+      },
     ],
     newRawKey: new Uint8Array(32).fill(9),
     createdAtUnix: 1780000100,
@@ -3986,7 +3943,7 @@ assert.doesNotMatch(
     JSON.stringify([authorNpub, remainingNpub].sort())
   );
   assert.equal(removal.grants.some((grant) => grant.recipientNpub === targetNpub), false);
-  assert.equal(removal.reencryptedRecords.length, 1);
+  assert.equal(removal.reencryptedRecords.length, 2);
   assert.equal(removal.reencryptedRecords[0].objectId, "obj_restricted0001");
   assert.equal(removal.reencryptedRecords[0].baseRevision, 1);
   assert.equal(removal.reencryptedRecords[0].keyVersion, 2);
@@ -4010,6 +3967,21 @@ assert.doesNotMatch(
     ciphertext: removal.reencryptedRecords[0].ciphertext,
   });
   assert.equal(rotatedPage.status, "ready");
+  const rotatedAssetRecord = removal.reencryptedRecords.find(
+    (record) => record.objectId === "obj_restrictedasset1"
+  );
+  const rotatedAsset = await client.openFolderObject(keyring, {
+    vaultId: "smoke",
+    folderId: "restricted",
+    objectId: "obj_restrictedasset1",
+    revision: 2,
+    ciphertext: rotatedAssetRecord.ciphertext,
+  });
+  assert.equal(rotatedAsset.status, "ready");
+  assert.equal(rotatedAsset.type, "asset");
+  assert.equal(rotatedAsset.path, "raw/assets/restricted.pdf");
+  assert.equal(rotatedAsset.contentType, "application/pdf");
+  assert.equal(new TextDecoder().decode(rotatedAsset.bytes), "%PDF restricted asset\n");
   assert.equal(rotatedPage.text, "# Restricted\n\nRotate this page.");
 
   const readerFolders = client.readerFolderRows(
@@ -4208,13 +4180,39 @@ assert.doesNotMatch(
     JSON.stringify(client.editorSlashCommandRows("code").map((row) => row.id)),
     JSON.stringify(["codeblock", "code"])
   );
-  const folderMenu = client.contextMenuItemsForTarget({ type: "folder", folderId: "crypto" });
+  const ownerNpub = client.npubFromHex("11".repeat(32));
+  const folderMenu = client.contextMenuItemsForTarget(
+    { type: "folder", folderId: "crypto" },
+    { kind: "personal", ownerUserId: ownerNpub, folders: [] },
+    ownerNpub
+  );
   assert.equal(folderMenu.some((item) => item.action === "new-page"), true);
   assert.equal(folderMenu.some((item) => item.action === "share-folder"), true);
   assert.equal(
     folderMenu.some((item) => item.action === "delete-folder" || item.label === "Delete Folder"),
+    true,
+    "A Personal Vault owner must see permanent Folder deletion"
+  );
+  assert.equal(
+    client.contextMenuItemsForTarget(
+      { type: "folder", folderId: "crypto" },
+      { kind: "organization", admins: [ownerNpub], folders: [] },
+      client.npubFromHex("22".repeat(32))
+    ).some((item) => item.action === "delete-folder"),
     false,
-    "Folder context menus must not advertise deletion before the server contract exists"
+    "A non-admin Organization member must not see Folder deletion"
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.folderSubtreeSummary("root", {
+      folders: [
+        { id: "root", name: "Root", parentFolderId: null },
+        { id: "child", name: "Child", parentFolderId: "root" },
+      ],
+    }, [
+      { folderId: "root", objectId: "one" },
+      { folderId: "child", objectId: "two" },
+    ]))),
+    { folderIds: ["root", "child"], folderCount: 2, objectCount: 2, name: "Root" }
   );
   const restrictedParent = client.folderCreationParent("restricted", [
     {
@@ -4279,14 +4277,28 @@ assert.doesNotMatch(
     /parentFolderId: hierarchy\.parentFolderId,\s*path: hierarchy\.path,/s,
     "Folder creation must submit the resolved hierarchy metadata"
   );
-  const pageMenu = client.contextMenuItemsForTarget({
-    type: "page",
-    folderId: "crypto",
-    objectId: "page-a",
-  });
+  const pageMenu = client.contextMenuItemsForTarget(
+    {
+      type: "page",
+      folderId: "crypto",
+      objectId: "page-a",
+      revision: 1,
+    },
+    { kind: "personal", ownerUserId: ownerNpub },
+    ownerNpub
+  );
   assert.equal(pageMenu.some((item) => item.action === "open-graph"), true);
   assert.equal(pageMenu.some((item) => item.action === "edit-page"), false);
   assert.equal(pageMenu.find((item) => item.action === "delete-page").disabled, false);
+  assert.equal(
+    client.contextMenuItemsForTarget(
+      { type: "page", folderId: "crypto", objectId: "page-a", revision: 1 },
+      { kind: "organization", admins: [ownerNpub] },
+      client.npubFromHex("22".repeat(32))
+    ).some((item) => item.action === "delete-page"),
+    false,
+    "A non-admin Organization member must not see persisted Page deletion"
+  );
   assert.equal(
     client.pageDeletionDisposition({ localDraft: true, revision: 0 }),
     "discard-local",
@@ -4326,13 +4338,17 @@ assert.doesNotMatch(
     false,
     "A persisted Page must not be discarded locally"
   );
-  const localDraftMenu = client.contextMenuItemsForTarget({
-    type: "page",
-    folderId: "restricted",
-    localDraft: true,
-    objectId: "obj_new_page_draft",
-    revision: 0,
-  });
+  const localDraftMenu = client.contextMenuItemsForTarget(
+    {
+      type: "page",
+      folderId: "restricted",
+      localDraft: true,
+      objectId: "obj_new_page_draft",
+      revision: 0,
+    },
+    { kind: "organization", admins: [] },
+    client.npubFromHex("22".repeat(32))
+  );
   assert.equal(
     localDraftMenu.find((item) => item.action === "delete-page").label,
     "Discard unsaved Page",

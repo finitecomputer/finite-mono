@@ -8,6 +8,16 @@ impl BrainStore {
         access_user_ids: &BTreeSet<UserId>,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
+        let was_deleted = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE vault_id = ?1 AND folder_id = ?2)",
+            params![vault_id.as_str(), folder.id.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if was_deleted {
+            return Err(StoreError::BrokenInvariant {
+                reason: "deleted Folder identities cannot be reused".to_owned(),
+            });
+        }
         if folder.current_key_version != 1 {
             return Err(StoreError::BrokenInvariant {
                 reason: "new folders must start at key version 1".to_owned(),
@@ -63,6 +73,16 @@ impl BrainStore {
         folder: &Folder,
         access_user_ids: &BTreeSet<UserId>,
     ) -> Result<(), StoreError> {
+        let was_deleted = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE vault_id = ?1 AND folder_id = ?2)",
+            params![vault_id.as_str(), folder.id.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if was_deleted {
+            return Err(StoreError::BrokenInvariant {
+                reason: "deleted Folder identities cannot be reused".to_owned(),
+            });
+        }
         let vault = self.load_core_vault(vault_id)?;
         validate_hierarchy(&self.conn, vault_id, folder)?;
         validate_access_list_shape(folder, access_user_ids)?;
@@ -112,8 +132,13 @@ impl BrainStore {
             .get(folder_id)
             .cloned()
             .unwrap_or_default();
-        let required = required_recipients(&stored.vault, folder, &access_user_ids)?;
-        validate_folder_grants(&stored.vault, folder, &required, grants)?;
+        let personal_agent = stored
+            .personal_agent
+            .as_ref()
+            .map(|relationship| &relationship.agent_npub);
+        let required =
+            required_recipients(&stored.vault, folder, &access_user_ids, personal_agent)?;
+        validate_folder_grants(&stored.vault, folder, &required, grants, personal_agent)?;
 
         let tx = self.conn.transaction()?;
         for grant in grants {
@@ -148,15 +173,6 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: folder_id.to_string(),
             })?;
-        if active_agent_delegation_scope(&self.conn, vault_id, user_id)?
-            .is_some_and(|folder_ids| !folder_ids.iter().any(|delegated| delegated == folder_id))
-        {
-            return Err(StoreError::BrokenInvariant {
-                reason:
-                    "active Agent Workspace access must be expanded through delegation expansion"
-                        .to_owned(),
-            });
-        }
         let adds_personal_member = stored.vault.kind == VaultKind::Personal
             && !stored
                 .vault
@@ -181,7 +197,14 @@ impl BrainStore {
         }
         validate_access_membership(&stored.vault, &BTreeSet::from([user_id.clone()]))?;
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(&stored.vault, grant)?;
+        validate_grant_issuer(
+            &stored.vault,
+            grant,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         if grant.folder_id != *folder_id {
             return Err(StoreError::BrokenInvariant {
                 reason: "grant folder id must match folder metadata".to_owned(),
@@ -313,22 +336,26 @@ impl BrainStore {
                 reason: "folder access target does not currently have access".to_owned(),
             });
         }
-        let is_active_agent_scope =
-            active_agent_delegation_scope(&self.conn, vault_id, removed_user_id)?.is_some_and(
-                |folder_ids| folder_ids.iter().any(|delegated| delegated == folder_id),
-            );
-        if is_active_agent_scope {
-            return Err(StoreError::BrokenInvariant {
-                reason:
-                    "active Agent Workspace access must be removed through delegation revocation"
-                        .to_owned(),
-            });
-        }
 
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = new_key_version;
-        let required = required_recipients(&stored.vault, &rotated_folder, &remaining_access)?;
-        validate_folder_grants(&stored.vault, &rotated_folder, &required, grants)?;
+        let personal_agent = stored
+            .personal_agent
+            .as_ref()
+            .map(|relationship| &relationship.agent_npub);
+        let required = required_recipients(
+            &stored.vault,
+            &rotated_folder,
+            &remaining_access,
+            personal_agent,
+        )?;
+        validate_folder_grants(
+            &stored.vault,
+            &rotated_folder,
+            &required,
+            grants,
+            personal_agent,
+        )?;
 
         let live_objects = self
             .load_current_objects(vault_id)?
@@ -380,37 +407,4 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
-}
-
-fn active_agent_delegation_scope(
-    conn: &Connection,
-    vault_id: &VaultId,
-    agent_npub: &UserId,
-) -> Result<Option<Vec<FolderId>>, StoreError> {
-    let scope_json = conn
-        .query_row(
-            r#"
-            SELECT scope_json
-            FROM brain_email_access_delegations
-            WHERE vault_id = ?1
-              AND agent_npub = ?2
-              AND status = 'active'
-            "#,
-            params![vault_id.as_str(), agent_npub.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    scope_json
-        .map(|scope_json| {
-            let folder_ids = serde_json::from_str::<Vec<String>>(&scope_json).map_err(|error| {
-                StoreError::InvalidRecord {
-                    reason: format!("delegation scope did not parse: {error}"),
-                }
-            })?;
-            folder_ids
-                .into_iter()
-                .map(|folder_id| FolderId::new(folder_id).map_err(StoreError::from))
-                .collect::<Result<Vec<_>, StoreError>>()
-        })
-        .transpose()
 }

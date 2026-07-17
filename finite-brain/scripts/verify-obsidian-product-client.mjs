@@ -288,7 +288,8 @@ function checkStaticShell() {
   assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");
   assertNotIncludes(js, "readerMode", "Product Client JS");
-  assertNotIncludes(js, 'action: "delete-folder"', "Product Client JS");
+  assertIncludes(js, 'action: "delete-folder"', "Product Client JS");
+  assertIncludes(js, "actorHasDestructiveAuthority(metadata, actorNpub)", "Product Client JS");
   for (const legacyMarker of [
     "accessFolderViewButton",
     "accessVaultViewButton",

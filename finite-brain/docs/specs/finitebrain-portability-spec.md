@@ -218,18 +218,11 @@ A Vault is the top-level privacy container.
 
 Personal Vault:
 
-- Has exactly one owner identity in `ownerUserId`.
-- Starts with Folder-scoped wiki roots:
-  - `getting-started`: role `personal_home`, access `owner`
-  - `restricted`: role `folder`, access `restricted`
-- Does not use ordinary organization membership/admin lists for the owner.
-- May contain limited Member Identities only for explicitly shared restricted
-  Folders. A limited Personal Vault Member is neither an owner nor an admin and
-  does not inherit access to any other Folder.
-- Each initial user-agent pairing uses a dedicated restricted **Agent Workspace
-  Folder**. The Personal Vault owner and the paired Agent Principal each receive
-  their own Folder Key Grant for that Folder; the agent receives no access to
-  the owner-only `getting-started` Folder.
+- Has exactly one owner identity in `ownerUserId` and starts empty.
+- May have exactly one distinct Personal Agent. Brain automatically issues the
+  owner and Personal Agent current grants for every Folder.
+- Does not use ordinary organization membership/admin lists for its owner or
+  Personal Agent. Explicit restricted-Folder sharing remains separate.
 
 Organization Vault:
 
@@ -509,46 +502,14 @@ Vault bootstrap is the first atomic access-control boundary.
 
 Personal Vault bootstrap:
 
-- Create one Vault with `kind: "personal"` and `ownerUserId` equal to the
-  user for whom the Personal Vault is being created. A user-signed path names
-  its acting User as the owner. A Chat-triggered agent path requires an explicit
-  user-approved **Personal Vault Bootstrap Authorization** and still names that
-  user, never the agent, as the owner. The authorization is short-lived,
-  single-use, and bound to that user, that Agent Principal, and the initial
-  Agent Workspace Folder.
-- Create the default personal wiki scope Folders from Section 4.1 with current
-  key version `1` and Folder Key Grants for the owner.
-- When a valid agent pairing is present, atomically create the dedicated Agent
-  Workspace Folder, add the Agent Principal as a limited Member, record its
-  Folder Access, record the durable Brain Email Access Delegation, and store
-  current Folder Key Grants for both the owner and the Agent Principal. The
-  agent is not an admin and receives no owner-folder grant.
-- In the first user-first implementation, the owner calls
-  `POST /_admin/vaults/{vaultId}/agent-workspace-pairings` after ensuring the
-  Personal Vault. The signed request includes the distinct agent npub, the
-  dedicated Folder metadata, the owner-signed access-change event, and current
-  NIP-59 grants for the owner and agent. Exact retries return the same durable
-  delegation; `GET` on the same path exposes its fixed initial scope, lifecycle
-  state, and audit record to the owner.
-- The user-first and agent-first paths MUST converge on the same single
-  Personal Vault for that owner. A failed or unauthorized delegated bootstrap
-  MUST create neither a user-owned Vault nor an agent-accessible Folder.
-- A successful agent-first bootstrap MUST atomically consume its Personal Vault
-  Bootstrap Authorization. Replay, expiry, a different user, a different Agent
-  Principal, a different Folder scope, or a later access expansion MUST fail.
-- The current agent-first route is `POST /_admin/personal-vault-bootstrap`.
-  Chat's explicit setup action obtains the bounded request bundle from
-  `POST /v1/brain/personal-vault-bootstrap-authorizations`; the Agent Principal
-  forwards that bundle and signs the protected Brain request as itself. The
-  bundle includes both the one-use bootstrap authorization and the owner's
-  canonical Agent Workspace access-change event; Brain verifies that both name
-  the same owner, Vault, Folder, key version, and Agent Principal before any
-  state is written.
-- Seed ordinary encrypted Folder Objects for default Pages:
-  - `AGENTS.md`, `HUMANS.md`, `README.md`, and orientation Pages in
-    `getting-started`
-  - `config.md`, `_index.md`, and `log.md` in each default personal Folder
-  - a restricted example Page in `restricted`
+- Atomically create one empty `kind: "personal"` Vault, with the User Nostr
+  Identity as sole owner and one distinct Personal Agent.
+- User-first setup resolves the Managed Agent Email before writing state.
+- Agent-first setup uses `POST /_admin/personal-vault-bootstrap`; Brain derives
+  the owner through Core account association and Finite Identity. The caller
+  cannot supply an owner, and Chat supplies no Brain authorization.
+- Both paths converge on the same Vault and relationship. Exact retries by the
+  established Personal Agent are idempotent; another agent fails closed.
 
 Organization Vault bootstrap:
 
@@ -1012,33 +973,14 @@ Removing Folder Access:
 - Requires a signed access-change authorization from the same controlling Vault
   authority.
 
-### 6.5 Personal Vault Agent Access
+### 6.5 Personal Agent Access
 
-The initial agent-first bootstrap may establish the Agent Workspace Folder only
-with the explicit, user-approved, single-use Personal Vault Bootstrap
-Authorization described in Section 4.8. That setup atomically creates the
-durable Brain Email Access Delegation, explicit limited membership and Folder
-Access, and a current Folder Key Grant addressed to the Agent Principal's own
-npub. Once a Personal Vault exists, its owner alone may establish, expand, or
-revoke an Agent Principal's access. The default scope is the Agent Workspace
-Folder; later scope expansion is Folder-by-Folder and never makes the agent an
-owner or admin.
-
-Revocation first disables the Brain Email Access Delegation and removes the
-agent's Folder Access, then rotates every affected Folder Key and re-encrypts
-live Folder Objects for the remaining recipients. It does not claim to erase
-plaintext or prior keys the agent already retained.
-
-The current owner lifecycle routes are:
-
-- `POST /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}/folders/{folderId}`
-  adds exactly one restricted Folder with an agent-addressed current grant.
-- `DELETE /_admin/vaults/{vaultId}/agent-workspace-pairings/{agentNpub}` revokes
-  the delegation. Its body MUST contain every Folder in the current delegated
-  scope exactly once, with the next key version, every live object re-encrypted
-  exactly once, grants for all and only the remaining recipients, and an
-  owner-signed removal event per Folder. Brain commits the complete revocation
-  atomically or leaves the active delegation unchanged.
+The Personal Agent has full operational access to every current and future
+Personal Vault Folder, but is never the owner. New Folder creation always wraps
+the key for the owner and current Personal Agent. Only the human owner can
+replace or remove the Personal Agent. That operation rotates every current
+Folder Key, re-encrypts live objects, swaps or vacates the role, and commits
+atomically. It does not claim to erase plaintext or prior keys already retained.
 
 ### 6.6 Folder Key Rotation
 

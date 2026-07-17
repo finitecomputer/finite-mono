@@ -603,6 +603,8 @@ impl Stack {
                 self.finitechat_dir(),
                 self.hosted_web_device_dir(),
                 self.finitesites_dir(),
+                self.finite_identity_dir(),
+                self.finite_brain_dir(),
                 self.finite_home_dir(),
             ] {
                 if dir.exists() {
@@ -1010,13 +1012,21 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[String::from("exec cargo run -p finitechat-hosted-device")],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.identity_authority_secret_file().display().to_string())
+                ),
+                String::from("exec cargo run -p finitechat-hosted-device"),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -1034,6 +1044,7 @@ wait "$postgres_pid"
                     self.hosted_web_device_token.clone(),
                 ),
                 ("FINITECHAT_SERVER_URL", self.finitechat_url()),
+                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.hosted_web_device, 1, 2, 3, 45);
@@ -1095,13 +1106,25 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[String::from("exec cargo run -p finite-brain-app")],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.core_secret_file().display().to_string())
+                ),
+                format!(
+                    ". {}",
+                    shell_quote(&self.identity_authority_secret_file().display().to_string())
+                ),
+                String::from("exec cargo run -p finite-brain-app"),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -1119,6 +1142,7 @@ wait "$postgres_pid"
                         .to_string(),
                 ),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
+                ("FC_CORE_API_BASE_URL", self.core_url()),
             ],
         );
         self.write_http_probe_host(
@@ -3332,12 +3356,16 @@ mod tests {
         stack.ensure_dirs().unwrap();
         fs::create_dir_all(stack.postgres_data_dir()).unwrap();
         fs::write(stack.postgres_data_dir().join("sentinel"), "stale").unwrap();
+        fs::write(stack.finite_identity_dir().join("sentinel"), "stale").unwrap();
+        fs::write(stack.finite_brain_dir().join("sentinel"), "stale").unwrap();
         fs::write(stack.runtime_image_dir().join("sentinel"), "preserve").unwrap();
         fs::write(stack.runner_dir().join("sentinel"), "preserve").unwrap();
 
         stack.prepare_for_start().unwrap();
 
         assert!(!stack.postgres_data_dir().join("sentinel").exists());
+        assert!(!stack.finite_identity_dir().join("sentinel").exists());
+        assert!(!stack.finite_brain_dir().join("sentinel").exists());
         assert_eq!(
             fs::read_to_string(stack.runtime_image_dir().join("sentinel")).unwrap(),
             "preserve"

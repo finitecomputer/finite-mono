@@ -139,9 +139,11 @@ Personal Agent through one atomic key-rotating relationship swap, but the
 removed agent cannot re-enroll itself. _Avoid_: Delegated Agent, Personal Vault
 Admin.
 
-Permanent deletion of the underlying agent in Core revokes the Personal Agent
-relationship and rotates current Folder Keys without deleting the Personal
-Vault or its content. Runtime stops and restarts leave the relationship intact.
+Owner-initiated removal or replacement revokes the Personal Agent relationship
+and rotates current Folder Keys without deleting the Personal Vault or its
+content. Runtime stops and restarts leave the relationship intact. Automatic
+revocation after permanent Core-agent deletion is a future integration because
+Core does not yet expose that lifecycle event.
 
 ### Direct Deletion
 

@@ -74,3 +74,8 @@ Vault and its content remain intact, and the owner may later add a replacement.
 Temporary Runtime stops, restarts, and replacements that preserve the same
 Agent Principal do not revoke access. Revocation cannot recall plaintext or old
 keys the agent already retained.
+
+Implementation status: owner-initiated removal and replacement provide this
+revocation and rotation behavior now. Automatic revocation after permanent
+Core-agent deletion remains deferred until Core exposes a permanent-agent
+deletion operation or event; Brain must not claim that integration before then.

@@ -123,7 +123,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -1517,6 +1517,16 @@ fn vault<W: Write>(
             let response = signed_json_request(env, args, "GET", "/_admin/vaults", None)?;
             write_command_response(output, json, &response)
         }
+        "bootstrap-personal" => {
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                "/_admin/personal-vault-bootstrap",
+                Some(serde_json::json!({})),
+            )?;
+            write_command_response(output, json, &response)
+        }
         "create" => {
             let values = positional_values(args);
             let vault_id = values.get(1).ok_or(CliError::MissingArgument("vault-id"))?;
@@ -1646,6 +1656,36 @@ fn folder<W: Write>(
             let route = format!("/_admin/vaults/{vault_id}/folders");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
             update_local_folder_after_create(env, folder_id, &path)?;
+            write_command_response(output, json, &response)
+        }
+        "delete" => {
+            let values = positional_values(args);
+            let folder_id = values
+                .get(1)
+                .ok_or(CliError::MissingArgument("folder-id"))?;
+            let vault_id = command_vault_id(args, env)?;
+            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let folder = metadata
+                .folders
+                .iter()
+                .find(|folder| folder.id == *folder_id)
+                .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+            let deletion_event = admin_access_change_event(
+                env,
+                &vault_id,
+                AdminAccessAction::DeleteFolder,
+                Some(folder_id),
+                None,
+                Some(folder.current_key_version),
+            )?;
+            let route = format!("/_admin/vaults/{vault_id}/folders/{folder_id}");
+            let response = signed_json_request(
+                env,
+                args,
+                "DELETE",
+                &route,
+                Some(serde_json::json!({ "deletionEvent": deletion_event })),
+            )?;
             write_command_response(output, json, &response)
         }
         other => Err(CliError::InvalidCommand(format!("folder {other}"))),
@@ -2468,7 +2508,10 @@ fn share<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_brain_core::{EncryptedFolderObjectEnvelope, FolderObjectAad, open_folder_object};
+    use finite_brain_core::{
+        BrainGrantIntent, EncryptedFolderObjectEnvelope, FolderObjectAad, open_folder_key_grant,
+        open_folder_object,
+    };
     use finite_nostr::{
         GiftWrapValidation, NostrPublicKey, decode_http_auth_header, open_gift_wrap,
     };
@@ -4670,6 +4713,39 @@ mod tests {
     }
 
     #[test]
+    fn vault_bootstrap_personal_uses_the_signed_agent_authority_route_without_owner_input() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let (server_url, server) = start_ok_capture_server(1);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "vault",
+                "bootstrap-personal",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /_admin/personal-vault-bootstrap ")
+        );
+        assert_eq!(requests[0].1, "{}");
+    }
+
+    #[test]
     fn vault_create_writes_default_pages() {
         let cases = [
             (
@@ -4677,7 +4753,7 @@ mod tests {
                 VaultKind::Personal,
                 "personal-defaults",
                 "Personal defaults",
-                vec!["getting-started", "restricted"],
+                vec![],
             ),
             (
                 "organization",
@@ -6300,6 +6376,7 @@ mod tests {
             kind: "organization".to_owned(),
             name: "Org".to_owned(),
             owner_user_id: None,
+            personal_agent: None,
             members: vec!["npub-member".to_owned()],
             admins: vec!["npub-admin".to_owned()],
             folders: Vec::new(),
@@ -6322,6 +6399,9 @@ mod tests {
             kind: "personal".to_owned(),
             name: "Personal".to_owned(),
             owner_user_id: Some("npub-owner".to_owned()),
+            personal_agent: Some(PersonalAgentView {
+                agent_npub: "npub-agent".to_owned(),
+            }),
             members: Vec::new(),
             admins: Vec::new(),
             folders: Vec::new(),
@@ -6330,7 +6410,48 @@ mod tests {
         };
         assert_eq!(
             folder_required_recipients(&personal_metadata, "restricted", &[]).unwrap(),
-            vec!["npub-owner".to_owned()]
+            vec!["npub-agent".to_owned(), "npub-owner".to_owned()]
         );
+    }
+
+    #[test]
+    fn cli_folder_grants_open_through_the_canonical_hosted_contract() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        import_identity_for(
+            &env,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let issuer = load_signer(&env).unwrap();
+        let recipient =
+            Keys::parse("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let recipient_npub = NostrPublicKey::from_protocol(recipient.public_key())
+            .to_npub()
+            .unwrap();
+        let folder_key = FolderKey::generate();
+        let grant = folder_key_grant_request(
+            &issuer,
+            "personal-test",
+            "agent-notes",
+            1,
+            &recipient_npub,
+            &folder_key,
+            &env,
+        )
+        .unwrap();
+        let opened = open_folder_key_grant(
+            &recipient,
+            &BrainGrantIntent {
+                purpose: "folder-key-grant".to_owned(),
+                vault_id: "personal-test".to_owned(),
+                recipient_npub,
+                folder_id: Some("agent-notes".to_owned()),
+                key_version: Some(1),
+            },
+            grant["wrappedEventJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened.folder_key, folder_key.to_base64());
     }
 }

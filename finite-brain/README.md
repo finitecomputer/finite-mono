@@ -107,35 +107,17 @@ When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
 identity. For `@finite.vip` emails, redemption binds the email to the current
 Local Identity Key in finite-identity and returns the NIP-05 identifier for
 that email. Run this binding flow only when the email and current key identify
-the same Principal. An agent must not redeem a human's email this way merely to
-inherit the human's Brain access; that requires a scoped, revocable Email
-Access Delegation or an invitation claim that explicitly grants the agent npub
-access without changing global identity ownership.
+the same Principal. An agent must not redeem a human's email to inherit the
+human identity. Brain instead records exactly one distinct Personal Agent for
+a Personal Vault and automatically grants it every current and future Folder
+Key. The owner can atomically replace or remove it; ownership always stays
+with the human User Nostr Identity.
 
-A Finite Brain Email Access Delegation is separate from a Sites delegation and
-is not itself a decryption key. Brain must issue current Folder Key Grants to
-the agent npub for every Folder the delegation makes readable; revoking the
-delegation must stop future authorization without rebinding either identity.
-
-The first user-owned pairing surface is
-`POST /_admin/vaults/{vault_id}/agent-workspace-pairings`. The Personal Vault
-owner signs the HTTP request and the included Folder access-change event, and
-supplies current NIP-59 grants for both the owner and the distinct Agent
-Principal. Brain atomically records the active delegation, non-admin
-membership, dedicated restricted Agent Workspace Folder, Folder Access, and
-grants. An exact retry returns the same delegation with `duplicate: true`.
-Owners inspect the durable scope and audit record with `GET` on the same path.
-This route is Brain-specific; other services own separate adapters and
-delegations.
-
-For the agent-first path, an explicit Chat setup action issues a short-lived
-bundle through
-`POST /v1/brain/personal-vault-bootstrap-authorizations`; the agent forwards it
-to `POST /_admin/personal-vault-bootstrap` using its own signed request. The
-Personal Vault owner expands a pairing one restricted Folder at a time through
-the pairing's `/folders/{folder_id}` route and revokes it through `DELETE` on
-the pairing resource. Revocation requires next-version grants and complete
-live-object re-encryption for every Folder in the current delegated scope.
+User-first creation resolves the Managed Agent Email before creating the empty
+Personal Vault. Agent-first creation uses the signed
+`POST /_admin/personal-vault-bootstrap` route; Brain derives the owning account
+through Core and the human public identity through Finite Identity. Chat does
+not issue a Brain setup ticket or grant.
 
 Hosted `/client` uses `finite-brain-identity-provider-v1` through the
 WorkOS-bound dashboard bridge. The dashboard injects a signed, expiring

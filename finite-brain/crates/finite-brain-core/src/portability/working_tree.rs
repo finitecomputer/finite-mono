@@ -347,7 +347,7 @@ fn safe_locked_reason(reason: &str) -> &'static str {
 
 fn root_agents_file(actor: &UserId) -> String {
     format!(
-        "# FiniteBrain Agent Workspace\n\nActing user: {actor}\n\n- Read and write only materialized accessible Folders.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n"
+        "# FiniteBrain Personal Agent Working Tree\n\nActing principal: {actor}\n\n- Read and write the materialized Folders available to this principal.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n"
     )
 }
 

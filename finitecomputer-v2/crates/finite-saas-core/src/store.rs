@@ -10,19 +10,19 @@ use crate::{
     AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
     AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
     AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
-    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
-    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
-    FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, BridgeCoreState,
+    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
+    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
+    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
@@ -449,6 +449,16 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.visible_projects_for_workos_user(workos_user_id).await,
             Self::Postgres(store) => store.visible_projects_for_workos_user(workos_user_id).await,
+        }
+    }
+
+    pub async fn brain_agent_account(
+        &self,
+        managed_agent_email: &str,
+    ) -> CoreResult<Option<BrainAgentAccount>> {
+        match self {
+            Self::Memory(store) => store.brain_agent_account(managed_agent_email).await,
+            Self::Postgres(store) => store.brain_agent_account(managed_agent_email).await,
         }
     }
 
@@ -1008,6 +1018,34 @@ impl MemoryCoreStore {
     ) -> CoreResult<Vec<VisibleProject>> {
         let state = self.state.lock().await;
         Ok(visible_projects_for_workos_user(&state, workos_user_id))
+    }
+
+    pub async fn brain_agent_account(
+        &self,
+        managed_agent_email: &str,
+    ) -> CoreResult<Option<BrainAgentAccount>> {
+        let email = managed_agent_email.trim().to_ascii_lowercase();
+        let state = self.state.lock().await;
+        let project = state
+            .projects
+            .values()
+            .find(|project| project.agent_email.as_deref() == Some(email.as_str()));
+        let Some(project) = project else {
+            return Ok(None);
+        };
+        let Some(user) = state.users.get(&project.owner_user_id) else {
+            return Err(crate::CoreError::Store(
+                "project owner is missing".to_owned(),
+            ));
+        };
+        let Some(workos_user_id) = user.workos_user_id.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(BrainAgentAccount {
+            workos_user_id: workos_user_id.clone(),
+            managed_agent_email: email,
+            status: "active".to_owned(),
+        }))
     }
 
     pub async fn agent_creation_requests_for_workos_user(
@@ -1721,6 +1759,32 @@ impl PostgresCoreStore {
     ) -> CoreResult<Vec<VisibleProject>> {
         let client = self.client.lock().await;
         postgres_visible_projects_for_workos_user(&*client, workos_user_id).await
+    }
+
+    pub async fn brain_agent_account(
+        &self,
+        managed_agent_email: &str,
+    ) -> CoreResult<Option<BrainAgentAccount>> {
+        let email = managed_agent_email.trim().to_ascii_lowercase();
+        let client = self.client.lock().await;
+        client
+            .query_opt(
+                "SELECT u.workos_user_id, p.agent_email
+                 FROM projects p
+                 JOIN users u ON u.id = p.owner_user_id
+                 WHERE p.agent_email = $1 AND u.workos_user_id IS NOT NULL",
+                &[&email],
+            )
+            .await
+            .map_err(store_error)?
+            .map(|row| {
+                Ok(BrainAgentAccount {
+                    workos_user_id: row.get("workos_user_id"),
+                    managed_agent_email: row.get("agent_email"),
+                    status: "active".to_owned(),
+                })
+            })
+            .transpose()
     }
 
     pub async fn agent_creation_requests_for_workos_user(
