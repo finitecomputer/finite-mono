@@ -104,6 +104,26 @@ it does not, Brain fails closed with a basic setup-required state and never
 creates another User Nostr Identity. This is a Greenfield boundary: Brain
 carries no legacy Vault or user-key migration path into the first release.
 
+### Organization Vault Requester
+
+The authenticated human whose direct request causes an Agent Principal to
+create an Organization Vault on the human's behalf. Organization Vault
+Bootstrap makes both the acting Agent Principal and this requesting User Nostr
+Identity initial members and admins and gives both the required initial Folder
+Key Grants in one atomic operation. If either identity cannot receive that
+initial access, no Vault is created. This is a Brain-enforced bootstrap, not a
+sequence of later membership mutations. The managed FiniteBrain skill passes
+the requester from authenticated message metadata, never from identity text
+supplied in the conversation. If that authenticated requester metadata is
+unavailable, the agent does not guess or create an agent-only Vault; it briefly
+asks the user to retry from an authenticated chat context. This rule does not
+auto-enroll an agent when a human creates an Organization Vault directly in the
+Product Client; agents are added explicitly in that path.
+
+A clear natural-language request to create the Organization Vault is sufficient
+authorization for this bootstrap. The agent does not add another confirmation
+step; after creation it reports that both requester and agent are admins.
+
 ### Personal Agent Access
 
 The explicit, revocable way a user's distinct Agent Principal Key works in that
