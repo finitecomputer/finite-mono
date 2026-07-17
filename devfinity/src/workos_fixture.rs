@@ -33,6 +33,7 @@ pub const CUSTOMER_EMAIL: &str = "devfinity@finite.computer";
 pub const OPERATOR_SUBJECT: &str = "user_devfinity_operator";
 pub const OPERATOR_EMAIL: &str = "operator@finite.computer";
 const KEY_ID: &str = "devfinity-local-rsa-1";
+const LOCAL_ACCESS_TOKEN_TTL_SECONDS: usize = 24 * 60 * 60;
 
 #[derive(Clone)]
 pub struct FixturePaths {
@@ -213,7 +214,8 @@ fn jwk(key: &RsaPublicKey) -> Jwk {
 fn mint(key: &EncodingKey, issuer: &str, subject: &str, org_id: Option<&str>) -> Result<String> {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KEY_ID.into());
-    let exp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize + 60 * 60;
+    let exp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize
+        + LOCAL_ACCESS_TOKEN_TTL_SECONDS;
     Ok(encode(
         &header,
         &Claims {
@@ -256,6 +258,27 @@ fn write_private(path: &FsPath, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn local_fixture_token_covers_a_full_development_day() {
+        let paths = fixture_paths();
+        prepare(&paths, "http://fixture.invalid").expect("prepare fixture");
+        let token = fs::read_to_string(&paths.customer_token).expect("read customer token");
+        let payload = token
+            .split('.')
+            .nth(1)
+            .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+            .and_then(|payload| serde_json::from_slice::<Value>(&payload).ok())
+            .expect("decode customer token claims");
+        let expires_at = payload["exp"].as_u64().expect("token expiry");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs();
+
+        assert!(expires_at.saturating_sub(now) >= 24 * 60 * 60 - 5);
+        fs::remove_dir_all(paths.root).expect("remove fixture directory");
+    }
 
     fn fixture_paths() -> FixturePaths {
         let unique = random_token().expect("generate unique fixture directory");
