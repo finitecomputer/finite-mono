@@ -16,7 +16,7 @@ digest-pinned finite-mono image.
 - The container runs as root only because the existing host-managed secret
   files are root-owned mode `0400`. It has no Linux capabilities, no service
   account token, no privilege escalation, and a read-only root filesystem.
-  FFmpeg media work is confined to a 256 MiB ephemeral workspace with two
+  FFmpeg media work is confined to a 256 MiB ephemeral workspace with four
   concurrent normalization slots.
 
 ## Verification
