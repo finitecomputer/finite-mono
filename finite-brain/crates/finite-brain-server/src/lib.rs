@@ -1424,6 +1424,9 @@ fn enrich_metadata_identities(
     if let Some(owner) = &response.owner_user_id {
         npubs.push(owner.clone());
     }
+    if let Some(personal_agent) = &response.personal_agent {
+        npubs.push(personal_agent.agent_npub.clone());
+    }
     npubs.extend(response.members.iter().cloned());
     npubs.extend(response.admins.iter().cloned());
     for folder in &response.folders {
@@ -2907,6 +2910,102 @@ mod tests {
                 .map(|relationship| relationship.agent_npub.as_str()),
             Some(agent_npub.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn owner_creates_personal_vault_by_managed_agent_email_without_trusting_navigation_npub()
+    {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let wrong_agent_keys = Keys::generate();
+        let agent_key = NostrPublicKey::from_protocol(agent_keys.public_key());
+        let agent_hex = agent_key.to_hex();
+        let agent_npub = agent_key.to_npub().unwrap();
+        let identifier = Nip05Identifier::parse("cheater@finite.vip").unwrap();
+        let document = serde_json::json!({ "names": { "cheater": agent_hex } }).to_string();
+        let router = router_with_state(
+            test_state().with_nip05_fixture(identifier.well_known_request().url, document),
+        );
+
+        let mismatch_body = serde_json::json!({
+            "vaultId": "personal",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentEmail": "cheater@finite.vip",
+            "personalAgentNpub": npub(&wrong_agent_keys),
+        })
+        .to_string();
+        let mismatch = post_vault(
+            router.clone(),
+            &owner_keys,
+            &mismatch_body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            mismatch,
+            StatusCode::BAD_REQUEST,
+            "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
+        )
+        .await;
+
+        let owner_vaults = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let owner_vaults: VisibleVaultsResponse = read_json(owner_vaults).await;
+        assert!(owner_vaults.vaults.is_empty());
+
+        let email_body = serde_json::json!({
+            "vaultId": "personal",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentEmail": "cheater@finite.vip",
+        })
+        .to_string();
+        let created = post_vault(
+            router.clone(),
+            &owner_keys,
+            &email_body,
+            TEST_NOW + 2,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: VaultMetadataResponse = read_json(created).await;
+        assert_eq!(
+            created
+                .personal_agent
+                .as_ref()
+                .map(|relationship| relationship.agent_npub.as_str()),
+            Some(agent_npub.as_str())
+        );
+        assert!(created.identities.iter().any(|identity| {
+            identity.npub == agent_npub && identity.nip05.as_deref() == Some("cheater@finite.vip")
+        }));
+
+        let agent_vaults = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        let agent_vaults: VisibleVaultsResponse = read_json(agent_vaults).await;
+        assert_eq!(agent_vaults.vaults.len(), 1);
+        assert_eq!(agent_vaults.vaults[0].role, "personal_agent");
     }
 
     #[tokio::test]

@@ -179,7 +179,43 @@ assert.equal(
   client.agentWorkspacePairingPrompt(
     `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
   ),
-  "Pair cheater with an Agent Workspace."
+  "Add cheater (cheater@finite.vip) as your Personal Agent."
+);
+assert.equal(
+  JSON.stringify(client.vaultCreateBody({
+    vaultId: "personal-owner",
+    kind: "personal",
+    name: "Personal vault",
+    bootstrapGrants: [],
+    agentIdentity: client.suggestedAgentIdentityFromNavigation(
+      `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
+    ),
+  })),
+  JSON.stringify({
+    vaultId: "personal-owner",
+    kind: "personal",
+    name: "Personal vault",
+    bootstrapGrants: [],
+    personalAgentEmail: "cheater@finite.vip",
+  }),
+  "A readable Managed Agent Email must be the normal signed Personal Vault setup input"
+);
+assert.equal(
+  JSON.stringify(client.vaultCreateBody({
+    vaultId: "personal-owner",
+    kind: "personal",
+    name: "Personal vault",
+    bootstrapGrants: [],
+    agentIdentity: { email: null, name: null, npub: suggestedAgentNpub },
+  })),
+  JSON.stringify({
+    vaultId: "personal-owner",
+    kind: "personal",
+    name: "Personal vault",
+    bootstrapGrants: [],
+    personalAgentNpub: suggestedAgentNpub,
+  }),
+  "Raw npub remains an advanced setup fallback when no Managed Agent Email is available"
 );
 
 assert.equal(
@@ -3455,14 +3491,15 @@ assert.doesNotMatch(
 
   assert.equal(
     JSON.stringify(client.defaultVaultBootstrapFolderIds("personal")),
-    JSON.stringify(["getting-started", "restricted"])
+    JSON.stringify([])
   );
   assert.equal(
     JSON.stringify(client.defaultVaultBootstrapFolderIds("organization")),
     JSON.stringify(["getting-started", "restricted"])
   );
-  assert.equal(client.defaultVaultPagesFolderId("personal"), "getting-started");
+  assert.equal(client.defaultVaultPagesFolderId("personal"), null);
   assert.equal(client.defaultVaultPagesFolderId("organization"), "getting-started");
+  assert.equal(JSON.stringify(client.defaultVaultPages("personal")), JSON.stringify([]));
   assert.match(htmlSource, /id="vaultInviteFoldersInput"\s+value="getting-started"/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);

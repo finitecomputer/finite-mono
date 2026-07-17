@@ -27,18 +27,40 @@ pub(crate) async fn create_vault_handler(
     let request: CreateVaultRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
-    let personal_agent = match (&request.kind, request.personal_agent_npub.as_deref()) {
-        (CreateVaultKind::Personal, Some(agent)) => {
-            let identity = resolve_and_record_identity(&state, agent)?;
-            Some(UserId::new(identity.npub)?)
-        }
-        (CreateVaultKind::Organization, Some(_)) => {
+    let personal_agent = match request.kind {
+        CreateVaultKind::Organization
+            if request.personal_agent_email.is_some() || request.personal_agent_npub.is_some() =>
+        {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
-                "personalAgentNpub is only valid for a Personal Vault",
+                "Personal Agent identity is only valid for a Personal Vault",
             ));
         }
-        (_, None) => None,
+        CreateVaultKind::Organization => None,
+        CreateVaultKind::Personal => {
+            let email_identity = request
+                .personal_agent_email
+                .as_deref()
+                .map(|email| resolve_and_record_identity(&state, email))
+                .transpose()?;
+            let npub_identity = request
+                .personal_agent_npub
+                .as_deref()
+                .map(|npub| resolve_and_record_identity(&state, npub))
+                .transpose()?;
+            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity) {
+                if email.npub != npub.npub {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
+                    ));
+                }
+            }
+            email_identity
+                .or(npub_identity)
+                .map(|identity| UserId::new(identity.npub))
+                .transpose()?
+        }
     };
     let output = match request.kind {
         CreateVaultKind::Personal => {

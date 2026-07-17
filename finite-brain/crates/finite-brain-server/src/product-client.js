@@ -8505,19 +8505,19 @@ const FiniteBrainProductClient = (() => {
   }
 
   function defaultVaultPages(kind) {
-    if (kind === "personal") return PERSONAL_DEFAULT_VAULT_PAGES.map((page) => ({ ...page }));
+    if (kind === "personal") return [];
     if (kind === "organization") return ORGANIZATION_DEFAULT_VAULT_PAGES.map((page) => ({ ...page }));
     throw new Error(`Unsupported Vault kind: ${kind}`);
   }
 
   function defaultVaultPagesFolderId(kind) {
-    if (kind === "personal") return DEFAULT_CLIENT_FOLDER_ID;
+    if (kind === "personal") return null;
     if (kind === "organization") return DEFAULT_CLIENT_FOLDER_ID;
     throw new Error(`Unsupported Vault kind: ${kind}`);
   }
 
   function defaultVaultBootstrapFolderIds(kind) {
-    if (kind === "personal") return ["getting-started", "restricted"];
+    if (kind === "personal") return [];
     if (kind === "organization") return ["getting-started", "restricted"];
     throw new Error(`Unsupported Vault kind: ${kind}`);
   }
@@ -8630,14 +8630,27 @@ const FiniteBrainProductClient = (() => {
     return writes;
   }
 
-  async function createVault(vaultId, kind, name) {
+  async function createVault(vaultId, kind, name, options = {}) {
     const sessionEpoch = state.sessionEpoch;
     const actorNpub = currentActorNpub();
     const plan = await buildVaultBootstrapPlan({ vaultId, kind, name, actorNpub });
+    const agentIdentity =
+      options.agentIdentity ||
+      (kind === "personal" ? suggestedAgentIdentityFromNavigation() : null);
+    const body = vaultCreateBody({
+      vaultId,
+      kind,
+      name,
+      bootstrapGrants: plan.bootstrapGrants,
+      agentIdentity,
+    });
+    if (kind === "personal" && !body.personalAgentEmail && !body.personalAgentNpub) {
+      throw new Error("Select your agent by email before creating your Personal Vault");
+    }
     requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest("/_admin/vaults", {
       method: "POST",
-      body: JSON.stringify({ vaultId, kind, name, bootstrapGrants: plan.bootstrapGrants }),
+      body: JSON.stringify(body),
     });
     requireCurrentSessionEpoch(sessionEpoch);
     await writeDefaultVaultPages({
@@ -9566,7 +9579,26 @@ const FiniteBrainProductClient = (() => {
       candidate?.email === inputEmail && candidate?.name
         ? candidate.name
         : inputEmail.split("@", 1)[0] || candidate?.name || "this agent";
-    return `Pair ${selectedName} with an Agent Workspace.`;
+    const selectedEmail = inputEmail || candidate?.email;
+    return `Add ${selectedName}${selectedEmail ? ` (${selectedEmail})` : ""} as your Personal Agent.`;
+  }
+
+  function vaultCreateBody(input) {
+    const body = {
+      vaultId: input.vaultId,
+      kind: input.kind,
+      name: input.name,
+      bootstrapGrants: input.bootstrapGrants || [],
+    };
+    if (input.kind !== "personal") return body;
+    const email = String(input.agentIdentity?.email || "").trim().toLowerCase();
+    if (email && looksLikeEmailIdentity(email)) {
+      body.personalAgentEmail = email;
+      return body;
+    }
+    const npub = publicKeyIdentityFromInput(input.agentIdentity?.npub)?.npub;
+    if (npub) body.personalAgentNpub = npub;
+    return body;
   }
 
   function agentWorkspacePairingRows(
@@ -11976,6 +12008,7 @@ const FiniteBrainProductClient = (() => {
     signerIdentityChanged,
     hasOrganizationVaultControls,
     showsCreateOrganizationControl,
+    vaultCreateBody,
     sidebarAccessBadgesForFolder,
     sidebarModeLabel,
     shortKey,

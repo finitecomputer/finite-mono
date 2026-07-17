@@ -11,6 +11,8 @@ pub struct CreateVaultRequest {
     #[serde(default)]
     pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
     #[serde(default)]
+    pub personal_agent_email: Option<String>,
+    #[serde(default)]
     pub personal_agent_npub: Option<String>,
 }
 

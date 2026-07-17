@@ -24,7 +24,7 @@ export function brainClientPath(identity: BrainAgentIdentityHint | null | undefi
   const query = new URLSearchParams();
   if (email) query.set("agentEmail", email);
   if (name) query.set("agentName", name);
-  if (npub) query.set("agentNpub", npub);
+  if (!email && npub) query.set("agentNpub", npub);
   return `/client?${query.toString()}`;
 }
 

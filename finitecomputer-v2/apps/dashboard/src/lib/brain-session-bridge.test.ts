@@ -31,7 +31,11 @@ test("the selected runtime Agent Principal is only a bounded Brain input hint", 
       name: "cheater",
       npub: "npub1agentexamplekey",
     }),
-    "/client?agentEmail=cheater-a1b2c3d4e5f60708%40finite.vip&agentName=cheater&agentNpub=npub1agentexamplekey"
+    "/client?agentEmail=cheater-a1b2c3d4e5f60708%40finite.vip&agentName=cheater"
+  );
+  assert.equal(
+    brainClientPath({ email: null, name: "cheater", npub: "npub1agentexamplekey" }),
+    "/client?agentName=cheater&agentNpub=npub1agentexamplekey"
   );
   assert.equal(
     brainClientPath({ email: "not-an-email", name: "x", npub: "not-an-npub" }),
