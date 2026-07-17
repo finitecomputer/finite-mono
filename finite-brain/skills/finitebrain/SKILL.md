@@ -67,22 +67,31 @@ fbrain -- <args>` may be the available entrypoint.
    that sync operation, readable Folders are materialized, and open conflicts
    are either empty or named.
 3. Orient before editing: identify the target Folder scope, then read its
-   `AGENTS.md`, `HUMANS.md`, `config.md` or `SCHEMA.md`, `_index.md` or
-   `index.md`, recent `log.md`, and relevant wiki pages. Search that Folder
-   before creating new pages.
+   `AGENTS.md`, `HUMANS.md`, `config.md` or `SCHEMA.md`, durable `index.md`
+   when present, generated `_index.md` for a current inventory, recent
+   `log.md`, and relevant wiki pages. Search that Folder before creating new
+   pages.
    Completion: the target Folder conventions, access boundary, existing wiki
    shape, and likely duplicate pages are known.
-4. Edit only readable content roots with ordinary file tools. Keep LLM wiki work
-   under Folder-local conventions such as `raw/`, `raw/assets/`, `wiki/`,
-   `inventory/`, `datasets/`, and `output/`.
+4. Edit only readable content roots with ordinary file tools. Follow the
+   nearest `AGENTS.md` for layout. Current Working Trees use `raw/`,
+   `raw/assets/`, `compiled/`, and `output/`; an older or imported Folder may
+   use `wiki/`, `inventory/`, or `datasets/` instead.
    Completion: the smallest coherent set of markdown files is changed.
-5. Do not edit `.finitebrain/`, locked metadata-only folders, encrypted sync
+5. Close every meaningful wiki write: connect it to sources and related Pages,
+   update the Folder's durable `index.md`, and append `log.md`. Check that each
+   new internal link names a Page the Brain client can resolve.
+   Completion: new knowledge is reachable, sourced, connected, and logged; it
+   is not merely present on disk.
+6. Do not edit `.finitebrain/`, locked metadata-only folders, encrypted sync
    evidence, generated convention files, auth files, grant plaintext, or Folder
    Key material unless the user explicitly asks for internal repair.
    Completion: all edits stay on the safe content surface.
-6. Sync after meaningful edits with `sync now --summary`, then run
+7. Sync after meaningful edits with `sync now --summary`, then run
    `conflicts --json`.
-   Completion: pushed/applied status, latest sequence, and conflict state are
+   For link-heavy work, reopen or refresh the Product Client graph when it is
+   available and inspect the changed Pages once. Completion: pushed/applied
+   status, latest sequence, conflict state, and link-verification level are
    known.
 
 ## First-Time Personal Vault Setup
@@ -118,33 +127,37 @@ The LLM Wiki topic model maps to a FiniteBrain Folder. Folder Keys and Folder
 Access define which topic wikis the active user or agent can read. Indexes and
 logs live at the same Folder scope as the knowledge they describe.
 
-When initializing a new wiki area, prefer this shape unless an existing Folder
-uses a different convention:
+When initializing a new wiki area, follow its nearest `AGENTS.md`. The current
+Working Tree profile is intentionally small:
 
 ```text
 <wiki-root>/
-|-- config.md
-|-- _index.md
+|-- index.md
 |-- log.md
-|-- inbox/
 |-- raw/
 |   `-- assets/
-|-- wiki/
-|   |-- concepts/
-|   |-- topics/
-|   `-- references/
-|-- inventory/
-|-- datasets/
+|-- compiled/
 `-- output/
 ```
 
+Older or imported Folders may name the curated root `wiki/` and may add
+`config.md`, `inbox/`, `inventory/`, or `datasets/`. Do not create empty layers
+just because the larger LLM Wiki profile permits them.
+
 Core wiki rules:
 
-- Read the target Folder's local index first. `_index.md` and `index.md` are
-  navigation caches for that Folder only; stale check them before trusting them,
-  then update them after meaningful writes.
+- Know which files are durable. Ordinary Markdown Pages, including `index.md`
+  and `log.md`, are encrypted and synced. Root and Folder `_index.md` plus
+  everything under `_wiki/` are generated Working Tree reports: read them as
+  hints, never edit them, and never cite them as proof that the Product Client
+  resolved a link.
+- Use the target Folder's durable `index.md` as its human and agent navigation
+  Page. If knowledge Pages exist and `index.md` does not, create it. Keep its
+  descriptions short, link every durable Page that should be discoverable, and
+  describe only this Folder.
 - Keep raw immutable. Once a URL, PDF, transcript, pasted source, or file is
-  captured under `raw/`, do not edit it; synthesize corrections in `wiki/`.
+  captured under `raw/`, do not edit it; synthesize corrections in the curated
+  root named by the Folder's `AGENTS.md` (`compiled/` in current Working Trees).
 - Store non-Markdown source files under `raw/assets/`. Pair every Asset with a
   Markdown Source Note that records provenance, content type, hash or extraction
   status when known, and any extraction/transcription decisions.
@@ -152,14 +165,25 @@ Core wiki rules:
   Asset preserves evidence; the Source Note is the agent-readable handle.
 - Synthesize articles, do not copy sources. Articles should connect claims,
   entities, dates, open questions, and related pages.
-- Use structured frontmatter on wiki pages with at least title, summary or
-  description, dates, tags, sources, and confidence when useful.
-- Use `[[wikilinks]]` for Obsidian and add normal markdown links when agent path
-  navigation would benefit from them.
+- Use structured frontmatter on durable knowledge Pages with at least `title`,
+  `summary` or `description`, `created`, `updated`, `tags`, and `sources` when
+  source-backed. Use `compiled-from: conversation` when a synthesized Page has
+  no captured source. Add confidence when it conveys real uncertainty.
+- Use internal links the Brain Product Client can resolve. Prefer
+  `[[Exact Page Title]]` or a Folder-root-relative Page path such as
+  `[[compiled/hermes-agent.md|Hermes Agent]]`. Normal Markdown links also work
+  when their target is an exact title, unique filename, or Folder-root-relative
+  Page path. Do not use filesystem-relative `../` targets; the Brain link
+  resolver does not expand them. Prefer the full Page path when titles or
+  filenames could collide.
 - Prefer updating an existing page over creating a near-duplicate. Create new
   pages only for central, recurring, or clearly durable topics.
+- Cite each captured Source Note from at least one synthesized Page. Connect
+  each new synthesized Page to a genuinely related Page when one exists, and
+  add a reciprocal `See Also` link between peer knowledge Pages when it helps
+  navigation. A source citation does not need a reciprocal link.
 - Append the target Folder's `log.md` for every meaningful wiki write; never
-  rewrite old log entries.
+  rewrite old log entries. Link the changed Pages from the entry when useful.
 - Use `inventory/` for durable operational state such as source candidates,
   watch items, open questions, tasks, and next actions.
 - Use `datasets/` for manifests, samples, schemas, and query recipes; large or
@@ -173,6 +197,28 @@ Core wiki rules:
   evidence, say what is missing and suggest what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do
   not stall.
+
+### Wiki Closure Pass
+
+Writing files is not completion. After an ingest, compilation, or substantial
+knowledge edit, close the wiki before the final sync:
+
+1. Inventory every Page created, moved, or substantially updated.
+2. Confirm every source-backed claim names a durable Source Note and every
+   Source Note is cited by at least one synthesized Page.
+3. Add meaningful outgoing links between related synthesized Pages. Give every
+   new durable Page an incoming route from `index.md` or a related Page.
+4. Update durable `index.md` from the actual Pages and frontmatter. Do not
+   update `_index.md` or `_wiki/*`.
+5. Append one concise `log.md` entry for the coherent change.
+6. Before sync, check each new link target against exact Page titles, unique
+   filenames, or Folder-root-relative paths. After sync, inspect backlinks and
+   missing links in the Product Client when available.
+
+If the Product Client is unavailable, report that the links were checked
+against files but the client graph was not verified. Never claim “no orphans,”
+“backlinks complete,” or “graph healthy” from generated `_wiki/` files or from
+the presence of `[[wikilinks]]` alone.
 
 Access-aware wiki rules:
 
@@ -246,6 +292,8 @@ current skill name is `finitebrain`.
 ## Final Report
 
 Report the working tree path, safe acting npub when relevant, folders readable or
-locked, wiki pages or sources created/updated/moved/deleted, index/log updates,
-`sync now --summary` status, latest sequence, whether `conflicts --json` is
-empty, and blockers with the command category that exposed them.
+locked, wiki pages or sources created/updated/moved/deleted, durable
+`index.md`/`log.md` updates, link verification as either Product Client-verified
+or file-checked only, `sync now --summary` status, latest sequence, whether
+`conflicts --json` is empty, and blockers with the command category that exposed
+them.
