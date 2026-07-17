@@ -17,7 +17,9 @@ digest-pinned finite-mono image.
   files are root-owned mode `0400`. It has no Linux capabilities, no service
   account token, no privilege escalation, and a read-only root filesystem.
   FFmpeg media work is confined to a 256 MiB ephemeral workspace with four
-  concurrent normalization slots.
+  concurrent normalization slots. Image, audio, and video semantic canaries
+  each run every ten minutes, phased 200 seconds apart to avoid synchronized
+  outbound bursts while remaining inside the 15-minute stale-health window.
 
 ## Verification
 

@@ -77,11 +77,11 @@ spec:
             - name: FINITE_SPECIALIZATION_VISION_MODEL
               value: aeon-gemma-4-12b-k4-nvfp4-unified-fast
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
-              value: "300"
+              value: "600"
             - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS
-              value: "300"
+              value: "600"
             - name: FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS
-              value: "300"
+              value: "600"
             - name: FINITE_SPECIALIZATION_MEDIA_TEMP_DIR
               value: /var/run/finite-specialization-media
             - name: FINITE_SPECIALIZATION_MEDIA_CONCURRENCY
