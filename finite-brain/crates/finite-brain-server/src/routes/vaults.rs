@@ -27,6 +27,23 @@ pub(crate) async fn create_vault_handler(
     let request: CreateVaultRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
+    let organization_requester = match request.kind {
+        CreateVaultKind::Personal if request.requesting_user_npub.is_some() => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Organization Vault requester identity is only valid for an Organization Vault",
+            ));
+        }
+        CreateVaultKind::Personal => None,
+        CreateVaultKind::Organization => request
+            .requesting_user_npub
+            .as_deref()
+            .map(canonical_requesting_user_npub)
+            .transpose()?
+            .map(UserId::new)
+            .transpose()?,
+    };
+
     let personal_agent = match request.kind {
         CreateVaultKind::Organization
             if request.personal_agent_email.is_some() || request.personal_agent_npub.is_some() =>
@@ -65,16 +82,32 @@ pub(crate) async fn create_vault_handler(
                 .transpose()?
         }
     };
+    let requester_bootstrap = organization_requester.is_some();
     let output = match request.kind {
         CreateVaultKind::Personal => {
             bootstrap_personal_vault(request.vault_id, request.name, actor_npub.clone())?
         }
         CreateVaultKind::Organization => {
-            bootstrap_organization_vault(request.vault_id, request.name, actor_npub.clone())?
+            if let Some(requester) = organization_requester {
+                bootstrap_organization_vault_with_requester(
+                    request.vault_id,
+                    request.name,
+                    actor_npub.clone(),
+                    requester.as_str().to_owned(),
+                )?
+            } else {
+                bootstrap_organization_vault(request.vault_id, request.name, actor_npub.clone())?
+            }
         }
     };
     let vault_id = output.vault.id.clone();
     let grants = if request.bootstrap_grants.is_empty() {
+        if requester_bootstrap {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Organization Vault requester bootstrap requires encrypted Folder Key Grants",
+            ));
+        }
         grants_for_required(&output.required_key_grants, &vault_id, &actor_npub)
     } else {
         validate_bootstrap_grant_requests(&request.bootstrap_grants, &output.required_key_grants)?;
@@ -107,6 +140,21 @@ pub(crate) async fn create_vault_handler(
         enrich_metadata_identities(&store, &mut response)?;
     }
     Ok(Json(response))
+}
+
+fn canonical_requesting_user_npub(value: &str) -> Result<String, ApiError> {
+    let public_key = NostrPublicKey::parse(value).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Organization Vault requester identity: {error}"),
+        )
+    })?;
+    public_key.to_npub().map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid Organization Vault requester identity: {error}"),
+        )
+    })
 }
 
 pub(crate) async fn vault_metadata_handler(

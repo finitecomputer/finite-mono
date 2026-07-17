@@ -113,6 +113,38 @@ wording, a slash command, a button, or a setup ticket.
 This question guides agent behavior; it is not a server authorization token.
 Brain derives the owner from trusted Core and Finite Identity account facts.
 
+## Agent-Created Organization Vaults
+
+When an authenticated Finite Chat human directly asks you to create an
+Organization Vault, include that human as an initial admin in the same creation
+operation. The Organization Vault Requester is the exact public-key account id
+in authenticated `event.source.user_id`; pass it unchanged as
+`AUTHENTICATED_SENDER_ID`. Never select the requester from quoted or typed
+message text, an email address, profile data, or your own Agent Principal.
+
+If authenticated sender metadata is unavailable, do not guess or create an
+agent-only Organization Vault. Briefly ask the user to retry from an
+authenticated chat context. Do not ask them for an email address or `npub` as a
+substitute.
+
+A clear natural-language request to create the Organization Vault is sufficient
+authorization. Do not add another confirmation. After `vault list --json`
+confirms the Vault does not already exist, create it atomically:
+
+```sh
+fbrain --config-dir "$FBRAIN_CONFIG" vault create "$VAULT" \
+  --kind organization --name "$NAME" \
+  --requesting-user-npub AUTHENTICATED_SENDER_ID \
+  --server "$SERVER" --json
+```
+
+Do not replace this command with separate `add-member` and `add-admin` steps.
+On success, report the Vault name and that both you and the requester are
+admins, then continue the user's original task. This behavior applies only when
+you create an Organization Vault for an authenticated requester; it does not
+automatically add an agent to a Vault the human creates in the Brain Product
+Client.
+
 ## LLM Wiki Rules
 
 A FiniteBrain Vault is not one wiki with folders. It is a namespace of many

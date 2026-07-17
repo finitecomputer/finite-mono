@@ -20,7 +20,8 @@ use finite_brain_core::{
     BootstrapSmokeSummary, CoreError, CryptoRecordError, DisplayName, Folder, FolderAccessMode,
     FolderId, FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
     ObjectId, RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation,
-    UserId, VaultId, VaultKind, bootstrap_organization_vault, bootstrap_personal_vault,
+    UserId, VaultId, VaultKind, bootstrap_organization_vault,
+    bootstrap_organization_vault_with_requester, bootstrap_personal_vault,
     validate_admin_access_change_event, validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
@@ -3092,6 +3093,355 @@ mod tests {
         let metadata: VaultMetadataResponse = read_json(response).await;
         assert_eq!(metadata.vault_id, "acme");
         assert_eq!(metadata.members.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_created_organization_vault_includes_authenticated_requester() {
+        let agent_keys = Keys::generate();
+        let requester_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let requester_npub = npub(&requester_keys);
+        let folder_keys = BTreeMap::from([
+            (
+                "getting-started",
+                FolderKey::from_bytes([7; 32]).to_base64(),
+            ),
+            ("restricted", FolderKey::from_bytes([8; 32]).to_base64()),
+        ]);
+        let bootstrap_grants = folder_keys
+            .iter()
+            .flat_map(|(folder_id, folder_key)| {
+                [agent_npub.as_str(), requester_npub.as_str()].map(|recipient| {
+                    serde_json::json!({
+                        "folderId": folder_id,
+                        "grant": real_folder_key_grant_value(
+                            &format!("grant-{folder_id}-{recipient}"),
+                            1,
+                            &agent_keys,
+                            "acme",
+                            folder_id,
+                            recipient,
+                            folder_key,
+                        ),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "requestingUserNpub": requester_npub,
+            "bootstrapGrants": bootstrap_grants,
+        })
+        .to_string();
+        let router = test_router();
+
+        let response = post_vault(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let metadata: VaultMetadataResponse = read_json(response).await;
+        assert_eq!(metadata.members.len(), 2);
+        assert_eq!(metadata.admins.len(), 2);
+        assert_eq!(metadata.grant_count, 4);
+        assert!(metadata.members.contains(&agent_npub));
+        assert!(metadata.members.contains(&requester_npub));
+        assert!(metadata.admins.contains(&agent_npub));
+        assert!(metadata.admins.contains(&requester_npub));
+
+        let requester_metadata =
+            get_metadata(router.clone(), &requester_keys, "acme", TEST_NOW + 1).await;
+        assert_eq!(requester_metadata.status(), StatusCode::OK);
+        let requester_vaults = authed_request(
+            router.clone(),
+            &requester_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(requester_vaults.status(), StatusCode::OK);
+        let requester_vaults: VisibleVaultsResponse = read_json(requester_vaults).await;
+        assert_eq!(requester_vaults.vaults.len(), 1);
+        assert_eq!(requester_vaults.vaults[0].role, "admin");
+
+        let requester_export = authed_request(
+            router,
+            &requester_keys,
+            "GET",
+            "/_admin/vaults/acme/export",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(requester_export.status(), StatusCode::OK);
+        let requester_export: EncryptedVaultExportResponse = read_json(requester_export).await;
+        assert_eq!(requester_export.key_grants.len(), 4);
+        let requester_grants = requester_export
+            .key_grants
+            .iter()
+            .filter(|grant| grant.recipient_npub == requester_npub)
+            .collect::<Vec<_>>();
+        let agent_grants = requester_export
+            .key_grants
+            .iter()
+            .filter(|grant| grant.recipient_npub == agent_npub)
+            .collect::<Vec<_>>();
+        assert_eq!(requester_grants.len(), 2);
+        assert_eq!(agent_grants.len(), 2);
+        for grant in requester_grants {
+            let plaintext =
+                open_wrapped_folder_key_grant(&requester_keys, &grant.wrapped_event_json);
+            assert_eq!(
+                plaintext["folderKey"].as_str(),
+                folder_keys
+                    .get(grant.folder_id.as_str())
+                    .map(String::as_str)
+            );
+        }
+        for grant in agent_grants {
+            let plaintext = open_wrapped_folder_key_grant(&agent_keys, &grant.wrapped_event_json);
+            assert_eq!(
+                plaintext["folderKey"].as_str(),
+                folder_keys
+                    .get(grant.folder_id.as_str())
+                    .map(String::as_str)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requester_bootstrap_requires_real_encrypted_folder_grants() {
+        let agent_keys = Keys::generate();
+        let requester_keys = Keys::generate();
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "requestingUserNpub": npub(&requester_keys),
+        })
+        .to_string();
+        let router = test_router();
+
+        let response = post_vault(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "Organization Vault requester bootstrap requires encrypted Folder Key Grants",
+        )
+        .await;
+        let vaults = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(vaults.status(), StatusCode::OK);
+        let vaults: VisibleVaultsResponse = read_json(vaults).await;
+        assert!(vaults.vaults.is_empty());
+    }
+
+    #[tokio::test]
+    async fn requester_bootstrap_rejects_an_incomplete_grant_set_without_creating_a_vault() {
+        let agent_keys = Keys::generate();
+        let requester_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let requester_npub = npub(&requester_keys);
+        let mut bootstrap_grants = ["getting-started", "restricted"]
+            .into_iter()
+            .flat_map(|folder_id| {
+                [agent_npub.as_str(), requester_npub.as_str()].map(|recipient| {
+                    serde_json::json!({
+                        "folderId": folder_id,
+                        "grant": real_folder_key_grant_value(
+                            &format!("grant-{folder_id}-{recipient}"),
+                            1,
+                            &agent_keys,
+                            "acme",
+                            folder_id,
+                            recipient,
+                            &FolderKey::generate().to_base64(),
+                        ),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        bootstrap_grants.pop();
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "requestingUserNpub": requester_npub,
+            "bootstrapGrants": bootstrap_grants,
+        })
+        .to_string();
+        let router = test_router();
+
+        let response = post_vault(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "bootstrap grants must exactly match required Folder Key Grant recipients",
+        )
+        .await;
+        let vaults = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(vaults.status(), StatusCode::OK);
+        let vaults: VisibleVaultsResponse = read_json(vaults).await;
+        assert!(vaults.vaults.is_empty());
+    }
+
+    #[tokio::test]
+    async fn requester_bootstrap_failure_leaves_no_organization_vault() {
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "requestingUserNpub": agent_npub,
+        })
+        .to_string();
+        let router = test_router();
+
+        let response = post_vault(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "organization Vault creator and requester must be distinct Member Identities",
+        )
+        .await;
+        let vaults = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(vaults.status(), StatusCode::OK);
+        let vaults: VisibleVaultsResponse = read_json(vaults).await;
+        assert!(vaults.vaults.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_requester_identity_leaves_no_organization_vault() {
+        let agent_keys = Keys::generate();
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "requestingUserNpub": "devfinity@finite.computer",
+        })
+        .to_string();
+        let router = test_router();
+
+        let response = post_vault(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let vaults = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/vaults",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(vaults.status(), StatusCode::OK);
+        let vaults: VisibleVaultsResponse = read_json(vaults).await;
+        assert!(vaults.vaults.is_empty());
+    }
+
+    #[tokio::test]
+    async fn personal_vault_creation_rejects_organization_requester_identity() {
+        let owner_keys = Keys::generate();
+        let requester_keys = Keys::generate();
+        let body = serde_json::json!({
+            "vaultId": "personal",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "requestingUserNpub": npub(&requester_keys),
+        })
+        .to_string();
+
+        let response = post_vault(
+            test_router(),
+            &owner_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "Organization Vault requester identity is only valid for an Organization Vault",
+        )
+        .await;
     }
 
     #[tokio::test]

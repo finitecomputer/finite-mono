@@ -41,6 +41,34 @@ pub(crate) fn option_value(args: &[String], flag: &str) -> Option<String> {
         .find_map(|window| (window[0] == flag).then(|| window[1].clone()))
 }
 
+pub(crate) fn unique_option_value(
+    args: &[String],
+    flag: &'static str,
+) -> Result<Option<String>, CliError> {
+    let prefix = format!("{flag}=");
+    let mut values = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if arg == flag {
+            let value = args
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or(CliError::MissingArgument(flag))?;
+            values.push(value.clone());
+        } else if let Some(value) = arg.strip_prefix(&prefix) {
+            if value.is_empty() {
+                return Err(CliError::MissingArgument(flag));
+            }
+            values.push(value.to_owned());
+        }
+    }
+    if values.len() > 1 {
+        return Err(CliError::InvalidInput(format!(
+            "{flag} may only be supplied once"
+        )));
+    }
+    Ok(values.into_iter().next())
+}
+
 pub(crate) fn required_option_or_positional(
     args: &[String],
     option: &str,

@@ -42,8 +42,9 @@ use finite_brain_core::portability::{
 };
 use finite_brain_core::{
     AdminAccessAction, FolderId, FolderKey, FolderObjectAad, FolderObjectOperation, ObjectId,
-    SafeRelativePath, VaultId, VaultKind, bootstrap_organization_vault, bootstrap_personal_vault,
-    default_vault_pages, encrypt_folder_object,
+    SafeRelativePath, VaultId, VaultKind, bootstrap_organization_vault,
+    bootstrap_organization_vault_with_requester, bootstrap_personal_vault, default_vault_pages,
+    encrypt_folder_object,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, wrap_rumor};
 use nostr::{Keys, Kind};
@@ -123,7 +124,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -1204,6 +1205,7 @@ fn activity<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Resul
 struct VaultCreateBootstrapPlan {
     bootstrap_grants: Vec<serde_json::Value>,
     folder_keys: BTreeMap<(String, u32), FolderKey>,
+    requesting_user_npub: Option<String>,
     vault_kind: VaultKind,
 }
 
@@ -1212,17 +1214,44 @@ fn bootstrap_plan_for_vault_create(
     vault_id: &str,
     kind: &str,
     name: &str,
+    requesting_user_input: Option<&str>,
 ) -> Result<VaultCreateBootstrapPlan, CliError> {
     let auth = load_signer(env)?;
+    let requesting_user_npub = requesting_user_input
+        .map(|input| {
+            NostrPublicKey::parse(input)
+                .and_then(|public_key| public_key.to_npub())
+                .map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "invalid Organization Vault requester identity: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
     let (vault_kind, output) = match kind {
+        "personal" if requesting_user_npub.is_some() => {
+            return Err(CliError::InvalidInput(
+                "Organization Vault requester identity is only valid for an Organization Vault"
+                    .to_owned(),
+            ));
+        }
         "personal" => (
             VaultKind::Personal,
             bootstrap_personal_vault(vault_id, name, auth.npub.clone()),
         ),
-        "organization" => (
-            VaultKind::Organization,
-            bootstrap_organization_vault(vault_id, name, auth.npub.clone()),
-        ),
+        "organization" => {
+            let output = if let Some(requester) = requesting_user_npub.as_ref() {
+                bootstrap_organization_vault_with_requester(
+                    vault_id,
+                    name,
+                    auth.npub.clone(),
+                    requester.clone(),
+                )
+            } else {
+                bootstrap_organization_vault(vault_id, name, auth.npub.clone())
+            };
+            (VaultKind::Organization, output)
+        }
         other => {
             return Err(CliError::InvalidInput(format!(
                 "unknown vault kind {other}"
@@ -1260,6 +1289,7 @@ fn bootstrap_plan_for_vault_create(
     Ok(VaultCreateBootstrapPlan {
         bootstrap_grants,
         folder_keys,
+        requesting_user_npub,
         vault_kind,
     })
 }
@@ -1533,14 +1563,23 @@ fn vault<W: Write>(
             let kind = option_value(args, "--kind").unwrap_or_else(|| "personal".to_owned());
             let normalized_kind = normalize_vault_kind(&kind)?;
             let name = option_value(args, "--name").unwrap_or_else(|| vault_id.clone());
-            let bootstrap_plan =
-                bootstrap_plan_for_vault_create(env, vault_id, normalized_kind, &name)?;
-            let body = serde_json::json!({
+            let requesting_user_input = unique_option_value(args, "--requesting-user-npub")?;
+            let bootstrap_plan = bootstrap_plan_for_vault_create(
+                env,
+                vault_id,
+                normalized_kind,
+                &name,
+                requesting_user_input.as_deref(),
+            )?;
+            let mut body = serde_json::json!({
                 "vaultId": vault_id,
                 "kind": normalized_kind,
                 "name": name,
                 "bootstrapGrants": bootstrap_plan.bootstrap_grants
             });
+            if let Some(requester) = bootstrap_plan.requesting_user_npub.as_ref() {
+                body["requestingUserNpub"] = serde_json::Value::String(requester.clone());
+            }
             let server_url = server_url_for_command(env, args)?;
             let response = signed_json_request_to_server(
                 env,
@@ -4851,6 +4890,149 @@ mod tests {
                 assert!(plaintext["markdown"].as_str().unwrap().starts_with('#'));
             }
         }
+    }
+
+    #[test]
+    fn vault_create_includes_authenticated_requester_and_both_grant_sets() {
+        let tmp = TempDir::new().unwrap();
+        let actor_secret = TEST_SECRET_HEX;
+        let requester_keys = Keys::generate();
+        let requester_secret = requester_keys.secret_key().to_secret_hex();
+        import_identity_secret(&tmp, actor_secret);
+        let actor_npub = npub_for_secret(actor_secret);
+        let requester_npub = NostrPublicKey::from_protocol(requester_keys.public_key())
+            .to_npub()
+            .unwrap();
+        let default_pages = finite_brain_core::default_vault_pages(VaultKind::Organization);
+        let (server_url, server) = start_ok_capture_server(1 + default_pages.len());
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "vault",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--name",
+                "Requested Org",
+                "--requesting-user-npub",
+                &requester_npub,
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let requests = server.join().unwrap();
+        let (_, post_body) = requests
+            .iter()
+            .find(|(request, _)| request.starts_with("POST /_admin/vaults "))
+            .expect("vault create request captured");
+        let post_body: Value = serde_json::from_str(post_body).unwrap();
+        assert_eq!(post_body["requestingUserNpub"], requester_npub);
+        let grants = post_body["bootstrapGrants"].as_array().unwrap();
+        assert_eq!(grants.len(), 4);
+        assert_eq!(
+            grants
+                .iter()
+                .filter(|grant| grant["grant"]["recipientNpub"] == actor_npub)
+                .count(),
+            2
+        );
+        assert_eq!(
+            grants
+                .iter()
+                .filter(|grant| grant["grant"]["recipientNpub"] == requester_npub)
+                .count(),
+            2
+        );
+
+        for folder_id in ["getting-started", "restricted"] {
+            let actor_grant = grants
+                .iter()
+                .find(|grant| {
+                    grant["folderId"] == folder_id && grant["grant"]["recipientNpub"] == actor_npub
+                })
+                .unwrap();
+            let requester_grant = grants
+                .iter()
+                .find(|grant| {
+                    grant["folderId"] == folder_id
+                        && grant["grant"]["recipientNpub"] == requester_npub
+                })
+                .unwrap();
+            assert_eq!(
+                grant_plaintext_folder_key(actor_grant, actor_secret, &actor_npub),
+                grant_plaintext_folder_key(requester_grant, &requester_secret, &requester_npub)
+            );
+        }
+    }
+
+    #[test]
+    fn vault_create_rejects_duplicate_requester_options() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let first_requester = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let second_requester = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let mut output = Vec::new();
+
+        let error = run_with_env(
+            [
+                "vault",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--requesting-user-npub",
+                &first_requester,
+                "--requesting-user-npub",
+                &second_requester,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid input: --requesting-user-npub may only be supplied once"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn vault_create_rejects_a_requester_option_without_an_identity() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let mut output = Vec::new();
+
+        let error = run_with_env(
+            [
+                "vault",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--requesting-user-npub",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "missing required argument: --requesting-user-npub"
+        );
+        assert!(output.is_empty());
     }
 
     #[test]

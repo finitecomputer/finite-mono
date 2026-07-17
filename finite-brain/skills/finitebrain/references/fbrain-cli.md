@@ -164,6 +164,7 @@ contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
 ```sh
 fbrain vault create <vault-id> --kind personal --name "My Vault"
 fbrain vault create <vault-id> --kind organization --name "Org Vault"
+fbrain vault create <vault-id> --kind organization --name "Org Vault" --requesting-user-npub <npub|hex>
 fbrain vault metadata --vault <vault-id>
 fbrain vault export --vault <vault-id>
 
@@ -172,6 +173,11 @@ fbrain folder create <folder-id> --vault <vault-id> --name Notes --path Notes
 fbrain folder create <folder-id> --vault <vault-id> --role folder --access restricted --member <npub>
 fbrain mount list --vault <vault-id>
 ```
+
+`--requesting-user-npub` is Organization Vault-only. It atomically makes the
+distinct signing creator and authenticated requester initial members and admins
+and generates both initial Folder Key Grant sets. Pass only authenticated sender
+metadata; the option does not resolve email or NIP-05 input.
 
 Folder roles are `personal_home`, `vault_ops`, `general`, and `folder` (hyphen
 aliases are accepted). Folder access modes are `owner`, `admin_only`,

@@ -4831,6 +4831,12 @@ mod tests {
         assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
         assert!(bundled.contains("bootstrap-personal --server"));
         assert!(bundled.contains("role `personal_agent`"));
+        assert!(bundled.contains("## Agent-Created Organization Vaults"));
+        assert!(bundled.contains("authenticated `event.source.user_id`"));
+        assert!(bundled.contains("--requesting-user-npub AUTHENTICATED_SENDER_ID"));
+        assert!(bundled.contains("report the Vault name and that both you and the requester are"));
+        assert!(bundled.contains("do not guess"));
+        assert!(bundled.contains("agent-only Organization Vault"));
         assert!(!bundled.contains("/brain setup"));
         assert!(!bundled.contains("personal-vault-bootstrap-authorizations"));
         assert!(!bundled.contains("SERVER=\"https://finite.computer\""));

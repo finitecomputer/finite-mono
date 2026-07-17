@@ -1045,9 +1045,43 @@ pub fn bootstrap_organization_vault(
     name: impl Into<String>,
     admin_user_id: impl Into<String>,
 ) -> Result<BootstrapOutput, CoreError> {
+    bootstrap_organization_vault_with_admins(vault_id, name, vec![admin_user_id.into()])
+}
+
+/// Build an organization Vault created by an agent for an authenticated human
+/// requester. Both distinct Member Identities are initial admins.
+pub fn bootstrap_organization_vault_with_requester(
+    vault_id: impl Into<String>,
+    name: impl Into<String>,
+    creator_user_id: impl Into<String>,
+    requesting_user_id: impl Into<String>,
+) -> Result<BootstrapOutput, CoreError> {
+    let creator_user_id = creator_user_id.into();
+    let requesting_user_id = requesting_user_id.into();
+    if creator_user_id == requesting_user_id {
+        return Err(CoreError::InvalidBootstrapInput {
+            reason: "organization Vault creator and requester must be distinct Member Identities"
+                .to_owned(),
+        });
+    }
+    bootstrap_organization_vault_with_admins(
+        vault_id,
+        name,
+        vec![creator_user_id, requesting_user_id],
+    )
+}
+
+fn bootstrap_organization_vault_with_admins(
+    vault_id: impl Into<String>,
+    name: impl Into<String>,
+    admin_user_ids: Vec<String>,
+) -> Result<BootstrapOutput, CoreError> {
     let vault_id = VaultId::new(vault_id)?;
     let name = DisplayName::new("vault_name", name)?;
-    let admin_user_id = UserId::new(admin_user_id)?;
+    let admin_user_ids = admin_user_ids
+        .into_iter()
+        .map(UserId::new)
+        .collect::<Result<Vec<_>, _>>()?;
 
     let folders = vec![
         root_folder(
@@ -1066,10 +1100,14 @@ pub fn bootstrap_organization_vault(
 
     let required_key_grants = folders
         .iter()
-        .map(|folder| RequiredFolderKeyGrant {
-            folder_id: folder.id.clone(),
-            recipient_user_id: admin_user_id.clone(),
-            key_version: 1,
+        .flat_map(|folder| {
+            admin_user_ids
+                .iter()
+                .map(|admin_user_id| RequiredFolderKeyGrant {
+                    folder_id: folder.id.clone(),
+                    recipient_user_id: admin_user_id.clone(),
+                    key_version: 1,
+                })
         })
         .collect();
 
@@ -1079,11 +1117,14 @@ pub fn bootstrap_organization_vault(
         name,
         owner_user_id: None,
         folders,
-        members: vec![VaultMember {
-            user_id: admin_user_id.clone(),
-            folder_access: BTreeSet::new(),
-        }],
-        admins: vec![admin_user_id],
+        members: admin_user_ids
+            .iter()
+            .map(|admin_user_id| VaultMember {
+                user_id: admin_user_id.clone(),
+                folder_access: BTreeSet::new(),
+            })
+            .collect(),
+        admins: admin_user_ids,
     };
 
     Ok(BootstrapOutput {

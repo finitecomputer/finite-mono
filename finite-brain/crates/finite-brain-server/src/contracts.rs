@@ -14,6 +14,8 @@ pub struct CreateVaultRequest {
     pub personal_agent_email: Option<String>,
     #[serde(default)]
     pub personal_agent_npub: Option<String>,
+    #[serde(default)]
+    pub requesting_user_npub: Option<String>,
 }
 
 /// Supported Vault creation kinds.
