@@ -20,7 +20,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 pub const DEFAULT_SPARK_BASE_URL: &str = "https://inference.finite.computer/v1";
-pub const DEFAULT_VISION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
+pub const DEFAULT_VISION_MODEL: &str = "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
 pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
 pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
@@ -742,7 +742,7 @@ fn chat_request_for_audio(
         ));
     }
     let mut messages = vec![json!({
-        "role": "developer",
+        "role": "system",
         "content": AUDIO_CAPABILITY_PROMPT,
     })];
     for message in &input.messages {
@@ -2540,7 +2540,7 @@ mod tests {
         assert_eq!(upstream["model"], "aeon-test");
         assert_eq!(upstream["stream"], false);
         assert_eq!(upstream["max_tokens"], 32);
-        assert_eq!(upstream["messages"][0]["role"], "developer");
+        assert_eq!(upstream["messages"][0]["role"], "system");
         assert_eq!(
             upstream["messages"][1]["content"][1],
             json!({
@@ -2599,6 +2599,7 @@ mod tests {
         assert_eq!(body["specialization_result"]["text"], "A steady tone.");
         let request = captured.lock().unwrap().clone().unwrap().1;
         assert_eq!(request["model"], "qwopus-test");
+        assert_eq!(request["messages"][0]["role"], "system");
         assert_eq!(request["messages"][0]["content"], AUDIO_CAPABILITY_PROMPT);
         let normalized = request["messages"][1]["content"][1]["input_audio"]["data"]
             .as_str()
