@@ -7519,8 +7519,16 @@ const FiniteBrainProductClient = (() => {
       }
       setActiveVaultId(vault.vaultId);
       log("Selected Vault.", { vaultId: vault.vaultId });
-      if (surface === "switcher") closeVaultSwitcher();
-      else render();
+      if (surface === "switcher") {
+        closeVaultSwitcher();
+        return resumeSession().catch((error) => {
+          reportClientActionFailure(error);
+          log("Failed to load selected Vault from switcher.", { error: error.message });
+          state.readerBusy = false;
+          render();
+        });
+      }
+      render();
     });
 
     const title = document.createElement("span");

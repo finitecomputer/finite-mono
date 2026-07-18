@@ -61,6 +61,16 @@ function element(ownerDocument = null) {
   };
 }
 
+function interactiveElement(ownerDocument = null) {
+  const target = element(ownerDocument);
+  const listeners = new Map();
+  target.addEventListener = (type, listener) => {
+    listeners.set(type, listener);
+  };
+  target.click = () => listeners.get("click")?.({ currentTarget: target, target });
+  return target;
+}
+
 const elements = new Map();
 const context = {
   TextDecoder,
@@ -377,6 +387,75 @@ function keyboardNavigationTestSeams() {
   });
   assert.ok(seams, "The Product Client must expose the captured keyboard-navigation seams");
   return seams;
+}
+
+function vaultSwitcherTestSeams() {
+  const testElements = new Map();
+  const loadCalls = [];
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, element(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      __FINITE_BRAIN_TEST_LOAD_VAULT__: (input) => {
+        loadCalls.push(input);
+      },
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_VAULT_SWITCHER_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source
+    .replace(
+      "  async function loadVaultReader(options = {}) {",
+      "  async function loadVaultReader(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_LOAD_VAULT__) return window.__FINITE_BRAIN_TEST_LOAD_VAULT__({ activeVaultId: state.activeVaultId, options });"
+    )
+    .replace(
+      "  return {\n    accessActionRoute,",
+      "  window.__FINITE_BRAIN_CAPTURE_VAULT_SWITCHER_TEST_SEAMS__?.({ state, vaultSwitchButton });\n\n  return {\n    accessActionRoute,"
+    );
+  assert.notEqual(seamSource, source, "The Vault switcher test must capture the real selection seam");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-vault-switcher.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured Vault switcher seam");
+  return { loadCalls, seams };
+}
+
+async function assertVaultSwitcherLoadsSelectedVault() {
+  const vaultSwitcher = vaultSwitcherTestSeams();
+  const state = vaultSwitcher.seams.state;
+  state.activeVaultId = "personal-fixture";
+  state.metadata = { vaultId: "personal-fixture" };
+  state.sessionStatus = "unlocked";
+  state.vaultSwitcherOpen = true;
+  state.visibleVaults = [
+    { vaultId: "personal-fixture", kind: "personal", name: "Personal vault", role: "owner" },
+    { vaultId: "organization-fixture", kind: "organization", name: "Hermes Agent", role: "admin" },
+  ];
+
+  const organizationButton = vaultSwitcher.seams.vaultSwitchButton(
+    state.visibleVaults[1],
+    "switcher"
+  );
+  await organizationButton.click();
+
+  assert.equal(state.activeVaultId, "organization-fixture");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(vaultSwitcher.loadCalls)),
+    [{ activeVaultId: "organization-fixture", options: { allowResume: true } }],
+    "Choosing another Vault in the footer switcher must immediately unlock and load it"
+  );
 }
 
 const keyboardNavigation = keyboardNavigationTestSeams();
@@ -2555,6 +2634,7 @@ assert.doesNotMatch(
   assert.equal(client.deriveBrainIdentityProviderState(null).canConnect, false);
 
   await assertClipboardInvitationFeedbackContracts();
+  await assertVaultSwitcherLoadsSelectedVault();
   assertNestedManageVaultReturnContract();
   assertModalFocusAndContextRouteContracts();
 
