@@ -1,6 +1,6 @@
 ---
 name: finitebrain
-description: FiniteBrain vault and LLM wiki operations through ordinary file edits plus the fbrain CLI control plane. Use when setting up or acting as a FiniteBrain agent participant; opening, syncing, or editing Vault Working Trees; building, ingesting, querying, linting, or maintaining LLM wiki content inside readable folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing vault, folder, permission, invitation, and share-link admin flows.
+description: Personal Brain/wiki knowledge-base operations in FiniteBrain through ordinary file edits plus the fbrain CLI control plane. Use for FiniteBrain product knowledge requests; setting up or acting as an agent participant; opening, syncing, or editing Vault Working Trees; maintaining content inside readable Folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing Vault, Folder, permission, invitation, and share-link admin flows. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
 ---
 
 # FiniteBrain
