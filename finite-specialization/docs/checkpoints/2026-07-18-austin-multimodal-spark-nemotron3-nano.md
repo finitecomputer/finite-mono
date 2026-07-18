@@ -15,20 +15,23 @@ runtime does not decode the representative H.264 MP4 fixture.
 
 Promotion used the operator-scoped practical gate: authenticated Tyk API
 compatibility, text and structured tool calls, image/audio/sampled-video
-semantics, a bounded four-seat capacity probe, fresh worker canaries, and
-rollback-path canaries. The operator explicitly waived the full agent
-benchmark for this finite-specialization cutover. The prior Gemma 12 raw
-runtime remains running but absent from the public Tyk-visible model catalog
-and is operator-visible during the rollback soak.
+semantics, bounded multimodal concurrency probes, and fresh worker and Maya
+canaries. The operator explicitly waived the full agent benchmark for this
+finite-specialization cutover. The prior Gemma 12 raw runtime is retired: its
+aliases were withdrawn before the final spark-ee82 container was stopped with
+restart disabled. Maya TTS now has spark-ee82 to itself.
 
 That gate passed on 2026-07-18. The authenticated Tyk path returned `729` for
 the fixed image, transcribed the fixed Audex WAV phrase, and returned red and
 blue in chronological order for the sampled video. Fast and thinking profiles
-both passed their final multimodal checks. The bounded four-seat probe
-completed 4/4 requests with no errors in 1.130 seconds wall time; average
-request latency was 0.651 seconds, maximum latency was 1.102 seconds,
-streaming remained usable, and structured tool calling remained usable. This
-is a short practical capacity check, not a sustained media benchmark.
+both passed their final multimodal checks. With the vLLM runtime, Tyk routes,
+and worker media semaphore all set to eight, warm c8 probes completed 8/8 for
+image, WAV audio, sampled video, and a mixed workload. Wall times were 0.944,
+2.583, 2.322, and 1.626 seconds respectively, while runtime metrics observed
+eight running requests and zero waiting. At c9, homogeneous audio and video
+each returned one intentional `capacity_exceeded` rejection, so eight is the
+supported all-modality ceiling. This is a short practical capacity check, not
+a sustained media benchmark.
 
 The final worker canaries completed healthy at Unix timestamps `1784413657`
 (image, 423 ms), `1784413459` (audio, 2873 ms), and `1784413557` (video,
@@ -43,22 +46,17 @@ The executed Spark runtime image is
 the runner resolves the configured mutable tag to this immutable image ID
 before container creation.
 
-The Spark promotion artifacts are in
-`spark-cluster/runs/2026-07-18-nemotron-omni-2f73-cutover/`. The final public
-route backup is
-`.public-beta-ingress.env.bak-public-beta-route-sync-20260718T222518Z` on
+The initial Spark promotion artifacts are in
+`spark-cluster/runs/2026-07-18-nemotron-omni-2f73-cutover/`; the c8 and
+Maya-solo evidence is in
+`spark-cluster/runs/2026-07-18-maya-solo-nemotron-mm-concurrency/`. The c8
+public route backup is
+`.public-beta-ingress.env.bak-public-beta-route-sync-20260718T231019Z` on
 `finite-gateway`. The pre-worker-fix deployment backup is
 `/root/nemotron-cutover-20260718T2117Z/worker-deployment-before-audio-fix.yaml`
 on `clawland-ovh`.
 
-Rollback is capability-safe: restore the Gemma 12 aliases in the Public Beta
-Ingress manifest, set `FINITE_SPECIALIZATION_VISION_MODEL` back to
-`aeon-gemma-4-12b-k4-nvfp4-unified-fast`, roll out only the specialization
-worker, and require the three semantic canaries to return healthy before
-removing Nemotron.
-
-The exact fail-closed boundary is the Public Beta route manifest: restore its
-named backup first so both models overlap, reconcile the worker to the approved
-Gemma rollback alias, verify all three worker canaries, and only then withdraw
-Nemotron. The Gemma raw runtime stays hot and operator-visible throughout the
-rollback soak.
+Rollback is fail-closed: withdraw the two Nemotron aliases before stopping its
+runtime or changing the worker model. If c8 proves unhealthy, reduce the
+worker, runtime, and both route manifests together to c4, then require fresh
+image, audio, and video canaries. Gemma is not a rollback target.

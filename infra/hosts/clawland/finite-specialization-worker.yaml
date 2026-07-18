@@ -85,7 +85,7 @@ spec:
             - name: FINITE_SPECIALIZATION_MEDIA_TEMP_DIR
               value: /var/run/finite-specialization-media
             - name: FINITE_SPECIALIZATION_MEDIA_CONCURRENCY
-              value: "4"
+              value: "8"
             - name: FINITE_SPECIALIZATION_MAX_AUDIO_DURATION_SECONDS
               value: "900"
             - name: FINITE_SPECIALIZATION_MAX_VIDEO_DURATION_SECONDS

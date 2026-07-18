@@ -73,5 +73,5 @@ verification:
     - duration_ms
 
 rollback:
-  scope: target_agent_and_shared_worker_model_selection
-  action: Restore the Gemma 12 public aliases and worker model, then require fresh image, audio, and video canaries.
+  scope: nemotron_route_and_media_admission
+  action: Fail the Nemotron aliases closed before runtime changes; reduce worker, runtime, and route admission together to c4 if c8 is unhealthy, then require fresh image, audio, and video canaries. Gemma is retired and is not a rollback target.
