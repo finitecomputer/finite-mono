@@ -13,26 +13,40 @@ as standard image inputs through Responses. The Spark route does not advertise
 the optional direct `video_url` extension because the pinned NVIDIA 26.06
 runtime does not decode the representative H.264 MP4 fixture.
 
-Promotion requires current semantic passes for image, audio, and sampled video
-through the authenticated Tyk and Public Beta Ingress path, followed by fresh
-worker canaries for all three capabilities. The prior Gemma 12 raw runtime
-remains running but absent from the Tyk-visible model catalog during the
-rollback soak.
+Promotion used the operator-scoped practical gate: authenticated Tyk API
+compatibility, text and structured tool calls, image/audio/sampled-video
+semantics, a bounded four-seat capacity probe, fresh worker canaries, and
+rollback-path canaries. The operator explicitly waived the full agent
+benchmark for this finite-specialization cutover. The prior Gemma 12 raw
+runtime remains running but absent from the public Tyk-visible model catalog
+and is operator-visible during the rollback soak.
 
 That gate passed on 2026-07-18. The authenticated Tyk path returned `729` for
-the fixed image, transcribed the fixed Audex WAV phrase, and returned the
-chronological `red, red, blue, blue` markers for four sampled video frames.
-The final worker canaries completed healthy at Unix timestamps `1784409457`
-(image), `1784409559` (audio), and `1784409657` (video). The deployed worker is
+the fixed image, transcribed the fixed Audex WAV phrase, and returned red and
+blue in chronological order for the sampled video. Fast and thinking profiles
+both passed their final multimodal checks. The bounded four-seat probe
+completed 4/4 requests with no errors in 1.130 seconds wall time; average
+request latency was 0.651 seconds, maximum latency was 1.102 seconds,
+streaming remained usable, and structured tool calling remained usable. This
+is a short practical capacity check, not a sustained media benchmark.
+
+The final worker canaries completed healthy at Unix timestamps `1784413657`
+(image, 423 ms), `1784413459` (audio, 2873 ms), and `1784413557` (video,
+1020 ms). The deployed worker is
 `ghcr.io/finitecomputer/finite-specialization-worker:2026-07-18.1@sha256:93bb5f03df49fb62d32247e45f379432d5671e1201d6f46c096f1e0bdb6dc5c0`,
 built from commit `2d48d43`. Nemotron audio uses a system capability message;
 the model's multimodal template rejects a developer message followed by
 list-valued audio content.
 
+The executed Spark runtime image is
+`sha256:7bcc7cc08c926b8ba67e05efb6d9b7e7a227c932e98d3aef2b85533644f27650`;
+the runner resolves the configured mutable tag to this immutable image ID
+before container creation.
+
 The Spark promotion artifacts are in
 `spark-cluster/runs/2026-07-18-nemotron-omni-2f73-cutover/`. The final public
 route backup is
-`.public-beta-ingress.env.bak-public-beta-route-sync-20260718T212159Z` on
+`.public-beta-ingress.env.bak-public-beta-route-sync-20260718T222518Z` on
 `finite-gateway`. The pre-worker-fix deployment backup is
 `/root/nemotron-cutover-20260718T2117Z/worker-deployment-before-audio-fix.yaml`
 on `clawland-ovh`.
