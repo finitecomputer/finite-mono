@@ -62,7 +62,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: worker
-          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-17.1@sha256:79d275990934ffa56495071115c7b766aa7d039af50672a4873c377d009ad97c
+          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-18.1@sha256:93bb5f03df49fb62d32247e45f379432d5671e1201d6f46c096f1e0bdb6dc5c0
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -75,13 +75,13 @@ spec:
               exec finite-specialization-worker serve --host 0.0.0.0 --port 18998
           env:
             - name: FINITE_SPECIALIZATION_VISION_MODEL
-              value: aeon-gemma-4-12b-k4-nvfp4-unified-fast
+              value: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
-              value: "600"
+              value: "300"
             - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS
-              value: "600"
+              value: "300"
             - name: FINITE_SPECIALIZATION_VIDEO_CANARY_INTERVAL_SECONDS
-              value: "600"
+              value: "300"
             - name: FINITE_SPECIALIZATION_MEDIA_TEMP_DIR
               value: /var/run/finite-specialization-media
             - name: FINITE_SPECIALIZATION_MEDIA_CONCURRENCY

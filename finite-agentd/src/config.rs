@@ -14,7 +14,9 @@ pub const VISION_CONFIG_PATH: &str = "auxiliary.vision";
 pub const FINITECHAT_TOOLSETS_CONFIG_PATH: &str = "platform_toolsets.finitechat";
 pub const MODEL_CONFIG_PATH: &str = "model";
 pub const TELEGRAM_CONFIG_PATH: &str = "gateway.platforms.telegram";
-pub const DEFAULT_AEON_SPECIALIZATION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
+pub const DEFAULT_AEON_SPECIALIZATION_MODEL: &str =
+    "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast";
+pub const AEON_SPECIALIZATION_ROLLBACK_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
 pub const DEFAULT_AEON_SPECIALIZATION_WORKER_URL: &str = "https://specialization.finite.vip/v1";
 pub const DEFAULT_AEON_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 
@@ -669,9 +671,14 @@ fn validate_aeon_desired_state(
             "proposal_id must contain 1..128 bytes".to_owned(),
         ));
     }
-    if desired.model_alias != DEFAULT_AEON_SPECIALIZATION_MODEL {
+    if ![
+        DEFAULT_AEON_SPECIALIZATION_MODEL,
+        AEON_SPECIALIZATION_ROLLBACK_MODEL,
+    ]
+    .contains(&desired.model_alias.as_str())
+    {
         return Err(AgentdError::InvalidPayload(
-            "model_alias is not the canonical AEON specialization alias".to_owned(),
+            "model_alias is not an approved AEON specialization alias".to_owned(),
         ));
     }
     if desired.worker_base_url != DEFAULT_AEON_SPECIALIZATION_WORKER_URL {
@@ -1139,6 +1146,19 @@ mod tests {
         assert!(repeated.already_applied);
         assert_eq!(fs::read(manager.path()).unwrap(), after_first_apply);
         drop(directory);
+    }
+
+    #[test]
+    fn aeon_specialization_allows_only_current_and_rollback_models() {
+        let mut rollback = AeonSpecializationDesiredStateV1::canonical("rollback-gemma12");
+        rollback.model_alias = AEON_SPECIALIZATION_ROLLBACK_MODEL.to_owned();
+        validate_aeon_desired_state(&rollback).unwrap();
+
+        rollback.model_alias = "unapproved-model".to_owned();
+        assert!(matches!(
+            validate_aeon_desired_state(&rollback),
+            Err(AgentdError::InvalidPayload(_))
+        ));
     }
 
     #[test]
