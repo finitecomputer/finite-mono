@@ -208,6 +208,15 @@ find -L ~/.finite/managed-skills/finite/current -path '*finitebrain/SKILL.md' -p
 If a runtime lists `finitebrain-agent`, treat it as a stale skill name. The
 current skill name is `finitebrain`.
 
+## User-Facing Identity
+
+Treat identity as email-first at every user-facing boundary. Ask for, show, and
+confirm a User or Agent by canonical resolvable email, then resolve that email to
+the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
+`npub` values internal to command execution and diagnostics. If email resolution
+fails, report that failure; show the `npub` only when the user asks for advanced
+identity details.
+
 ## Security Rules
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,
@@ -225,7 +234,8 @@ current skill name is `finitebrain`.
 
 ## Final Report
 
-Report the working tree path, safe acting npub when relevant, folders readable or
-locked, wiki pages or sources created/updated/moved/deleted, index/log updates,
-`sync now --summary` status, latest sequence, whether `conflicts --json` is
-empty, and blockers with the command category that exposed them.
+Report the working tree path, acting identity email, folders readable or locked,
+wiki pages or sources created/updated/moved/deleted, index/log updates, `sync
+now --summary` status, latest sequence, whether `conflicts --json` is empty, and
+blockers with the command category that exposed them. Include the acting `npub`
+only when the user requests advanced identity details.
