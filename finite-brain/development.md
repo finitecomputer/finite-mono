@@ -25,8 +25,9 @@ Current v1 capabilities:
 - Product Client at `/client` for browser-based trusted-client workflows.
 - Development Smoke UI at `/smoke/ui` for local inspection only.
 - `fbrain` CLI for agent-native Vault Working Trees.
-- Folder-scoped default vault files for AGENTS/HUMANS guidance and LLM wiki
-  conventions.
+- Folder-scoped AGENTS/HUMANS guidance and LLM wiki conventions that trusted
+  clients or agents can add when a user explicitly asks for them. New Vaults
+  start empty under ADR-0021.
 
 ## Official URLs
 

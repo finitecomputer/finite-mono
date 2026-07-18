@@ -5,8 +5,10 @@ Status: accepted 2026-07-17.
 When an authenticated human directly asks an agent to create an Organization
 Vault, the acting Agent Principal and the requesting User Nostr Identity become
 initial Vault members and admins. Brain creates both memberships, both admin
-roles, and the required initial Folder Key Grants in the same atomic bootstrap.
-If any part fails, no Vault is created.
+roles, and the Vault in the same atomic bootstrap. Under ADR-0021, the new
+Vault has no Folders, Folder Keys, or Folder Key Grants; those appear only when
+an admin explicitly creates a Folder. If any bootstrap part fails, no Vault is
+created.
 
 The managed FiniteBrain skill obtains the requester from authenticated message
 metadata and passes that public-key account identifier unchanged into the

@@ -229,9 +229,7 @@ Organization Vault:
 - Has Vault Members.
 - Has Vault Admins.
 - Every Vault Admin MUST also be a Vault Member.
-- A new organization Vault starts with:
-  - `getting-started`: role `general`, access `all_members`
-  - `restricted`: role `folder`, access `restricted`
+- Starts with no Folders or Folder Objects.
 - Additional team or domain knowledge SHOULD be created as explicit Folders.
 - Sensitive or limited-audience org knowledge SHOULD be created as restricted
   Folders rather than hidden local directories inside an all-member Folder.
@@ -513,20 +511,12 @@ Personal Vault bootstrap:
 
 Organization Vault bootstrap:
 
-- Create one Vault with `kind: "organization"`.
-- Add the acting User as both Vault Member and Vault Admin.
-- Create the default organization wiki scope Folders from Section 4.1 with
-  current key version `1` and grants for all initial members/admins.
-- Seed ordinary encrypted Folder Objects for default Pages:
-  - `AGENTS.md`, `HUMANS.md`, `README.md`, and orientation Pages in
-    `getting-started`
-  - `config.md`, `_index.md`, and `log.md` in each default organization Folder
-  - a restricted example Page in `restricted`
-
-Default starter Pages MUST explain the Asset Source Note convention:
-non-Markdown source files are Assets under `raw/assets/`, and every Asset
-SHOULD have a Markdown Source Note in the same Folder before agents cite it
-from synthesized `wiki/` pages.
+- Atomically create one empty Vault with `kind: "organization"`.
+- Add every initial admin as both Vault Member and Vault Admin. Agent-created
+  bootstrap includes both the signing Agent Principal and authenticated human
+  requester; direct Product Client creation includes the signing human.
+- Create no Folder Keys or Folder Key Grants until an authorized admin creates
+  a Folder.
 
 Smoke/demo bootstrap:
 

@@ -22,8 +22,8 @@ Requester**: the User Nostr Identity taken from the authenticated human's direct
 chat request. The managed FiniteBrain skill passes that public identity into
 the Organization Vault creation operation. Brain atomically creates the Vault
 with both the acting Agent Principal and Organization Vault Requester as
-members and admins and issues both identities the required initial Folder Key
-Grants.
+members and admins. The Vault starts empty, so no Folder Key Grants exist until
+an admin explicitly creates a Folder.
 
 If the complete bootstrap cannot succeed, Brain creates no Vault. If the
 managed skill cannot obtain authenticated requester metadata, it does not
@@ -68,9 +68,8 @@ automatically add their Personal Agent.
 12. As an agent, I want to resume the user's broader task after successful
     creation, so that creating the Vault is a prerequisite rather than the end
     of the conversation.
-13. As a Vault administrator, I want both initial admins to receive the
-    required Folder Key Grants, so that membership metadata never claims access
-    an identity cannot cryptographically exercise.
+13. As a Vault administrator, I want the new Vault to start empty, so that
+    onboarding examples do not become permanent organization data.
 14. As a human creating an Organization Vault in the Product Client, I want the
     existing flow to remain unchanged, so that my Personal Agent is not added
     without an explicit action.
@@ -110,12 +109,11 @@ automatically add their Personal Agent.
   durable Vault state is written.
 - Organization Vault bootstrap produces both the signing creator and requester
   as initial members and admins. Every Vault admin remains a Vault member.
-- Required initial Folder Key Grants include both identities for every default
-  Organization Vault Folder they must open. Client-generated encrypted grants
-  are validated for completeness before storage.
-- Vault metadata, memberships, admin roles, initial folders, and all required
-  grants are committed as one store operation. Any validation, encryption,
-  grant, or persistence failure leaves no new Vault or partial relationships.
+- Organization Vault bootstrap creates no Folders, Folder Keys, or Folder Key
+  Grants. An authorized admin creates those explicitly later.
+- Vault metadata, memberships, and admin roles are committed as one store
+  operation. Any validation or persistence failure leaves no new Vault or
+  partial relationships.
 - Brain enforces the atomic two-principal result when a requester is supplied.
   The managed skill is responsible for selecting the requester from the
   authenticated message's sender metadata because Brain remains agnostic to
@@ -141,7 +139,7 @@ automatically add their Personal Agent.
 - The primary behavior test is the existing signed Brain HTTP integration seam.
   A request signed by an Agent Principal and carrying a distinct Organization
   Vault Requester must return a Vault in which both identities are members and
-  admins and both can exercise their initial Folder access.
+  admins and the Folder list and grant set are empty.
 - The integration test observes externally visible authorization and access,
   not internal helper calls or SQL layout.
 - The same seam verifies atomic failure by submitting an invalid or incomplete
@@ -153,8 +151,8 @@ automatically add their Personal Agent.
   invariants and rollback, but they support rather than replace the signed HTTP
   acceptance seam.
 - Existing CLI request-capture tests verify that
-  `--requesting-user-npub` produces the correct signed creation request and
-  complete encrypted grant set.
+  `--requesting-user-npub` produces the correct signed creation request with no
+  bootstrap grants.
 - Existing managed-skill static checks verify that the canonical component skill
   and packaged managed skill remain synchronized, use authenticated sender
   metadata, avoid identity guessing, and stop when that metadata is unavailable.

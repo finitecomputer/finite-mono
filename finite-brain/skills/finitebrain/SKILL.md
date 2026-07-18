@@ -138,6 +138,11 @@ fbrain --config-dir "$FBRAIN_CONFIG" vault create "$VAULT" \
   --server "$SERVER" --json
 ```
 
+The new Organization Vault starts empty. Do not create `getting-started`,
+`restricted`, onboarding Pages, or any other example content. Create a Folder
+only when the user's original request explicitly requires organization content,
+then continue that request in the new Folder.
+
 Do not replace this command with separate `add-member` and `add-admin` steps.
 On success, report the Vault name and that both you and the requester are
 admins, then continue the user's original task. This behavior applies only when

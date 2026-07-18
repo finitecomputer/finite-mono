@@ -108,13 +108,15 @@ carries no legacy Vault or user-key migration path into the first release.
 
 The authenticated human whose direct request causes an Agent Principal to
 create an Organization Vault on the human's behalf. Organization Vault
-Bootstrap makes both the acting Agent Principal and this requesting User Nostr
-Identity initial members and admins and gives both the required initial Folder
-Key Grants in one atomic operation. If either identity cannot receive that
-initial access, no Vault is created. This is a Brain-enforced bootstrap, not a
-sequence of later membership mutations. The managed FiniteBrain skill passes
-the requester from authenticated message metadata, never from identity text
-supplied in the conversation. If that authenticated requester metadata is
+Bootstrap atomically creates the Vault and makes both the acting Agent
+Principal and this requesting User Nostr Identity initial members and admins.
+It creates no Folder, Folder Key, or Folder Key Grant; those appear only when
+an admin explicitly creates a Folder. If either membership or admin role
+cannot be established, no Vault is created. This is a Brain-enforced
+bootstrap, not a sequence of later membership mutations. The managed
+FiniteBrain skill passes the requester from authenticated message metadata,
+never from identity text supplied in the conversation. If that authenticated
+requester metadata is
 unavailable, the agent does not guess or create an agent-only Vault; it briefly
 asks the user to retry from an authenticated chat context. This rule does not
 auto-enroll an agent when a human creates an Organization Vault directly in the
@@ -185,6 +187,15 @@ without creating a Folder merely for the relationship. In user-first setup, the
 owner atomically creates the Vault and adds the currently selected,
 identity-resolved agent as the one Personal Agent; if that agent cannot be
 verified, neither relationship is created.
+
+### Organization Vault Bootstrap
+
+The creation of an empty Organization Vault with its initial member-admin set.
+Direct Product Client creation starts with the signing human. Agent-created
+bootstrap atomically includes both the signing Agent Principal and the
+authenticated human requester. It seeds no default Folders, Folder Objects,
+Folder Keys, or Folder Key Grants; those appear only when an admin explicitly
+creates a Folder.
 
 ### Agent Bootstrap Authority
 

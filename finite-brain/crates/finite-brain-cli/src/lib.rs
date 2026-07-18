@@ -30,7 +30,7 @@ pub(crate) use state::*;
 pub(crate) use sync_engine::*;
 pub(crate) use working_tree_security::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -41,10 +41,8 @@ use finite_brain_core::portability::{
     WorkingTreeObjectManifestEntry, WorkingTreeSyncState,
 };
 use finite_brain_core::{
-    AdminAccessAction, FolderId, FolderKey, FolderObjectAad, FolderObjectOperation, ObjectId,
-    SafeRelativePath, VaultId, VaultKind, bootstrap_organization_vault,
-    bootstrap_organization_vault_with_requester, bootstrap_personal_vault, default_vault_pages,
-    encrypt_folder_object,
+    AdminAccessAction, FolderKey, VaultId, bootstrap_organization_vault,
+    bootstrap_organization_vault_with_requester, bootstrap_personal_vault,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, wrap_rumor};
 use nostr::{Keys, Kind};
@@ -54,6 +52,7 @@ pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
 pub(crate) const VAULT_DIRECTORY_VERSION: &str = "finite-vault-directory-v1";
 pub(crate) const WORKING_TREE_STATE_VERSION: &str = "finite-vault-working-tree-state-v1";
 pub(crate) const APP_SPECIFIC_KIND: u16 = 30_078;
+#[cfg(test)]
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
 
 /// Run `fbrain` using process args, stdin, and stdout.
@@ -1202,20 +1201,17 @@ fn activity<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Resul
     }
 }
 
-struct VaultCreateBootstrapPlan {
-    bootstrap_grants: Vec<serde_json::Value>,
-    folder_keys: BTreeMap<(String, u32), FolderKey>,
+struct VaultCreatePlan {
     requesting_user_npub: Option<String>,
-    vault_kind: VaultKind,
 }
 
-fn bootstrap_plan_for_vault_create(
+fn plan_vault_create(
     env: &CliEnvironment,
     vault_id: &str,
     kind: &str,
     name: &str,
     requesting_user_input: Option<&str>,
-) -> Result<VaultCreateBootstrapPlan, CliError> {
+) -> Result<VaultCreatePlan, CliError> {
     let auth = load_signer(env)?;
     let requesting_user_npub = requesting_user_input
         .map(|input| {
@@ -1228,19 +1224,16 @@ fn bootstrap_plan_for_vault_create(
                 })
         })
         .transpose()?;
-    let (vault_kind, output) = match kind {
+    let output = match kind {
         "personal" if requesting_user_npub.is_some() => {
             return Err(CliError::InvalidInput(
                 "Organization Vault requester identity is only valid for an Organization Vault"
                     .to_owned(),
             ));
         }
-        "personal" => (
-            VaultKind::Personal,
-            bootstrap_personal_vault(vault_id, name, auth.npub.clone()),
-        ),
+        "personal" => bootstrap_personal_vault(vault_id, name, auth.npub.clone()),
         "organization" => {
-            let output = if let Some(requester) = requesting_user_npub.as_ref() {
+            if let Some(requester) = requesting_user_npub.as_ref() {
                 bootstrap_organization_vault_with_requester(
                     vault_id,
                     name,
@@ -1249,8 +1242,7 @@ fn bootstrap_plan_for_vault_create(
                 )
             } else {
                 bootstrap_organization_vault(vault_id, name, auth.npub.clone())
-            };
-            (VaultKind::Organization, output)
+            }
         }
         other => {
             return Err(CliError::InvalidInput(format!(
@@ -1258,108 +1250,11 @@ fn bootstrap_plan_for_vault_create(
             )));
         }
     };
-    let output = output.map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    output.map_err(|error| CliError::InvalidInput(error.to_string()))?;
 
-    let mut folder_keys = BTreeMap::<(String, u32), FolderKey>::new();
-    let bootstrap_grants = output
-        .required_key_grants
-        .into_iter()
-        .map(|required| {
-            let folder_id = required.folder_id.to_string();
-            let folder_key = folder_keys
-                .entry((folder_id.clone(), required.key_version))
-                .or_insert_with(FolderKey::generate);
-            let recipient = required.recipient_user_id.to_string();
-            let grant = folder_key_grant_request(
-                &auth,
-                vault_id,
-                &folder_id,
-                required.key_version,
-                &recipient,
-                folder_key,
-                env,
-            )?;
-            Ok(serde_json::json!({
-                "folderId": folder_id,
-                "grant": grant
-            }))
-        })
-        .collect::<Result<Vec<_>, CliError>>()?;
-
-    Ok(VaultCreateBootstrapPlan {
-        bootstrap_grants,
-        folder_keys,
+    Ok(VaultCreatePlan {
         requesting_user_npub,
-        vault_kind,
     })
-}
-
-fn write_default_vault_pages_for_create(
-    env: &CliEnvironment,
-    server_url: &str,
-    vault_id: &str,
-    plan: &VaultCreateBootstrapPlan,
-) -> Result<(), CliError> {
-    let auth = load_signer(env)?;
-    let keys = auth.keys.clone();
-    let key_version = 1;
-
-    for page in default_vault_pages(plan.vault_kind) {
-        let folder_id = FolderId::new(page.folder_id)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let folder_key = plan
-            .folder_keys
-            .get(&(page.folder_id.to_owned(), key_version))
-            .ok_or_else(|| {
-                CliError::InvalidInput(format!(
-                    "missing generated Folder Key for {}",
-                    page.folder_id
-                ))
-            })?;
-        let object_id = ObjectId::new(page.object_id)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let page_path = SafeRelativePath::new("page_path", page.path)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let aad = FolderObjectAad {
-            vault_id: VaultId::new(vault_id.to_owned())
-                .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-            folder_id: folder_id.clone(),
-            object_id: object_id.clone(),
-            key_version,
-        };
-        let plaintext = encode_folder_object_page_plaintext(&page_path, page.markdown)?;
-        let envelope = encrypt_folder_object(folder_key, &aad, plaintext)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let envelope_json = envelope.canonical_json();
-        let revision_event = signed_revision_event(
-            &keys,
-            RevisionEventInput {
-                actor_npub: &auth.npub,
-                vault_id,
-                folder_id: &folder_id,
-                object_id: &object_id,
-                operation: FolderObjectOperation::Create,
-                base_revision: None,
-                key_version,
-                envelope_json: envelope_json.clone(),
-            },
-        )?;
-        let body = serde_json::json!({
-            "baseRevision": null,
-            "keyVersion": key_version,
-            "cipher": CIPHER_AES_256_GCM,
-            "ciphertext": envelope_json,
-            "revisionEvent": revision_event
-        });
-        let route = format!(
-            "/_admin/vaults/{vault_id}/folders/{}/objects/{}",
-            folder_id.as_str(),
-            object_id.as_str()
-        );
-        signed_json_request_to_server(env, server_url, "PUT", &route, Some(body))?;
-    }
-
-    Ok(())
 }
 
 fn access<W: Write>(
@@ -1564,7 +1459,7 @@ fn vault<W: Write>(
             let normalized_kind = normalize_vault_kind(&kind)?;
             let name = option_value(args, "--name").unwrap_or_else(|| vault_id.clone());
             let requesting_user_input = unique_option_value(args, "--requesting-user-npub")?;
-            let bootstrap_plan = bootstrap_plan_for_vault_create(
+            let create_plan = plan_vault_create(
                 env,
                 vault_id,
                 normalized_kind,
@@ -1575,9 +1470,9 @@ fn vault<W: Write>(
                 "vaultId": vault_id,
                 "kind": normalized_kind,
                 "name": name,
-                "bootstrapGrants": bootstrap_plan.bootstrap_grants
+                "bootstrapGrants": []
             });
-            if let Some(requester) = bootstrap_plan.requesting_user_npub.as_ref() {
+            if let Some(requester) = create_plan.requesting_user_npub.as_ref() {
                 body["requestingUserNpub"] = serde_json::Value::String(requester.clone());
             }
             let server_url = server_url_for_command(env, args)?;
@@ -1588,7 +1483,6 @@ fn vault<W: Write>(
                 "/_admin/vaults",
                 Some(body),
             )?;
-            write_default_vault_pages_for_create(env, &server_url, vault_id, &bootstrap_plan)?;
             write_command_response(output, json, &response)
         }
         "metadata" | "status" => {
@@ -2548,8 +2442,8 @@ fn share<W: Write>(
 mod tests {
     use super::*;
     use finite_brain_core::{
-        BrainGrantIntent, EncryptedFolderObjectEnvelope, FolderObjectAad, open_folder_key_grant,
-        open_folder_object,
+        BrainGrantIntent, FolderId, FolderObjectAad, ObjectId, SafeRelativePath,
+        encrypt_folder_object, open_folder_key_grant,
     };
     use finite_nostr::{
         GiftWrapValidation, NostrPublicKey, decode_http_auth_header, open_gift_wrap,
@@ -3463,28 +3357,6 @@ mod tests {
         let opened = open_gift_wrap(&keys, &event, &GiftWrapValidation::new(recipient)).unwrap();
         let plaintext: Value = serde_json::from_str(&opened.rumor.content).unwrap();
         plaintext["folderKey"].as_str().unwrap().to_owned()
-    }
-
-    fn open_default_page_request(
-        body: &str,
-        vault_id: &str,
-        folder_id: &str,
-        object_id: &str,
-        folder_key: &str,
-    ) -> Value {
-        let body: Value = serde_json::from_str(body).unwrap();
-        let key_version = body["keyVersion"].as_u64().unwrap() as u32;
-        let key = FolderKey::from_base64(folder_key).unwrap();
-        let aad = FolderObjectAad {
-            vault_id: VaultId::new(vault_id).unwrap(),
-            folder_id: finite_brain_core::FolderId::new(folder_id).unwrap(),
-            object_id: ObjectId::new(object_id).unwrap(),
-            key_version,
-        };
-        let envelope =
-            EncryptedFolderObjectEnvelope::from_json(body["ciphertext"].as_str().unwrap()).unwrap();
-        let plaintext = open_folder_object(&key, &aad, &envelope).unwrap();
-        serde_json::from_slice(&plaintext).unwrap()
     }
 
     fn read_http_request(stream: &mut TcpStream) -> (String, String) {
@@ -4785,31 +4657,16 @@ mod tests {
     }
 
     #[test]
-    fn vault_create_writes_default_pages() {
+    fn vault_create_starts_personal_and_organization_vaults_empty() {
         let cases = [
-            (
-                "personal",
-                VaultKind::Personal,
-                "personal-defaults",
-                "Personal defaults",
-                vec![],
-            ),
-            (
-                "organization",
-                VaultKind::Organization,
-                "org-defaults",
-                "Org defaults",
-                vec!["getting-started", "restricted"],
-            ),
+            ("personal", "personal-empty", "Personal empty"),
+            ("organization", "org-empty", "Org empty"),
         ];
 
-        for (kind, vault_kind, vault_id, name, expected_grant_folders) in cases {
+        for (kind, vault_id, name) in cases {
             let tmp = TempDir::new().unwrap();
-            let secret = "0000000000000000000000000000000000000000000000000000000000000001";
-            import_identity_secret(&tmp, secret);
-            let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
-            let default_pages = finite_brain_core::default_vault_pages(vault_kind);
-            let (server_url, server) = start_ok_capture_server(1 + default_pages.len());
+            import_identity_secret(&tmp, TEST_SECRET_HEX);
+            let (server_url, server) = start_ok_capture_server(1);
 
             let mut output = Vec::new();
             run_with_env(
@@ -4834,7 +4691,7 @@ mod tests {
             assert_eq!(response["status"], "ok");
 
             let requests = server.join().unwrap();
-            assert_eq!(requests.len(), 1 + default_pages.len());
+            assert_eq!(requests.len(), 1);
             let (_, post_body) = requests
                 .iter()
                 .find(|(request, _)| request.starts_with("POST /_admin/vaults "))
@@ -4843,68 +4700,19 @@ mod tests {
             assert_eq!(post_body["vaultId"], vault_id);
             assert_eq!(post_body["kind"], kind);
             assert_eq!(post_body["name"], name);
-            assert_eq!(
-                post_body["bootstrapGrants"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|grant| grant["folderId"].as_str().unwrap())
-                    .collect::<Vec<_>>(),
-                expected_grant_folders
-            );
-
-            let folder_keys = post_body["bootstrapGrants"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|grant| {
-                    let folder_id = grant["folderId"].as_str().unwrap().to_owned();
-                    let folder_key = grant_plaintext_folder_key(grant, secret, &actor_npub);
-                    (folder_id, folder_key)
-                })
-                .collect::<BTreeMap<_, _>>();
-
-            for page in default_pages {
-                let folder_key = folder_keys
-                    .get(page.folder_id)
-                    .expect("default Page Folder grant captured");
-                let (request, body) = requests
-                    .iter()
-                    .find(|(request, _)| {
-                        request.starts_with(&format!(
-                            "PUT /_admin/vaults/{vault_id}/folders/{}/objects/{} ",
-                            page.folder_id, page.object_id
-                        ))
-                    })
-                    .expect("default Page write captured");
-                assert!(request.contains(page.object_id));
-                let plaintext = open_default_page_request(
-                    body,
-                    vault_id,
-                    page.folder_id,
-                    page.object_id,
-                    folder_key,
-                );
-                assert_eq!(plaintext["version"], "finite-folder-object-page-v1");
-                assert_eq!(plaintext["path"], page.path);
-                assert!(plaintext["markdown"].as_str().unwrap().starts_with('#'));
-            }
+            assert!(post_body["bootstrapGrants"].as_array().unwrap().is_empty());
         }
     }
 
     #[test]
-    fn vault_create_includes_authenticated_requester_and_both_grant_sets() {
+    fn vault_create_includes_authenticated_requester_without_bootstrap_grants() {
         let tmp = TempDir::new().unwrap();
-        let actor_secret = TEST_SECRET_HEX;
         let requester_keys = Keys::generate();
-        let requester_secret = requester_keys.secret_key().to_secret_hex();
-        import_identity_secret(&tmp, actor_secret);
-        let actor_npub = npub_for_secret(actor_secret);
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
         let requester_npub = NostrPublicKey::from_protocol(requester_keys.public_key())
             .to_npub()
             .unwrap();
-        let default_pages = finite_brain_core::default_vault_pages(VaultKind::Organization);
-        let (server_url, server) = start_ok_capture_server(1 + default_pages.len());
+        let (server_url, server) = start_ok_capture_server(1);
 
         let mut output = Vec::new();
         run_with_env(
@@ -4934,42 +4742,7 @@ mod tests {
             .expect("vault create request captured");
         let post_body: Value = serde_json::from_str(post_body).unwrap();
         assert_eq!(post_body["requestingUserNpub"], requester_npub);
-        let grants = post_body["bootstrapGrants"].as_array().unwrap();
-        assert_eq!(grants.len(), 4);
-        assert_eq!(
-            grants
-                .iter()
-                .filter(|grant| grant["grant"]["recipientNpub"] == actor_npub)
-                .count(),
-            2
-        );
-        assert_eq!(
-            grants
-                .iter()
-                .filter(|grant| grant["grant"]["recipientNpub"] == requester_npub)
-                .count(),
-            2
-        );
-
-        for folder_id in ["getting-started", "restricted"] {
-            let actor_grant = grants
-                .iter()
-                .find(|grant| {
-                    grant["folderId"] == folder_id && grant["grant"]["recipientNpub"] == actor_npub
-                })
-                .unwrap();
-            let requester_grant = grants
-                .iter()
-                .find(|grant| {
-                    grant["folderId"] == folder_id
-                        && grant["grant"]["recipientNpub"] == requester_npub
-                })
-                .unwrap();
-            assert_eq!(
-                grant_plaintext_folder_key(actor_grant, actor_secret, &actor_npub),
-                grant_plaintext_folder_key(requester_grant, &requester_secret, &requester_npub)
-            );
-        }
+        assert!(post_body["bootstrapGrants"].as_array().unwrap().is_empty());
     }
 
     #[test]

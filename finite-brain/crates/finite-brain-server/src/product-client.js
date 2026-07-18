@@ -127,7 +127,6 @@ const FiniteBrainProductClient = (() => {
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS = 100;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
-  const DEFAULT_CLIENT_FOLDER_ID = "getting-started";
   const VAULT_ACCESS_CHANGED_NOTICE =
     "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
   const VAULT_ACCESS_REQUIRED_REASON = "vault access required";
@@ -167,412 +166,6 @@ const FiniteBrainProductClient = (() => {
     "vaultInviteUrlInput",
     "vaultMemberNpubInput",
   ];
-  const DEFAULT_AGENTS_MARKDOWN =
-    [
-      "# AGENTS.md",
-      "",
-      "This is a FiniteBrain vault. Start with [[Getting Started]], then use",
-      "[[How FiniteBrain Works]] and [[Access And Folders]] to understand the",
-      "product model. Treat every readable Folder as its own encrypted, syncable",
-      "LLM wiki scope.",
-      "",
-      "## Operating Model",
-      "",
-      "FiniteBrain stores encrypted Vault state on the server. Trusted clients and",
-      "agent runtimes open Folder Key Grants locally, decrypt accessible Pages and",
-      "Assets, edit ordinary files, then sync encrypted changes back. See",
-      "[[How FiniteBrain Works]] for the technical spine and [[Access And Folders]] for",
-      "the privacy boundary.",
-      "",
-      "Every participating keypair is a Member Identity. FiniteBrain does not classify",
-      "that identity as human- or agent-controlled; access and attribution follow the",
-      "acting public key.",
-      "",
-      "A Vault is not one giant wiki with folders. It is a namespace of many",
-      "Folder-scoped LLM wikis. Folder access determines which wiki scopes can be read",
-      "or written. The local scope contract lives in [[Getting Started Config]],",
-      "with navigation in [[Getting Started Index]] and maintenance history in",
-      "[[Getting Started Log]].",
-      "",
-      "## Use `fbrain`",
-      "",
-      "Use `fbrain` for identity, sync, access, and daemon state.",
-      "",
-      "Start here:",
-      "",
-      "```sh",
-      "fbrain doctor --server \"$SERVER\"",
-      "fbrain auth status --json",
-      "fbrain open \"$VAULT\" \"$TREE\" --server \"$SERVER\"",
-      "cd \"$TREE\"",
-      "fbrain sync now --summary",
-      "fbrain conflicts --json",
-      "```",
-      "",
-      "Use an explicit config dir in agent runtimes:",
-      "",
-      "```sh",
-      "fbrain --config-dir \"$HOME/.config/finitebrain\" auth status --json",
-      "```",
-      "",
-      "Never print or expose Nostr secrets, Folder Keys, grant plaintext, auth files, decrypted sync internals, or rotation bodies.",
-      "",
-      "## Editing Rules",
-      "",
-      "Before editing:",
-      "",
-      "1. Sync; the operation reopens available encrypted grants in memory.",
-      "2. Read this file.",
-      "3. Read [[HUMANS.md]].",
-      "4. Read [[Getting Started Index]], [[Getting Started Config]],",
-      "   [[Getting Started Log]], `index.md`, or `SCHEMA.md` when present.",
-      "5. Search before creating new pages.",
-      "",
-      "Only edit readable content. Do not edit `.finitebrain/`, encrypted sync evidence, locked metadata-only folders, generated state files, auth files, or key material.",
-      "",
-      "After editing:",
-      "",
-      "```sh",
-      "fbrain sync now --summary",
-      "fbrain conflicts --json",
-      "```",
-      "",
-      "Resolve conflicts before reporting done.",
-      "",
-      "## LLM Wiki Rules",
-      "",
-      "Use each readable Folder as a durable LLM wiki scope.",
-      "",
-      "- The default `getting-started` Folder is the shared orientation scope for users and agents. Its starter map is [[Getting Started]].",
-      "- The default `restricted` Folder is the starter tighter-boundary scope for sensitive work. If readable, its starter note is [[Restricted Folder Example]].",
-      "- Keep raw sources immutable under that Folder's `raw/`.",
-      "- Store non-Markdown source files under that Folder's `raw/assets/`.",
-      "- Pair every Asset with a Markdown Source Note that records provenance, content type, hash or extraction status when known.",
-      "- Cite Source Notes from synthesized wiki pages; do not make the blob itself the knowledge surface.",
-      "- Put synthesized durable knowledge in that Folder's `wiki/`.",
-      "- Prefer updating existing pages over creating duplicates.",
-      "- Use wikilinks for internal relationships.",
-      "- Keep the Folder-local `_index.md` current; this starter scope uses [[Getting Started Index]].",
-      "- Append only to the Folder-local `log.md` after meaningful writes in that Folder; this starter scope uses [[Getting Started Log]].",
-      "- Use `inventory/` for source candidates, open questions, watch items, and next actions.",
-      "- Use `datasets/` for manifests, schemas, samples, and query recipes.",
-      "- Use `output/` for reports, plans, summaries, and deliverables.",
-      "- Archive superseded material instead of deleting it.",
-      "- Answer from curated wiki pages first; say what is missing when evidence is thin.",
-      "- Never summarize restricted Folder contents into a less-restricted Folder, index, log, or output.",
-      "",
-      "## Suggested Layout",
-      "",
-      "```text",
-      "config.md",
-      "_index.md",
-      "log.md",
-      "inbox/",
-      "raw/",
-      "  assets/",
-      "wiki/",
-      "inventory/",
-      "datasets/",
-      "output/",
-      "archive/",
-      "```",
-      "",
-      "Local folder instructions may override this layout. Human-facing context is in",
-      "[[HUMANS.md]], and the seeded graph hub is [[Getting Started]].",
-      "",
-      "## Final Report",
-      "",
-      "When finished, report:",
-      "",
-      "- working tree path",
-      "- acting email, if relevant",
-      "- folders readable or locked",
-      "- pages or sources created/updated/moved/deleted",
-      "- index/log updates",
-      "- sync summary",
-      "- latest sequence, if available",
-      "- whether conflicts are empty",
-    ].join("\n") + "\n";
-  const DEFAULT_HUMANS_MARKDOWN =
-    [
-      "# HUMANS.md",
-      "",
-      "This vault is your private, encrypted knowledge workspace.",
-      "",
-      "FiniteBrain keeps the server blind to page and asset contents. Your client or agent opens the vault locally, decrypts what you can access, edits ordinary files, then syncs encrypted changes back. [[How FiniteBrain Works]] explains that flow.",
-      "",
-      "A FiniteBrain vault is a namespace of wiki scopes. Each top-level Folder is its",
-      "own LLM wiki with its own `_index.md`, `config.md`, and `log.md`. The",
-      "starter orientation scope is mapped in [[Getting Started Index]], configured",
-      "by [[Getting Started Config]], and recorded in [[Getting Started Log]].",
-      "",
-      "Inside a Folder:",
-      "",
-      "- `raw/` is source material.",
-      "- `raw/assets/` is non-Markdown source files such as PDFs, images, audio, video, and datasets.",
-      "- Source Notes are Markdown pages that explain those files and make them usable by agents.",
-      "- `wiki/` is durable notes and synthesized understanding.",
-      "- `inventory/` tracks things to revisit.",
-      "- `datasets/` indexes structured references.",
-      "- `output/` holds reports, plans, and finished work.",
-      "- `log.md` records meaningful changes for that Folder only.",
-      "",
-      "The default `getting-started` Folder is for orientation and shared operating",
-      "rules. The default `restricted` Folder demonstrates a tighter access boundary",
-      "for private work.",
-      "",
-      "Read [[Getting Started]] for the first-page map, [[Access And Folders]] for",
-      "sharing rules, and [[AGENTS.md]] for agent operating instructions. Agents",
-      "should sync before editing, avoid duplicates, preserve sources, create Source",
-      "Notes for assets, and keep the wiki useful for future work.",
-    ].join("\n") + "\n";
-  const defaultScopeConfigMarkdown = (folderId) => {
-    const label = folderId === "restricted" ? "Restricted" : "Getting Started";
-    const peerLabel = folderId === "restricted" ? "Getting Started" : "Restricted";
-    return (
-    [
-      `# ${label} Config`,
-      "",
-      "This Folder is an independent FiniteBrain LLM wiki scope.",
-      "",
-      `Use [[${label} Index]] as the local navigation hub and append meaningful`,
-      `maintenance to [[${label} Log]]. Shared product orientation starts at`,
-      "[[Getting Started]], with related model notes in [[How FiniteBrain Works]]",
-      "and [[Access And Folders]].",
-      "",
-      "Use this Folder's `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`",
-      "directories for knowledge that belongs inside this access boundary. Keep this",
-      "Folder's `_index.md` and `log.md` scoped only to pages in this Folder.",
-      "",
-      "Store non-Markdown source files in `raw/assets/` and pair each one with a",
-      "Markdown Source Note in this Folder.",
-      "",
-      "Do not summarize restricted sibling Folder contents here unless the user",
-      "explicitly chooses this Folder as an equal-or-more-restricted destination.",
-      "",
-      `Related default scope: ${peerLabel === "Restricted" ? "`restricted`" : "`getting-started`"}. Keep cross-Folder synthesis access-safe.`,
-    ].join("\n") + "\n"
-    );
-  };
-  const defaultScopeIndexMarkdown = (folderId) => {
-    if (folderId === "restricted") {
-      return (
-        [
-          "# Restricted Index",
-          "",
-          "This index maps the restricted starter wiki scope. It should describe only",
-          "content that belongs inside this Folder's access boundary.",
-          "",
-          "## Local Pages",
-          "",
-          "- [[Restricted Folder Example]] explains this default tighter-boundary Folder.",
-          "- [[Restricted Config]] defines the local wiki conventions.",
-          "- [[Restricted Log]] records meaningful writes in this Folder only.",
-          "",
-          "## Related Orientation",
-          "",
-          "- [[Getting Started]] is the shared starter map.",
-          "- [[How FiniteBrain Works]] explains trusted-client encryption and sync.",
-          "- [[Access And Folders]] explains why restricted content must stay inside an equal-or-more-restricted destination.",
-          "- [[AGENTS.md]] gives agent operating rules.",
-        ].join("\n") + "\n"
-      );
-    }
-    return (
-      [
-        "# Getting Started Index",
-        "",
-        "This index maps the shared orientation wiki scope.",
-        "",
-        "## Local Pages",
-        "",
-        "- [[Getting Started]] is the first-page map for a new Vault.",
-        "- [[How FiniteBrain Works]] explains the trusted-client and encrypted-server model.",
-        "- [[Access And Folders]] explains Folder-scoped access boundaries.",
-        "- [[AGENTS.md]] gives agent operating rules.",
-        "- [[HUMANS.md]] gives human-facing orientation.",
-        "- [[Getting Started Config]] defines this scope's wiki conventions.",
-        "- [[Getting Started Log]] records meaningful writes in this Folder only.",
-        "",
-        "## Boundaries",
-        "",
-        "Do not list private titles, summaries, source hints, assets, or activity from",
-        "sibling Folders here. Link out only to product-safe default orientation.",
-      ].join("\n") + "\n"
-    );
-  };
-  const defaultScopeLogMarkdown = (folderId) => {
-    const label = folderId === "restricted" ? "Restricted" : "Getting Started";
-    return (
-    [
-      `# ${label} Log`,
-      "",
-      `Append meaningful changes in this Folder only. Keep [[${label} Index]] in`,
-      `sync with durable pages and follow [[${label} Config]] for scope rules.`,
-      "",
-      "Do not record activity from sibling Folders here.",
-    ].join("\n") + "\n"
-    );
-  };
-  const DEFAULT_GETTING_STARTED_README_MARKDOWN =
-    [
-      "# Getting Started",
-      "",
-      "This Folder explains the default FiniteBrain vault layout.",
-      "",
-      "For humans, read [[HUMANS.md]]. For agents, read [[AGENTS.md]]. For the local",
-      "scope map, use [[Getting Started Index]], [[Getting Started Config]], and",
-      "[[Getting Started Log]].",
-      "",
-      "Default Folders:",
-      "",
-      "- `getting-started` is the shared orientation scope for users and agents. Keep",
-      "  operating rules, onboarding notes, and vault-level guidance here.",
-      "- `restricted` is the starter tighter-boundary scope for sensitive work. Do not",
-      "  copy restricted titles, summaries, source notes, assets, or logs back here",
-      "  unless the intended audience is allowed to read them.",
-      "",
-      "Core starter pages:",
-      "",
-      "- [[How FiniteBrain Works]] explains encrypted server state, local Folder Keys, Pages, Assets, and sync.",
-      "- [[Access And Folders]] explains why every Folder is its own wiki boundary.",
-      "- [[Restricted Folder Example]] is readable only when that Folder's key is open.",
-      "",
-      "Inside any Folder, keep non-Markdown source files as encrypted Assets under",
-      "`raw/assets/`. Pair each Asset with a Markdown Source Note in the same Folder.",
-      "Agents and synthesized wiki pages cite the Source Note; the Asset preserves the",
-      "original bytes.",
-      "",
-      "Keep durable knowledge inside Folder-scoped `wiki/` pages, and keep private or",
-      "sensitive work inside a Folder with an equal or tighter access boundary.",
-      "",
-      "Backlinks to keep this starter graph connected: [[HUMANS.md]], [[AGENTS.md]],",
-      "[[Getting Started Index]], [[How FiniteBrain Works]], and [[Access And Folders]].",
-    ].join("\n") + "\n";
-  const DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN =
-    [
-      "# How FiniteBrain Works",
-      "",
-      "FiniteBrain stores encrypted Vault data on the server. The client or agent",
-      "opens Folder Keys locally, decrypts the Pages and Assets it can access, edits",
-      "ordinary files, and syncs encrypted updates back.",
-      "",
-      "This is the technical companion to [[Getting Started]] and should stay",
-      "consistent with [[Access And Folders]], [[Getting Started Config]], and",
-      "[[AGENTS.md]].",
-      "",
-      "Non-Markdown source files are encrypted as Assets and kept under `raw/assets/`.",
-      "Agents use Markdown Source Notes to describe those Assets before synthesizing",
-      "durable wiki pages from them.",
-      "",
-      "Each top-level Folder is an LLM wiki scope. A Folder has its own `config.md`,",
-      "`_index.md`, and `log.md`, so activity and summaries stay inside the same",
-      "access boundary as the content they describe.",
-      "",
-      "Graph View and backlinks are client-side projections over decrypted Pages. The",
-      "server stores encrypted objects and sync records; it does not need plaintext",
-      "page titles, links, backlinks, or wiki indexes.",
-      "",
-      "Related pages: [[Getting Started]], [[Access And Folders]], [[Getting Started Index]], [[HUMANS.md]], and [[AGENTS.md]].",
-    ].join("\n") + "\n";
-  const DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN =
-    [
-      "# Access And Folders",
-      "",
-      "Access is Folder-scoped.",
-      "",
-      "Read this with [[How FiniteBrain Works]]: Folder Keys are why the wiki graph",
-      "is built from readable local Pages instead of server-side plaintext indexing.",
-      "",
-      "- `getting-started` is the default shared orientation Folder.",
-      "- `restricted` is the default example of a tighter access boundary.",
-      "- Open Folders are intended for everyone who belongs in that Vault.",
-      "- Restricted Folders are for material that should only be visible to approved",
-      "  Member Identities.",
-      "- Do not copy restricted titles, summaries, Source Notes, Assets, or log entries",
-      "  into a less-restricted Folder.",
-      "",
-      "Use [[Getting Started]] and [[Getting Started Index]] for shared orientation.",
-      "Use [[Restricted Folder Example]] only when the restricted Folder is readable.",
-      "Agent rules live in [[AGENTS.md]], and human-facing orientation lives in",
-      "[[HUMANS.md]].",
-    ].join("\n") + "\n";
-  const DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN =
-    [
-      "# Restricted Folder Example",
-      "",
-      "This Folder demonstrates a tighter access boundary.",
-      "",
-      "It is the restricted counterpart to [[Getting Started]]. Keep local navigation",
-      "in [[Restricted Index]], local rules in [[Restricted Config]], and local history",
-      "in [[Restricted Log]].",
-      "",
-      "In an organization Vault, this Folder starts with access for admins only. Add",
-      "specific members later when the work in this Folder should be shared with them.",
-      "",
-      "Keep this Folder's `_index.md` and `log.md` local to this Folder. Do not",
-      "summarize this Folder into `getting-started` unless the user explicitly chooses",
-      "that destination and the audience is allowed to see the summary.",
-      "",
-      "Related shared pages: [[Access And Folders]], [[How FiniteBrain Works]],",
-      "[[AGENTS.md]], and [[HUMANS.md]].",
-    ].join("\n") + "\n";
-  const defaultPage = (folderId, objectId, path, markdown) =>
-    Object.freeze({ folderId, objectId, path, markdown });
-  const defaultScopePages = (folderId) => [
-    defaultPage(
-      folderId,
-      `obj_default_${folderId}_scope_config`,
-      "config.md",
-      defaultScopeConfigMarkdown(folderId)
-    ),
-    defaultPage(folderId, `obj_default_${folderId}_scope_index`, "_index.md", defaultScopeIndexMarkdown(folderId)),
-    defaultPage(folderId, `obj_default_${folderId}_scope_log`, "log.md", defaultScopeLogMarkdown(folderId)),
-  ];
-  const defaultPrimaryScopePages = (folderId) => [
-    defaultPage(folderId, "obj_default_agents", "AGENTS.md", DEFAULT_AGENTS_MARKDOWN),
-    defaultPage(folderId, "obj_default_humans", "HUMANS.md", DEFAULT_HUMANS_MARKDOWN),
-    ...defaultScopePages(folderId),
-  ];
-  const gettingStartedGuidePages = () => [
-    defaultPage(
-      "getting-started",
-      "obj_default_getting-started_readme",
-      "README.md",
-      DEFAULT_GETTING_STARTED_README_MARKDOWN
-    ),
-    defaultPage(
-      "getting-started",
-      "obj_default_getting-started_how_finitebrain_works",
-      "wiki/how-finitebrain-works.md",
-      DEFAULT_HOW_FINITEBRAIN_WORKS_MARKDOWN
-    ),
-    defaultPage(
-      "getting-started",
-      "obj_default_getting-started_access_and_folders",
-      "wiki/access-and-folders.md",
-      DEFAULT_ACCESS_AND_FOLDERS_MARKDOWN
-    ),
-  ];
-  const restrictedGuidePage = () =>
-    defaultPage(
-      "restricted",
-      "obj_default_restricted_example",
-      "wiki/restricted-folder-example.md",
-      DEFAULT_RESTRICTED_EXAMPLE_MARKDOWN
-    );
-  const starterVaultPages = () => [
-    ...defaultPrimaryScopePages("getting-started"),
-    ...gettingStartedGuidePages(),
-    ...defaultScopePages("restricted"),
-    restrictedGuidePage(),
-  ];
-  const PERSONAL_DEFAULT_VAULT_PAGES = Object.freeze([
-    ...starterVaultPages(),
-  ]);
-  const ORGANIZATION_DEFAULT_VAULT_PAGES = Object.freeze([
-    ...starterVaultPages(),
-  ]);
   const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
   const graphViewport = { height: 560, width: 900 };
   const GRAPH_ZOOM_MAX = 2.5;
@@ -4205,6 +3798,16 @@ const FiniteBrainProductClient = (() => {
     return normalizeAssetPath(`raw/assets/${filename}`, "OKF asset target path");
   }
 
+  function requireOkfDestinationFolderId(...candidates) {
+    const folderId = candidates
+      .map((candidate) => String(candidate || "").trim())
+      .find(Boolean);
+    if (!folderId) {
+      throw new Error("Create or select a Folder before importing OKF content");
+    }
+    return folderId;
+  }
+
   function parseOkfBundle(input, options = {}) {
     const source = typeof input === "string" ? JSON.parse(input) : input;
     if (!source || typeof source !== "object") throw new Error("OKF bundle must be a JSON object");
@@ -4238,7 +3841,11 @@ const FiniteBrainProductClient = (() => {
           sourceFolderId: page.folderId || null,
           sourceObjectId: page.objectId || null,
           sourcePath,
-          folderId: options.destinationFolderId || page.targetFolderId || page.folderId || DEFAULT_CLIENT_FOLDER_ID,
+          folderId: requireOkfDestinationFolderId(
+            options.destinationFolderId,
+            page.targetFolderId,
+            page.folderId
+          ),
           targetPath,
           markdown,
           contentType: page.contentType || "text/markdown",
@@ -4261,7 +3868,11 @@ const FiniteBrainProductClient = (() => {
           sourceFolderId: asset.folderId || null,
           sourceObjectId: asset.objectId || null,
           sourcePath,
-          folderId: options.destinationFolderId || asset.targetFolderId || asset.folderId || DEFAULT_CLIENT_FOLDER_ID,
+          folderId: requireOkfDestinationFolderId(
+            options.destinationFolderId,
+            asset.targetFolderId,
+            asset.folderId
+          ),
           targetPath,
           bytesBase64,
           contentHash: asset.contentHash || "",
@@ -4280,7 +3891,11 @@ const FiniteBrainProductClient = (() => {
             sourceFolderId: object.folderId || null,
             sourceObjectId: object.objectId || null,
             sourcePath,
-            folderId: options.destinationFolderId || object.targetFolderId || object.folderId || DEFAULT_CLIENT_FOLDER_ID,
+            folderId: requireOkfDestinationFolderId(
+              options.destinationFolderId,
+              object.targetFolderId,
+              object.folderId
+            ),
             targetPath: normalizeSafeRelativePath(
               object.targetPath || object.pagePath || targetPathFromBundlePath(sourcePath),
               "OKF page target path"
@@ -4301,7 +3916,11 @@ const FiniteBrainProductClient = (() => {
             sourceFolderId: object.folderId || null,
             sourceObjectId: object.objectId || null,
             sourcePath,
-            folderId: options.destinationFolderId || object.targetFolderId || object.folderId || DEFAULT_CLIENT_FOLDER_ID,
+            folderId: requireOkfDestinationFolderId(
+              options.destinationFolderId,
+              object.targetFolderId,
+              object.folderId
+            ),
             targetPath: normalizeAssetPath(
               object.targetPath || object.assetPath || assetTargetPathFromBundlePath(sourcePath),
               "OKF asset target path"
@@ -4320,7 +3939,7 @@ const FiniteBrainProductClient = (() => {
           sourceFolderId: null,
           sourceObjectId: null,
           sourcePath,
-          folderId: options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID,
+          folderId: requireOkfDestinationFolderId(options.destinationFolderId),
           targetPath: targetPathFromBundlePath(sourcePath),
           markdown,
           contentType: "text/markdown",
@@ -4338,7 +3957,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function normalizeExistingPageRecord(record) {
-    const folderId = record.folderId || DEFAULT_CLIENT_FOLDER_ID;
+    const folderId = requireOkfDestinationFolderId(record.folderId);
     const path =
       record.path ||
       record.pagePath ||
@@ -4462,7 +4081,10 @@ const FiniteBrainProductClient = (() => {
 
     const entries = [];
     for (const page of bundle.pages) {
-      const folderId = page.folderId || options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID;
+      const folderId = requireOkfDestinationFolderId(
+        options.destinationFolderId,
+        page.folderId
+      );
       let targetPath = normalizeSafeRelativePath(page.targetPath, "OKF page target path");
       const existing = existingByPath.get(targetKey(folderId, targetPath));
       let action = "create";
@@ -4502,7 +4124,10 @@ const FiniteBrainProductClient = (() => {
       });
     }
     for (const asset of bundle.assets || []) {
-      const folderId = asset.folderId || options.destinationFolderId || DEFAULT_CLIENT_FOLDER_ID;
+      const folderId = requireOkfDestinationFolderId(
+        options.destinationFolderId,
+        asset.folderId
+      );
       let targetPath = normalizeAssetPath(asset.targetPath, "OKF asset target path");
       const existing = existingByPath.get(targetKey(folderId, targetPath));
       const alreadyPlanned = plannedTargets.has(targetKey(folderId, targetPath));
@@ -4947,6 +4572,47 @@ const FiniteBrainProductClient = (() => {
     }));
   }
 
+  function readerEmptyStateCopy(metadata, sessionStatus, selectedFolderId, actorNpub = null) {
+    const sessionLocked = sessionStatus !== SESSION_STATUS.UNLOCKED;
+    const vaultLoaded = Boolean(metadata?.vaultId || metadata?.id || metadata?.kind);
+    const vaultIsEmpty = vaultLoaded && (metadata?.folders || []).length === 0;
+    const canCreateFolder = actorHasDestructiveAuthority(metadata, actorNpub);
+    if (sessionLocked) {
+      return {
+        list: vaultIsEmpty
+          ? canCreateFolder
+            ? "This Vault is empty. Unlock to create a Folder."
+            : "This Vault is empty. Ask a Vault admin to create the first Folder."
+          : "Load a Vault to browse Folders.",
+        path: "Unlock the session to reopen encrypted Folder Key Grants",
+        title: "Session locked",
+      };
+    }
+    if (selectedFolderId) {
+      return {
+        list: "No Folders available.",
+        path: selectedFolderId,
+        title: "No Page selected",
+      };
+    }
+    if (vaultIsEmpty) {
+      return {
+        list: canCreateFolder
+          ? "This Vault is empty. Create a Folder to get started."
+          : "This Vault is empty. Ask a Vault admin to create the first Folder.",
+        path: canCreateFolder
+          ? "Create a Folder to add Pages."
+          : "A Vault admin must create the first Folder.",
+        title: "This Vault is empty",
+      };
+    }
+    return {
+      list: "Load a Vault to browse Folders.",
+      path: "No Page path loaded",
+      title: "No Folder selected",
+    };
+  }
+
   function readerPageRows(folderId, pages = projectionPages()) {
     return pages
       .filter((page) => !folderId || page.folderId === folderId)
@@ -5050,7 +4716,7 @@ const FiniteBrainProductClient = (() => {
 
   function syncReaderInputsFromSelectedPage() {
     const page = selectedReaderPage();
-    $("pageFolderIdInput").value = page?.folderId || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    $("pageFolderIdInput").value = page?.folderId || state.selectedFolderId || "";
     $("pageObjectIdInput").value = page?.objectId || "";
     $("pageBaseRevisionInput").value = page ? String(page.revision || "") : "";
     setEditorDraftText(page && pageTextIsPresent(page) ? page.text : "");
@@ -5318,7 +4984,12 @@ const FiniteBrainProductClient = (() => {
   function startNewPageDraft(folderIdOverride = null) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return;
     clearSearchHighlight();
-    const folderId = folderIdOverride || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    const folderId = folderIdOverride || state.selectedFolderId;
+    if (!folderId) {
+      state.sessionNotice = "Create or select a Folder before adding a Page.";
+      render();
+      return;
+    }
     const objectId = nextDraftObjectId();
     const draftKey = pageKey(folderId, objectId);
     const draftText = "# New Page\n\nStart writing here.";
@@ -6154,7 +5825,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function activePageKeyFromInputs() {
-    const folderId = $("pageFolderIdInput")?.value.trim() || state.selectedFolderId || DEFAULT_CLIENT_FOLDER_ID;
+    const folderId = $("pageFolderIdInput")?.value.trim() || state.selectedFolderId || "";
     const objectId = $("pageObjectIdInput")?.value.trim() || selectedReaderPage()?.objectId || nextDraftObjectId();
     return { folderId, objectId, key: pageKey(folderId, objectId) };
   }
@@ -7318,6 +6989,13 @@ const FiniteBrainProductClient = (() => {
     return (metadata.admins || []).includes(actorNpub);
   }
 
+  function actorCanCreateFolder(metadata, sessionStatus, actorNpub) {
+    return (
+      sessionStatus === SESSION_STATUS.UNLOCKED &&
+      actorHasDestructiveAuthority(metadata, actorNpub)
+    );
+  }
+
   function hasOrganizationVaultControls(metadata) {
     return metadata?.kind === "organization";
   }
@@ -8317,8 +7995,14 @@ const FiniteBrainProductClient = (() => {
     selectDefaultReaderTargets();
     const page = syncReaderInputsFromSelectedPage();
     const folderRows = readerFolderRows(state.metadata);
+    const emptyState = readerEmptyStateCopy(
+      state.metadata,
+      state.sessionStatus,
+      state.selectedFolderId,
+      state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null
+    );
 
-    setList("readerFolderList", folderRows, "Load a Vault to browse folders", (item, row) => {
+    setList("readerFolderList", folderRows, emptyState.list, (item, row) => {
       const expanded = state.expandedFolderIds.has(row.id);
       const button = obsidianTreeButton(
         row.path,
@@ -8368,14 +8052,8 @@ const FiniteBrainProductClient = (() => {
 
     if (!page) {
       const sessionLocked = state.sessionStatus !== SESSION_STATUS.UNLOCKED;
-      setText(
-        "readerPageTitle",
-        sessionLocked ? "Session locked" : state.selectedFolderId ? "No page selected" : "No folder selected"
-      );
-      setText(
-        "readerPagePath",
-        sessionLocked ? "Unlock the session to reopen encrypted Folder Key Grants" : state.selectedFolderId || "No page path loaded"
-      );
+      setText("readerPageTitle", emptyState.title);
+      setText("readerPagePath", emptyState.path);
       setPill("readerPageMeta", sessionLocked ? "locked" : "empty", sessionLocked ? "warn" : "muted");
       renderPageContent(null);
       renderLinkContext(null);
@@ -8424,8 +8102,15 @@ const FiniteBrainProductClient = (() => {
       clearSessionOwnedDom();
     }
     renderClientActionFeedback();
-    setOptionalDisabled("obsidianNewPageButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED);
-    setOptionalDisabled("obsidianNewFolderButton", state.sessionStatus !== SESSION_STATUS.UNLOCKED || !state.metadata);
+    const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    setOptionalDisabled(
+      "obsidianNewPageButton",
+      state.sessionStatus !== SESSION_STATUS.UNLOCKED || !(state.metadata?.folders || []).length
+    );
+    setOptionalDisabled(
+      "obsidianNewFolderButton",
+      !actorCanCreateFolder(state.metadata, state.sessionStatus, actorNpub)
+    );
     setOptionalDisabled(
       "refreshReaderButton",
       state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.readerBusy || state.signerStatus !== "connected" || !state.metadata
@@ -8598,136 +8283,8 @@ const FiniteBrainProductClient = (() => {
     return state.visibleVaults;
   }
 
-  function defaultVaultPages(kind) {
-    if (kind === "personal") return [];
-    if (kind === "organization") return ORGANIZATION_DEFAULT_VAULT_PAGES.map((page) => ({ ...page }));
-    throw new Error(`Unsupported Vault kind: ${kind}`);
-  }
-
-  function defaultVaultPagesFolderId(kind) {
-    if (kind === "personal") return null;
-    if (kind === "organization") return DEFAULT_CLIENT_FOLDER_ID;
-    throw new Error(`Unsupported Vault kind: ${kind}`);
-  }
-
-  function defaultVaultBootstrapFolderIds(kind) {
-    if (kind === "personal") return [];
-    if (kind === "organization") return ["getting-started", "restricted"];
-    throw new Error(`Unsupported Vault kind: ${kind}`);
-  }
-
-  function configuredRawFolderKey(input, folderId) {
-    const source = input.rawKeysByFolderId;
-    let value = null;
-    if (source instanceof Map && source.has(folderId)) value = source.get(folderId);
-    if (!value && source && Object.prototype.hasOwnProperty.call(source, folderId)) {
-      value = source[folderId];
-    }
-    if (!value) return randomFolderKeyBytes();
-    if (value instanceof Uint8Array) return value;
-    if (Array.isArray(value)) return new Uint8Array(value);
-    if (typeof value === "string") return base64ToBytes(value);
-    throw new Error(`Unsupported raw Folder Key for ${folderId}`);
-  }
-
-  async function buildVaultBootstrapPlan(input) {
-    if (!input?.vaultId) throw new Error("Vault bootstrap needs a Vault id");
-    if (!input?.kind) throw new Error("Vault bootstrap needs a Vault kind");
-    const actorNpub = input.actorNpub || currentActorNpub();
-    const keyring = input.keyring || createSessionKeyring();
-    const bootstrapGrants = [];
-    const folderKeys = new Map();
-    for (const folderId of defaultVaultBootstrapFolderIds(input.kind)) {
-      const rawKey = configuredRawFolderKey(input, folderId);
-      folderKeys.set(folderId, rawKey);
-      await importFolderKey(keyring, {
-        vaultId: input.vaultId,
-        folderId,
-        keyVersion: 1,
-        folderKey: bytesToBase64(rawKey),
-      });
-      const grant = await buildFolderKeyGrantRequest({
-        createdAtUnix: input.createdAtUnix,
-        issuerNpub: actorNpub,
-        keyVersion: 1,
-        brainIdentityProvider: input.brainIdentityProvider,
-        provider: input.provider,
-        rawKey,
-        recipientNpub: actorNpub,
-        signEvent: input.signEvent,
-        vaultId: input.vaultId,
-        folderId,
-      });
-      bootstrapGrants.push({ folderId, grant });
-    }
-    return {
-      bootstrapGrants,
-      defaultFolderId: defaultVaultPagesFolderId(input.kind),
-      defaultPages: defaultVaultPages(input.kind),
-      folderKeys,
-      keyring,
-    };
-  }
-
-  async function buildDefaultVaultPageWrites(input) {
-    if (!input?.keyring) throw new Error("Default Vault Pages need an opened keyring");
-    if (!input?.vaultId) throw new Error("Default Vault Pages need a Vault id");
-    const actorNpub = input.actorNpub || currentActorNpub();
-    const signEvent = requireBrainEventAuthorizer("folder-object-revision", input);
-    const pages = input.pages || defaultVaultPages(input.kind);
-    const writes = [];
-    let pageIndex = 0;
-    for (const page of pages) {
-      const folderId = page.folderId || input.folderId || defaultVaultPagesFolderId(input.kind);
-      if (!folderId) throw new Error("Default Vault Pages need a target Folder");
-      const nonceBytes =
-        typeof input.nonceFactory === "function" ? input.nonceFactory(pageIndex, page) : undefined;
-      const body = await buildPageWriteRequest(input.keyring, {
-        authorNpub: actorNpub,
-        baseRevision: null,
-        createdAtUnix: input.createdAtUnix,
-        folderId,
-        keyVersion: input.keyVersion || 1,
-        nonceBytes,
-        objectId: page.objectId,
-        operation: "create",
-        plaintext: encodeFolderObjectPagePlaintext(page.path, page.markdown),
-        signEvent,
-        vaultId: input.vaultId,
-      });
-      writes.push({
-        body,
-        folderId,
-        objectId: page.objectId,
-        path: `/_admin/vaults/${encodeURIComponent(input.vaultId)}/folders/${encodeURIComponent(
-          folderId
-        )}/objects/${encodeURIComponent(page.objectId)}`,
-        targetPath: page.path,
-      });
-      pageIndex += 1;
-    }
-    return writes;
-  }
-
-  async function writeDefaultVaultPages(input) {
-    const request = input.request || protectedRequest;
-    const writes = await buildDefaultVaultPageWrites(input);
-    if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
-    for (const write of writes) {
-      if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
-      await request(write.path, {
-        method: "PUT",
-        body: JSON.stringify(write.body),
-      });
-      if (input.sessionEpoch !== undefined) requireCurrentSessionEpoch(input.sessionEpoch);
-    }
-    return writes;
-  }
-
   async function createVault(vaultId, kind, name, options = {}) {
     const sessionEpoch = state.sessionEpoch;
-    const actorNpub = currentActorNpub();
-    const plan = await buildVaultBootstrapPlan({ vaultId, kind, name, actorNpub });
     const agentIdentity =
       options.agentIdentity ||
       (kind === "personal" ? suggestedAgentIdentityFromNavigation() : null);
@@ -8735,7 +8292,7 @@ const FiniteBrainProductClient = (() => {
       vaultId,
       kind,
       name,
-      bootstrapGrants: plan.bootstrapGrants,
+      bootstrapGrants: [],
       agentIdentity,
     });
     if (kind === "personal" && !body.personalAgentEmail && !body.personalAgentNpub) {
@@ -8752,15 +8309,7 @@ const FiniteBrainProductClient = (() => {
       body: JSON.stringify(body),
     });
     requireCurrentSessionEpoch(sessionEpoch);
-    await writeDefaultVaultPages({
-      actorNpub,
-      kind,
-      keyring: plan.keyring,
-      sessionEpoch,
-      vaultId,
-    });
-    requireCurrentSessionEpoch(sessionEpoch);
-    state.keyring = plan.keyring;
+    state.keyring = createSessionKeyring();
     return metadata;
   }
 
@@ -9219,7 +8768,8 @@ const FiniteBrainProductClient = (() => {
     } else if (visualEditorElement()?.getAttribute?.("contenteditable") === "true") {
       syncDraftFromVisualEditor();
     }
-    const folderId = $("pageFolderIdInput").value.trim() || DEFAULT_CLIENT_FOLDER_ID;
+    const folderId = $("pageFolderIdInput").value.trim() || state.selectedFolderId;
+    if (!folderId) throw new Error("Create or select a Folder before saving a Page");
     const objectId = $("pageObjectIdInput").value.trim() || "obj_000000000001";
     const key = pageKey(folderId, objectId);
     const page = state.projection.pages.get(key);
@@ -11886,6 +11436,7 @@ const FiniteBrainProductClient = (() => {
     accessPanelState,
     accessPeopleSummary,
     actorHasDestructiveAuthority,
+    actorCanCreateFolder,
     adminAccessChangeTags,
     buildAdminAccessChangeEvent,
     buildFolderKeyGrantRequest,
@@ -11893,14 +11444,12 @@ const FiniteBrainProductClient = (() => {
     buildPageWriteRequest,
     buildAuthEventTemplate,
     buildBrainAuthorizationHeader,
-    buildDefaultVaultPageWrites,
     buildFolderAccessRemovalRequest,
     buildEmailInviteAuthorizationEvent,
     buildEmailInviteClaimProofEvent,
     buildEmailInviteClaimRequest,
     buildEmailVaultInvitationRequest,
     buildVaultInvitationRequest,
-    buildVaultBootstrapPlan,
     buildGraphProjection,
     canonicalAdminAccessChangePayload,
     canonicalEmailInviteAuthorizationPayload,
@@ -11921,9 +11470,6 @@ const FiniteBrainProductClient = (() => {
     deriveBrainIdentityProviderState,
     expireBrainIdentitySession,
     discardLocalPageDraft,
-    defaultVaultBootstrapFolderIds,
-    defaultVaultPages,
-    defaultVaultPagesFolderId,
     emailInviteAuthorizationTags,
     emailInviteBootstrapPath,
     emailInviteClaimPath,
@@ -11995,6 +11541,7 @@ const FiniteBrainProductClient = (() => {
     publicKeyIdentityFromInput,
     readerFolderDetail,
     readerFolderRows,
+    readerEmptyStateCopy,
     readerSearchHighlightForPage,
     readerPageDetail,
     readerPageRows,

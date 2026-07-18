@@ -212,6 +212,21 @@ assert.equal(
   "Raw npub remains an advanced setup fallback when no Managed Agent Email is available"
 );
 assert.equal(
+  JSON.stringify(client.vaultCreateBody({
+    vaultId: "org-empty",
+    kind: "organization",
+    name: "Empty organization",
+    bootstrapGrants: [],
+  })),
+  JSON.stringify({
+    vaultId: "org-empty",
+    kind: "organization",
+    name: "Empty organization",
+    bootstrapGrants: [],
+  }),
+  "Organization Vault creation must not request starter folders or grants"
+);
+assert.equal(
   client.personalVaultAgentConfirmationMessage({ personalAgentEmail: "cheater@finite.vip" }),
   "Create your Personal Vault and pair cheater@finite.vip as your Personal Agent?",
   "User-first setup must show the readable Managed Agent Email before creation"
@@ -3497,152 +3512,11 @@ assert.doesNotMatch(
   assert.equal(boundWrapperGrant.id, "grant-bound-wrapper");
   assert.equal(boundProviderEncryptCalls, 2);
 
-  assert.equal(
-    JSON.stringify(client.defaultVaultBootstrapFolderIds("personal")),
-    JSON.stringify([])
-  );
-  assert.equal(
-    JSON.stringify(client.defaultVaultBootstrapFolderIds("organization")),
-    JSON.stringify(["getting-started", "restricted"])
-  );
-  assert.equal(client.defaultVaultPagesFolderId("personal"), null);
-  assert.equal(client.defaultVaultPagesFolderId("organization"), "getting-started");
-  assert.equal(JSON.stringify(client.defaultVaultPages("personal")), JSON.stringify([]));
-  assert.match(htmlSource, /id="vaultInviteFoldersInput"\s+value="getting-started"/);
+  assert.match(htmlSource, /id="vaultInviteFoldersInput"(?![^>]*\svalue=)/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
-  assert.match(htmlSource, /id="pageFolderIdInput" value="getting-started"/);
+  assert.match(htmlSource, /id="pageFolderIdInput"(?![^>]*\svalue=)/);
   assert.doesNotMatch(htmlSource, /id="okfDestinationFolderInput"/);
-  const defaultPages = client.defaultVaultPages("organization");
-  assert.equal(
-    JSON.stringify(defaultPages.slice(0, 5).map((page) => [page.folderId, page.objectId, page.path])),
-    JSON.stringify([
-      ["getting-started", "obj_default_agents", "AGENTS.md"],
-      ["getting-started", "obj_default_humans", "HUMANS.md"],
-      ["getting-started", "obj_default_getting-started_scope_config", "config.md"],
-      ["getting-started", "obj_default_getting-started_scope_index", "_index.md"],
-      ["getting-started", "obj_default_getting-started_scope_log", "log.md"],
-    ])
-  );
-  assert.equal(defaultPages.length, 12);
-  assert.equal(new Set(defaultPages.map((page) => page.objectId)).size, defaultPages.length);
-  assert.equal(defaultPages.some((page) => page.folderId === "vault-ops"), false);
-  assert.equal(defaultPages.some((page) => page.folderId === "product"), false);
-  const gettingStartedReadme = defaultPages.find((page) => page.path === "README.md");
-  assert.match(gettingStartedReadme?.markdown || "", /Default Folders/);
-  assert.match(gettingStartedReadme?.markdown || "", /encrypted Assets under/);
-  assert.match(gettingStartedReadme?.markdown || "", /Source Note/);
-  const restrictedExamplePage = defaultPages.find((page) => page.path === "wiki/restricted-folder-example.md");
-  assert.equal(restrictedExamplePage?.folderId, "restricted");
-  assert.match(defaultPages[0].markdown, /Use `fbrain`/);
-  assert.match(defaultPages[0].markdown, /LLM Wiki Rules/);
-  assert.match(defaultPages[0].markdown, /raw\/assets\//);
-  assert.match(defaultPages[0].markdown, /Source Note/);
-  assert.match(defaultPages[1].markdown, /private, encrypted knowledge workspace/);
-  assert.match(defaultPages[1].markdown, /Source Notes/);
-  assert.match(defaultPages[2].markdown, /raw\/assets\//);
-  assert.match(defaultPages[2].markdown, /Source Note/);
-  const seedGraphPages = defaultPages.map((page) => ({
-    ...page,
-    key: `${page.folderId}/${page.objectId}`,
-    status: "ready",
-    text: page.markdown,
-  }));
-  const missingSeedLinks = seedGraphPages.flatMap((page) =>
-    client
-      .pageLinkContext(page, seedGraphPages)
-      .outgoing.filter((row) => row.status !== "resolved")
-      .map((row) => `${page.folderId}/${page.path}->${row.label}`)
-  );
-  assert.equal(JSON.stringify(missingSeedLinks), JSON.stringify([]));
-  assert.equal(
-    seedGraphPages.filter((page) => client.extractPageLinks(page.markdown).length > 0).length,
-    defaultPages.length
-  );
-  assert.equal(
-    seedGraphPages.filter((page) => client.pageLinkContext(page, seedGraphPages).backlinks.length > 0).length,
-    defaultPages.length
-  );
-  assert.match(defaultPages[3].markdown, /# Getting Started Index/);
-  assert.match(defaultPages[9].markdown, /# Restricted Index/);
-
-  let bootstrapSignedIndex = 0;
-  const bootstrapSigner = async (template) => ({
-    ...template,
-    id: `bootstrap-signed-${++bootstrapSignedIndex}`,
-    pubkey: "00".repeat(32),
-    sig: "bootstrap-signature",
-  });
-  const orgBootstrapPlan = await client.buildVaultBootstrapPlan({
-    actorNpub: authorNpub,
-    createdAtUnix: 1780000200,
-    kind: "organization",
-    provider: { signEvent: bootstrapSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
-    rawKeysByFolderId: {
-      "getting-started": new Uint8Array(32).fill(12),
-      restricted: new Uint8Array(32).fill(13),
-    },
-    signEvent: bootstrapSigner,
-    vaultId: "org-smoke",
-  });
-  assert.equal(
-    JSON.stringify(orgBootstrapPlan.bootstrapGrants.map((entry) => entry.folderId)),
-    JSON.stringify(["getting-started", "restricted"])
-  );
-  assert.equal(orgBootstrapPlan.defaultFolderId, "getting-started");
-  assert.equal(orgBootstrapPlan.keyring.keys.has("org-smoke:getting-started:1"), true);
-  assert.equal(orgBootstrapPlan.keyring.keys.has("org-smoke:restricted:1"), true);
-  const starterWrites = await client.buildDefaultVaultPageWrites({
-    actorNpub: authorNpub,
-    createdAtUnix: 1780000300,
-    kind: "organization",
-    keyring: orgBootstrapPlan.keyring,
-    nonceFactory: (index) => new Uint8Array(12).fill(index + 1),
-    signEvent: bootstrapSigner,
-    vaultId: "org-smoke",
-  });
-  assert.equal(
-    JSON.stringify(
-      starterWrites.slice(0, 8).map((write) => [write.folderId, write.objectId, write.targetPath])
-    ),
-    JSON.stringify([
-      ["getting-started", "obj_default_agents", "AGENTS.md"],
-      ["getting-started", "obj_default_humans", "HUMANS.md"],
-      ["getting-started", "obj_default_getting-started_scope_config", "config.md"],
-      ["getting-started", "obj_default_getting-started_scope_index", "_index.md"],
-      ["getting-started", "obj_default_getting-started_scope_log", "log.md"],
-      ["getting-started", "obj_default_getting-started_readme", "README.md"],
-      ["getting-started", "obj_default_getting-started_how_finitebrain_works", "wiki/how-finitebrain-works.md"],
-      ["getting-started", "obj_default_getting-started_access_and_folders", "wiki/access-and-folders.md"],
-    ])
-  );
-  assert.equal(starterWrites.length, 12);
-  assert.equal(new Set(starterWrites.map((write) => write.objectId)).size, starterWrites.length);
-  assert.equal(starterWrites.some((write) => write.folderId === "vault-ops"), false);
-  const openedAgentsDefault = await client.openFolderObject(orgBootstrapPlan.keyring, {
-    vaultId: "org-smoke",
-    folderId: "getting-started",
-    objectId: "obj_default_agents",
-    revision: 1,
-    ciphertext: starterWrites[0].body.ciphertext,
-  });
-  assert.equal(openedAgentsDefault.status, "ready");
-  assert.equal(openedAgentsDefault.path, "AGENTS.md");
-  assert.match(openedAgentsDefault.text, /FiniteBrain vault/);
-  assert.match(openedAgentsDefault.text, /raw\/assets\//);
-  assert.match(openedAgentsDefault.text, /Source Note/);
-  const openedHumansDefault = await client.openFolderObject(orgBootstrapPlan.keyring, {
-    vaultId: "org-smoke",
-    folderId: "getting-started",
-    objectId: "obj_default_humans",
-    revision: 1,
-    ciphertext: starterWrites[1].body.ciphertext,
-  });
-  assert.equal(openedHumansDefault.status, "ready");
-  assert.equal(openedHumansDefault.path, "HUMANS.md");
-  assert.match(openedHumansDefault.text, /private, encrypted knowledge workspace/);
-  assert.match(openedHumansDefault.text, /Source Notes/);
-
   const wrongRecipientOpen = await client.openFolderKeyGrants(
     client.createSessionKeyring(),
     {
@@ -4095,6 +3969,73 @@ assert.doesNotMatch(
   assert.equal(readerFolders[0].accessLabel, "all members");
   assert.equal(readerFolders[1].status, "locked");
   assert.equal(readerFolders[1].accessLabel, "restricted");
+  const emptyOrganizationAdmin = client.npubFromHex("55".repeat(32));
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        client.readerEmptyStateCopy(
+          {
+            vaultId: "empty-org",
+            kind: "organization",
+            folders: [],
+            admins: [emptyOrganizationAdmin],
+          },
+          "unlocked",
+          null,
+          emptyOrganizationAdmin
+        )
+      )
+    ),
+    {
+      list: "This Vault is empty. Create a Folder to get started.",
+      path: "Create a Folder to add Pages.",
+      title: "This Vault is empty",
+    }
+  );
+  assert.equal(
+    client.readerEmptyStateCopy(
+      {
+        vaultId: "empty-org",
+        kind: "organization",
+        folders: [],
+        admins: [emptyOrganizationAdmin],
+      },
+      "unlocked",
+      null,
+      client.npubFromHex("66".repeat(32))
+    ).list,
+    "This Vault is empty. Ask a Vault admin to create the first Folder."
+  );
+  assert.equal(
+    client.readerEmptyStateCopy(
+      {
+        vaultId: "empty-org",
+        kind: "organization",
+        folders: [],
+        admins: [emptyOrganizationAdmin],
+      },
+      "locked",
+      null,
+      client.npubFromHex("66".repeat(32))
+    ).list,
+    "This Vault is empty. Ask a Vault admin to create the first Folder."
+  );
+  assert.equal(
+    client.actorCanCreateFolder(
+      { kind: "organization", admins: [emptyOrganizationAdmin] },
+      "unlocked",
+      emptyOrganizationAdmin
+    ),
+    true
+  );
+  assert.equal(
+    client.actorCanCreateFolder(
+      { kind: "organization", admins: [emptyOrganizationAdmin] },
+      "unlocked",
+      client.npubFromHex("66".repeat(32))
+    ),
+    false
+  );
   const compatibilityRows = client.metadataFolderRows({
     folders: [
       {
@@ -5377,10 +5318,18 @@ assert.doesNotMatch(
   assert.match(preparedImport.writes[0].path, /\/_admin\/vaults\/smoke\/folders\/general\/objects\/obj_/);
   assert.equal(preparedImport.writes[0].body.revisionEvent.kind, 30078);
 
-  const implicitFolderOkf = client.parseOkfBundle({
-    pages: [{ path: "content/Notes/start.md", content: "# Start\n" }],
-  });
-  assert.equal(implicitFolderOkf.pages[0].folderId, "getting-started");
+  assert.throws(
+    () =>
+      client.parseOkfBundle({
+        pages: [{ path: "content/Notes/start.md", content: "# Start\n" }],
+      }),
+    /Create or select a Folder before importing OKF content/
+  );
+  const explicitlyScopedOkf = client.parseOkfBundle(
+    { pages: [{ path: "content/Notes/start.md", content: "# Start\n" }] },
+    { destinationFolderId: "general" }
+  );
+  assert.equal(explicitlyScopedOkf.pages[0].folderId, "general");
 
   const openedImportedAlpha = await client.openFolderObject(keyring, {
     vaultId: "smoke",

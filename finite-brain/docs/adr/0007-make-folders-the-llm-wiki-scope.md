@@ -21,17 +21,9 @@ learning, and archives.
 A FiniteBrain Vault is a namespace of many Folder-scoped LLM wikis. A Folder is
 the wiki scope because it is the encrypted access boundary.
 
-Default personal and organization Vaults start with `getting-started` and
-`restricted`. `getting-started` is the primary readable onboarding wiki scope.
-`restricted` is a starter access-boundary example: in organization Vaults it is
-restricted to the admin set at creation, and in personal Vaults it is
-owner-only.
-
-Each default scope is seeded with `config.md`, `_index.md`, and `log.md`.
-`getting-started` also receives `AGENTS.md`, `HUMANS.md`, and product-facing
-onboarding pages. `restricted` receives a concise restricted-folder example
-page and must not be summarized into `getting-started` unless the user
-explicitly chooses an equal-or-more-restricted destination.
+Vaults start empty under ADR 0021. A human or authorized agent explicitly
+creates each Folder-scoped wiki and chooses its access mode; Brain does not
+represent onboarding or access modes with permanent example Folders.
 
 ## Consequences
 

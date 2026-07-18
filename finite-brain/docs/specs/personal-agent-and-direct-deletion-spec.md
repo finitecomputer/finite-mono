@@ -258,7 +258,7 @@ Trash or restore workflow.
   revocation, automatic grants, and direct deletion are concurrency-safe and
   fail closed on ambiguity.
 - Existing unreleased development fixtures may be reset rather than migrated.
-  Organization Vault bootstrap defaults remain unchanged.
+  Organization Vaults also start empty under ADR 0021.
 - The portability specification, README, shared context, ADR status, managed
   skill, CLI reference, Product Client language, and service contracts must
   agree on the new model.

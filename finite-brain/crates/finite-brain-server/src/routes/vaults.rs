@@ -82,7 +82,6 @@ pub(crate) async fn create_vault_handler(
                 .transpose()?
         }
     };
-    let requester_bootstrap = organization_requester.is_some();
     let output = match request.kind {
         CreateVaultKind::Personal => {
             bootstrap_personal_vault(request.vault_id, request.name, actor_npub.clone())?
@@ -102,12 +101,6 @@ pub(crate) async fn create_vault_handler(
     };
     let vault_id = output.vault.id.clone();
     let grants = if request.bootstrap_grants.is_empty() {
-        if requester_bootstrap {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "Organization Vault requester bootstrap requires encrypted Folder Key Grants",
-            ));
-        }
         grants_for_required(&output.required_key_grants, &vault_id, &actor_npub)
     } else {
         validate_bootstrap_grant_requests(&request.bootstrap_grants, &output.required_key_grants)?;

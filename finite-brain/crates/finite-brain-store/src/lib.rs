@@ -1985,13 +1985,7 @@ fn to_store_from_sql_error(
 }
 
 fn validate_bootstrap_output(output: &BootstrapOutput) -> Result<(), StoreError> {
-    validate_loaded_vault(&output.vault)?;
-    if output.vault.kind == VaultKind::Organization && output.vault.folders.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "organization bootstrap must create at least one folder".to_owned(),
-        });
-    }
-    Ok(())
+    validate_loaded_vault(&output.vault)
 }
 
 fn validate_loaded_vault(vault: &Vault) -> Result<(), StoreError> {
@@ -2928,30 +2922,9 @@ mod tests {
             stored.vault.admins,
             vec![UserId::new("npub-admin").unwrap()]
         );
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["getting-started".to_owned(), "restricted".to_owned()])
-        );
-        let restricted = FolderId::new("restricted").unwrap();
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .find(|folder| folder.id == restricted)
-                .map(|folder| folder.access),
-            Some(FolderAccessMode::Restricted)
-        );
-        assert!(!stored.folder_access.contains_key(&restricted));
-        assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == restricted
-                && grant.recipient_npub == UserId::new("npub-admin").unwrap()
-        }));
+        assert!(stored.vault.folders.is_empty());
+        assert!(stored.folder_access.is_empty());
+        assert!(stored.grants.is_empty());
         assert_same_grants(&stored.grants, &grants);
     }
 
@@ -2971,7 +2944,7 @@ mod tests {
 
     #[test]
     fn creates_restricted_folder_with_required_grants_transactionally() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&vault_id, &member).unwrap();
@@ -3104,7 +3077,7 @@ mod tests {
 
     #[test]
     fn grants_all_members_folder_key_without_restricted_access_row() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&vault_id, &member).unwrap();
@@ -3112,11 +3085,11 @@ mod tests {
         store
             .grant_folder_access(
                 &vault_id,
-                &FolderId::new("getting-started").unwrap(),
+                &FolderId::new("team-notes").unwrap(),
                 &member,
                 &grant(
-                    "grant-getting-started-member",
-                    "getting-started",
+                    "grant-team-notes-member",
+                    "team-notes",
                     1,
                     "npub-admin",
                     member.as_str(),
@@ -3128,10 +3101,10 @@ mod tests {
         assert!(
             !stored
                 .folder_access
-                .contains_key(&FolderId::new("getting-started").unwrap())
+                .contains_key(&FolderId::new("team-notes").unwrap())
         );
         assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == FolderId::new("getting-started").unwrap()
+            grant.folder_id == FolderId::new("team-notes").unwrap()
                 && grant.key_version == 1
                 && grant.recipient_npub == member
         }));
@@ -3139,7 +3112,7 @@ mod tests {
 
     #[test]
     fn grants_admin_only_folder_key_to_existing_admin_without_access_row() {
-        let mut store = bootstrapped_org_store();
+        let mut store = empty_org_store();
         let vault_id = VaultId::new("acme").unwrap();
         let admin_only = admin_only_folder();
         store
@@ -3190,7 +3163,7 @@ mod tests {
 
     #[test]
     fn rejects_admin_only_folder_key_grant_to_non_admin() {
-        let mut store = bootstrapped_org_store();
+        let mut store = empty_org_store();
         let vault_id = VaultId::new("acme").unwrap();
         let admin_only = admin_only_folder();
         store
@@ -3233,9 +3206,9 @@ mod tests {
 
     #[test]
     fn vault_invitation_is_single_user_single_use_and_retry_safe() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let target = UserId::new("npub-target").unwrap();
         let wrong_user = UserId::new("npub-wrong").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
@@ -3331,10 +3304,10 @@ mod tests {
 
     #[test]
     fn email_vault_invitation_claims_membership_access_and_grants_atomically() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
-        let getting_started = FolderId::new("getting-started").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let team_notes = FolderId::new("team-notes").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
         let claimant = UserId::new("npub-claimant").unwrap();
@@ -3370,19 +3343,19 @@ mod tests {
         assert_eq!(invitation.invite_unwrap_npub, Some(unwrap_npub.clone()));
         assert_eq!(
             invitation.initial_folder_access,
-            vec![getting_started.clone(), restricted.clone()]
+            vec![restricted.clone(), team_notes.clone()]
         );
         assert_eq!(
             invitation.bootstrap_scope,
             vec![
                 EmailInviteBootstrapScopeFolder {
-                    folder_id: getting_started.clone(),
-                    access: FolderAccessMode::AllMembers,
+                    folder_id: restricted.clone(),
+                    access: FolderAccessMode::Restricted,
                     key_version: 1,
                 },
                 EmailInviteBootstrapScopeFolder {
-                    folder_id: restricted.clone(),
-                    access: FolderAccessMode::Restricted,
+                    folder_id: team_notes.clone(),
+                    access: FolderAccessMode::AllMembers,
                     key_version: 1,
                 },
             ]
@@ -3395,8 +3368,8 @@ mod tests {
                     "friend@example.com",
                     &claimant,
                     &[grant(
-                        "claim-grant-getting-started",
-                        "getting-started",
+                        "claim-grant-team-notes",
+                        "team-notes",
                         1,
                         "npub-claimant",
                         "npub-claimant",
@@ -3419,15 +3392,15 @@ mod tests {
 
         let claim_grants = vec![
             grant(
-                "claim-grant-getting-started",
-                "getting-started",
+                "claim-grant-team-notes",
+                "team-notes",
                 1,
                 "npub-claimant",
                 "npub-claimant",
             ),
             grant(
-                "claim-grant-restricted",
-                "restricted",
+                "claim-grant-private-project",
+                "private-project",
                 1,
                 "npub-claimant",
                 "npub-claimant",
@@ -3492,9 +3465,9 @@ mod tests {
 
     #[test]
     fn email_vault_invitation_terminal_states_tombstone_bootstrap_ciphertext() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
         let claimant = UserId::new("npub-claimant").unwrap();
@@ -3606,15 +3579,15 @@ mod tests {
                     &claimant,
                     &[
                         grant(
-                            "claim-grant-getting-started-stale",
-                            "getting-started",
+                            "claim-grant-team-notes-stale",
+                            "team-notes",
                             1,
                             "npub-claimant",
                             "npub-claimant",
                         ),
                         grant(
-                            "claim-grant-restricted-stale",
-                            "restricted",
+                            "claim-grant-private-project-stale",
+                            "private-project",
                             1,
                             "npub-claimant",
                             "npub-claimant",
@@ -3638,9 +3611,9 @@ mod tests {
 
     #[test]
     fn folder_key_rotation_invalidates_pending_email_bootstrap() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let member = UserId::new("npub-member").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
@@ -3652,8 +3625,8 @@ mod tests {
                 &restricted,
                 &member,
                 &grant(
-                    "grant-restricted-member-rotation",
-                    "restricted",
+                    "grant-private-project-member-rotation",
+                    "private-project",
                     1,
                     "npub-admin",
                     member.as_str(),
@@ -3705,8 +3678,8 @@ mod tests {
                 &member,
                 2,
                 &[grant(
-                    "grant-restricted-admin-v2",
-                    "restricted",
+                    "grant-private-project-admin-v2",
+                    "private-project",
                     2,
                     "npub-admin",
                     "npub-admin",
@@ -3724,7 +3697,7 @@ mod tests {
 
     #[test]
     fn vault_invitation_handles_existing_members_without_stale_invites() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let existing_member = UserId::new("npub-existing-member").unwrap();
@@ -4148,7 +4121,7 @@ mod tests {
 
     #[test]
     fn encrypted_vault_export_filters_payloads_grants_and_access_state() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let member = UserId::new("npub-member").unwrap();
@@ -4171,12 +4144,12 @@ mod tests {
             .submit_sync_record(
                 &vault_id,
                 &revision_record_for(
-                    "getting-started",
-                    "event-getting-started-create",
+                    "team-notes",
+                    "event-team-notes-create",
                     "obj_000000000101",
                     1,
                     None,
-                    "getting-started payload",
+                    "team-notes payload",
                 ),
             )
             .unwrap();
@@ -4199,18 +4172,18 @@ mod tests {
         assert!(member_export.key_grants.is_empty());
         assert_eq!(member_export.access_state.members, vec![member.clone()]);
         assert!(member_export.access_state.admins.is_empty());
-        let getting_started = member_export
+        let team_notes_export = member_export
             .objects
             .iter()
-            .find(|object| object.folder_id == FolderId::new("getting-started").unwrap())
+            .find(|object| object.folder_id == FolderId::new("team-notes").unwrap())
             .unwrap();
-        assert!(!getting_started.opaque);
+        assert!(!team_notes_export.opaque);
         assert!(
-            getting_started
+            team_notes_export
                 .payload_json
                 .as_ref()
                 .unwrap()
-                .contains("getting-started")
+                .contains("team-notes")
         );
         let strategy = member_export
             .objects
@@ -4937,7 +4910,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_required_grant_without_partial_folder() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&vault_id, &member).unwrap();
@@ -4965,17 +4938,13 @@ mod tests {
 
     #[test]
     fn rolls_back_folder_creation_when_grant_insert_fails() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
-        assert!(
-            store
-                .grant_exists("grant-getting-started-npub-admin")
-                .unwrap()
-        );
+        assert!(store.grant_exists("grant-team-notes-npub-admin").unwrap());
 
         let folder = strategy_folder();
         let grants = vec![grant(
-            "grant-getting-started-npub-admin",
+            "grant-team-notes-npub-admin",
             "strategy",
             1,
             "npub-admin",
@@ -5015,6 +4984,7 @@ mod tests {
             store
                 .create_vault_bootstrap(&output, &bootstrap_grants)
                 .unwrap();
+            add_access_test_folders(&mut store);
             store
                 .insert_setup_incomplete_folder_for_repair(&vault_id, &folder, &BTreeSet::new())
                 .unwrap();
@@ -5041,7 +5011,7 @@ mod tests {
 
     #[test]
     fn finish_setup_rejects_non_empty_setup_incomplete_folder() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let folder = strategy_folder();
         store
@@ -5076,7 +5046,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_hierarchy_duplicate_ids_and_admin_invariants() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
 
         let mut missing_parent = strategy_folder();
@@ -5146,8 +5116,7 @@ mod tests {
         let bad_issuer_folder = Folder {
             id: FolderId::new("bad-issuer-strategy").unwrap(),
             name: DisplayName::new("folder_name", "Bad Issuer Strategy").unwrap(),
-            path: SafeRelativePath::new("folder_path", "getting-started/Bad Issuer Strategy")
-                .unwrap(),
+            path: SafeRelativePath::new("folder_path", "team-notes/Bad Issuer Strategy").unwrap(),
             ..strategy_folder()
         };
         assert_eq!(
@@ -5261,7 +5230,7 @@ mod tests {
 
     #[test]
     fn removes_members_and_admins_without_breaking_admin_invariant() {
-        let mut store = bootstrapped_org_store();
+        let mut store = org_store_with_access_test_folders();
         let vault_id = VaultId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&vault_id, &member).unwrap();
@@ -5642,9 +5611,15 @@ mod tests {
         assert_eq!(rebuilt.objects[0].payload_json, "{\"body\":\"update\"}");
     }
 
-    fn bootstrapped_org_store() -> BrainStore {
+    fn empty_org_store() -> BrainStore {
         let mut store = BrainStore::open_in_memory().unwrap();
         bootstrap_org(&mut store);
+        store
+    }
+
+    fn org_store_with_access_test_folders() -> BrainStore {
+        let mut store = empty_org_store();
+        add_access_test_folders(&mut store);
         store
     }
 
@@ -5656,6 +5631,7 @@ mod tests {
 
     fn bootstrap_org_and_strategy_folder(store: &mut BrainStore) {
         bootstrap_org(store);
+        add_access_test_folders(store);
         let vault_id = VaultId::new("acme").unwrap();
         store
             .create_folder(
@@ -5679,6 +5655,47 @@ mod tests {
         store.create_vault_bootstrap(&output, &grants).unwrap();
     }
 
+    fn add_access_test_folders(store: &mut BrainStore) {
+        let vault_id = VaultId::new("acme").unwrap();
+        for folder in [
+            Folder {
+                id: FolderId::new("team-notes").unwrap(),
+                name: DisplayName::new("folder_name", "Team Notes").unwrap(),
+                role: FolderRole::General,
+                access: FolderAccessMode::AllMembers,
+                parent_folder_id: None,
+                path: SafeRelativePath::new("folder_path", "Team Notes").unwrap(),
+                current_key_version: 1,
+                shared_folder_source: false,
+            },
+            Folder {
+                id: FolderId::new("private-project").unwrap(),
+                name: DisplayName::new("folder_name", "Private Project").unwrap(),
+                role: FolderRole::Folder,
+                access: FolderAccessMode::Restricted,
+                parent_folder_id: None,
+                path: SafeRelativePath::new("folder_path", "Private Project").unwrap(),
+                current_key_version: 1,
+                shared_folder_source: false,
+            },
+        ] {
+            store
+                .create_folder(
+                    &vault_id,
+                    &folder,
+                    &BTreeSet::new(),
+                    &[grant(
+                        &format!("grant-{}-npub-admin", folder.id),
+                        folder.id.as_str(),
+                        1,
+                        "npub-admin",
+                        "npub-admin",
+                    )],
+                )
+                .unwrap();
+        }
+    }
+
     fn bootstrap_org_named(store: &mut BrainStore, id: &str, name: &str, admin: &str) {
         let output = bootstrap_organization_vault(id, name, admin).unwrap();
         let grants = grants_for_required(&output.required_key_grants, admin);
@@ -5691,8 +5708,8 @@ mod tests {
             name: DisplayName::new("folder_name", "Strategy").unwrap(),
             role: FolderRole::Folder,
             access: FolderAccessMode::Restricted,
-            parent_folder_id: Some(FolderId::new("getting-started").unwrap()),
-            path: SafeRelativePath::new("folder_path", "getting-started/Strategy").unwrap(),
+            parent_folder_id: Some(FolderId::new("team-notes").unwrap()),
+            path: SafeRelativePath::new("folder_path", "Team Notes/Strategy").unwrap(),
             current_key_version: 1,
             shared_folder_source: false,
         }

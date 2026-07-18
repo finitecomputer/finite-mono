@@ -2577,7 +2577,7 @@ mod tests {
 
         let keys = Keys::generate();
         let create = post_vault(
-            router,
+            router.clone(),
             &keys,
             &create_vault_body("smoke", "organization"),
             TEST_NOW,
@@ -2593,13 +2593,7 @@ mod tests {
         assert_eq!(metadata.status(), StatusCode::OK);
         let metadata: VaultMetadataResponse = read_json(metadata).await;
         assert_eq!(metadata.vault_id, "smoke");
-        assert_eq!(metadata.folders.len(), 2);
-        assert!(
-            metadata
-                .folders
-                .iter()
-                .any(|folder| folder.id == "getting-started")
-        );
+        assert!(metadata.folders.is_empty());
 
         let sync_bootstrap = authed_request(
             reopened,
@@ -3069,7 +3063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_auth_creates_vault_and_metadata_contains_no_pages() {
+    async fn valid_auth_creates_empty_organization_vault() {
         let keys = Keys::generate();
         let body = create_vault_body("acme", "organization");
         let router = test_router();
@@ -3079,14 +3073,8 @@ mod tests {
         let metadata: VaultMetadataResponse = read_json(response).await;
         assert_eq!(metadata.vault_id, "acme");
         assert_eq!(metadata.kind, VaultKind::Organization);
-        assert_eq!(metadata.folders.len(), 2);
-        assert_eq!(metadata.grant_count, 2);
-        assert!(
-            metadata
-                .folders
-                .iter()
-                .all(|folder| !folder.setup_incomplete)
-        );
+        assert!(metadata.folders.is_empty());
+        assert_eq!(metadata.grant_count, 0);
 
         let response = get_metadata(router, &keys, "acme", TEST_NOW).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -3101,38 +3089,11 @@ mod tests {
         let requester_keys = Keys::generate();
         let agent_npub = npub(&agent_keys);
         let requester_npub = npub(&requester_keys);
-        let folder_keys = BTreeMap::from([
-            (
-                "getting-started",
-                FolderKey::from_bytes([7; 32]).to_base64(),
-            ),
-            ("restricted", FolderKey::from_bytes([8; 32]).to_base64()),
-        ]);
-        let bootstrap_grants = folder_keys
-            .iter()
-            .flat_map(|(folder_id, folder_key)| {
-                [agent_npub.as_str(), requester_npub.as_str()].map(|recipient| {
-                    serde_json::json!({
-                        "folderId": folder_id,
-                        "grant": real_folder_key_grant_value(
-                            &format!("grant-{folder_id}-{recipient}"),
-                            1,
-                            &agent_keys,
-                            "acme",
-                            folder_id,
-                            recipient,
-                            folder_key,
-                        ),
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
         let body = serde_json::json!({
             "vaultId": "acme",
             "kind": "organization",
             "name": "Acme",
             "requestingUserNpub": requester_npub,
-            "bootstrapGrants": bootstrap_grants,
         })
         .to_string();
         let router = test_router();
@@ -3152,7 +3113,8 @@ mod tests {
         let metadata: VaultMetadataResponse = read_json(response).await;
         assert_eq!(metadata.members.len(), 2);
         assert_eq!(metadata.admins.len(), 2);
-        assert_eq!(metadata.grant_count, 4);
+        assert!(metadata.folders.is_empty());
+        assert_eq!(metadata.grant_count, 0);
         assert!(metadata.members.contains(&agent_npub));
         assert!(metadata.members.contains(&requester_npub));
         assert!(metadata.admins.contains(&agent_npub));
@@ -3186,86 +3148,11 @@ mod tests {
         .await;
         assert_eq!(requester_export.status(), StatusCode::OK);
         let requester_export: EncryptedVaultExportResponse = read_json(requester_export).await;
-        assert_eq!(requester_export.key_grants.len(), 4);
-        let requester_grants = requester_export
-            .key_grants
-            .iter()
-            .filter(|grant| grant.recipient_npub == requester_npub)
-            .collect::<Vec<_>>();
-        let agent_grants = requester_export
-            .key_grants
-            .iter()
-            .filter(|grant| grant.recipient_npub == agent_npub)
-            .collect::<Vec<_>>();
-        assert_eq!(requester_grants.len(), 2);
-        assert_eq!(agent_grants.len(), 2);
-        for grant in requester_grants {
-            let plaintext =
-                open_wrapped_folder_key_grant(&requester_keys, &grant.wrapped_event_json);
-            assert_eq!(
-                plaintext["folderKey"].as_str(),
-                folder_keys
-                    .get(grant.folder_id.as_str())
-                    .map(String::as_str)
-            );
-        }
-        for grant in agent_grants {
-            let plaintext = open_wrapped_folder_key_grant(&agent_keys, &grant.wrapped_event_json);
-            assert_eq!(
-                plaintext["folderKey"].as_str(),
-                folder_keys
-                    .get(grant.folder_id.as_str())
-                    .map(String::as_str)
-            );
-        }
+        assert!(requester_export.key_grants.is_empty());
     }
 
     #[tokio::test]
-    async fn requester_bootstrap_requires_real_encrypted_folder_grants() {
-        let agent_keys = Keys::generate();
-        let requester_keys = Keys::generate();
-        let body = serde_json::json!({
-            "vaultId": "acme",
-            "kind": "organization",
-            "name": "Acme",
-            "requestingUserNpub": npub(&requester_keys),
-        })
-        .to_string();
-        let router = test_router();
-
-        let response = post_vault(
-            router.clone(),
-            &agent_keys,
-            &body,
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-
-        assert_error(
-            response,
-            StatusCode::BAD_REQUEST,
-            "Organization Vault requester bootstrap requires encrypted Folder Key Grants",
-        )
-        .await;
-        let vaults = authed_request(
-            router,
-            &agent_keys,
-            "GET",
-            "/_admin/vaults",
-            None,
-            TEST_NOW + 1,
-        )
-        .await;
-        assert_eq!(vaults.status(), StatusCode::OK);
-        let vaults: VisibleVaultsResponse = read_json(vaults).await;
-        assert!(vaults.vaults.is_empty());
-    }
-
-    #[tokio::test]
-    async fn requester_bootstrap_rejects_an_incomplete_grant_set_without_creating_a_vault() {
+    async fn requester_bootstrap_rejects_unexpected_grants_without_creating_a_vault() {
         let agent_keys = Keys::generate();
         let requester_keys = Keys::generate();
         let agent_npub = npub(&agent_keys);
@@ -3800,7 +3687,7 @@ mod tests {
         let admin_keys = Keys::generate();
         let member_keys = Keys::generate();
         let member_npub = npub(&member_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
         let add_member_body = serde_json::json!({
             "targetNpub": member_npub,
             "accessChangeEvent": admin_event(
@@ -4332,6 +4219,7 @@ mod tests {
         )
         .await;
         assert_eq!(org.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
 
         let list = authed_request(
             router.clone(),
@@ -4409,6 +4297,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
 
         let invite_body = serde_json::json!({
             "targetNpub": target_npub,
@@ -5283,6 +5172,8 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
+        let setup_sequence = latest_sync_sequence(&router, &keys, "acme").await;
 
         let object_path = "/_admin/vaults/acme/folders/getting-started/objects/obj_000000000001";
         let create_body = object_write_body(
@@ -5311,7 +5202,7 @@ mod tests {
         .await;
         assert_eq!(create.status(), StatusCode::OK);
         let create: ObjectWriteResponse = read_json(create).await;
-        assert_eq!(create.sequence, 1);
+        assert_eq!(create.sequence, setup_sequence + 1);
         assert!(!create.duplicate);
         assert_eq!(create.revision, 1);
 
@@ -5348,7 +5239,7 @@ mod tests {
         .await;
         assert_eq!(update.status(), StatusCode::OK);
         let update: ObjectWriteResponse = read_json(update).await;
-        assert_eq!(update.sequence, 2);
+        assert_eq!(update.sequence, setup_sequence + 2);
         assert_eq!(update.revision, 2);
 
         let bootstrap = authed_request(
@@ -5362,7 +5253,7 @@ mod tests {
         .await;
         assert_eq!(bootstrap.status(), StatusCode::OK);
         let bootstrap: SyncBootstrapResponse = read_json(bootstrap).await;
-        assert_eq!(bootstrap.latest_sequence, 2);
+        assert_eq!(bootstrap.latest_sequence, setup_sequence + 2);
         assert_eq!(bootstrap.object_count, 1);
         assert_eq!(bootstrap.objects[0].revision, 2);
 
@@ -5370,7 +5261,7 @@ mod tests {
             router.clone(),
             &keys,
             "GET",
-            "/_admin/vaults/acme/sync/records?after=0&limit=1",
+            &format!("/_admin/vaults/acme/sync/records?after={setup_sequence}&limit=1"),
             None,
             TEST_NOW,
         )
@@ -5379,7 +5270,7 @@ mod tests {
         let first_pull: SyncPullResponse = read_json(first_pull).await;
         assert_eq!(first_pull.count, 1);
         assert!(first_pull.has_more);
-        assert_eq!(first_pull.next_sequence, 1);
+        assert_eq!(first_pull.next_sequence, setup_sequence + 1);
         assert_eq!(first_pull.records[0].record_type, "folder_object_revision");
         assert!(
             first_pull.records[0]
@@ -5396,7 +5287,10 @@ mod tests {
             router.clone(),
             &keys,
             "GET",
-            "/_admin/vaults/acme/sync/records?after=1&limit=10",
+            &format!(
+                "/_admin/vaults/acme/sync/records?after={}&limit=10",
+                setup_sequence + 1
+            ),
             None,
             TEST_NOW,
         )
@@ -5438,7 +5332,7 @@ mod tests {
         .await;
         assert_eq!(move_object.status(), StatusCode::OK);
         let move_object: ObjectWriteResponse = read_json(move_object).await;
-        assert_eq!(move_object.sequence, 3);
+        assert_eq!(move_object.sequence, setup_sequence + 3);
         assert_eq!(move_object.revision, 3);
 
         let delete_body = object_delete_body(
@@ -5463,7 +5357,7 @@ mod tests {
         .await;
         assert_eq!(delete.status(), StatusCode::OK);
         let delete: ObjectWriteResponse = read_json(delete).await;
-        assert_eq!(delete.sequence, 4);
+        assert_eq!(delete.sequence, setup_sequence + 4);
         assert_eq!(delete.revision, 4);
 
         let get_deleted = authed_request(
@@ -5488,13 +5382,16 @@ mod tests {
         .await;
         assert_eq!(bootstrap.status(), StatusCode::OK);
         let bootstrap: SyncBootstrapResponse = read_json(bootstrap).await;
-        assert_eq!(bootstrap.latest_sequence, 4);
+        assert_eq!(bootstrap.latest_sequence, setup_sequence + 4);
         assert!(bootstrap.objects[0].deleted);
         let tombstone_pull = authed_request(
             router,
             &keys,
             "GET",
-            "/_admin/vaults/acme/sync/records?after=3&limit=10",
+            &format!(
+                "/_admin/vaults/acme/sync/records?after={}&limit=10",
+                setup_sequence + 3
+            ),
             None,
             TEST_NOW,
         )
@@ -5530,12 +5427,52 @@ mod tests {
             .create_folder(
                 &vault_id,
                 &Folder {
+                    id: FolderId::new("getting-started").unwrap(),
+                    name: DisplayName::new("folder_name", "Getting Started").unwrap(),
+                    role: FolderRole::General,
+                    access: FolderAccessMode::AllMembers,
+                    parent_folder_id: None,
+                    path: SafeRelativePath::new("folder_path", "getting-started").unwrap(),
+                    current_key_version: 1,
+                    shared_folder_source: false,
+                },
+                &BTreeSet::new(),
+                &[
+                    FolderKeyGrantMetadata {
+                        id: "grant-getting-started-admin".to_owned(),
+                        folder_id: FolderId::new("getting-started").unwrap(),
+                        key_version: 1,
+                        issuer_npub: UserId::new(admin_npub.clone()).unwrap(),
+                        recipient_npub: UserId::new(admin_npub.clone()).unwrap(),
+                        format: "NIP-59".to_owned(),
+                        wrapped_event_json: "{\"kind\":1059}".to_owned(),
+                        access_change_event_json: Some("{\"kind\":30078}".to_owned()),
+                        created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+                    },
+                    FolderKeyGrantMetadata {
+                        id: "grant-getting-started-member".to_owned(),
+                        folder_id: FolderId::new("getting-started").unwrap(),
+                        key_version: 1,
+                        issuer_npub: UserId::new(admin_npub.clone()).unwrap(),
+                        recipient_npub: UserId::new(member_npub.clone()).unwrap(),
+                        format: "NIP-59".to_owned(),
+                        wrapped_event_json: "{\"kind\":1059}".to_owned(),
+                        access_change_event_json: Some("{\"kind\":30078}".to_owned()),
+                        created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+                    },
+                ],
+            )
+            .unwrap();
+        store
+            .create_folder(
+                &vault_id,
+                &Folder {
                     id: FolderId::new("strategy").unwrap(),
                     name: DisplayName::new("folder_name", "Strategy").unwrap(),
                     role: FolderRole::Folder,
                     access: FolderAccessMode::Restricted,
-                    parent_folder_id: Some(FolderId::new("getting-started").unwrap()),
-                    path: SafeRelativePath::new("folder_path", "getting-started/Strategy").unwrap(),
+                    parent_folder_id: None,
+                    path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
                     current_key_version: 1,
                     shared_folder_source: false,
                 },
@@ -5634,7 +5571,8 @@ mod tests {
     #[tokio::test]
     async fn object_write_duplicate_retry_returns_original_sequence() {
         let keys = Keys::generate();
-        let router = router_with_bootstrapped_org(&keys).await;
+        let router = router_with_test_org_folders(&keys).await;
+        let setup_sequence = latest_sync_sequence(&router, &keys, "acme").await;
         let path = "/_admin/vaults/acme/folders/getting-started/objects/obj_000000000001";
         let body = object_write_body(
             &keys,
@@ -5663,20 +5601,20 @@ mod tests {
         .await;
         assert_eq!(first.status(), StatusCode::OK);
         let first: ObjectWriteResponse = read_json(first).await;
-        assert_eq!(first.sequence, 1);
+        assert_eq!(first.sequence, setup_sequence + 1);
         assert!(!first.duplicate);
 
         let retry = authed_request(router, &keys, "PUT", path, Some(body), TEST_NOW + 1).await;
         assert_eq!(retry.status(), StatusCode::OK);
         let retry: ObjectWriteResponse = read_json(retry).await;
-        assert_eq!(retry.sequence, 1);
+        assert_eq!(retry.sequence, setup_sequence + 1);
         assert!(retry.duplicate);
     }
 
     #[tokio::test]
     async fn object_write_rejects_stale_base_bad_ciphertext_hash_and_signer_mismatch() {
         let keys = Keys::generate();
-        let router = router_with_bootstrapped_org(&keys).await;
+        let router = router_with_test_org_folders(&keys).await;
         let path = "/_admin/vaults/acme/folders/getting-started/objects/obj_000000000001";
         let create_body = object_write_body(
             &keys,
@@ -5869,6 +5807,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
         let path = "/_admin/vaults/acme/folders/getting-started/objects/obj_000000000001";
         let body = object_write_body(
             &keys,
@@ -5912,7 +5851,7 @@ mod tests {
         let admin_keys = Keys::generate();
         let member_keys = Keys::generate();
         let member_npub = npub(&member_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
 
         let add_member_body = serde_json::json!({
             "targetNpub": member_npub,
@@ -5945,8 +5884,8 @@ mod tests {
             "name": "Strategy",
             "role": "folder",
             "access": "restricted",
-            "parentFolderId": "getting-started",
-            "path": "getting-started/Strategy",
+            "parentFolderId": null,
+            "path": "Strategy",
             "accessUserIds": [member_npub],
             "grants": [
                 folder_key_grant_value("grant-strategy-admin-v1", 1, npub(&admin_keys).as_str()),
@@ -6192,7 +6131,7 @@ mod tests {
         let target_keys = Keys::generate();
         let wrong_keys = Keys::generate();
         let target_npub = npub(&target_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
 
         let create_body = serde_json::json!({
             "targetNpub": target_npub,
@@ -6396,6 +6335,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
         let payload_hash = "sha256-bootstrap-payload";
         let bootstrap_wrapped_event_json = gift_wrap_event_json(&unwrap_npub);
         let authorization_event_json = email_bootstrap_authorization_event(
@@ -6764,6 +6704,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
 
         let create_private_body = serde_json::json!({
             "folderId": "private",
@@ -7226,7 +7167,7 @@ mod tests {
         let admin_keys = Keys::generate();
         let unwrap_keys = Keys::generate();
         let unwrap_npub = npub(&unwrap_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
         let payload_hash = "sha256-bootstrap-payload";
         let authorization_event_json = email_bootstrap_authorization_event(
             &admin_keys,
@@ -7306,6 +7247,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
 
         let create_body = serde_json::json!({
             "target": "alice@finite.vip",
@@ -7364,7 +7306,7 @@ mod tests {
     async fn vault_invitation_create_rejects_existing_members() {
         let admin_keys = Keys::generate();
         let admin_npub = npub(&admin_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
 
         let create_body = serde_json::json!({
             "targetNpub": admin_npub,
@@ -7395,7 +7337,7 @@ mod tests {
         let recipient_keys = Keys::generate();
         let wrong_keys = Keys::generate();
         let recipient_npub = npub(&recipient_keys);
-        let router = router_with_bootstrapped_org(&admin_keys).await;
+        let router = router_with_test_org_folders(&admin_keys).await;
 
         let create_folder_body = serde_json::json!({
             "folderId": "strategy",
@@ -7621,8 +7563,8 @@ mod tests {
             "name": "Strategy",
             "role": "folder",
             "access": "restricted",
-            "parentFolderId": "getting-started",
-            "path": "getting-started/Strategy",
+            "parentFolderId": null,
+            "path": "Strategy",
             "accessUserIds": [],
             "grants": [
                 folder_key_grant_value("grant-strategy-source-admin-v1", 1, source_admin_npub.as_str())
@@ -8098,7 +8040,7 @@ mod tests {
         router_with_state(ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60))
     }
 
-    async fn router_with_bootstrapped_org(keys: &Keys) -> Router {
+    async fn router_with_test_org_folders(keys: &Keys) -> Router {
         let router = test_router();
         let create_vault = post_vault(
             router.clone(),
@@ -8111,7 +8053,75 @@ mod tests {
         )
         .await;
         assert_eq!(create_vault.status(), StatusCode::OK);
+        add_test_org_folders(&router, keys).await;
         router
+    }
+
+    async fn add_test_org_folders(router: &Router, keys: &Keys) {
+        for (folder_id, name, role, access) in [
+            (
+                "getting-started",
+                "Getting Started",
+                "general",
+                "all_members",
+            ),
+            ("restricted", "Restricted", "folder", "restricted"),
+        ] {
+            let body = serde_json::json!({
+                "folderId": folder_id,
+                "name": name,
+                "role": role,
+                "access": access,
+                "parentFolderId": null,
+                "path": folder_id,
+                "accessUserIds": [],
+                "grants": [
+                    folder_key_grant_value(
+                        &format!("grant-{folder_id}-test-admin-v1"),
+                        1,
+                        npub(keys).as_str(),
+                    )
+                ],
+                "accessChangeEvent": admin_event(
+                    keys,
+                    "acme",
+                    &format!("change-create-{folder_id}-test"),
+                    AdminAccessAction::SetFolderAccessMode,
+                    Some(folder_id),
+                    None,
+                    Some(1),
+                ),
+            })
+            .to_string();
+            let response = authed_request(
+                router.clone(),
+                keys,
+                "POST",
+                "/_admin/vaults/acme/folders",
+                Some(body),
+                TEST_NOW,
+            )
+            .await;
+            let status = response.status();
+            let text = read_text(response).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+        }
+    }
+
+    async fn latest_sync_sequence(router: &Router, keys: &Keys, vault_id: &str) -> u64 {
+        let response = authed_request(
+            router.clone(),
+            keys,
+            "GET",
+            &format!("/_admin/vaults/{vault_id}/sync/bootstrap"),
+            None,
+            TEST_NOW - 1,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json::<SyncBootstrapResponse>(response)
+            .await
+            .latest_sequence
     }
 
     fn create_vault_body(vault_id: &str, kind: &str) -> String {
@@ -8752,8 +8762,8 @@ mod tests {
             name: DisplayName::new("folder_name", "Strategy").unwrap(),
             role: FolderRole::Folder,
             access: FolderAccessMode::Restricted,
-            parent_folder_id: Some(FolderId::new("getting-started").unwrap()),
-            path: SafeRelativePath::new("folder_path", "getting-started/Strategy").unwrap(),
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
             current_key_version: 1,
             shared_folder_source: false,
         }

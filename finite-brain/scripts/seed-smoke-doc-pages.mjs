@@ -144,12 +144,11 @@ Related pages: [[OKF and Agent Wiki]], [[Working Tree Projection]], and [[Graph 
 
 A Vault is the top-level container for a personal or organization knowledge space.
 
-New default Vaults start with:
+New Personal and Organization Vaults start empty. Folders and content appear
+only after an explicit user action or authorized product workflow.
 
-- getting-started for shared user and agent orientation;
-- restricted as the starter tighter-boundary scope.
-
-Smoke/demo Vaults may add extra Folders like general, agent-wiki, graph-smoke, and vault-ops so local testing has enough content to inspect.
+This smoke/demo Vault deliberately adds Folders like general, agent-wiki,
+graph-smoke, and vault-ops so local testing has enough content to inspect.
 
 Folder access is binary in Portable v1. A member either has access to a Folder or they do not. There are no read-only or editor roles yet.
 
