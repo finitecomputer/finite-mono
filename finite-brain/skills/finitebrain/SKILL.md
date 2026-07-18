@@ -1,6 +1,6 @@
 ---
 name: finitebrain
-description: FiniteBrain vault and LLM wiki operations through ordinary file edits plus the fbrain CLI control plane. Use when setting up or acting as a FiniteBrain agent participant; opening, syncing, or editing Vault Working Trees; building, ingesting, querying, linting, or maintaining LLM wiki content inside readable folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing vault, folder, permission, invitation, and share-link admin flows.
+description: Personal Brain/wiki knowledge-base operations in FiniteBrain through ordinary file edits plus the fbrain CLI control plane. Use for FiniteBrain product knowledge requests; setting up or acting as an agent participant; opening, syncing, or editing Vault Working Trees; maintaining content inside readable Folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing Vault, Folder, permission, invitation, and share-link admin flows. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
 ---
 
 # FiniteBrain
@@ -313,6 +313,15 @@ find -L ~/.finite/managed-skills/finite/current -path '*finitebrain/SKILL.md' -p
 If a runtime lists `finitebrain-agent`, treat it as a stale skill name. The
 current skill name is `finitebrain`.
 
+## User-Facing Identity
+
+Treat identity as email-first at every user-facing boundary. Ask for, show, and
+confirm a User or Agent by canonical resolvable email, then resolve that email to
+the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
+`npub` values internal to command execution and diagnostics. If email resolution
+fails, report that failure; show the `npub` only when the user asks for advanced
+identity details.
+
 ## Security Rules
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,
@@ -330,9 +339,9 @@ current skill name is `finitebrain`.
 
 ## Final Report
 
-Report the working tree path, safe acting npub when relevant, folders readable or
-locked, wiki pages or sources created/updated/moved/deleted, durable
-`index.md`/`log.md` updates, link verification as either Product Client-verified
-or file-checked only, `sync now --summary` status, latest sequence, whether
-`conflicts --json` is empty, and blockers with the command category that exposed
-them.
+Report the working tree path, acting identity email, folders readable or locked,
+wiki pages or sources created/updated/moved/deleted, durable `index.md`/`log.md`
+updates, link verification as either Product Client-verified or `fbrain wiki
+check`-only, `sync now --summary` status, latest sequence, whether `conflicts
+--json` is empty, and blockers with the command category that exposed them.
+Include the acting `npub` only when the user requests advanced identity details.

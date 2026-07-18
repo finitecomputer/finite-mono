@@ -38,11 +38,19 @@ for path in skill_files:
         continue
     frontmatter = lines[1:close_idx]
     fields: dict[str, str] = {}
-    for line in frontmatter:
+    for index, line in enumerate(frontmatter):
         if ":" not in line or line.startswith((" ", "\t", "-")):
             continue
         key, value = line.split(":", 1)
-        fields[key.strip()] = value.strip().strip('"')
+        value = value.strip().strip('"')
+        if value in (">", "|"):
+            continuation_lines: list[str] = []
+            for continuation in frontmatter[index + 1 :]:
+                if not continuation.startswith((" ", "\t")):
+                    break
+                continuation_lines.append(continuation.strip())
+            value = " ".join(continuation_lines)
+        fields[key.strip()] = value
     for required in ("name", "description"):
         if not fields.get(required):
             errors.append(f"{path}: missing non-empty {required!r} frontmatter")
@@ -103,6 +111,30 @@ brain_path = root / "software-development/finitebrain/SKILL.md"
 if not brain_path.is_file():
     errors.append(f"{brain_path}: canonical FiniteBrain skill is required")
 else:
+    brain_fields = frontmatter_by_path.get(brain_path, {})
+    brain_description = brain_fields.get("description", "").lower()
+    for term in (
+        "brain/wiki",
+        "personal",
+        "knowledge-base",
+        "llm-wiki-finite",
+        ".wiki/",
+        "~/wiki/",
+        "configured wiki hub",
+    ):
+        if term not in brain_description:
+            errors.append(
+                f"{brain_path}: description must explicitly route {term!r} requests"
+            )
+
+    component_brain_path = Path("../finite-brain/skills/finitebrain/SKILL.md")
+    if not component_brain_path.is_file():
+        errors.append(f"{component_brain_path}: FiniteBrain reference copy is required")
+    elif component_brain_path.read_text(encoding="utf-8") != brain_path.read_text(
+        encoding="utf-8"
+    ):
+        errors.append(f"{component_brain_path}: must match canonical {brain_path}")
+
     brain_text = brain_path.read_text(encoding="utf-8")
     for marker in (
         'SERVER="${FINITE_BRAIN_SERVER_URL:?',
@@ -150,6 +182,26 @@ if website_path.is_file():
     for marker in ("finite-sites-publishing-finite", "fsite"):
         if marker not in website_text:
             errors.append(f"{website_path}: must use current Finite Sites marker {marker!r}")
+
+llm_wiki_path = root / "research/llm-wiki-finite/SKILL.md"
+if llm_wiki_path.is_file():
+    llm_wiki_fields = frontmatter_by_path.get(llm_wiki_path, {})
+    llm_wiki_description = llm_wiki_fields.get("description", "").lower()
+    for marker in (
+        "repository llm-wiki",
+        "explicitly invokes",
+        ".wiki/",
+        "~/wiki/",
+        "configured hub",
+        "brain/wiki",
+        "personal",
+        "knowledge-base",
+        "finitebrain",
+    ):
+        if marker not in llm_wiki_description:
+            errors.append(
+                f"{llm_wiki_path}: missing routing boundary marker {marker!r}"
+            )
 
 legacy_command = re.compile(r"\bfinitec\s+(?:publish|repo|skills)\b", re.IGNORECASE)
 text_extensions = {".md", ".sh", ".py", ".json", ".toml", ".yaml", ".yml", ".txt"}
