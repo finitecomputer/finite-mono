@@ -2103,6 +2103,19 @@ Key loss and recovery:
 Search, backlinks, graph indexes, and LLM Wiki reports are derived from
 decrypted content.
 
+Backlinks, Graph View, and trusted-client link diagnostics MUST share one Page
+reference contract. Exact Page titles, unique filenames, and
+Folder-root-relative Page paths are supported. References follow the NFC and
+case-sensitive comparison rules in Section 4.7. Markdown destinations with URI
+schemes are external and do not become Page references. Markdown images and
+links to non-Markdown Assets are also outside Page-link health. Resolution
+prefers a matching Page in the source Page's Folder route; otherwise exactly one
+readable match is required. Zero matches are missing and multiple readable
+matches are ambiguous. Missing or ambiguous references MUST NOT create a
+backlink or graph edge. Link-looking examples inside inline or fenced code MUST
+NOT create Page references; inline and reference-style CommonMark Page links
+MUST resolve consistently across trusted clients.
+
 Privacy rules:
 
 - The server MUST NOT build plaintext search over secure Folder Objects.

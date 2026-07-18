@@ -3483,22 +3483,304 @@ const FiniteBrainProductClient = (() => {
   function normalizePageReference(value) {
     return String(value || "")
       .trim()
-      .replace(/^\.?\//, "")
-      .replace(/\.md$/i, "")
+      .replace(/^\.\//, "")
+      .replace(/\.md$/, "")
       .replace(/^#/, "")
-      .toLowerCase();
+      .normalize("NFC");
+  }
+
+  function isExternalPageReference(value) {
+    return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(String(value || "").trim());
+  }
+
+  function markdownDestination(value) {
+    const source = String(value || "").trim();
+    let target = source;
+    if (source.startsWith("<")) {
+      const close = source.indexOf(">");
+      target = close >= 0 ? source.slice(1, close) : source;
+    } else {
+      let depth = 0;
+      let escaped = false;
+      for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "(") depth += 1;
+        else if (char === ")" && depth > 0) depth -= 1;
+        else if (/\s/.test(char) && depth === 0) {
+          target = source.slice(0, index);
+          break;
+        }
+      }
+    }
+    return target.trim().replace(/\\(.)/g, "$1");
+  }
+
+  function isMarkdownPageDestination(value) {
+    const target = String(value || "").split("#")[0];
+    const filename = target.split("/").pop() || "";
+    const extension = filename.includes(".") ? filename.split(".").pop() : "";
+    return !extension || extension === "md";
+  }
+
+  function rangeContains(ranges, index) {
+    return ranges.some(([start, end]) => index >= start && index < end);
+  }
+
+  function markdownIndentColumns(value, initialColumns = 0) {
+    let columns = initialColumns;
+    for (const char of String(value || "")) {
+      if (char === " ") columns += 1;
+      else if (char === "\t") columns += 4 - (columns % 4);
+      else break;
+    }
+    return columns;
+  }
+
+  function markdownCodeRanges(source) {
+    const fenced = [];
+    const indented = [];
+    const lines = [];
+    let fence = null;
+    let offset = 0;
+    for (const line of source.match(/.*(?:\n|$)/g) || []) {
+      if (!line && offset >= source.length) break;
+      const content = line.replace(/\r?\n$/, "");
+      lines.push({ content, start: offset, end: offset + line.length });
+      const markerMatch = content.match(/^ {0,3}((?:\x60){3,}|~{3,})(.*)$/);
+      const marker = markerMatch?.[1] || "";
+      const trailing = markerMatch?.[2] || "";
+      if (!fence && marker) {
+        fence = { char: marker[0], length: marker.length, start: offset };
+      } else if (
+        fence &&
+        marker[0] === fence.char &&
+        marker.length >= fence.length &&
+        !trailing.trim()
+      ) {
+        fenced.push([fence.start, offset + line.length]);
+        fence = null;
+      }
+      offset += line.length;
+    }
+    if (fence) fenced.push([fence.start, source.length]);
+
+    let activeListIndent = 0;
+    let indentedBlock = false;
+    let validCodeBoundary = true;
+    for (const line of lines) {
+      if (rangeContains(fenced, line.start)) {
+        indentedBlock = false;
+        validCodeBoundary = true;
+        continue;
+      }
+      if (!line.content.trim()) {
+        validCodeBoundary = true;
+        continue;
+      }
+
+      const leading = line.content.match(/^[ \t]*/)?.[0] || "";
+      const indent = markdownIndentColumns(leading);
+      const listMarker = line.content.match(
+        /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/
+      );
+      if (activeListIndent && indent < activeListIndent && !listMarker) {
+        activeListIndent = 0;
+      }
+      const relativeIndent = Math.max(0, indent - activeListIndent);
+      if (relativeIndent >= 4 && (indentedBlock || validCodeBoundary)) {
+        indented.push([line.start, line.end]);
+        indentedBlock = true;
+        validCodeBoundary = false;
+        continue;
+      }
+
+      indentedBlock = false;
+      validCodeBoundary = false;
+      if (listMarker) {
+        const markerIndent = markdownIndentColumns(listMarker[1]);
+        activeListIndent = markdownIndentColumns(
+          listMarker[3],
+          markerIndent + listMarker[2].length
+        );
+      }
+    }
+
+    const ranges = [...fenced, ...indented];
+    for (let index = 0; index < source.length; index += 1) {
+      if (rangeContains(fenced, index) || source[index] !== "\x60") continue;
+      let length = 1;
+      while (source[index + length] === "\x60") length += 1;
+      const marker = "\x60".repeat(length);
+      const close = source.indexOf(marker, index + length);
+      if (close < 0 || rangeContains(fenced, close)) {
+        index += length - 1;
+        continue;
+      }
+      ranges.push([index, close + length]);
+      index = close + length - 1;
+    }
+    return ranges.sort((left, right) => left[0] - right[0]);
+  }
+
+  function markdownReferenceLabel(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").normalize("NFC").toLowerCase();
+  }
+
+  function markdownContext(text) {
+    const source = String(text || "");
+    const excluded = markdownCodeRanges(source);
+    const references = new Map();
+    const definitionPattern = /^ {0,3}\[([^\]\n]+)\]:[ \t]*(.+)$/gm;
+    for (const match of source.matchAll(definitionPattern)) {
+      if (rangeContains(excluded, match.index)) continue;
+      const destination = markdownDestination(match[2]);
+      if (!destination) continue;
+      const label = markdownReferenceLabel(match[1]);
+      if (!references.has(label)) references.set(label, destination);
+      excluded.push([match.index, match.index + match[0].length]);
+    }
+    excluded.sort((left, right) => left[0] - right[0]);
+    return { excluded, references };
+  }
+
+  function closingMarkdownBracket(source, start) {
+    let depth = 1;
+    let escaped = false;
+    for (let index = start + 1; index < source.length; index += 1) {
+      const char = source[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "[") depth += 1;
+      if (char === "]") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
+  }
+
+  function wikiLinkTokens(text, context = markdownContext(text)) {
+    const source = String(text || "");
+    const pattern = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g;
+    return [...source.matchAll(pattern)]
+      .filter((match) => !rangeContains(context.excluded, match.index))
+      .map((match) => ({
+        end: match.index + match[0].length,
+        label: String(match[2] || match[1]).trim(),
+        start: match.index,
+        target: normalizePageReference(match[1]),
+      }));
+  }
+
+  function markdownLinkTokens(text, context = markdownContext(text)) {
+    const source = String(text || "");
+    const tokens = [];
+    for (let start = 0; start < source.length; start += 1) {
+      if (
+        source[start] !== "[" ||
+        source[start - 1] === "!" ||
+        source[start - 1] === "[" ||
+        rangeContains(context.excluded, start)
+      ) {
+        continue;
+      }
+      const labelEnd = closingMarkdownBracket(source, start);
+      if (labelEnd < 0 || source[labelEnd + 1] !== "(") continue;
+      let depth = 1;
+      let quote = "";
+      let escaped = false;
+      let end = labelEnd + 2;
+      for (; end < source.length; end += 1) {
+        const char = source[end];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (quote) {
+          if (char === quote) quote = "";
+          continue;
+        }
+        if (char === '"' || char === "'") {
+          quote = char;
+          continue;
+        }
+        if (char === "(") depth += 1;
+        if (char === ")") {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (depth !== 0) continue;
+      const destination = markdownDestination(source.slice(labelEnd + 2, end));
+      if (!destination) continue;
+      tokens.push({
+        destination,
+        end: end + 1,
+        label: source.slice(start + 1, labelEnd),
+        start,
+      });
+      start = end;
+    }
+
+    for (let start = 0; start < source.length; start += 1) {
+      if (
+        source[start] !== "[" ||
+        source[start - 1] === "!" ||
+        source[start - 1] === "[" ||
+        source[start + 1] === "[" ||
+        rangeContains(context.excluded, start) ||
+        tokens.some((token) => start >= token.start && start < token.end)
+      ) {
+        continue;
+      }
+      const labelEnd = closingMarkdownBracket(source, start);
+      if (labelEnd < 0 || source[labelEnd + 1] === "(") continue;
+      const label = source.slice(start + 1, labelEnd);
+      let reference = label;
+      let end = labelEnd + 1;
+      if (source[labelEnd + 1] === "[") {
+        const referenceEnd = closingMarkdownBracket(source, labelEnd + 1);
+        if (referenceEnd < 0) continue;
+        reference = source.slice(labelEnd + 2, referenceEnd) || label;
+        end = referenceEnd + 1;
+      }
+      const destination = context.references.get(markdownReferenceLabel(reference));
+      if (!destination) continue;
+      tokens.push({ destination, end, label, start });
+      start = end - 1;
+    }
+    return tokens.sort((left, right) => left.start - right.start);
   }
 
   function extractPageLinks(text) {
     const links = new Set();
-    const wikiPattern = /\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
-    const markdownPattern = /\[[^\]]+\]\(([^)]+)\)/g;
-    for (const match of String(text || "").matchAll(wikiPattern)) {
-      links.add(normalizePageReference(match[1]));
+    const context = markdownContext(text);
+    for (const token of wikiLinkTokens(text, context)) {
+      links.add(token.target);
     }
-    for (const match of String(text || "").matchAll(markdownPattern)) {
-      const target = match[1].split("#")[0];
-      if (!/^https?:\/\//i.test(target)) links.add(normalizePageReference(target));
+    for (const token of markdownLinkTokens(text, context)) {
+      const target = token.destination;
+      if (!isExternalPageReference(target) && isMarkdownPageDestination(target)) {
+        links.add(normalizePageReference(target.split("#")[0]));
+      }
     }
     return [...links].filter(Boolean);
   }
@@ -3513,50 +3795,72 @@ const FiniteBrainProductClient = (() => {
       .filter(Boolean);
   }
 
-  function pageReferenceMap(pages = readablePages()) {
-    const byReference = new Map();
+  function resolvePageReference(reference, pages = readablePages(), sourcePage = null) {
+    const normalizedReference = normalizePageReference(reference);
+    const matches = new Map();
     for (const page of pages.filter(isReadablePage)) {
-      for (const reference of pageReferencesForPage(page)) {
-        if (!byReference.has(reference)) byReference.set(reference, page);
-      }
+      if (!pageReferencesForPage(page).includes(normalizedReference)) continue;
+      matches.set(pageKeyForPage(page), page);
     }
-    return byReference;
+    const readableMatches = [...matches.values()];
+    const localMatches = sourcePage
+      ? readableMatches.filter((page) => page.folderId === sourcePage.folderId)
+      : [];
+    const candidates = localMatches.length ? localMatches : readableMatches;
+    if (candidates.length === 1) {
+      return { matches: candidates, status: "resolved", target: candidates[0] };
+    }
+    return {
+      matches: candidates,
+      status: candidates.length ? "ambiguous" : "missing",
+      target: null,
+    };
   }
 
-  function pageForReference(reference, pages = readablePages()) {
-    return pageReferenceMap(pages).get(normalizePageReference(reference)) || null;
+  function pageForReference(reference, pages = readablePages(), sourcePage = null) {
+    return resolvePageReference(reference, pages, sourcePage).target;
   }
 
-  function pageKeyForReference(reference, pages = readablePages()) {
-    const page = pageForReference(reference, pages);
+  function pageKeyForReference(reference, pages = readablePages(), sourcePage = null) {
+    const page = pageForReference(reference, pages, sourcePage);
     return page ? pageKeyForPage(page) : null;
   }
 
   function inlineLinkSegments(text) {
     const source = String(text || "");
     const segments = [];
-    const pattern = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
-    let cursor = 0;
-    for (const match of source.matchAll(pattern)) {
-      if (match.index > cursor) {
-        segments.push({ kind: "text", text: source.slice(cursor, match.index) });
-      }
-      if (match[1]) {
-        segments.push({
-          kind: "internal",
-          target: normalizePageReference(match[1]),
-          text: String(match[2] || match[1]).trim(),
-        });
-      } else {
-        const target = String(match[4] || "").trim();
-        const external = /^https?:\/\//i.test(target);
-        segments.push({
+    const context = markdownContext(source);
+    const tokens = [
+      ...wikiLinkTokens(source, context).map((token) => ({
+        end: token.end,
+        kind: "internal",
+        start: token.start,
+        target: token.target,
+        text: token.label,
+      })),
+      ...markdownLinkTokens(source, context).map((token) => {
+        const external =
+          isExternalPageReference(token.destination) ||
+          !isMarkdownPageDestination(token.destination);
+        return {
+          end: token.end,
           kind: external ? "external" : "internal",
-          target: external ? target : normalizePageReference(target.split("#")[0]),
-          text: String(match[3] || target).trim(),
-        });
+          start: token.start,
+          target: external
+            ? token.destination
+            : normalizePageReference(token.destination.split("#")[0]),
+          text: token.label.trim(),
+        };
+      }),
+    ].sort((left, right) => left.start - right.start);
+    let cursor = 0;
+    for (const token of tokens) {
+      if (token.start < cursor) continue;
+      if (token.start > cursor) {
+        segments.push({ kind: "text", text: source.slice(cursor, token.start) });
       }
-      cursor = match.index + match[0].length;
+      segments.push({ kind: token.kind, target: token.target, text: token.text });
+      cursor = token.end;
     }
     if (cursor < source.length) {
       segments.push({ kind: "text", text: source.slice(cursor) });
@@ -4271,26 +4575,30 @@ const FiniteBrainProductClient = (() => {
   function buildGraphProjection(pages) {
     const visiblePages = [...pages].filter(isReadablePage);
     const nodes = visiblePages.map((page) => {
-      const id = pageKey(page.folderId, page.objectId);
+      const id = pageKeyForPage(page);
       const title = pageTitleForPage(page);
       return {
         id,
         folderId: page.folderId,
         objectId: page.objectId,
         title,
-        normalizedTitle: normalizePageReference(title),
       };
     });
-    const titleToNode = new Map(nodes.map((node) => [node.normalizedTitle, node]));
+    const nodesByPageKey = new Map(nodes.map((node) => [node.id, node]));
     const edges = [];
+    const edgeIds = new Set();
     for (const page of visiblePages) {
-      const source = nodes.find((node) => node.id === pageKey(page.folderId, page.objectId));
+      const source = nodesByPageKey.get(pageKeyForPage(page));
       if (!source) continue;
       for (const targetRef of extractPageLinks(page.text)) {
-        const target = titleToNode.get(targetRef);
+        const targetPage = resolvePageReference(targetRef, visiblePages, page).target;
+        const target = targetPage ? nodesByPageKey.get(pageKeyForPage(targetPage)) : null;
         if (!target) continue;
+        const id = `${source.id}->${target.id}`;
+        if (edgeIds.has(id)) continue;
+        edgeIds.add(id);
         edges.push({
-          id: `${source.id}->${target.id}`,
+          id,
           source: source.id,
           target: target.id,
         });
@@ -4632,30 +4940,34 @@ const FiniteBrainProductClient = (() => {
   function pageLinkContext(page, pages = readablePages()) {
     if (!isReadablePage(page)) return { backlinks: [], outgoing: [] };
     const readable = [...pages].filter(isReadablePage);
-    const byReference = pageReferenceMap(readable);
     const currentKey = pageKeyForPage(page);
-    const currentReferences = new Set(pageReferencesForPage(page));
     const outgoing = extractPageLinks(page.text).map((targetRef) => {
-      const target = byReference.get(targetRef);
-      if (!target) {
+      const resolution = resolvePageReference(targetRef, readable, page);
+      if (!resolution.target) {
         return {
-          detail: "unresolved",
+          detail:
+            resolution.status === "ambiguous"
+              ? `${resolution.matches.length} readable matches`
+              : "unresolved",
           key: null,
           label: targetRef,
-          status: "missing",
+          status: resolution.status,
         };
       }
       return {
-        detail: target.folderId,
-        key: pageKeyForPage(target),
-        label: pageTitleForPage(target),
+        detail: resolution.target.folderId,
+        key: pageKeyForPage(resolution.target),
+        label: pageTitleForPage(resolution.target),
         status: "resolved",
       };
     });
     const backlinks = readable
       .filter((candidate) => pageKeyForPage(candidate) !== currentKey)
       .filter((candidate) =>
-        extractPageLinks(candidate.text).some((targetRef) => currentReferences.has(targetRef))
+        extractPageLinks(candidate.text).some((targetRef) => {
+          const target = resolvePageReference(targetRef, readable, candidate).target;
+          return target ? pageKeyForPage(target) === currentKey : false;
+        })
       )
       .map((candidate) => ({
         detail: candidate.folderId,
@@ -5235,7 +5547,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function openInternalPageReference(reference) {
-    const key = pageKeyForReference(reference);
+    const key = pageKeyForReference(reference, readablePages(), selectedReaderPage());
     if (!key) return false;
     selectReaderPage(key);
     return true;

@@ -12,6 +12,7 @@ mod output;
 mod signer;
 mod state;
 mod sync_engine;
+mod wiki;
 mod working_tree_security;
 
 pub use environment::CliEnvironment;
@@ -28,6 +29,7 @@ pub(crate) use output::*;
 pub(crate) use signer::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
+pub(crate) use wiki::*;
 pub(crate) use working_tree_security::*;
 
 use std::collections::BTreeSet;
@@ -109,6 +111,7 @@ where
         "conflicts" => conflicts(&env, json, output),
         "resolve" => resolve(&args[1..], &env, json, output),
         "activity" => activity(&env, json, output),
+        "wiki" => wiki(&args[1..], &env, json, output),
         "access" => access(&args[1..], &env, json, output),
         "vault" => vault(&args[1..], &env, json, output),
         "folder" => folder(&args[1..], &env, json, output),
@@ -123,7 +126,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\nwiki check\naccess explain|list|grant|revoke\nvault list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -131,6 +134,49 @@ fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
 fn version<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(output, "fbrain {}", env!("CARGO_PKG_VERSION"))?;
     Ok(())
+}
+
+fn wiki<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str).unwrap_or("check") {
+        "check" => {
+            let root = current_tree_root(env)?;
+            let report = check_wiki_links(&root)?;
+            if json {
+                write_json(output, &report)
+            } else {
+                writeln!(
+                    output,
+                    "wiki links {}: {} pages, {} resolved, {} missing, {} ambiguous",
+                    report.status,
+                    report.page_count,
+                    report.resolved_link_count,
+                    report.missing_link_count,
+                    report.ambiguous_link_count
+                )?;
+                for issue in report.issues {
+                    writeln!(
+                        output,
+                        "- {} -> {} ({}){}",
+                        issue.path,
+                        issue.reference,
+                        issue.status,
+                        if issue.matches.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", issue.matches.join(", "))
+                        }
+                    )?;
+                }
+                Ok(())
+            }
+        }
+        other => Err(CliError::InvalidCommand(format!("wiki {other}"))),
+    }
 }
 
 fn expand_cli_path(value: &str) -> PathBuf {
@@ -3585,6 +3631,194 @@ mod tests {
             json["configDir"],
             env_for(&tmp).config_dir.display().to_string()
         );
+    }
+
+    #[test]
+    fn wiki_check_reports_missing_and_ambiguous_links_from_readable_folders_only() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        initialize_private_working_tree(&tree).unwrap();
+        let now = "2026-06-24T20:46:36Z";
+        write_agent_state(&tree, &AgentState::new("vault", now)).unwrap();
+        for folder in ["Notes/compiled", "Alpha", "Beta", "Locked"] {
+            fs::create_dir_all(tree.join(folder)).unwrap();
+        }
+        fs::write(
+            tree.join("Notes/summary.md"),
+            "# Summary\n\nSee [[compiled/deep.md|Deep Dive]], [[Missing]], and [[Roadmap]].\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("Notes/compiled/deep.md"),
+            "# Deep Dive\n\nBack to [Summary](summary.md).\n",
+        )
+        .unwrap();
+        fs::write(tree.join("Alpha/roadmap.md"), "# Roadmap\n").unwrap();
+        fs::write(tree.join("Beta/roadmap.md"), "# Roadmap\n").unwrap();
+        fs::write(tree.join("Locked/roadmap.md"), "# Roadmap\n").unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &VaultWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_vault_id: None,
+                        path: "Notes".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "alpha".to_owned(),
+                        source_vault_id: None,
+                        path: "Alpha".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "beta".to_owned(),
+                        source_vault_id: None,
+                        path: "Beta".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "locked".to_owned(),
+                        source_vault_id: None,
+                        path: "Locked".to_owned(),
+                        can_read: false,
+                        metadata_only: true,
+                    },
+                ],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        run_with_env(["wiki", "check", "--json"], env, &mut output).unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "issues");
+        assert_eq!(report["pageCount"], 4);
+        assert_eq!(report["resolvedLinkCount"], 2);
+        assert_eq!(report["missingLinkCount"], 1);
+        assert_eq!(report["ambiguousLinkCount"], 1);
+        assert_eq!(report["issues"][0]["path"], "Notes/summary.md");
+        assert_eq!(report["issues"][0]["reference"], "Missing");
+        assert_eq!(report["issues"][0]["status"], "missing");
+        assert_eq!(report["issues"][1]["reference"], "Roadmap");
+        assert_eq!(report["issues"][1]["status"], "ambiguous");
+        assert_eq!(
+            report["issues"][1]["matches"],
+            serde_json::json!(["Alpha/roadmap.md", "Beta/roadmap.md"])
+        );
+    }
+
+    #[test]
+    fn wiki_check_uses_folder_routes_and_normalized_reference_rules() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        fs::create_dir_all(tree.join("Local")).unwrap();
+        fs::create_dir_all(tree.join("Mounted")).unwrap();
+        fs::write(
+            tree.join("Local/source.md"),
+            "# Source\n\n[[Guide]] [[guide]] [[Re\u{301}sume\u{301}]] [Angle](<angle.md>) [Web](HTTPS://example.com) [Mail](mailto:person@example.com) ![Diagram](raw/assets/diagram.png) [PDF](raw/assets/source.pdf) [Manual](manual.md \"read\") [Version](guide(v2).md)\n\n`[Ghost](missing.md)`\n\n```md\n```not-a-close\n[Ghost](missing.md)\n[[Ghost]]\n```\n\n    [Ghost](missing.md)\n\nParagraph\n    [Paragraph Guide](paragraph.md)\n\n- item\n\n    [List Guide](list.md)\n\n[[Guide]] [Manual][manual-ref] [Duplicate][duplicate] [see [Manual]](upper.md) [escaped \\] label](manual.md) [Escaped Version](guide\\(v2\\).md)\n\n[Guide]: missing.md\n[manual-ref]: manual.md\n[duplicate]: upper.md\n[duplicate]: missing.md\n",
+        )
+        .unwrap();
+        fs::write(tree.join("Local/upper.md"), "# Guide\n").unwrap();
+        fs::write(tree.join("Local/lower.md"), "# guide\n").unwrap();
+        fs::write(tree.join("Local/resume.md"), "# R\u{e9}sum\u{e9}\n").unwrap();
+        fs::write(tree.join("Local/angle.md"), "# Angle\n").unwrap();
+        fs::write(tree.join("Local/manual.md"), "# Manual\n").unwrap();
+        fs::write(tree.join("Local/guide(v2).md"), "# Version Guide\n").unwrap();
+        fs::write(tree.join("Local/paragraph.md"), "# Paragraph Guide\n").unwrap();
+        fs::write(tree.join("Local/list.md"), "# List Guide\n").unwrap();
+        fs::write(tree.join("Mounted/guide.md"), "# Guide\n").unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &VaultWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_vault_id: None,
+                        path: "Local".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_vault_id: Some("mounted-vault".to_owned()),
+                        path: "Mounted".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                ],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        run_with_env(["wiki", "check", "--json"], env, &mut output).unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "ok", "{report:#}");
+        assert_eq!(report["pageCount"], 10);
+        assert_eq!(report["resolvedLinkCount"], 9);
+        assert_eq!(report["missingLinkCount"], 0);
+        assert_eq!(report["ambiguousLinkCount"], 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wiki_check_rejects_folder_root_and_intermediate_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("vault");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir_all(external.join("Notes")).unwrap();
+        fs::write(external.join("Notes/secret.md"), "# External Secret\n").unwrap();
+
+        for (folder_path, link_path, target) in [
+            ("Notes", tree.join("Notes"), external.join("Notes")),
+            ("Mount/Notes", tree.join("Mount"), external.clone()),
+        ] {
+            symlink(target, &link_path).unwrap();
+            write_json_file(
+                &tree.join(".finitebrain/working-tree-state.json"),
+                &VaultWorkingTreeStateManifest {
+                    version: WORKING_TREE_STATE_VERSION.to_owned(),
+                    folder_roots: vec![WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_vault_id: None,
+                        path: folder_path.to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    }],
+                    objects: Vec::new(),
+                    sync: WorkingTreeSyncState { latest_sequence: 0 },
+                },
+            )
+            .unwrap();
+            let mut env = env_for(&tmp);
+            env.cwd = tree.clone();
+            assert!(matches!(
+                run_with_env(["wiki", "check", "--json"], env, &mut Vec::new()),
+                Err(CliError::InsecureWorkingTree { .. })
+            ));
+            fs::remove_file(link_path).unwrap();
+        }
     }
 
     #[test]

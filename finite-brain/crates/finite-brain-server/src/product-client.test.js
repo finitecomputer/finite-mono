@@ -2244,6 +2244,344 @@ assert.doesNotMatch(
   "Invitation acceptance and revocation must remain explicit actions"
 );
 
+const pathGraphPages = [
+  {
+    folderId: "docs",
+    objectId: "intro",
+    path: "docs/intro.md",
+    status: "ready",
+    text: "# Intro\n\nSee [[docs/deep-dive.md|Deep Dive]].",
+  },
+  {
+    folderId: "docs",
+    objectId: "deep-dive",
+    path: "docs/deep-dive.md",
+    status: "ready",
+    text: "# Deep Dive",
+  },
+];
+const pathGraph = client.buildGraphProjection(pathGraphPages);
+assert.equal(
+  pathGraph.edges.length,
+  1,
+  "Graph View must resolve the same Folder-root-relative Page paths as backlinks"
+);
+assert.equal(
+  client.pageLinkContext(pathGraphPages[0], pathGraphPages).outgoing[0].status,
+  "resolved"
+);
+
+const titleAndFilenameGraph = client.buildGraphProjection([
+  {
+    folderId: "docs",
+    objectId: "title-source",
+    path: "title-source.md",
+    status: "ready",
+    text: "# Title Source\n\nSee [[Deep Dive]].",
+  },
+  {
+    folderId: "docs",
+    objectId: "filename-source",
+    path: "filename-source.md",
+    status: "ready",
+    text: "# Filename Source\n\nSee [Deep Dive](deep-dive.md).",
+  },
+  pathGraphPages[1],
+]);
+assert.equal(
+  JSON.stringify(titleAndFilenameGraph.edges.map((edge) => [edge.source, edge.target])),
+  JSON.stringify([
+    ["docs/title-source", "docs/deep-dive"],
+    ["docs/filename-source", "docs/deep-dive"],
+  ]),
+  "Graph View resolves exact titles and unique filenames through the shared link contract"
+);
+
+const ambiguousTitlePages = [
+  {
+    folderId: "notes",
+    objectId: "summary",
+    path: "summary.md",
+    status: "ready",
+    text: "# Summary\n\nSee [[Roadmap]].",
+  },
+  {
+    folderId: "alpha",
+    objectId: "roadmap-alpha",
+    path: "roadmap.md",
+    status: "ready",
+    text: "# Roadmap",
+  },
+  {
+    folderId: "beta",
+    objectId: "roadmap-beta",
+    path: "roadmap.md",
+    status: "ready",
+    text: "# Roadmap",
+  },
+  {
+    folderId: "restricted",
+    objectId: "roadmap-locked",
+    path: "roadmap.md",
+    status: "locked",
+    text: "# Roadmap",
+  },
+];
+const ambiguousContext = client.pageLinkContext(ambiguousTitlePages[0], ambiguousTitlePages);
+assert.equal(ambiguousContext.outgoing[0].status, "ambiguous");
+assert.equal(ambiguousContext.outgoing[0].detail, "2 readable matches");
+assert.equal(
+  client.buildGraphProjection(ambiguousTitlePages).edges.length,
+  0,
+  "Graph View must not guess between duplicate readable Page titles"
+);
+assert.equal(
+  client.pageLinkContext(ambiguousTitlePages[1], ambiguousTitlePages).backlinks.length,
+  0,
+  "Ambiguous title links must not become backlinks"
+);
+
+const localTitlePages = [
+  {
+    folderId: "alpha",
+    objectId: "summary-alpha",
+    path: "summary.md",
+    status: "ready",
+    text: "# Summary\n\nSee [[Roadmap]].",
+  },
+  ...ambiguousTitlePages.slice(1),
+];
+const localTitleGraph = client.buildGraphProjection(localTitlePages);
+assert.equal(
+  JSON.stringify(localTitleGraph.edges.map((edge) => [edge.source, edge.target])),
+  JSON.stringify([["alpha/summary-alpha", "alpha/roadmap-alpha"]]),
+  "A Folder-scoped wiki resolves its local Page before a same-title Page in another Folder"
+);
+assert.equal(client.pageKeyForReference("Roadmap", localTitlePages), null);
+assert.equal(
+  client.pageKeyForReference("Roadmap", localTitlePages, localTitlePages[0]),
+  "alpha/roadmap-alpha",
+  "Page navigation uses the source Page's Folder to disambiguate local links"
+);
+
+const normalizedReferencePages = [
+  {
+    folderId: "notes",
+    objectId: "normalized-source",
+    path: "normalized-source.md",
+    status: "ready",
+    text: "# Source\n\n[[Guide]] [[Re\u0301sume\u0301]] [Angle](<angle.md>) [Web](HTTPS://example.com) [Mail](mailto:person@example.com)",
+  },
+  {
+    folderId: "notes",
+    objectId: "upper-guide",
+    path: "Guide.md",
+    status: "ready",
+    text: "# Guide",
+  },
+  {
+    folderId: "notes",
+    objectId: "lower-guide",
+    path: "guide.md",
+    status: "ready",
+    text: "# guide",
+  },
+  {
+    folderId: "notes",
+    objectId: "resume",
+    path: "resume.md",
+    status: "ready",
+    text: "# R\u00e9sum\u00e9",
+  },
+  {
+    folderId: "notes",
+    objectId: "angle",
+    path: "angle.md",
+    status: "ready",
+    text: "# Angle",
+  },
+];
+const normalizedContext = client.pageLinkContext(
+  normalizedReferencePages[0],
+  normalizedReferencePages
+);
+assert.equal(
+  JSON.stringify(normalizedContext.outgoing.map((link) => [link.label, link.status])),
+  JSON.stringify([
+    ["Guide", "resolved"],
+    ["R\u00e9sum\u00e9", "resolved"],
+    ["Angle", "resolved"],
+  ]),
+  "Link extraction is NFC-normalized, case-sensitive, angle-bracket aware, and ignores URI schemes"
+);
+assert.equal(
+  client.pageKeyForReference("Guide", normalizedReferencePages, normalizedReferencePages[0]),
+  "notes/upper-guide",
+  "Case-distinct Page references do not collapse"
+);
+assert.equal(
+  JSON.stringify(
+    client
+      .inlineLinkSegments(
+        "[Angle](<angle.md#Top>) [Web](HTTPS://example.com/x#y) [Mail](mailto:person@example.com) [CDN](//cdn.example.com/x) [[Guide#Top|Guide alias]]"
+      )
+      .filter((segment) => segment.kind !== "text")
+  ),
+  JSON.stringify([
+    { kind: "internal", target: "angle", text: "Angle" },
+    { kind: "external", target: "HTTPS://example.com/x#y", text: "Web" },
+    { kind: "external", target: "mailto:person@example.com", text: "Mail" },
+    { kind: "external", target: "//cdn.example.com/x", text: "CDN" },
+    { kind: "internal", target: "Guide", text: "Guide alias" },
+  ]),
+  "Rendered links use the same destinations, URI classification, fragments, and aliases as link health"
+);
+
+const commonMarkPages = [
+  {
+    folderId: "notes",
+    objectId: "commonmark-source",
+    path: "commonmark-source.md",
+    status: "ready",
+    text: '# Source\n\n![Diagram](raw/assets/diagram.png) [PDF](raw/assets/source.pdf) [Manual](manual.md "read") [Version](guide(v2).md)',
+  },
+  {
+    folderId: "notes",
+    objectId: "manual",
+    path: "manual.md",
+    status: "ready",
+    text: "# Manual",
+  },
+  {
+    folderId: "notes",
+    objectId: "version",
+    path: "guide(v2).md",
+    status: "ready",
+    text: "# Version Guide",
+  },
+];
+assert.equal(
+  JSON.stringify(
+    client
+      .pageLinkContext(commonMarkPages[0], commonMarkPages)
+      .outgoing.map((link) => [link.label, link.status])
+  ),
+  JSON.stringify([
+    ["Manual", "resolved"],
+    ["Version Guide", "resolved"],
+  ]),
+  "Page link health ignores images and non-Markdown assets while parsing titles and balanced parentheses"
+);
+assert.equal(
+  JSON.stringify(
+    client
+      .inlineLinkSegments(commonMarkPages[0].text)
+      .filter((segment) => segment.kind !== "text")
+  ),
+  JSON.stringify([
+    { kind: "external", target: "raw/assets/source.pdf", text: "PDF" },
+    { kind: "internal", target: "manual", text: "Manual" },
+    { kind: "internal", target: "guide(v2)", text: "Version" },
+  ]),
+  "Rendered Markdown links share the Page/asset destination parser"
+);
+
+const contextualMarkdownPages = [
+  {
+    folderId: "notes",
+    objectId: "context-source",
+    path: "context-source.md",
+    status: "ready",
+    text: [
+      "# Context",
+      "\x60[Ghost](missing.md)\x60",
+      "\x60\x60\x60md",
+      "\x60\x60\x60not-a-close",
+      "[Ghost](missing.md)",
+      "[[Ghost]]",
+      "\x60\x60\x60",
+      "    [Ghost](missing.md)",
+      "Paragraph",
+      "    [Paragraph Guide](paragraph.md)",
+      "- item",
+      "",
+      "    [List Guide](list.md)",
+      "[[Guide]]",
+      "[Guide][guide-ref]",
+      "[guide-ref]: guide.md",
+      "[Guide]: missing.md",
+      "[duplicate]: guide.md",
+      "[duplicate]: missing.md",
+      "[Duplicate][duplicate]",
+      "[see [Manual]](guide.md)",
+      "[escaped \\] label](guide.md)",
+      "[Version](guide\\(v2\\).md)",
+    ].join("\n"),
+  },
+  {
+    folderId: "notes",
+    objectId: "context-guide",
+    path: "guide.md",
+    status: "ready",
+    text: "# Guide",
+  },
+  {
+    folderId: "notes",
+    objectId: "context-version",
+    path: "guide(v2).md",
+    status: "ready",
+    text: "# Version Guide",
+  },
+  {
+    folderId: "notes",
+    objectId: "context-paragraph",
+    path: "paragraph.md",
+    status: "ready",
+    text: "# Paragraph Guide",
+  },
+  {
+    folderId: "notes",
+    objectId: "context-list",
+    path: "list.md",
+    status: "ready",
+    text: "# List Guide",
+  },
+];
+assert.equal(
+  JSON.stringify(
+    client
+      .pageLinkContext(contextualMarkdownPages[0], contextualMarkdownPages)
+      .outgoing.map((link) => [link.label, link.status])
+  ),
+  JSON.stringify([
+    ["Guide", "resolved"],
+    ["Paragraph Guide", "resolved"],
+    ["List Guide", "resolved"],
+    ["Guide", "resolved"],
+    ["Version Guide", "resolved"],
+  ]),
+  "Link health ignores code examples and resolves CommonMark reference, nested-label, and escaped links"
+);
+assert.equal(
+  JSON.stringify(
+    client
+      .inlineLinkSegments(contextualMarkdownPages[0].text)
+      .filter((segment) => segment.kind !== "text")
+      .map((segment) => segment.target)
+  ),
+  JSON.stringify([
+    "paragraph",
+    "list",
+    "Guide",
+    "guide",
+    "guide",
+    "guide",
+    "guide",
+    "guide(v2)",
+  ]),
+  "Rendered contextual links use the same CommonMark targets as health and Graph View"
+);
+
 (async () => {
   const rawNip07Provider = {
     async getPublicKey() {

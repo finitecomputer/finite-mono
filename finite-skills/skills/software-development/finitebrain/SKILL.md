@@ -248,14 +248,16 @@ knowledge edit, close the wiki before the final sync:
 4. Update durable `index.md` from the actual Pages and frontmatter. Do not
    update `_index.md` or `_wiki/*`.
 5. Append one concise `log.md` entry for the coherent change.
-6. Before sync, check each new link target against exact Page titles, unique
-   filenames, or Folder-root-relative paths. After sync, inspect backlinks and
-   missing links in the Product Client when available.
+6. Run `fbrain --config-dir "$FBRAIN_CONFIG" wiki check --json` from the Vault
+   Working Tree. Resolve every reported missing or ambiguous link before the
+   final sync. This command checks only materialized readable Folders.
+7. After sync, inspect backlinks and Graph View in the Product Client when
+   available.
 
 If the Product Client is unavailable, report that the links were checked
-against files but the client graph was not verified. Never claim “no orphans,”
-“backlinks complete,” or “graph healthy” from generated `_wiki/` files or from
-the presence of `[[wikilinks]]` alone.
+with `fbrain wiki check` but the client graph was not verified. Never claim “no
+orphans,” “backlinks complete,” or “graph healthy” from generated `_wiki/`
+files, a clean link check, or the presence of `[[wikilinks]]` alone.
 
 Access-aware wiki rules:
 

@@ -39,6 +39,7 @@ fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
 fbrain activity
+fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
 fbrain vault list|create|metadata|export
 fbrain folder create|list
@@ -91,6 +92,7 @@ fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
 fbrain activity
+fbrain wiki check --json
 ```
 
 `open` creates `.finitebrain/` state, saves the server URL when provided, marks
@@ -107,6 +109,15 @@ Useful `sync now --json` fields include `status`, `latestSequence`,
 `recordCount`, `localChanges`, `remoteChanges`, and `conflicts`. Expected status
 values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, and
 `blocked-local-conflicts`.
+
+`wiki check` scans Markdown Pages in materialized readable Folders only. It
+resolves exact Page titles, unique filenames, and Folder-root-relative Page
+paths using the same local-Folder-first ambiguity rule as the Product Client.
+The JSON report includes `resolvedLinkCount`, `missingLinkCount`,
+`ambiguousLinkCount`, and source-specific `issues`. Resolve missing and
+ambiguous links before the final sync; a clean result verifies link targets but
+does not by itself prove that the wiki has no orphans or enough meaningful
+connections.
 
 ## Operation-Scoped Folder Keys
 
@@ -175,9 +186,10 @@ fbrain mount list --vault <vault-id>
 ```
 
 `--requesting-user-npub` is Organization Vault-only. It atomically makes the
-distinct signing creator and authenticated requester initial members and admins
-and generates both initial Folder Key Grant sets. Pass only authenticated sender
-metadata; the option does not resolve email or NIP-05 input.
+distinct signing creator and authenticated requester initial members and
+admins. The new Vault starts empty, so it creates no Folder Key Grants until an
+admin creates a Folder. Pass only authenticated sender metadata; the option
+does not resolve email or NIP-05 input.
 
 Folder roles are `personal_home`, `vault_ops`, `general`, and `folder` (hyphen
 aliases are accepted). Folder access modes are `owner`, `admin_only`,
