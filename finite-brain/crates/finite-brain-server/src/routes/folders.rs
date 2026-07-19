@@ -269,6 +269,13 @@ pub(crate) async fn remove_folder_access_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: RemoveFolderAccessRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_folder_rotation_fanout(
+        FolderRotationOperation::FolderAccessRemoval,
+        [FolderRotationFanout {
+            grants: request.grants.len(),
+            reencrypted_records: request.reencrypted_records.len(),
+        }],
+    )?;
     let vault_id = VaultId::new(vault_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub)?;

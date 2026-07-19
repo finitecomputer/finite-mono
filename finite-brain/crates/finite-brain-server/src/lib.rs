@@ -19,10 +19,11 @@ use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation,
     BootstrapSmokeSummary, CoreError, CryptoRecordError, DisplayName, Folder, FolderAccessMode,
     FolderId, FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
-    ObjectId, RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation,
-    UserId, VaultId, VaultKind, bootstrap_organization_vault,
-    bootstrap_organization_vault_with_requester, bootstrap_personal_vault,
-    validate_admin_access_change_event, validate_revision_event, validate_tombstone_event,
+    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
+    RevisionValidation, SafeRelativePath, TombstoneValidation, UserId, VaultId, VaultKind,
+    bootstrap_organization_vault, bootstrap_organization_vault_with_requester,
+    bootstrap_personal_vault, validate_admin_access_change_event, validate_folder_rotation_fanout,
+    validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
     BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder, EncryptedVaultExport,
@@ -417,7 +418,7 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(value: StoreError) -> Self {
         match value {
-            StoreError::Core(error) => Self::new(StatusCode::BAD_REQUEST, error.to_string()),
+            StoreError::Core(error) => Self::from(error),
             StoreError::MissingVault { .. } | StoreError::MissingFolder { .. } => {
                 Self::new(StatusCode::NOT_FOUND, value.to_string())
             }
@@ -444,7 +445,11 @@ impl From<StoreError> for ApiError {
 
 impl From<CoreError> for ApiError {
     fn from(value: CoreError) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, value.to_string())
+        let status = match &value {
+            CoreError::RotationFanoutLimitExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        Self::new(status, value.to_string())
     }
 }
 
@@ -2442,6 +2447,7 @@ mod tests {
     };
     use finite_brain_core::{
         EncryptedFolderObjectEnvelope, FolderKey, FolderObjectAad,
+        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
         encrypt_folder_object_with_nonce, open_folder_object,
     };
     use finite_nostr::{
@@ -3771,6 +3777,8 @@ mod tests {
         let owner_npub = npub(&owner_keys);
         let old_agent_keys = Keys::generate();
         let old_agent_npub = npub(&old_agent_keys);
+        let collaborator_keys = Keys::generate();
+        let collaborator_npub = npub(&collaborator_keys);
         let replacement_keys = Keys::generate();
         let replacement_key = NostrPublicKey::from_protocol(replacement_keys.public_key());
         let replacement_npub = replacement_key.to_npub().unwrap();
@@ -3835,7 +3843,7 @@ mod tests {
             "folderId": "personal-notes",
             "name": "Personal notes",
             "role": "folder",
-            "access": "owner",
+            "access": "restricted",
             "parentFolderId": null,
             "path": "personal-notes",
             "sharedFolderSource": false,
@@ -3869,6 +3877,38 @@ mod tests {
             StatusCode::OK
         );
 
+        let grant_collaborator = serde_json::json!({
+            "targetNpub": collaborator_npub,
+            "grant": folder_key_grant_value(
+                "grant-personal-notes-collaborator-v1",
+                1,
+                collaborator_npub.as_str(),
+            ),
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "grant-personal-notes-collaborator",
+                AdminAccessAction::GrantFolderAccess,
+                Some("personal-notes"),
+                Some(collaborator_npub.as_str()),
+                Some(1),
+            ),
+        })
+        .to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &owner_keys,
+                "POST",
+                "/_admin/vaults/personal/folders/personal-notes/access",
+                Some(grant_collaborator),
+                TEST_NOW + 1,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
         let replace_body = serde_json::json!({
             "agentEmail": "replacement@finite.vip",
             "rotations": [{
@@ -3877,6 +3917,7 @@ mod tests {
                 "grants": [
                     folder_key_grant_value("grant-personal-notes-owner-v2", 2, owner_npub.as_str()),
                     folder_key_grant_value("grant-personal-notes-agent-v2", 2, replacement_npub.as_str()),
+                    folder_key_grant_value("grant-personal-notes-collaborator-v2", 2, collaborator_npub.as_str()),
                 ],
                 "reencryptedRecords": [],
                 "accessChangeEvent": admin_event(
@@ -3966,6 +4007,7 @@ mod tests {
                 "newKeyVersion": 3,
                 "grants": [
                     folder_key_grant_value("grant-personal-notes-owner-v3", 3, owner_npub.as_str()),
+                    folder_key_grant_value("grant-personal-notes-collaborator-v3", 3, collaborator_npub.as_str()),
                 ],
                 "reencryptedRecords": [],
                 "accessChangeEvent": admin_event(
@@ -4001,6 +4043,7 @@ mod tests {
                 "grants": [
                     folder_key_grant_value("grant-personal-notes-owner-v4", 4, owner_npub.as_str()),
                     folder_key_grant_value("grant-personal-notes-agent-v4", 4, replacement_npub.as_str()),
+                    folder_key_grant_value("grant-personal-notes-collaborator-v4", 4, collaborator_npub.as_str()),
                 ],
                 "reencryptedRecords": [],
                 "accessChangeEvent": admin_event(
@@ -4996,6 +5039,93 @@ mod tests {
             .expect("oversized response");
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn signed_rotation_routes_reject_excessive_fanout_without_mutation() {
+        let keys = Keys::generate();
+        let actor = UserId::new(npub(&keys)).unwrap();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+
+        let rotations = (0..=MAX_PERSONAL_AGENT_ROTATION_FOLDERS)
+            .map(|index| {
+                serde_json::json!({
+                    "folderId": format!("folder-{index}"),
+                    "newKeyVersion": 2,
+                    "grants": [],
+                    "reencryptedRecords": [],
+                    "accessChangeEvent": {},
+                })
+            })
+            .collect::<Vec<_>>();
+        let personal_body = serde_json::json!({
+            "agentEmail": null,
+            "rotations": rotations,
+        })
+        .to_string();
+        let personal = authed_request(
+            router.clone(),
+            &keys,
+            "PUT",
+            "/_admin/vaults/personal/personal-agent",
+            Some(personal_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            personal,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Personal Agent rotation exceeds Folder rotations limit: 101 supplied, maximum 100",
+        )
+        .await;
+
+        let grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("grant-{index}"),
+                    "keyVersion": 2,
+                    "recipientNpub": actor.as_str(),
+                    "wrappedEventJson": "{}",
+                    "createdAt": "2026-06-23T00:00:00.000Z",
+                })
+            })
+            .collect::<Vec<_>>();
+        let access_body = serde_json::json!({
+            "newKeyVersion": 2,
+            "grants": grants,
+            "reencryptedRecords": [],
+            "accessChangeEvent": {},
+        })
+        .to_string();
+        let access = authed_request(
+            router,
+            &keys,
+            "DELETE",
+            &format!(
+                "/_admin/vaults/personal/folders/notes/access/{}",
+                actor.as_str()
+            ),
+            Some(access_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_error(
+            access,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Folder access removal exceeds grants per Folder rotation limit: 1001 supplied, maximum 1000",
+        )
+        .await;
+
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_visible_vaults(&actor)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

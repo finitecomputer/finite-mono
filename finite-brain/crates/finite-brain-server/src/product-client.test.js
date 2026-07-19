@@ -240,6 +240,43 @@ assert.equal(
   JSON.stringify([client.npubFromHex("11".repeat(32)), suggestedAgentNpub].sort()),
   "Every Personal Vault Folder must wrap its key for both the owner and Personal Agent"
 );
+const personalOwner = client.npubFromHex("12".repeat(32));
+const personalReplacement = client.npubFromHex("13".repeat(32));
+const personalCollaborator = client.npubFromHex("14".repeat(32));
+assert.equal(
+  JSON.stringify(client.folderRecipientsForAccess("restricted", [personalCollaborator], {
+    kind: "personal",
+    ownerUserId: personalOwner,
+    personalAgent: { agentNpub: personalReplacement },
+  }).sort()),
+  JSON.stringify([personalOwner, personalReplacement, personalCollaborator].sort()),
+  "Personal Agent rotation recipients must preserve explicit Folder collaborators"
+);
+assert.doesNotThrow(() => client.validateFolderRotationFanout("personal-agent", [{
+  grants: 1000,
+  reencryptedRecords: 1000,
+}]));
+assert.throws(
+  () => client.validateFolderRotationFanout(
+    "personal-agent",
+    Array.from({ length: 101 }, () => ({ grants: 0, reencryptedRecords: 0 }))
+  ),
+  /Personal Agent rotation exceeds Folder rotations limit/
+);
+assert.throws(
+  () => client.validateFolderRotationFanout("folder-access-removal", [{
+    grants: 1001,
+    reencryptedRecords: 0,
+  }]),
+  /Folder access removal exceeds grants per Folder rotation limit/
+);
+assert.throws(
+  () => client.validateFolderRotationFanout(
+    "personal-agent",
+    Array.from({ length: 11 }, () => ({ grants: 1000, reencryptedRecords: 0 }))
+  ),
+  /Personal Agent rotation exceeds aggregate grants limit/
+);
 
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("locked")),

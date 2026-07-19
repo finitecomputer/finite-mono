@@ -9,6 +9,13 @@ impl BrainStore {
         rotations: &[PersonalAgentFolderRotation],
         updated_at: &str,
     ) -> Result<(), StoreError> {
+        validate_folder_rotation_fanout(
+            FolderRotationOperation::PersonalAgent,
+            rotations.iter().map(|rotation| FolderRotationFanout {
+                grants: rotation.grants.len(),
+                reencrypted_records: rotation.reencrypted_records.len(),
+            }),
+        )?;
         let stored = self.load_vault(vault_id)?;
         if stored.vault.kind != VaultKind::Personal
             || stored.vault.owner_user_id.as_ref() != Some(owner_npub)
@@ -61,9 +68,13 @@ impl BrainStore {
             }
             let mut rotated = folder.clone();
             rotated.current_key_version = rotation.new_key_version;
-            let required = BTreeSet::from_iter(
-                std::iter::once(owner_npub.clone()).chain(replacement_npub.cloned()),
-            );
+            let explicit_access = stored
+                .folder_access
+                .get(&folder.id)
+                .cloned()
+                .unwrap_or_default();
+            let required =
+                required_recipients(&stored.vault, &rotated, &explicit_access, replacement_npub)?;
             validate_folder_grants(
                 &stored.vault,
                 &rotated,

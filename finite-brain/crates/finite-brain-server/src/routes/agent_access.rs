@@ -11,6 +11,16 @@ pub(crate) async fn replace_personal_agent_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: ReplacePersonalAgentRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_folder_rotation_fanout(
+        FolderRotationOperation::PersonalAgent,
+        request
+            .rotations
+            .iter()
+            .map(|rotation| FolderRotationFanout {
+                grants: rotation.grants.len(),
+                reencrypted_records: rotation.reencrypted_records.len(),
+            }),
+    )?;
     let vault_id = VaultId::new(vault_id)?;
     let actor_id = UserId::new(actor.clone())?;
     {

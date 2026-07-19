@@ -126,6 +126,12 @@ const FiniteBrainProductClient = (() => {
   });
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS = 100;
+  // Keep these public-client preflight bounds aligned with finite-brain-core.
+  const MAX_PERSONAL_AGENT_ROTATION_FOLDERS = 100;
+  const MAX_FOLDER_ROTATION_GRANTS = 1000;
+  const MAX_FOLDER_ROTATION_RECORDS = 1000;
+  const MAX_PERSONAL_AGENT_ROTATION_GRANTS = 10000;
+  const MAX_PERSONAL_AGENT_ROTATION_RECORDS = 10000;
   const PERSONAL_VAULT_PLACEHOLDER_ID = "personal";
   const VAULT_ACCESS_CHANGED_NOTICE =
     "Vault access changed. This session was locked. Select a Vault you can open, then unlock again.";
@@ -9223,6 +9229,9 @@ const FiniteBrainProductClient = (() => {
 
   function folderRecipientsForAccess(access, accessUserIds = [], metadata = state.metadata) {
     const recipients = new Set();
+    if (metadata?.kind === "personal" && metadata.ownerUserId) {
+      recipients.add(metadata.ownerUserId);
+    }
     if (access === "owner") {
       if (metadata?.ownerUserId) recipients.add(metadata.ownerUserId);
       else recipients.add(currentActorNpub());
@@ -9632,6 +9641,57 @@ const FiniteBrainProductClient = (() => {
       throw new Error("Every live object in this Folder must be readable before rotating access");
     }
     return rows;
+  }
+
+  function validateFolderRotationFanout(operation, rotations) {
+    const personalAgent = operation === "personal-agent";
+    if (!personalAgent && operation !== "folder-access-removal") {
+      throw new Error("Unknown Folder rotation operation");
+    }
+    const operationLabel = personalAgent ? "Personal Agent rotation" : "Folder access removal";
+    const maxRotations = personalAgent ? MAX_PERSONAL_AGENT_ROTATION_FOLDERS : 1;
+    const maxTotalGrants = personalAgent
+      ? MAX_PERSONAL_AGENT_ROTATION_GRANTS
+      : MAX_FOLDER_ROTATION_GRANTS;
+    const maxTotalRecords = personalAgent
+      ? MAX_PERSONAL_AGENT_ROTATION_RECORDS
+      : MAX_FOLDER_ROTATION_RECORDS;
+    if (rotations.length > maxRotations) {
+      throw new Error(
+        `${operationLabel} exceeds Folder rotations limit: ${rotations.length} supplied, maximum ${maxRotations}`
+      );
+    }
+    let totalGrants = 0;
+    let totalRecords = 0;
+    for (const rotation of rotations) {
+      const grants = Number(rotation.grants || 0);
+      const records = Number(rotation.reencryptedRecords || 0);
+      if (!Number.isSafeInteger(grants) || grants < 0 || !Number.isSafeInteger(records) || records < 0) {
+        throw new Error("Folder rotation fanout counts must be non-negative integers");
+      }
+      if (grants > MAX_FOLDER_ROTATION_GRANTS) {
+        throw new Error(
+          `${operationLabel} exceeds grants per Folder rotation limit: ${grants} supplied, maximum ${MAX_FOLDER_ROTATION_GRANTS}`
+        );
+      }
+      if (records > MAX_FOLDER_ROTATION_RECORDS) {
+        throw new Error(
+          `${operationLabel} exceeds re-encrypted records per Folder rotation limit: ${records} supplied, maximum ${MAX_FOLDER_ROTATION_RECORDS}`
+        );
+      }
+      totalGrants += grants;
+      totalRecords += records;
+      if (totalGrants > maxTotalGrants) {
+        throw new Error(
+          `${operationLabel} exceeds aggregate grants limit: ${totalGrants} supplied, maximum ${maxTotalGrants}`
+        );
+      }
+      if (totalRecords > maxTotalRecords) {
+        throw new Error(
+          `${operationLabel} exceeds aggregate re-encrypted records limit: ${totalRecords} supplied, maximum ${maxTotalRecords}`
+        );
+      }
+    }
   }
 
   function randomFolderKeyBytes() {
@@ -10391,6 +10451,11 @@ const FiniteBrainProductClient = (() => {
     const recipients = input.recipients
       ? uniqueNpubs(input.recipients)
       : folderAccessRemovalRecipients(metadata, row, targetNpub).recipients;
+    const liveObjects = input.liveObjects || liveReadableFolderObjects(input.objects, row.id);
+    validateFolderRotationFanout("folder-access-removal", [{
+      grants: recipients.length,
+      reencryptedRecords: liveObjects.length,
+    }]);
     const newKeyVersion = input.newKeyVersion || currentKeyVersion + 1;
     if (newKeyVersion !== currentKeyVersion + 1) {
       throw new Error("Folder access removal must rotate to the next key version");
@@ -10427,7 +10492,7 @@ const FiniteBrainProductClient = (() => {
     }
 
     const reencryptedRecords = [];
-    for (const object of liveReadableFolderObjects(input.objects, row.id)) {
+    for (const object of liveObjects) {
       const plaintext = isAssetObject(object)
         ? await encodeFolderObjectAssetPlaintext(
             object.path,
@@ -10506,15 +10571,29 @@ const FiniteBrainProductClient = (() => {
       ...metadata,
       personalAgent: replacementNpub ? { agentNpub: replacementNpub } : null,
     };
+    const objects = projectionPages();
+    const rotationPlans = metadataFolderRows(metadata).map((row) => {
+      const recipients = folderRecipientsForAccess(row.access, row.accessUserIds, rotationMetadata);
+      const liveObjects = liveReadableFolderObjects(objects, row.id);
+      return { row, recipients, liveObjects };
+    });
+    validateFolderRotationFanout(
+      "personal-agent",
+      rotationPlans.map((plan) => ({
+        grants: plan.recipients.length,
+        reencryptedRecords: plan.liveObjects.length,
+      }))
+    );
     const rotations = [];
-    for (const row of metadataFolderRows(metadata)) {
+    for (const { row, recipients, liveObjects } of rotationPlans) {
       const rotation = await buildFolderAccessRemovalRequest(state.keyring, {
         action: "rotate-folder-key",
         actorNpub,
         eventTargetNpub: replacementNpub,
         metadata: rotationMetadata,
-        objects: projectionPages(),
-        recipients: uniqueNpubs([metadata.ownerUserId, replacementNpub]),
+        objects,
+        recipients,
+        liveObjects,
         row,
         targetNpub: oldAgent || null,
         vaultId,
@@ -11799,6 +11878,7 @@ const FiniteBrainProductClient = (() => {
     folderCreationHierarchy,
     folderCreationParent,
     folderRecipientsForAccess,
+    validateFolderRotationFanout,
     folderSubtreeSummary,
     folderShareLinkRows,
     graphEmptyStateCopy,

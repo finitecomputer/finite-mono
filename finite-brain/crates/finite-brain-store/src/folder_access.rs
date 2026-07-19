@@ -298,6 +298,13 @@ impl BrainStore {
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
         updated_at: &str,
     ) -> Result<(), StoreError> {
+        validate_folder_rotation_fanout(
+            FolderRotationOperation::FolderAccessRemoval,
+            [FolderRotationFanout {
+                grants: grants.len(),
+                reencrypted_records: reencrypted_records.len(),
+            }],
+        )?;
         let stored = self.load_vault(vault_id)?;
         let folder = stored
             .vault

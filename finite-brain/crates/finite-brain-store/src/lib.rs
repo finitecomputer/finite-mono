@@ -7,8 +7,9 @@ use std::path::Path;
 
 use finite_brain_core::{
     BootstrapOutput, CoreError, DisplayName, Folder, FolderAccessMode, FolderId,
-    FolderKeyRecipientPolicy, FolderRole, ObjectId, RequiredFolderKeyGrant, SafeRelativePath,
-    UserId, Vault, VaultId, VaultKind, VaultMember, required_folder_key_recipients,
+    FolderKeyRecipientPolicy, FolderRole, FolderRotationFanout, FolderRotationOperation, ObjectId,
+    RequiredFolderKeyGrant, SafeRelativePath, UserId, Vault, VaultId, VaultKind, VaultMember,
+    required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2851,7 +2852,10 @@ fn parse_folder_access(value: &str) -> Result<FolderAccessMode, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_brain_core::{bootstrap_organization_vault, bootstrap_personal_vault};
+    use finite_brain_core::{
+        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
+        bootstrap_organization_vault, bootstrap_personal_vault,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -4252,6 +4256,269 @@ mod tests {
                     "2026-06-23T00:02:00Z",
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn personal_agent_replacement_preserves_every_required_folder_recipient() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let vault_id = output.vault.id.clone();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        let new_agent = UserId::new("npub-new-agent").unwrap();
+        let collaborator = UserId::new("npub-collaborator").unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let folder = Folder {
+            access: FolderAccessMode::Restricted,
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &vault_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-owner-v1",
+                        "strategy",
+                        1,
+                        owner.as_str(),
+                        owner.as_str(),
+                    ),
+                    grant(
+                        "grant-agent-v1",
+                        "strategy",
+                        1,
+                        owner.as_str(),
+                        old_agent.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+        store
+            .grant_folder_access(
+                &vault_id,
+                &folder.id,
+                &collaborator,
+                &grant(
+                    "grant-collaborator-v1",
+                    "strategy",
+                    1,
+                    owner.as_str(),
+                    collaborator.as_str(),
+                ),
+            )
+            .unwrap();
+
+        let grants = vec![
+            grant(
+                "grant-owner-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                owner.as_str(),
+            ),
+            grant(
+                "grant-agent-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                new_agent.as_str(),
+            ),
+            grant(
+                "grant-collaborator-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                collaborator.as_str(),
+            ),
+        ];
+        let rotation_for = |grants: Vec<FolderKeyGrantMetadata>| {
+            let mut control_records = grants
+                .iter()
+                .map(|grant| {
+                    let SyncRecordInput::Control(record) = folder_access_control_record(
+                        &format!("{}-control", grant.id),
+                        SyncRecordType::FolderKeyGrant,
+                        "strategy",
+                        owner.as_str(),
+                    ) else {
+                        unreachable!()
+                    };
+                    record
+                })
+                .collect::<Vec<_>>();
+            let SyncRecordInput::Control(access_record) = folder_access_control_record(
+                &format!("event-replace-agent-{}", grants.len()),
+                SyncRecordType::VaultAdminAccessChange,
+                "strategy",
+                owner.as_str(),
+            ) else {
+                unreachable!()
+            };
+            control_records.push(access_record);
+            PersonalAgentFolderRotation {
+                folder_id: folder.id.clone(),
+                new_key_version: 2,
+                grants,
+                reencrypted_records: vec![],
+                control_records,
+            }
+        };
+
+        let before = store.load_vault(&vault_id).unwrap();
+        let incomplete = vec![grants[0].clone(), grants[1].clone()];
+        assert_eq!(
+            store
+                .replace_personal_agent(
+                    &vault_id,
+                    &owner,
+                    Some(&new_agent),
+                    &[rotation_for(incomplete)],
+                    "2026-06-23T00:01:00Z",
+                )
+                .unwrap_err(),
+            StoreError::MissingRequiredGrant {
+                recipient_user_id: collaborator.to_string(),
+            }
+        );
+        assert_eq!(store.load_vault(&vault_id).unwrap(), before);
+
+        let mut excessive = grants.clone();
+        excessive.push(grant(
+            "grant-unrequired-v2",
+            "strategy",
+            2,
+            owner.as_str(),
+            "npub-unrequired",
+        ));
+        assert_eq!(
+            store
+                .replace_personal_agent(
+                    &vault_id,
+                    &owner,
+                    Some(&new_agent),
+                    &[rotation_for(excessive)],
+                    "2026-06-23T00:01:00Z",
+                )
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "grant recipients must exactly match required recipients".to_owned(),
+            }
+        );
+        assert_eq!(store.load_vault(&vault_id).unwrap(), before);
+
+        store
+            .replace_personal_agent(
+                &vault_id,
+                &owner,
+                Some(&new_agent),
+                &[rotation_for(grants)],
+                "2026-06-23T00:01:00Z",
+            )
+            .unwrap();
+
+        let stored = store.load_vault(&vault_id).unwrap();
+        let current_recipients = stored
+            .grants
+            .iter()
+            .filter(|grant| grant.folder_id.as_str() == "strategy" && grant.key_version == 2)
+            .map(|grant| grant.recipient_npub.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            current_recipients,
+            BTreeSet::from([owner, new_agent, collaborator])
+        );
+        assert!(!current_recipients.contains(&old_agent));
+    }
+
+    #[test]
+    fn rotation_fanout_limits_reject_before_store_mutation() {
+        let mut personal_store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        personal_store
+            .create_personal_vault_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let before = personal_store.load_vault(&output.vault.id).unwrap();
+        let excessive_rotations = (0..=MAX_PERSONAL_AGENT_ROTATION_FOLDERS)
+            .map(|index| PersonalAgentFolderRotation {
+                folder_id: FolderId::new(format!("folder-{index}")).unwrap(),
+                new_key_version: 2,
+                grants: vec![],
+                reencrypted_records: vec![],
+                control_records: vec![],
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            personal_store.replace_personal_agent(
+                &output.vault.id,
+                &owner,
+                None,
+                &excessive_rotations,
+                "2026-06-23T00:01:00Z",
+            ),
+            Err(StoreError::Core(CoreError::RotationFanoutLimitExceeded {
+                resource: "Folder rotations",
+                ..
+            }))
+        ));
+        assert_eq!(personal_store.load_vault(&output.vault.id).unwrap(), before);
+
+        let mut access_store = store_with_strategy_folder();
+        let vault_id = VaultId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let before = access_store.load_vault(&vault_id).unwrap();
+        let before_sequence = access_store.latest_sequence(&vault_id).unwrap();
+        let excessive_grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+            .map(|index| {
+                grant(
+                    &format!("grant-limit-{index}"),
+                    "strategy",
+                    2,
+                    "npub-admin",
+                    "npub-admin",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            access_store.rotate_folder_key_for_access_removal(
+                &vault_id,
+                &folder_id,
+                &member,
+                2,
+                &excessive_grants,
+                &[],
+                "2026-06-23T00:01:00Z",
+            ),
+            Err(StoreError::Core(CoreError::RotationFanoutLimitExceeded {
+                resource: "grants per Folder rotation",
+                ..
+            }))
+        ));
+        assert_eq!(access_store.load_vault(&vault_id).unwrap(), before);
+        assert_eq!(
+            access_store.latest_sequence(&vault_id).unwrap(),
+            before_sequence
         );
     }
 

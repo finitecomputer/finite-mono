@@ -29,6 +29,20 @@ const MAX_USER_ID_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 128;
 const MAX_SAFE_RELATIVE_PATH_LEN: usize = 1024;
 const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS: usize = 100;
+/// Maximum number of Folder rotations accepted in one Personal Agent request.
+pub const MAX_PERSONAL_AGENT_ROTATION_FOLDERS: usize = 100;
+/// Maximum Folder Key Grants accepted for one Folder rotation.
+pub const MAX_FOLDER_ROTATION_GRANTS: usize = 1_000;
+/// Maximum re-encrypted object records accepted for one Folder rotation.
+pub const MAX_FOLDER_ROTATION_RECORDS: usize = 1_000;
+/// Maximum total Folder Key Grants accepted in one Personal Agent request.
+pub const MAX_PERSONAL_AGENT_ROTATION_GRANTS: usize = 10_000;
+/// Maximum total re-encrypted records accepted in one Personal Agent request.
+pub const MAX_PERSONAL_AGENT_ROTATION_RECORDS: usize = 10_000;
+/// Maximum Folder Key Grants accepted in one Folder access-removal request.
+pub const MAX_FOLDER_ACCESS_REMOVAL_GRANTS: usize = MAX_FOLDER_ROTATION_GRANTS;
+/// Maximum re-encrypted records accepted in one Folder access-removal request.
+pub const MAX_FOLDER_ACCESS_REMOVAL_RECORDS: usize = MAX_FOLDER_ROTATION_RECORDS;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -132,6 +146,13 @@ pub enum CoreError {
     InvalidBootstrapInput { reason: String },
     /// Folder access metadata cannot produce a valid current key recipient set.
     InvalidAccessPolicy { reason: String },
+    /// A key-rotation request exceeded a documented per-request work bound.
+    RotationFanoutLimitExceeded {
+        operation: &'static str,
+        resource: &'static str,
+        count: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for CoreError {
@@ -156,6 +177,15 @@ impl fmt::Display for CoreError {
             Self::InvalidAccessPolicy { reason } => {
                 write!(f, "invalid Folder access policy: {reason}")
             }
+            Self::RotationFanoutLimitExceeded {
+                operation,
+                resource,
+                count,
+                max,
+            } => write!(
+                f,
+                "{operation} exceeds {resource} limit: {count} supplied, maximum {max}"
+            ),
         }
     }
 }
@@ -503,6 +533,93 @@ pub fn required_folder_key_recipients(
         });
     }
     Ok(recipients)
+}
+
+/// One Folder's client-supplied key-rotation work counts.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct FolderRotationFanout {
+    pub grants: usize,
+    pub reencrypted_records: usize,
+}
+
+/// Rotation endpoint whose request fanout is being validated.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FolderRotationOperation {
+    PersonalAgent,
+    FolderAccessRemoval,
+}
+
+/// Validate key-rotation work before cryptography, record parsing, or durable mutation.
+pub fn validate_folder_rotation_fanout(
+    operation: FolderRotationOperation,
+    rotations: impl IntoIterator<Item = FolderRotationFanout>,
+) -> Result<(), CoreError> {
+    let operation_name = match operation {
+        FolderRotationOperation::PersonalAgent => "Personal Agent rotation",
+        FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
+    };
+    let max_rotations = match operation {
+        FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
+        FolderRotationOperation::FolderAccessRemoval => 1,
+    };
+    let max_total_grants = match operation {
+        FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
+        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+    };
+    let max_total_records = match operation {
+        FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
+        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+    };
+
+    let mut rotation_count = 0usize;
+    let mut total_grants = 0usize;
+    let mut total_records = 0usize;
+    for rotation in rotations {
+        rotation_count = rotation_count.saturating_add(1);
+        if rotation_count > max_rotations {
+            return Err(CoreError::RotationFanoutLimitExceeded {
+                operation: operation_name,
+                resource: "Folder rotations",
+                count: rotation_count,
+                max: max_rotations,
+            });
+        }
+        if rotation.grants > MAX_FOLDER_ROTATION_GRANTS {
+            return Err(CoreError::RotationFanoutLimitExceeded {
+                operation: operation_name,
+                resource: "grants per Folder rotation",
+                count: rotation.grants,
+                max: MAX_FOLDER_ROTATION_GRANTS,
+            });
+        }
+        if rotation.reencrypted_records > MAX_FOLDER_ROTATION_RECORDS {
+            return Err(CoreError::RotationFanoutLimitExceeded {
+                operation: operation_name,
+                resource: "re-encrypted records per Folder rotation",
+                count: rotation.reencrypted_records,
+                max: MAX_FOLDER_ROTATION_RECORDS,
+            });
+        }
+        total_grants = total_grants.saturating_add(rotation.grants);
+        total_records = total_records.saturating_add(rotation.reencrypted_records);
+        if total_grants > max_total_grants {
+            return Err(CoreError::RotationFanoutLimitExceeded {
+                operation: operation_name,
+                resource: "aggregate grants",
+                count: total_grants,
+                max: max_total_grants,
+            });
+        }
+        if total_records > max_total_records {
+            return Err(CoreError::RotationFanoutLimitExceeded {
+                operation: operation_name,
+                resource: "aggregate re-encrypted records",
+                count: total_records,
+                max: max_total_records,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Required current Folder Key Grant recipient produced by bootstrap.
@@ -2578,6 +2695,92 @@ mod tests {
             required_folder_key_recipients(policy(FolderAccessMode::Restricted)).unwrap(),
             BTreeSet::from([admin, explicit])
         );
+    }
+
+    #[test]
+    fn bounds_personal_agent_rotation_fanout_by_folder_and_aggregate_work() {
+        validate_folder_rotation_fanout(
+            FolderRotationOperation::PersonalAgent,
+            [FolderRotationFanout {
+                grants: MAX_FOLDER_ROTATION_GRANTS,
+                reencrypted_records: MAX_FOLDER_ROTATION_RECORDS,
+            }],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::PersonalAgent,
+                (0..=MAX_PERSONAL_AGENT_ROTATION_FOLDERS).map(|_| FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: 0,
+                }),
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::PersonalAgent,
+                [FolderRotationFanout {
+                    grants: MAX_FOLDER_ROTATION_GRANTS + 1,
+                    reencrypted_records: 0,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "grants per Folder rotation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::PersonalAgent,
+                (0..=MAX_PERSONAL_AGENT_ROTATION_GRANTS / MAX_FOLDER_ROTATION_GRANTS).map(|_| {
+                    FolderRotationFanout {
+                        grants: MAX_FOLDER_ROTATION_GRANTS,
+                        reencrypted_records: 0,
+                    }
+                }),
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "aggregate grants",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::PersonalAgent,
+                (0..=MAX_PERSONAL_AGENT_ROTATION_RECORDS / MAX_FOLDER_ROTATION_RECORDS).map(|_| {
+                    FolderRotationFanout {
+                        grants: 0,
+                        reencrypted_records: MAX_FOLDER_ROTATION_RECORDS,
+                    }
+                }),
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "aggregate re-encrypted records",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_folder_access_removal_rotation_fanout() {
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderAccessRemoval,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ACCESS_REMOVAL_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
     }
 
     #[test]
