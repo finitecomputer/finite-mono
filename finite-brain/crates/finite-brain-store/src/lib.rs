@@ -6,9 +6,9 @@ use std::fmt;
 use std::path::Path;
 
 use finite_brain_core::{
-    BootstrapOutput, CoreError, DisplayName, Folder, FolderAccessMode, FolderId, FolderRole,
-    ObjectId, RequiredFolderKeyGrant, SafeRelativePath, UserId, Vault, VaultId, VaultKind,
-    VaultMember,
+    BootstrapOutput, CoreError, DisplayName, Folder, FolderAccessMode, FolderId,
+    FolderKeyRecipientPolicy, FolderRole, ObjectId, RequiredFolderKeyGrant, SafeRelativePath,
+    UserId, Vault, VaultId, VaultKind, VaultMember, required_folder_key_recipients,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2473,43 +2473,21 @@ fn required_recipients(
     access_user_ids: &BTreeSet<UserId>,
     personal_agent: Option<&UserId>,
 ) -> Result<BTreeSet<UserId>, StoreError> {
-    let mut recipients = BTreeSet::new();
-    match folder.access {
-        FolderAccessMode::Owner => {
-            let owner = vault
-                .owner_user_id
-                .clone()
-                .ok_or_else(|| StoreError::BrokenInvariant {
-                    reason: "owner access requires a personal vault owner".to_owned(),
-                })?;
-            recipients.insert(owner);
-        }
-        FolderAccessMode::AdminOnly => {
-            recipients.extend(vault.admins.iter().cloned());
-        }
-        FolderAccessMode::AllMembers => {
-            recipients.extend(vault.admins.iter().cloned());
-            recipients.extend(vault.members.iter().map(|member| member.user_id.clone()));
-        }
-        FolderAccessMode::Restricted => {
-            if let Some(owner) = vault.owner_user_id.clone() {
-                recipients.insert(owner);
-            }
-            recipients.extend(vault.admins.iter().cloned());
-            recipients.extend(access_user_ids.iter().cloned());
-        }
-    }
-
-    if vault.kind == VaultKind::Personal {
-        recipients.extend(personal_agent.cloned());
-    }
-
-    if recipients.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "current folder key must have at least one recipient".to_owned(),
-        });
-    }
-    Ok(recipients)
+    let members = vault
+        .members
+        .iter()
+        .map(|member| member.user_id.clone())
+        .collect::<Vec<_>>();
+    required_folder_key_recipients(FolderKeyRecipientPolicy {
+        vault_kind: vault.kind,
+        folder_access: folder.access,
+        owner_user_id: vault.owner_user_id.as_ref(),
+        admins: &vault.admins,
+        members: &members,
+        explicit_access_user_ids: access_user_ids,
+        personal_agent_npub: personal_agent,
+    })
+    .map_err(StoreError::from)
 }
 
 fn vault_visible_to_actor(vault: &Vault, actor_npub: &UserId) -> bool {
@@ -3943,6 +3921,37 @@ mod tests {
 
         assert_eq!(share.created_by_npub, agent);
         assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn vacant_personal_agent_role_requires_only_the_owner_folder_grant() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let vault_id = output.vault.id.clone();
+        store.create_vault_bootstrap(&output, &[]).unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Private").unwrap(),
+            access: FolderAccessMode::Owner,
+            ..strategy_folder()
+        };
+        let owner_grant = grant(
+            "grant-personal-owner",
+            "strategy",
+            1,
+            owner.as_str(),
+            owner.as_str(),
+        );
+
+        store
+            .create_folder(&vault_id, &folder, &BTreeSet::new(), &[owner_grant])
+            .unwrap();
+
+        let stored = store.load_vault(&vault_id).unwrap();
+        assert!(stored.personal_agent.is_none());
+        assert_eq!(stored.grants.len(), 1);
+        assert_eq!(stored.grants[0].recipient_npub, owner);
     }
 
     #[test]

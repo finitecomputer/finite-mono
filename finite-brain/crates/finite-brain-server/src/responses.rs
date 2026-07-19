@@ -37,7 +37,11 @@ pub(crate) fn metadata_response_for_actor(
             .vault
             .owner_user_id
             .as_ref()
-            .is_none_or(|owner| owner.as_str() != actor_npub);
+            .is_none_or(|owner| owner.as_str() != actor_npub)
+        && stored
+            .personal_agent
+            .as_ref()
+            .is_none_or(|relationship| relationship.agent_npub.as_str() != actor_npub);
     if !is_limited_personal_member {
         return metadata_response_with_mounts(stored, mounted_folders);
     }

@@ -130,6 +130,8 @@ pub enum CoreError {
     InvalidHierarchy { reason: String },
     /// Bootstrap input is incomplete or violates the Vault kind rules.
     InvalidBootstrapInput { reason: String },
+    /// Folder access metadata cannot produce a valid current key recipient set.
+    InvalidAccessPolicy { reason: String },
 }
 
 impl fmt::Display for CoreError {
@@ -150,6 +152,9 @@ impl fmt::Display for CoreError {
             Self::InvalidHierarchy { reason } => write!(f, "invalid hierarchy: {reason}"),
             Self::InvalidBootstrapInput { reason } => {
                 write!(f, "invalid bootstrap input: {reason}")
+            }
+            Self::InvalidAccessPolicy { reason } => {
+                write!(f, "invalid Folder access policy: {reason}")
             }
         }
     }
@@ -432,6 +437,72 @@ pub struct Vault {
     pub members: Vec<VaultMember>,
     /// Organization admins.
     pub admins: Vec<UserId>,
+}
+
+/// Typed inputs for computing the complete current Folder Key recipient set.
+#[derive(Debug, Clone, Copy)]
+pub struct FolderKeyRecipientPolicy<'a> {
+    /// Personal Vault or Organization Vault semantics.
+    pub vault_kind: VaultKind,
+    /// Folder access mode.
+    pub folder_access: FolderAccessMode,
+    /// Sole owner for a Personal Vault.
+    pub owner_user_id: Option<&'a UserId>,
+    /// Organization Vault admins.
+    pub admins: &'a [UserId],
+    /// Organization Vault members.
+    pub members: &'a [UserId],
+    /// Explicit restricted-Folder recipients.
+    pub explicit_access_user_ids: &'a BTreeSet<UserId>,
+    /// Current Personal Agent, when the role is occupied.
+    pub personal_agent_npub: Option<&'a UserId>,
+}
+
+/// Compute the canonical set of recipients for the current Folder Key.
+pub fn required_folder_key_recipients(
+    policy: FolderKeyRecipientPolicy<'_>,
+) -> Result<BTreeSet<UserId>, CoreError> {
+    let mut recipients = BTreeSet::new();
+
+    if policy.vault_kind == VaultKind::Personal {
+        let owner = policy
+            .owner_user_id
+            .ok_or_else(|| CoreError::InvalidAccessPolicy {
+                reason: "Personal Vault Folder access requires an owner".to_owned(),
+            })?;
+        recipients.insert(owner.clone());
+        recipients.extend(policy.personal_agent_npub.cloned());
+    }
+
+    match policy.folder_access {
+        FolderAccessMode::Owner => {
+            let owner = policy
+                .owner_user_id
+                .ok_or_else(|| CoreError::InvalidAccessPolicy {
+                    reason: "owner access requires a Personal Vault owner".to_owned(),
+                })?;
+            recipients.insert(owner.clone());
+        }
+        FolderAccessMode::AdminOnly => {
+            recipients.extend(policy.admins.iter().cloned());
+        }
+        FolderAccessMode::AllMembers => {
+            recipients.extend(policy.admins.iter().cloned());
+            recipients.extend(policy.members.iter().cloned());
+        }
+        FolderAccessMode::Restricted => {
+            recipients.extend(policy.owner_user_id.cloned());
+            recipients.extend(policy.admins.iter().cloned());
+            recipients.extend(policy.explicit_access_user_ids.iter().cloned());
+        }
+    }
+
+    if recipients.is_empty() {
+        return Err(CoreError::InvalidAccessPolicy {
+            reason: "current Folder Key must have at least one recipient".to_owned(),
+        });
+    }
+    Ok(recipients)
 }
 
 /// Required current Folder Key Grant recipient produced by bootstrap.
@@ -2422,6 +2493,91 @@ mod tests {
         );
         assert!(output.vault.folders.is_empty());
         assert!(output.required_key_grants.is_empty());
+    }
+
+    #[test]
+    fn personal_folder_key_recipients_always_include_owner_and_current_agent() {
+        let owner = UserId::new("npub-owner").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let explicit = UserId::new("npub-explicit").unwrap();
+
+        for access in [
+            FolderAccessMode::Owner,
+            FolderAccessMode::AdminOnly,
+            FolderAccessMode::AllMembers,
+            FolderAccessMode::Restricted,
+        ] {
+            let recipients = required_folder_key_recipients(FolderKeyRecipientPolicy {
+                vault_kind: VaultKind::Personal,
+                folder_access: access,
+                owner_user_id: Some(&owner),
+                admins: std::slice::from_ref(&admin),
+                members: std::slice::from_ref(&member),
+                explicit_access_user_ids: &BTreeSet::from([explicit.clone()]),
+                personal_agent_npub: Some(&agent),
+            })
+            .unwrap();
+
+            assert!(recipients.contains(&owner), "owner missing for {access:?}");
+            assert!(recipients.contains(&agent), "agent missing for {access:?}");
+        }
+    }
+
+    #[test]
+    fn vacant_personal_agent_role_grants_every_mode_to_owner() {
+        let owner = UserId::new("npub-owner").unwrap();
+        for access in [
+            FolderAccessMode::Owner,
+            FolderAccessMode::AdminOnly,
+            FolderAccessMode::AllMembers,
+            FolderAccessMode::Restricted,
+        ] {
+            assert_eq!(
+                required_folder_key_recipients(FolderKeyRecipientPolicy {
+                    vault_kind: VaultKind::Personal,
+                    folder_access: access,
+                    owner_user_id: Some(&owner),
+                    admins: &[],
+                    members: &[],
+                    explicit_access_user_ids: &BTreeSet::new(),
+                    personal_agent_npub: None,
+                })
+                .unwrap(),
+                BTreeSet::from([owner.clone()])
+            );
+        }
+    }
+
+    #[test]
+    fn organization_folder_key_recipients_preserve_access_modes() {
+        let admin = UserId::new("npub-admin").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let explicit = UserId::new("npub-explicit").unwrap();
+        let explicit_users = BTreeSet::from([explicit.clone()]);
+        let policy = |folder_access| FolderKeyRecipientPolicy {
+            vault_kind: VaultKind::Organization,
+            folder_access,
+            owner_user_id: None,
+            admins: std::slice::from_ref(&admin),
+            members: std::slice::from_ref(&member),
+            explicit_access_user_ids: &explicit_users,
+            personal_agent_npub: None,
+        };
+
+        assert_eq!(
+            required_folder_key_recipients(policy(FolderAccessMode::AdminOnly)).unwrap(),
+            BTreeSet::from([admin.clone()])
+        );
+        assert_eq!(
+            required_folder_key_recipients(policy(FolderAccessMode::AllMembers)).unwrap(),
+            BTreeSet::from([admin.clone(), member.clone()])
+        );
+        assert_eq!(
+            required_folder_key_recipients(policy(FolderAccessMode::Restricted)).unwrap(),
+            BTreeSet::from([admin, explicit])
+        );
     }
 
     #[test]

@@ -3540,11 +3540,12 @@ mod tests {
         assert_eq!(agent_metadata.status(), StatusCode::OK);
         let agent_metadata: VaultMetadataResponse = read_json(agent_metadata).await;
         assert_eq!(agent_metadata.folders.len(), 2);
-        assert_eq!(agent_metadata.grant_count, 2);
+        assert_eq!(agent_metadata.grant_count, 4);
         let owner_metadata =
             get_metadata(router.clone(), &owner_keys, "personal", TEST_NOW + 3).await;
         let owner_metadata: VaultMetadataResponse = read_json(owner_metadata).await;
         assert_eq!(owner_metadata.grant_count, 4);
+        assert_eq!(agent_metadata, owner_metadata);
 
         let retired_pairing_route = authed_request(
             router,

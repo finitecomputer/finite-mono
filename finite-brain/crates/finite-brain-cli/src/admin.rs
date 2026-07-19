@@ -3,8 +3,9 @@ use std::fs;
 
 use finite_brain_core::portability::WorkingTreeFolderRoot;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, FolderId, FolderKey,
-    FolderKeyGrantPayload, SafeRelativePath, VaultId,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, FolderAccessMode,
+    FolderId, FolderKey, FolderKeyGrantPayload, FolderKeyRecipientPolicy, SafeRelativePath, UserId,
+    VaultId, VaultKind, required_folder_key_recipients,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Kind, Tag};
@@ -63,43 +64,75 @@ pub(crate) fn folder_required_recipients(
     access: &str,
     access_users: &[String],
 ) -> Result<Vec<String>, CliError> {
-    let mut recipients = BTreeSet::new();
-    match normalize_folder_access(access)? {
-        "owner" => {
-            let owner = metadata.owner_user_id.clone().ok_or_else(|| {
-                CliError::InvalidInput("owner access requires a personal vault".to_owned())
-            })?;
-            recipients.insert(owner);
+    let vault_kind = match metadata.kind.as_str() {
+        "personal" => VaultKind::Personal,
+        "organization" => VaultKind::Organization,
+        other => {
+            return Err(CliError::InvalidInput(format!(
+                "unknown vault kind {other}"
+            )));
         }
-        "admin_only" => {
-            recipients.extend(metadata.admins.iter().cloned());
-        }
-        "all_members" => {
-            recipients.extend(metadata.admins.iter().cloned());
-            recipients.extend(metadata.members.iter().cloned());
-        }
-        "restricted" => {
-            recipients.extend(metadata.owner_user_id.iter().cloned());
-            recipients.extend(metadata.admins.iter().cloned());
-            recipients.extend(access_users.iter().cloned());
-        }
+    };
+    let folder_access = match normalize_folder_access(access)? {
+        "owner" => FolderAccessMode::Owner,
+        "admin_only" => FolderAccessMode::AdminOnly,
+        "all_members" => FolderAccessMode::AllMembers,
+        "restricted" => FolderAccessMode::Restricted,
         other => {
             return Err(CliError::InvalidInput(format!(
                 "unknown folder access mode {other}"
             )));
         }
-    }
-    if metadata.kind == "personal"
-        && let Some(personal_agent) = &metadata.personal_agent
-    {
-        recipients.insert(personal_agent.agent_npub.clone());
-    }
-    if recipients.is_empty() {
-        return Err(CliError::InvalidInput(
-            "folder key needs at least one recipient".to_owned(),
-        ));
-    }
-    Ok(recipients.into_iter().collect())
+    };
+    let owner = metadata
+        .owner_user_id
+        .as_deref()
+        .map(UserId::new)
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let admins = metadata
+        .admins
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let members = metadata
+        .members
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let explicit_access_user_ids = access_users
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let personal_agent = metadata
+        .personal_agent
+        .as_ref()
+        .map(|agent| UserId::new(agent.agent_npub.clone()))
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+
+    required_folder_key_recipients(FolderKeyRecipientPolicy {
+        vault_kind,
+        folder_access,
+        owner_user_id: owner.as_ref(),
+        admins: &admins,
+        members: &members,
+        explicit_access_user_ids: &explicit_access_user_ids,
+        personal_agent_npub: personal_agent.as_ref(),
+    })
+    .map(|recipients| {
+        recipients
+            .into_iter()
+            .map(|user| user.to_string())
+            .collect()
+    })
+    .map_err(|error| CliError::InvalidInput(error.to_string()))
 }
 
 pub(crate) fn folder_key_grant_request(

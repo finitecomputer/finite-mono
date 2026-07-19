@@ -369,8 +369,15 @@ pub(crate) struct AccessSummaryReport {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderAccessSummary {
-    #[serde(flatten)]
-    pub(crate) metadata: FolderMetadataView,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) access: String,
+    pub(crate) parent_folder_id: Option<String>,
+    pub(crate) path: String,
+    pub(crate) shared_folder_source: bool,
+    pub(crate) current_key_version: u32,
+    pub(crate) setup_incomplete: bool,
     pub(crate) explicit_access_user_ids: Vec<String>,
     pub(crate) effective_access_user_ids: Vec<String>,
 }

@@ -1461,7 +1461,15 @@ fn access_summary_report(metadata: VaultMetadataView) -> Result<AccessSummaryRep
         .iter()
         .map(|folder| {
             Ok(FolderAccessSummary {
-                metadata: folder.clone(),
+                id: folder.id.clone(),
+                name: folder.name.clone(),
+                role: folder.role.clone(),
+                access: folder.access.clone(),
+                parent_folder_id: folder.parent_folder_id.clone(),
+                path: folder.path.clone(),
+                shared_folder_source: folder.shared_folder_source,
+                current_key_version: folder.current_key_version,
+                setup_incomplete: folder.setup_incomplete,
                 explicit_access_user_ids: folder.access_user_ids.clone(),
                 effective_access_user_ids: folder_required_recipients(
                     &metadata,
@@ -1502,7 +1510,27 @@ fn write_access_summary_rows<W: Write>(
                 folder.explicit_access_user_ids.join(","),
                 folder.effective_access_user_ids.join(",")
             );
-            write_folder_row(output, &folder.metadata, &access_details)?;
+            let setup = if folder.setup_incomplete {
+                "setup-incomplete"
+            } else {
+                "ready"
+            };
+            let source = if folder.shared_folder_source {
+                " shared-source"
+            } else {
+                ""
+            };
+            writeln!(
+                output,
+                "folder {} path={} access={} keyVersion={} state={}{}{}",
+                folder.id,
+                folder.path,
+                folder.access,
+                folder.current_key_version,
+                setup,
+                source,
+                access_details
+            )?;
         }
     }
     write_mount_rows(output, &report.mounted_folders)
@@ -5345,7 +5373,7 @@ mod tests {
         assert_eq!(access["vaultId"], "acme");
         assert_eq!(access["grantCount"], 3);
         assert_eq!(access["folders"][0]["currentKeyVersion"], 2);
-        assert_eq!(access["folders"][0]["accessUserIds"], serde_json::json!([]));
+        assert!(access["folders"][0].get("accessUserIds").is_none());
         assert_eq!(
             access["folders"][0]["explicitAccessUserIds"],
             serde_json::json!([])
@@ -5426,6 +5454,7 @@ mod tests {
             access["folders"][0]["effectiveAccessUserIds"],
             serde_json::json!(["npub-agent", "npub-owner"])
         );
+        assert!(access["folders"][0].get("accessUserIds").is_none());
         assert_eq!(
             access["folders"][1]["explicitAccessUserIds"],
             serde_json::json!(["npub-collaborator"])
