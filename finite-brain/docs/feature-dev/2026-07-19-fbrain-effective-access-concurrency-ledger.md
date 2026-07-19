@@ -9,8 +9,8 @@
 - Feature branch: `codex/brain-personal-agent`
 - Human owner: Austin
 - Started: 2026-07-19
-- Current status: all three slices implemented and individually verified; final
-  whole-branch review and repository gates in progress
+- Current status: all three slices and whole-branch review remediations are
+  implemented; final repository gates and PR publication are in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and
   `finite-brain/docs/agents/`)
 
@@ -33,7 +33,8 @@ Keep the work on the existing Brain mega-branch and PR #121.
 - Ticket sessions: #128, #129, and #130 recorded
 - Agent briefs: recorded in each issue session
 - Review packets: #128, #129, and #130 recorded
-- Local CodeRabbit report: pending
+- Local CodeRabbit reports: three completed rounds, all findings addressed
+  (`2026-07-19-coderabbit-round-{1,2,3}.md`)
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/121
 
 ## Commands
@@ -73,6 +74,39 @@ Keep the work on the existing Brain mega-branch and PR #121.
 - None. The accepted behavior is: display effective access, treat an existing
   current-version grant as already satisfied, and attribute concurrent changes
   from signed activity rather than temporal proximity.
+
+## Whole-Branch Review
+
+- The first standards/specification review found ten issues spanning canonical
+  Personal Vault recipients, atomic Folder grants, bounded rotation fanout,
+  truthful access fields, Personal Agent lifecycle preservation, and verified
+  user-first setup. Commits `1e7ecfe`, `ae28c20`, `50b1eee`, and `e055bfc`
+  addressed them.
+- The re-review found two remaining gaps: Personal Vault collaborator removal
+  could omit the owner and Personal Agent, and one-Personal-Vault-per-owner was
+  not database-enforced across connections. Commit `b1ba347` centralized the
+  recipient calculation, added a partial unique index, serialized creation, and
+  added repeatable two-connection coverage with rollback assertions.
+- Three local CodeRabbit rounds reported nine, two, and one findings. All were
+  addressed in `3cf93fc`, `73b97c0`, and the final review checkpoint. The fixes
+  include post-commit keyring publication, least-privilege local Brain
+  credentials, corrected managed-skill commands and references, stronger
+  deletion smoke checks, and consistent superseded/future-state docs.
+- The large Product Client module remains non-blocking architecture debt. This
+  run did not expand scope into a module-boundary refactor.
+
+## Verification
+
+- Focused Brain suites passed: Product Client JavaScript, store (54), server
+  (60), CLI (97), core (33), static skills (47), and repeated competing
+  Personal Vault bootstrap tests.
+- `cargo fmt --all -- --check`, workspace clippy with warnings denied, managed
+  skill/reference byte equality, JavaScript syntax checks, and `git diff
+  --check` passed after review remediation.
+- Dashboard lint, 208 unit tests, two browser tests, and production build passed
+  earlier on this branch. The final `cargo test --workspace --locked --
+  --test-threads=1` rerun passed against real isolated PostgreSQL after all code
+  and managed-skill changes.
 
 ## Escalations
 

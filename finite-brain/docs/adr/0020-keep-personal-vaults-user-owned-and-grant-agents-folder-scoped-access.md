@@ -1,6 +1,6 @@
 # Keep Personal Vaults User-Owned And Grant Agents Folder-Scoped Access
 
-Status: superseded by ADR-0023 on 2026-07-16.
+Status: superseded by ADR-0023 and ADR-0024 on 2026-07-16.
 
 Historical implementation note: this ADR described the former limited-member,
 Chat setup-ticket, Agent Workspace, and Folder-by-Folder delegation design.
