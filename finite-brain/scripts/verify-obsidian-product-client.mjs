@@ -289,13 +289,18 @@ function checkStaticShell() {
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");
   assertNotIncludes(js, "readerMode", "Product Client JS");
   const deleteFolderHandler = js.match(
-    /async function deleteFolderFromContextTarget\(target\) \{[\s\S]*?const summary = folderSubtreeSummary/
+    /async function deleteFolderFromContextTarget\(target\) \{[\s\S]*?\n  \}\n\n  function /
   )?.[0];
   assert.ok(deleteFolderHandler, "Product Client JS should expose the delete-Folder handler");
-  assertIncludes(
+  assert.match(
     deleteFolderHandler,
-    "actorHasDestructiveAuthority(state.metadata, currentActorNpub())",
-    "Product Client delete-Folder handler"
+    /if \(\s*!actorHasDestructiveAuthority\(state\.metadata, currentActorNpub\(\)\)\s*\) \{\s*throw new Error\("Your Vault role cannot permanently delete Folders"\);\s*\}/,
+    "Product Client delete-Folder handler must exit before deletion when authority is absent"
+  );
+  assert.ok(
+    deleteFolderHandler.indexOf("actorHasDestructiveAuthority(state.metadata, currentActorNpub())") <
+      deleteFolderHandler.indexOf("const result = await protectedRequest"),
+    "Product Client delete-Folder handler must check authority before its destructive request"
   );
   assertIncludes(deleteFolderHandler, 'action: "delete-folder"', "Product Client delete-Folder handler");
   for (const legacyMarker of [

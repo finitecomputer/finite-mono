@@ -182,7 +182,7 @@ contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
 `accessChangeEvent`.
 
 ```sh
-fbrain vault create <vault-id> --kind personal --name "My Vault"
+fbrain vault bootstrap-personal --server "$SERVER" --json
 fbrain vault create <vault-id> --kind organization --name "Org Vault"
 fbrain vault create <vault-id> --kind organization --name "Org Vault" --requesting-user-npub <npub|hex>
 fbrain vault metadata --vault <vault-id>
