@@ -110,6 +110,9 @@ Useful `sync now --json` fields include `status`, `latestSequence`,
 values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, and
 `blocked-local-conflicts`.
 
+Each `remoteChanges` entry produced from a signed sync record includes
+`actorNpub`; `--summary` renders it as `actor=<npub>`.
+
 `wiki check` scans Markdown Pages in materialized readable Folders only. It
 resolves exact Page titles, unique filenames, and Folder-root-relative Page
 paths using the same local-Folder-first ambiguity rule as the Product Client.

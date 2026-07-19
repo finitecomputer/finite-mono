@@ -66,6 +66,10 @@ fbrain -- <args>` may be the available entrypoint.
    Completion: latest sequence is recorded, encrypted grants were reopened for
    that sync operation, readable Folders are materialized, and open conflicts
    are either empty or named.
+   Unexpected Vault change: inspect `sync now --json` and
+   `remoteChanges[].actorNpub`. Attribute it from signed actor evidence: a
+   different actor means another principal changed the Vault; otherwise report
+   the cause as unknown.
 3. Orient before editing: identify the target Folder scope, then read its
    `AGENTS.md`, `HUMANS.md`, `config.md` or `SCHEMA.md`, durable `index.md`
    when present, generated `_index.md` for a current inventory, recent

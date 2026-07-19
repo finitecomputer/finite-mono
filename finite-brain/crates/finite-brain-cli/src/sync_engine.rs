@@ -516,6 +516,7 @@ fn sync_record_reports(
         .map(|record| SyncChangeReport {
             status: status.to_owned(),
             action: sync_record_action(record),
+            actor_npub: Some(record.actor_npub.clone()),
             sequence: Some(record.sequence),
             path: sync_record_path(record, prior_state, applied_state),
             from_path: None,
@@ -918,6 +919,7 @@ fn sync_change_report(
     SyncChangeReport {
         status: status.to_owned(),
         action: sync_action_label(intent.action).to_owned(),
+        actor_npub: None,
         sequence: None,
         path,
         from_path,

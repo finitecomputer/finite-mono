@@ -949,17 +949,22 @@ fn write_sync_change_group<W: Write>(
             .sequence
             .map(|sequence| format!(" seq={sequence}"))
             .unwrap_or_default();
+        let actor = change
+            .actor_npub
+            .as_deref()
+            .map(|actor| format!(" actor={actor}"))
+            .unwrap_or_default();
         if let Some(from_path) = change.from_path.as_deref() {
             writeln!(
                 output,
-                "- {} {} {} -> {}{}",
-                change.status, change.action, from_path, path, sequence
+                "- {} {} {} -> {}{}{}",
+                change.status, change.action, from_path, path, sequence, actor
             )?;
         } else {
             writeln!(
                 output,
-                "- {} {} {}{}",
-                change.status, change.action, path, sequence
+                "- {} {} {}{}{}",
+                change.status, change.action, path, sequence, actor
             )?;
         }
         if let Some(reason) = change.reason.as_deref() {
@@ -2854,7 +2859,7 @@ mod tests {
         (url, handle)
     }
 
-    fn start_two_agent_incremental_sync_server(
+    fn start_two_member_identity_incremental_sync_server(
         export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2863,7 +2868,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            let mut accepted_object = None::<(String, String)>;
+            let mut accepted_object = None::<(String, String, String)>;
             while requests.len() < 5 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
@@ -2876,9 +2881,15 @@ mod tests {
                 } else if request_line.starts_with("PUT ") {
                     let path = request_line.split_whitespace().nth(1).unwrap_or_default();
                     let object_id = path.rsplit('/').next().unwrap_or_default().to_owned();
-                    let body: Value = serde_json::from_str(&body).unwrap();
-                    let ciphertext = body["ciphertext"].as_str().unwrap().to_owned();
-                    accepted_object = Some((object_id, ciphertext));
+                    let body_json: Value = serde_json::from_str(&body).unwrap();
+                    let revision_event =
+                        Event::from_json(body_json["revisionEvent"].to_string()).unwrap();
+                    revision_event.verify().unwrap();
+                    let writer_npub = NostrPublicKey::from_protocol(revision_event.pubkey)
+                        .to_npub()
+                        .unwrap();
+                    let ciphertext = body_json["ciphertext"].as_str().unwrap().to_owned();
+                    accepted_object = Some((object_id, ciphertext, writer_npub));
                     (
                         "200 OK",
                         serde_json::json!({
@@ -2891,7 +2902,7 @@ mod tests {
                 } else if request_line.contains("/sync/bootstrap") {
                     let objects = accepted_object
                         .as_ref()
-                        .map(|(object_id, ciphertext)| {
+                        .map(|(object_id, ciphertext, _)| {
                             vec![serde_json::json!({
                                 "folderId": "general",
                                 "objectId": object_id,
@@ -2912,7 +2923,7 @@ mod tests {
                 } else if request_line.contains("/sync/records") {
                     let records = accepted_object
                         .as_ref()
-                        .map(|(object_id, ciphertext)| {
+                        .map(|(object_id, ciphertext, writer_npub)| {
                             vec![serde_json::json!({
                                 "sequence": 1,
                                 "recordEventId": "evt-agent-b-1",
@@ -2920,7 +2931,7 @@ mod tests {
                                 "folderId": "general",
                                 "objectId": object_id,
                                 "revision": 1,
-                                "actorNpub": "npub-agent-b",
+                                "actorNpub": writer_npub,
                                 "clientCreatedAt": "2026-06-24T20:46:36Z",
                                 "payloadJson": remote_revision_payload_json_for_object(
                                     object_id,
@@ -6320,7 +6331,9 @@ mod tests {
         assert!(text.contains("applied-remote-records latestSequence=7"));
         assert!(text.contains("local changes: none"));
         assert!(text.contains("remote changes:"));
-        assert!(text.contains("- applied create General/compiled/summary.md seq=7"));
+        assert!(
+            text.contains("- applied create General/compiled/summary.md seq=7 actor=npub-remote")
+        );
         assert!(text.contains("conflicts: none"));
 
         let requests = server.join().unwrap();
@@ -6382,42 +6395,47 @@ mod tests {
     }
 
     #[test]
-    fn two_agent_sync_uses_incremental_records_for_second_working_tree() {
+    fn two_member_identity_sync_reports_writer_identity_to_receiver() {
         let tmp = TempDir::new().unwrap();
-        let nsec = "0000000000000000000000000000000000000000000000000000000000000001";
+        let agent_a_nsec = "0000000000000000000000000000000000000000000000000000000000000001";
+        let agent_b_nsec = "0000000000000000000000000000000000000000000000000000000000000002";
         let agent_a_config = tmp.path().join("agent-a-config");
         let agent_b_config = tmp.path().join("agent-b-config");
-        let agent_a_auth_env = CliEnvironment {
-            cwd: tmp.path().to_path_buf(),
+        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
+        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
+        let env_a = CliEnvironment {
+            cwd: agent_a_tree.clone(),
             config_dir: agent_a_config.clone(),
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
+            finite_home: Some(tmp.path().join("finite-home-a")),
         };
-        // Both agents share the one Finite identity: import once.
-        import_identity_for(&agent_a_auth_env, nsec);
-        let folder_key = FolderKey::from_bytes([6; 32]);
-        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
-        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
-        fs::write(agent_b_tree.join("General/shared.md"), "# Shared\n").unwrap();
-
         let env_b = CliEnvironment {
             cwd: agent_b_tree.clone(),
             config_dir: agent_b_config,
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
+            finite_home: Some(tmp.path().join("finite-home-b")),
         };
-        let actor_npub = load_signer(&env_b).unwrap().npub;
-        let export_grant =
-            export_grant_for_test(&env_b, "vault", "general", 1, &folder_key, &actor_npub);
-        let (server_url, server) = start_two_agent_incremental_sync_server(vec![export_grant]);
+        import_identity_for(&env_a, agent_a_nsec);
+        import_identity_for(&env_b, agent_b_nsec);
+        fs::write(agent_b_tree.join("General/shared.md"), "# Shared\n").unwrap();
+
+        let agent_a_npub = load_signer(&env_a).unwrap().npub;
+        let agent_b_npub = load_signer(&env_b).unwrap().npub;
+        assert_ne!(agent_a_npub, agent_b_npub);
+        let folder_key = FolderKey::from_bytes([6; 32]);
+        let export_grants = vec![
+            export_grant_for_test(&env_b, "vault", "general", 1, &folder_key, &agent_a_npub),
+            export_grant_for_test(&env_b, "vault", "general", 1, &folder_key, &agent_b_npub),
+        ];
+        let (server_url, server) = start_two_member_identity_incremental_sync_server(export_grants);
         let mut output_b = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
-            env_b,
+            env_b.clone(),
             &mut output_b,
         )
         .unwrap();
@@ -6425,14 +6443,6 @@ mod tests {
         assert_eq!(json_b["status"], "pushed-local-changes");
         assert_eq!(json_b["localChanges"].as_array().unwrap().len(), 1);
 
-        let env_a = CliEnvironment {
-            cwd: agent_a_tree.clone(),
-            config_dir: agent_a_config,
-            working_tree_root: None,
-            now: Some("2026-06-24T20:46:36Z".to_owned()),
-            identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
-        };
         let mut output_a = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -6448,6 +6458,7 @@ mod tests {
         assert_eq!(json_a["remoteChanges"][0]["status"], "applied");
         assert_eq!(json_a["remoteChanges"][0]["sequence"], 1);
         assert_eq!(json_a["remoteChanges"][0]["path"], "General/shared.md");
+        assert_eq!(json_a["remoteChanges"][0]["actorNpub"], agent_b_npub);
         assert_eq!(
             fs::read_to_string(agent_a_tree.join("General/shared.md")).unwrap(),
             "# Shared\n"

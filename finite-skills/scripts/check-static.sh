@@ -145,9 +145,29 @@ else:
         "bootstrap-personal",
         "role `personal_agent`",
         "do not require exact",
+        "`remoteChanges[].actorNpub`",
+        "signed actor evidence",
+        "different actor means another principal changed the Vault",
+        "otherwise report",
+        "the cause as unknown",
     ):
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
+
+    brain_reference_path = brain_path.parent / "references/fbrain-cli.md"
+    component_brain_reference_path = Path(
+        "../finite-brain/skills/finitebrain/references/fbrain-cli.md"
+    )
+    if not component_brain_reference_path.is_file():
+        errors.append(
+            f"{component_brain_reference_path}: FiniteBrain CLI reference copy is required"
+        )
+    elif component_brain_reference_path.read_text(
+        encoding="utf-8"
+    ) != brain_reference_path.read_text(encoding="utf-8"):
+        errors.append(
+            f"{component_brain_reference_path}: must match canonical {brain_reference_path}"
+        )
     for forbidden_server in (
         'SERVER="https://finite.computer"',
         'SERVER="https://brain.smoke.finite.computer"',
