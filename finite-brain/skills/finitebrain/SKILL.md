@@ -138,7 +138,7 @@ confirms the Vault does not already exist, create it atomically:
 ```sh
 fbrain --config-dir "$FBRAIN_CONFIG" vault create "$VAULT" \
   --kind organization --name "$NAME" \
-  --requesting-user-npub AUTHENTICATED_SENDER_ID \
+  --requesting-user-npub "$AUTHENTICATED_SENDER_ID" \
   --server "$SERVER" --json
 ```
 

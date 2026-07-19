@@ -72,15 +72,15 @@ an incomplete production flow.
 - Local gates: Identity Authority tests, Brain CLI/server tests, dashboard
   tests/browser/build, and `just dev smoke`.
 - Production evidence: exact Git revisions and image digests, healthy public
-  authority and Brain endpoints, one immutable Agent Email binding, bounded
-  Folder membership, owner readback, and restart persistence.
+  authority and Brain endpoints, one immutable Agent Email binding, Personal
+  Vault-wide Agent write/read access, owner readback, and restart persistence.
 - Before deployment, take consistent backups of Identity Authority and Brain
   state and record their hashes outside database contents. A NixOS rollback is
   not a data rollback; preserve both sides if either service accepts writes.
 - Fail closed on an unavailable authority, mismatched email/principal binding,
-  ambiguous Vault ownership, broader-than-Folder access, or UI/release revision
-  mismatch. Keep Brain navigation disabled and return to the last known-good
-  system generation.
+  ambiguous Vault ownership, authority beyond the user's Personal Vault, or
+  UI/release revision mismatch. Keep Brain navigation disabled and return to
+  the last known-good system generation.
 
 ## Acceptance Request (to complete when ACTIVE)
 
@@ -90,10 +90,11 @@ an incomplete production flow.
   designated acceptance account.
 - **Time:** 10 minutes.
 - **Steps and observations:** open Brain from the Agent sidebar; confirm the
-  reviewed Product Client UI; pair by canonical Agent Email; create and read an
-  Agent-folder document; restart the named services; read it again as owner.
-- **Pass:** the same Agent Principal retains access only to its dedicated Folder
-  and the owner retains the Personal Vault and post-restart data.
+  reviewed Product Client UI; pair by canonical Agent Email; write and read in
+  multiple Personal Vault Folders as the Agent; read the same content as owner;
+  restart the named services; repeat both Agent and owner readback.
+- **Pass:** the same Agent Principal retains full operational access throughout
+  the Personal Vault, and the owner retains ownership and post-restart data.
 - **Fail/stop:** capture read-only service health, deployed revisions, binding
   inspection, and Brain authorization output; keep navigation disabled and do
   not rewrite identity or Vault state.

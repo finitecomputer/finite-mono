@@ -158,7 +158,9 @@ else:
     component_brain_reference_path = Path(
         "../finite-brain/skills/finitebrain/references/fbrain-cli.md"
     )
-    if not component_brain_reference_path.is_file():
+    if not brain_reference_path.is_file():
+        errors.append(f"{brain_reference_path}: canonical FiniteBrain CLI reference is required")
+    elif not component_brain_reference_path.is_file():
         errors.append(
             f"{component_brain_reference_path}: FiniteBrain CLI reference copy is required"
         )

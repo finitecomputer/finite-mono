@@ -252,6 +252,11 @@ assert.equal(
   JSON.stringify([personalOwner, personalReplacement, personalCollaborator].sort()),
   "Personal Agent rotation recipients must preserve explicit Folder collaborators"
 );
+assert.match(
+  source,
+  /const operationKeyring = cloneSessionKeyring\(state\.keyring\);[\s\S]*?buildFolderAccessRemovalRequest\(operationKeyring,[\s\S]*?await protectedRequest\([\s\S]*?state\.keyring = operationKeyring;/,
+  "Personal Agent rotation must publish successfully before replacing the live session keyring"
+);
 assert.doesNotThrow(() => client.validateFolderRotationFanout("personal-agent", [{
   grants: 1000,
   reencryptedRecords: 1000,

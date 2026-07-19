@@ -425,6 +425,14 @@ impl Stack {
             )
             .as_bytes(),
         )?;
+        write_mode_600(
+            &self.brain_auth_secret_file(),
+            format!(
+                "export FC_CORE_API_TOKEN={}\n",
+                shell_quote(&self.core_token)
+            )
+            .as_bytes(),
+        )?;
 
         if !self.profile.includes_runtime() {
             return Ok(());
@@ -466,6 +474,7 @@ impl Stack {
             self.runner_auth_secret_file(),
             self.limiter_auth_secret_file(),
             self.dashboard_auth_secret_file(),
+            self.brain_auth_secret_file(),
             self.identity_authority_secret_file(),
         ] {
             remove_file_best_effort(&path);
@@ -1109,7 +1118,7 @@ wait "$postgres_pid"
             &[
                 format!(
                     ". {}",
-                    shell_quote(&self.core_secret_file().display().to_string())
+                    shell_quote(&self.brain_auth_secret_file().display().to_string())
                 ),
                 format!(
                     ". {}",
@@ -2404,6 +2413,9 @@ wait "$postgres_pid"
     fn dashboard_auth_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("dashboard-auth.sh")
     }
+    fn brain_auth_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("brain-auth.sh")
+    }
     fn identity_authority_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("identity-authority.sh")
     }
@@ -3185,6 +3197,15 @@ mod tests {
         assert!(!dashboard_exports.contains("FC_CORE_RUNNER_CREDENTIALS_JSON"));
         assert!(!dashboard_exports.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN"));
         assert!(!dashboard_exports.contains("WORKOS_API_KEY"));
+
+        let brain_exports = fs::read_to_string(stack.brain_auth_secret_file()).unwrap();
+        assert_eq!(
+            brain_exports,
+            format!(
+                "export FC_CORE_API_TOKEN={}\n",
+                shell_quote(&stack.core_token)
+            )
+        );
 
         let _ = fs::remove_dir_all(state_dir);
     }

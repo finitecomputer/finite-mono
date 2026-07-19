@@ -41,13 +41,19 @@ fbrain resolve <id>
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
-fbrain vault list|create|metadata|export
+fbrain vault list|create|bootstrap-personal|metadata|export
 fbrain folder create|list
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
 fbrain invites create|show|accept|revoke
 fbrain share link|accept|revoke|source|folder-invite|folder-accept
 ```
+
+Use `vault bootstrap-personal` for first-time Personal Vault setup. It creates
+the empty user-owned Personal Vault and establishes the authenticated agent as
+its Personal Agent through Brain's account-bound authority. Direct `vault
+create` is for Organization Vaults and is not a substitute for this Personal
+Agent bootstrap flow.
 
 ## Identity
 

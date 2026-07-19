@@ -67,13 +67,13 @@ Folder creation exposes no agent-recipient choice. If the Personal Agent role is
 vacant, the new Folder grants only the owner. Sharing with other Principals
 remains a separate explicit product action.
 
-Permanent deletion of the underlying agent in Core immediately blocks new
-Brain actions from that Agent Principal, removes the Personal Agent
-relationship, and rotates every current Folder Key. The human-owned Personal
-Vault and its content remain intact, and the owner may later add a replacement.
-Temporary Runtime stops, restarts, and replacements that preserve the same
-Agent Principal do not revoke access. Revocation cannot recall plaintext or old
-keys the agent already retained.
+Future permanent-agent deletion integration with Core must block new Brain
+actions from that Agent Principal, remove the Personal Agent relationship, and
+rotate every current Folder Key. The human-owned Personal Vault and its content
+must remain intact so the owner may later add a replacement. Temporary Runtime
+stops, restarts, and replacements that preserve the same Agent Principal must
+not revoke access. Revocation cannot recall plaintext or old keys the agent
+already retained.
 
 Implementation status: owner-initiated removal and replacement provide this
 revocation and rotation behavior now. Automatic revocation after permanent

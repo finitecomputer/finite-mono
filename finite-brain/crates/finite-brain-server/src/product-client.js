@@ -10586,9 +10586,10 @@ const FiniteBrainProductClient = (() => {
         reencryptedRecords: plan.liveObjects.length,
       }))
     );
+    const operationKeyring = cloneSessionKeyring(state.keyring);
     const rotations = [];
     for (const { row, recipients, liveObjects } of rotationPlans) {
-      const rotation = await buildFolderAccessRemovalRequest(state.keyring, {
+      const rotation = await buildFolderAccessRemovalRequest(operationKeyring, {
         action: "rotate-folder-key",
         actorNpub,
         eventTargetNpub: replacementNpub,
@@ -10611,6 +10612,7 @@ const FiniteBrainProductClient = (() => {
       }
     );
     requireCurrentSessionEpoch(sessionEpoch);
+    state.keyring = operationKeyring;
     state.metadata = updated;
     if ($("personalAgentEmailInput")) $("personalAgentEmailInput").value = "";
     await refreshReader();

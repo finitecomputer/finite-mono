@@ -18,12 +18,14 @@ operate on behalf of its user.
 
 ## Solution
 
-A Personal Vault starts empty and has exactly one fully trusted **Personal
-Agent**. The human's User Nostr Identity remains the sole owner, while the
-Personal Agent uses its own Agent Principal Key and receives full operational
-and collaboration access to every current and future Folder. Brain maintains
-the necessary per-Folder cryptographic grants automatically; Agent Workspace
-and Folder-by-Folder agent delegation disappear from the product model.
+A Personal Vault starts empty, and successful bootstrap establishes exactly one
+fully trusted **Personal Agent**. Steady state permits at most one Personal
+Agent, including an explicit vacant owner-only state after removal. The human's
+User Nostr Identity remains the sole owner, while the Personal Agent uses its
+own Agent Principal Key and receives full operational and collaboration access
+to every current and future Folder. Brain maintains the necessary per-Folder
+cryptographic grants automatically; Agent Workspace and Folder-by-Folder agent
+delegation disappear from the product model.
 
 Both initialization paths converge on the same state. User-first setup
 atomically creates the empty Personal Vault and adds the selected,
@@ -64,8 +66,9 @@ Trash or restore workflow.
 10. As a human user, I want Brain to derive the Personal Vault owner from trusted
     Core and Identity facts, so that an agent cannot create a Personal Vault for
     an arbitrary person.
-11. As a human user, I want exactly one Personal Agent in this phase, so that the
-    Personal Vault model stays simple.
+11. As a human user, I want at most one Personal Agent in this phase, with a
+    vacant owner-only state after removal, so that the Personal Vault model
+    stays simple.
 12. As a human user, I want other agents prevented from self-enrolling after my
     Vault exists, so that account-owned agents do not silently gain access.
 13. As a human user, I want to replace my Personal Agent atomically by readable
@@ -160,9 +163,10 @@ Trash or restore workflow.
 - **Personal Vault Bootstrap** creates the user's single Personal Vault with the
   User Nostr Identity as sole owner and seeds no default Folders or Folder
   Objects.
-- **Personal Agent** is a product role held by exactly one Agent Principal in a
-  Personal Vault during this phase. It is neither an owner nor a Personal Vault
-  admin.
+- **Personal Agent** is a product role held by at most one Agent Principal in a
+  Personal Vault during this phase. Successful bootstrap fills the role;
+  owner-authorized removal may leave it vacant. It is neither an owner nor a
+  Personal Vault admin.
 - Personal Agent Access includes full operational and collaboration authority
   across every current and future Personal Vault Folder: read, write, create,
   organize, share, invite, and direct deletion.

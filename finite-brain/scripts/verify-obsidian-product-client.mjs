@@ -288,8 +288,16 @@ function checkStaticShell() {
   assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");
   assertNotIncludes(js, "readerMode", "Product Client JS");
-  assertIncludes(js, 'action: "delete-folder"', "Product Client JS");
-  assertIncludes(js, "actorHasDestructiveAuthority(metadata, actorNpub)", "Product Client JS");
+  const deleteFolderHandler = js.match(
+    /async function deleteFolderFromContextTarget\(target\) \{[\s\S]*?const summary = folderSubtreeSummary/
+  )?.[0];
+  assert.ok(deleteFolderHandler, "Product Client JS should expose the delete-Folder handler");
+  assertIncludes(
+    deleteFolderHandler,
+    "actorHasDestructiveAuthority(state.metadata, currentActorNpub())",
+    "Product Client delete-Folder handler"
+  );
+  assertIncludes(deleteFolderHandler, 'action: "delete-folder"', "Product Client delete-Folder handler");
   for (const legacyMarker of [
     "accessFolderViewButton",
     "accessVaultViewButton",
