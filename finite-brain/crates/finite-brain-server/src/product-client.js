@@ -9621,7 +9621,9 @@ const FiniteBrainProductClient = (() => {
       throw new Error("Admins can still open restricted Folders; remove admin role first");
     }
     const remainingAccessUsers = accessUsers.filter((npub) => npub !== targetNpub);
-    const recipients = uniqueNpubs([...admins, ...remainingAccessUsers]);
+    const recipients = uniqueNpubs(
+      folderRecipientsForAccess(row.access, remainingAccessUsers, metadata)
+    );
     if (!recipients.length) throw new Error("Folder Key rotation needs at least one remaining recipient");
     return { remainingAccessUsers, recipients };
   }

@@ -73,8 +73,12 @@ impl BrainStore {
             }
         }
 
-        let existing_vault_id = self
+        // Serialize Personal Vault creation before checking the one-owner invariant. The partial
+        // unique index remains the final database guard for every writer.
+        let tx = self
             .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_vault_id = tx
             .query_row(
                 "SELECT id FROM vaults WHERE kind = 'personal' AND owner_user_id = ?1",
                 params![owner_npub.as_str()],
@@ -87,9 +91,15 @@ impl BrainStore {
                     reason: "user already has a personal vault".to_owned(),
                 });
             }
-            let existing = self.load_personal_agent(&output.vault.id)?;
-            return match existing {
-                Some(existing) if existing.agent_npub == *agent_npub => Ok(()),
+            let existing_agent = tx
+                .query_row(
+                    "SELECT agent_npub FROM personal_agents WHERE vault_id = ?1 AND status = 'active'",
+                    params![output.vault.id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            return match existing_agent {
+                Some(existing_agent) if existing_agent == agent_npub.as_str() => Ok(()),
                 Some(_) => Err(StoreError::BrokenInvariant {
                     reason: "personal vault already has a different personal agent".to_owned(),
                 }),
@@ -100,7 +110,6 @@ impl BrainStore {
         }
 
         let audit_id = format!("{}-personal-agent-established", output.vault.id);
-        let tx = self.conn.transaction()?;
         insert_vault(&tx, &output.vault)?;
         insert_members_and_admins(&tx, &output.vault)?;
         for folder in &output.vault.folders {

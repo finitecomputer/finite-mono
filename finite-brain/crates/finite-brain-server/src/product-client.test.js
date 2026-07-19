@@ -4228,12 +4228,17 @@ assert.equal(
   const remainingNpub = client.npubFromHex("22".repeat(32));
   const removal = await client.buildFolderAccessRemovalRequest(keyring, {
     vaultId: "smoke",
-    metadata: { admins: [authorNpub] },
+    metadata: {
+      kind: "personal",
+      ownerUserId: authorNpub,
+      admins: [],
+      personalAgent: { agentNpub: remainingNpub },
+    },
     row: {
       id: "restricted",
       path: "Restricted",
       access: "restricted",
-      accessUserIds: [targetNpub, remainingNpub],
+      accessUserIds: [targetNpub],
       currentKeyVersion: 1,
     },
     targetNpub,
@@ -4270,6 +4275,11 @@ assert.equal(
   assert.equal(
     JSON.stringify(removal.grants.map((grant) => grant.recipientNpub).sort()),
     JSON.stringify([authorNpub, remainingNpub].sort())
+  );
+  assert.equal(
+    JSON.stringify(removal.recipientNpubs.sort()),
+    JSON.stringify([authorNpub, remainingNpub].sort()),
+    "Removing the last explicit Personal Vault collaborator must retain owner and Personal Agent key access"
   );
   assert.equal(removal.grants.some((grant) => grant.recipientNpub === targetNpub), false);
   assert.equal(removal.reencryptedRecords.length, 2);

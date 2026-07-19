@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use finite_brain_core::{
     BootstrapOutput, CoreError, DisplayName, Folder, FolderAccessMode, FolderId,
@@ -11,7 +12,7 @@ use finite_brain_core::{
     RequiredFolderKeyGrant, SafeRelativePath, UserId, Vault, VaultId, VaultKind, VaultMember,
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -812,6 +813,7 @@ impl BrainStore {
 
     fn from_connection(conn: Connection) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         let mut store = Self { conn };
         store.apply_migrations()?;
         Ok(store)
@@ -2678,8 +2680,33 @@ fn insert_vault(tx: &Transaction<'_>, vault: &Vault) -> Result<(), StoreError> {
             current_timestamp()
         ],
     )
-    .map_err(map_insert_error("vault_id", vault.id.as_str()))?;
+    .map_err(map_vault_insert_error(vault))?;
     Ok(())
+}
+
+fn map_vault_insert_error(vault: &Vault) -> impl FnOnce(rusqlite::Error) -> StoreError + '_ {
+    move |error| match error {
+        rusqlite::Error::SqliteFailure(inner, message)
+            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation)
+                && vault.kind == VaultKind::Personal
+                && message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("vaults.owner_user_id")) =>
+        {
+            StoreError::BrokenInvariant {
+                reason: "user already has a personal vault".to_owned(),
+            }
+        }
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
+        {
+            StoreError::DuplicateId {
+                field: "vault_id",
+                value: vault.id.to_string(),
+            }
+        }
+        other => StoreError::from(other),
+    }
 }
 
 fn insert_members_and_admins(tx: &Transaction<'_>, vault: &Vault) -> Result<(), StoreError> {
@@ -2860,6 +2887,7 @@ mod tests {
         MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
         bootstrap_organization_vault, bootstrap_personal_vault,
     };
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     #[test]
@@ -2934,6 +2962,111 @@ mod tests {
                 .unwrap(),
             aliases
         );
+    }
+
+    #[test]
+    fn database_allows_only_one_personal_vault_per_owner_across_connections() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("one-personal-vault.sqlite3");
+        let first = BrainStore::open(&db).unwrap();
+        let second = BrainStore::open(&db).unwrap();
+
+        first
+            .conn
+            .execute(
+                "INSERT INTO vaults (id, kind, name, owner_user_id, created_at) VALUES (?1, 'personal', ?2, ?3, ?4)",
+                params!["personal-first", "First", "npub-owner", "2026-07-19T00:00:00Z"],
+            )
+            .unwrap();
+
+        let error = second
+            .conn
+            .execute(
+                "INSERT INTO vaults (id, kind, name, owner_user_id, created_at) VALUES (?1, 'personal', ?2, ?3, ?4)",
+                params!["personal-second", "Second", "npub-owner", "2026-07-19T00:00:01Z"],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                rusqlite::Error::SqliteFailure(inner, _)
+                    if inner.code == rusqlite::ErrorCode::ConstraintViolation
+            ),
+            "the database must enforce one Personal Vault per owner: {error}"
+        );
+    }
+
+    #[test]
+    fn competing_personal_bootstraps_leave_one_vault_and_one_truthful_loser() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("competing-personal-vault.sqlite3");
+        let first_store = BrainStore::open(&db).unwrap();
+        let second_store = BrainStore::open(&db).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first = scope.spawn(move || {
+                let mut store = first_store;
+                let output =
+                    bootstrap_personal_vault("personal-first", "First", "npub-owner").unwrap();
+                first_barrier.wait();
+                store.create_personal_vault_bootstrap(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent-first").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-07-19T00:00:00Z",
+                )
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second = scope.spawn(move || {
+                let mut store = second_store;
+                let output =
+                    bootstrap_personal_vault("personal-second", "Second", "npub-owner").unwrap();
+                second_barrier.wait();
+                store.create_personal_vault_bootstrap(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent-second").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-07-19T00:00:01Z",
+                )
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| {
+            matches!(
+                result,
+                Err(StoreError::BrokenInvariant { reason })
+                    if reason == "user already has a personal vault"
+            )
+        }));
+
+        let store = BrainStore::open(&db).unwrap();
+        let count = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vaults WHERE kind = 'personal' AND owner_user_id = ?1",
+                params!["npub-owner"],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        for table in ["personal_agents", "personal_agent_audit"] {
+            let count = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "the losing bootstrap must leave no partial {table} row"
+            );
+        }
     }
 
     #[test]

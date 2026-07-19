@@ -100,6 +100,14 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 12)? {
+            tx.execute_batch(SCHEMA_V12)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![12, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -496,6 +504,12 @@ CREATE TABLE deleted_object_identities (
     PRIMARY KEY (vault_id, folder_id, object_id),
     FOREIGN KEY (vault_id) REFERENCES vaults(id) ON DELETE CASCADE
 );
+"#;
+
+const SCHEMA_V12: &str = r#"
+CREATE UNIQUE INDEX personal_vaults_one_per_owner
+    ON vaults(owner_user_id)
+    WHERE kind = 'personal';
 "#;
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {
