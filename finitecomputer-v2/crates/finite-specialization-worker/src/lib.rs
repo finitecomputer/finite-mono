@@ -20,7 +20,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 pub const DEFAULT_SPARK_BASE_URL: &str = "https://inference.finite.computer/v1";
-pub const DEFAULT_VISION_MODEL: &str = "aeon-gemma-4-12b-k4-nvfp4-unified-fast";
+pub const DEFAULT_VISION_MODEL: &str = "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
 pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
 pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
@@ -742,7 +742,7 @@ fn chat_request_for_audio(
         ));
     }
     let mut messages = vec![json!({
-        "role": "developer",
+        "role": "system",
         "content": AUDIO_CAPABILITY_PROMPT,
     })];
     for message in &input.messages {
@@ -1587,7 +1587,7 @@ fn truncate_chars(value: String, max_chars: usize) -> String {
 }
 
 async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = canary_interval(Capability::Image, interval_seconds);
     loop {
         interval.tick().await;
         let started = Instant::now();
@@ -1630,7 +1630,7 @@ async fn run_image_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
 }
 
 async fn run_audio_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = canary_interval(Capability::Audio, interval_seconds);
     loop {
         interval.tick().await;
         let started = Instant::now();
@@ -1653,7 +1653,7 @@ async fn run_audio_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
 }
 
 async fn run_video_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = canary_interval(Capability::Video, interval_seconds);
     loop {
         interval.tick().await;
         let started = Instant::now();
@@ -1675,6 +1675,20 @@ async fn run_video_canary_loop(state: Arc<WorkerState>, interval_seconds: u64) {
             started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
     }
+}
+
+fn canary_interval(capability: Capability, interval_seconds: u64) -> tokio::time::Interval {
+    let period = Duration::from_secs(interval_seconds);
+    let first_tick = tokio::time::Instant::now() + canary_phase_delay(capability, interval_seconds);
+    let mut interval = tokio::time::interval_at(first_tick, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+fn canary_phase_delay(capability: Capability, interval_seconds: u64) -> Duration {
+    Duration::from_secs(
+        interval_seconds.saturating_mul(capability.index() as u64) / Capability::ALL.len() as u64,
+    )
 }
 
 fn audio_canary_request() -> ChatCompletionRequest {
@@ -2526,7 +2540,7 @@ mod tests {
         assert_eq!(upstream["model"], "aeon-test");
         assert_eq!(upstream["stream"], false);
         assert_eq!(upstream["max_tokens"], 32);
-        assert_eq!(upstream["messages"][0]["role"], "developer");
+        assert_eq!(upstream["messages"][0]["role"], "system");
         assert_eq!(
             upstream["messages"][1]["content"][1],
             json!({
@@ -2585,6 +2599,7 @@ mod tests {
         assert_eq!(body["specialization_result"]["text"], "A steady tone.");
         let request = captured.lock().unwrap().clone().unwrap().1;
         assert_eq!(request["model"], "qwopus-test");
+        assert_eq!(request["messages"][0]["role"], "system");
         assert_eq!(request["messages"][0]["content"], AUDIO_CAPABILITY_PROMPT);
         let normalized = request["messages"][1]["content"][1]["input_audio"]["data"]
             .as_str()
@@ -3368,6 +3383,19 @@ mod tests {
         assert_eq!(canary_interval_from_env(Some("off")), None);
         assert_eq!(canary_interval_from_env(Some("300")), Some(300));
         assert_eq!(canary_interval_from_env(None), Some(300));
+    }
+
+    #[test]
+    fn canary_phases_spread_a_ten_minute_interval_evenly() {
+        assert_eq!(canary_phase_delay(Capability::Image, 600), Duration::ZERO);
+        assert_eq!(
+            canary_phase_delay(Capability::Audio, 600),
+            Duration::from_secs(200)
+        );
+        assert_eq!(
+            canary_phase_delay(Capability::Video, 600),
+            Duration::from_secs(400)
+        );
     }
 
     #[test]
