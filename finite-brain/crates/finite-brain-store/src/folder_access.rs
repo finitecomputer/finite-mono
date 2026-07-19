@@ -162,7 +162,7 @@ impl BrainStore {
         folder_id: &FolderId,
         user_id: &UserId,
         grant: &FolderKeyGrantMetadata,
-    ) -> Result<(), StoreError> {
+    ) -> Result<GrantFolderAccessOutcome, StoreError> {
         let mut stored = self.load_vault(vault_id)?;
         let folder = stored
             .vault
@@ -221,53 +221,36 @@ impl BrainStore {
             });
         }
 
+        let current_access = stored
+            .folder_access
+            .get(folder_id)
+            .cloned()
+            .unwrap_or_default();
+        let effective_access = required_recipients(
+            &stored.vault,
+            &folder,
+            &current_access,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
+        let current_grant_exists = stored.grants.iter().any(|existing| {
+            existing.folder_id == *folder_id
+                && existing.key_version == folder.current_key_version
+                && existing.recipient_npub == *user_id
+        });
+        if effective_access.contains(user_id) && current_grant_exists {
+            return Ok(GrantFolderAccessOutcome::AlreadyHasAccess);
+        }
+
         let inserts_access_row = match folder.access {
-            FolderAccessMode::Restricted => {
-                let current_access = stored
-                    .folder_access
-                    .get(folder_id)
-                    .cloned()
-                    .unwrap_or_default();
-                if current_access.contains(user_id) {
-                    if stored.grants.iter().any(|existing| {
-                        existing.folder_id == *folder_id
-                            && existing.key_version == folder.current_key_version
-                            && existing.recipient_npub == *user_id
-                    }) {
-                        return Err(StoreError::BrokenInvariant {
-                            reason: "folder key grant is already present".to_owned(),
-                        });
-                    }
-                    false
-                } else {
-                    true
-                }
-            }
-            FolderAccessMode::AllMembers => {
-                if stored.grants.iter().any(|existing| {
-                    existing.folder_id == *folder_id
-                        && existing.key_version == folder.current_key_version
-                        && existing.recipient_npub == *user_id
-                }) {
-                    return Err(StoreError::BrokenInvariant {
-                        reason: "folder key grant is already present".to_owned(),
-                    });
-                }
-                false
-            }
+            FolderAccessMode::Restricted => !current_access.contains(user_id),
+            FolderAccessMode::AllMembers => false,
             FolderAccessMode::AdminOnly => {
                 if !stored.vault.admins.iter().any(|admin| admin == user_id) {
                     return Err(StoreError::BrokenInvariant {
                         reason: "admin-only folder grants require a vault admin target".to_owned(),
-                    });
-                }
-                if stored.grants.iter().any(|existing| {
-                    existing.folder_id == *folder_id
-                        && existing.key_version == folder.current_key_version
-                        && existing.recipient_npub == *user_id
-                }) {
-                    return Err(StoreError::BrokenInvariant {
-                        reason: "folder key grant is already present".to_owned(),
                     });
                 }
                 false
@@ -292,7 +275,7 @@ impl BrainStore {
         }
         insert_grant(&tx, vault_id, grant)?;
         tx.commit()?;
-        Ok(())
+        Ok(GrantFolderAccessOutcome::Granted)
     }
 
     /// Remove restricted Folder access by rotating the Folder Key and re-encrypting live objects.

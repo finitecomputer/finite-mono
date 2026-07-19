@@ -313,6 +313,15 @@ pub struct SubmitRecordOutcome {
     pub duplicate: bool,
 }
 
+/// Result of granting one identity the current Folder Key.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GrantFolderAccessOutcome {
+    /// Access and its current-version key grant were added.
+    Granted,
+    /// The identity already had effective access and the current-version grant.
+    AlreadyHasAccess,
+}
+
 /// Result of atomically deleting one Folder subtree.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FolderSubtreeDeletion {
@@ -3159,6 +3168,35 @@ mod tests {
                 && grant.key_version == 1
                 && grant.recipient_npub == admin
         }));
+    }
+
+    #[test]
+    fn redundant_current_folder_key_grant_is_an_idempotent_no_op() {
+        let mut store = org_store_with_access_test_folders();
+        let vault_id = VaultId::new("acme").unwrap();
+        let folder_id = FolderId::new("team-notes").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let before = store.load_vault(&vault_id).unwrap();
+
+        let outcome = store
+            .grant_folder_access(
+                &vault_id,
+                &folder_id,
+                &admin,
+                &grant(
+                    "grant-team-notes-admin-retry",
+                    "team-notes",
+                    1,
+                    "npub-admin",
+                    admin.as_str(),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(outcome, GrantFolderAccessOutcome::AlreadyHasAccess);
+        let after = store.load_vault(&vault_id).unwrap();
+        assert_eq!(after.folder_access, before.folder_access);
+        assert_eq!(after.grants, before.grants);
     }
 
     #[test]

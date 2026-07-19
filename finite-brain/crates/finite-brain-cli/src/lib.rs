@@ -1906,7 +1906,12 @@ fn permissions<W: Write>(
                 "accessChangeEvent": event
             });
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
-            write_command_response(output, json, &response)
+            if !json && response["outcome"] == "alreadyHasAccess" {
+                writeln!(output, "This person already has access.")?;
+                Ok(())
+            } else {
+                write_command_response(output, json, &response)
+            }
         }
         Some(other) => Err(CliError::InvalidCommand(format!("permissions {other}"))),
         None => Err(CliError::MissingArgument("permissions command")),
@@ -3022,6 +3027,7 @@ mod tests {
     fn start_metadata_export_and_grant_server(
         admin_npub: String,
         export_grants: Vec<Value>,
+        grant_outcome: &'static str,
     ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -3083,7 +3089,11 @@ mod tests {
                     })
                     .to_string()
                 } else {
-                    serde_json::json!({ "status": "ok" }).to_string()
+                    serde_json::json!({
+                        "vaultId": "acme",
+                        "outcome": grant_outcome,
+                    })
+                    .to_string()
                 };
                 requests.push((request_line, body));
                 let response = format!(
@@ -4752,8 +4762,11 @@ mod tests {
         env.cwd = tree.clone();
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
-        let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub.clone(), vec![export_grant]);
+        let (server_url, server) = start_metadata_export_and_grant_server(
+            admin_npub.clone(),
+            vec![export_grant],
+            "granted",
+        );
         let mut output = Vec::new();
         run_with_env(
             [
@@ -4786,6 +4799,64 @@ mod tests {
         );
         let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
         assert!(!durable_state.contains(&folder_key.to_base64()));
+    }
+
+    #[test]
+    fn redundant_folder_grant_reports_that_the_person_already_has_access() {
+        let output = run_redundant_folder_grant(false);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "This person already has access.\n"
+        );
+    }
+
+    #[test]
+    fn redundant_folder_grant_json_preserves_machine_readable_outcome() {
+        let output = run_redundant_folder_grant(true);
+        let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["vaultId"], "acme");
+        assert_eq!(response["outcome"], "alreadyHasAccess");
+    }
+
+    fn run_redundant_folder_grant(json: bool) -> Vec<u8> {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([7; 32]);
+        let tree = tmp.path().join("org");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) = start_metadata_export_and_grant_server(
+            admin_npub.clone(),
+            vec![export_grant],
+            "alreadyHasAccess",
+        );
+        let mut output = Vec::new();
+        let mut args = vec![
+            "permissions".to_owned(),
+            "grant-folder".to_owned(),
+            "--vault".to_owned(),
+            "acme".to_owned(),
+            "--folder".to_owned(),
+            "general".to_owned(),
+            "--target".to_owned(),
+            admin_npub,
+            "--server".to_owned(),
+            server_url,
+        ];
+        if json {
+            args.push("--json".to_owned());
+        }
+
+        run_with_env(args, env, &mut output).unwrap();
+
+        server.join().unwrap();
+        output
     }
 
     #[test]
@@ -5728,7 +5799,7 @@ mod tests {
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
         let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant], "granted");
         let mut output = Vec::new();
         run_with_env(
             [
@@ -5785,7 +5856,7 @@ mod tests {
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
         let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant], "granted");
         let mut output = Vec::new();
         run_with_env(
             [

@@ -402,6 +402,23 @@ pub struct GrantFolderAccessRequest {
     pub access_change_event: serde_json::Value,
 }
 
+/// Result of granting one identity the current Folder Key.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantFolderAccessResponse {
+    #[serde(flatten)]
+    pub metadata: VaultMetadataResponse,
+    pub outcome: GrantFolderAccessResponseOutcome,
+}
+
+/// Stable machine-readable outcome for a Folder access grant.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GrantFolderAccessResponseOutcome {
+    Granted,
+    AlreadyHasAccess,
+}
+
 /// Re-encrypted object supplied during Folder Key rotation.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

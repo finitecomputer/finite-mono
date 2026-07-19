@@ -27,11 +27,11 @@ use finite_brain_core::{
 use finite_brain_store::{
     BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder, EncryptedVaultExport,
     FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
-    IdentityAlias, LinkStatus, MountedFolderProjection, MountedFolderState,
-    PersonalAgentFolderRotation, SharedFolderConnectionStatus, SharedFolderDirection, StoreError,
-    StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord,
-    StoredVault, StoredVaultInvitation, SyncRecordInput, SyncRecordType, VaultInvitationTargetKind,
-    VisibleVault, VisibleVaultRole,
+    GrantFolderAccessOutcome, IdentityAlias, LinkStatus, MountedFolderProjection,
+    MountedFolderState, PersonalAgentFolderRotation, SharedFolderConnectionStatus,
+    SharedFolderDirection, StoreError, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, StoredVault, StoredVaultInvitation,
+    SyncRecordInput, SyncRecordType, VaultInvitationTargetKind, VisibleVault, VisibleVaultRole,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -5878,6 +5878,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_current_folder_grants_have_one_winner_and_one_truthful_no_op() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let add_member_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "change-add-concurrent-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let add_member = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/vaults/acme/members",
+            Some(add_member_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(add_member.status(), StatusCode::OK);
+        let before_sequence = latest_sync_sequence(&router, &admin_keys, "acme").await;
+
+        let grant_body = |suffix: &str| {
+            serde_json::json!({
+                "targetNpub": member_npub,
+                "grant": folder_key_grant_value(
+                    &format!("grant-restricted-member-{suffix}"),
+                    1,
+                    member_npub.as_str(),
+                ),
+                "accessChangeEvent": admin_event(
+                    &admin_keys,
+                    "acme",
+                    &format!("change-grant-restricted-member-{suffix}"),
+                    AdminAccessAction::GrantFolderAccess,
+                    Some("restricted"),
+                    Some(member_npub.as_str()),
+                    Some(1),
+                ),
+            })
+            .to_string()
+        };
+        let first_body = grant_body("first");
+        let second_body = grant_body("second");
+        let first = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/vaults/acme/folders/restricted/access",
+            Some(first_body),
+            TEST_NOW,
+        );
+        let second = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/vaults/acme/folders/restricted/access",
+            Some(second_body),
+            TEST_NOW,
+        );
+        let (first, second) = tokio::join!(first, second);
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        let first: serde_json::Value = read_json(first).await;
+        let second: serde_json::Value = read_json(second).await;
+        let mut outcomes = vec![
+            first["outcome"].as_str().unwrap().to_owned(),
+            second["outcome"].as_str().unwrap().to_owned(),
+        ];
+        outcomes.sort();
+        assert_eq!(outcomes, ["alreadyHasAccess", "granted"]);
+
+        let metadata = if first["outcome"] == "granted" {
+            first
+        } else {
+            second
+        };
+        assert_eq!(metadata["grantCount"], 3);
+        assert_eq!(
+            metadata["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|folder| folder["id"] == "restricted")
+                .unwrap()["accessUserIds"],
+            serde_json::json!([member_npub])
+        );
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 2).await,
+            before_sequence + 2
+        );
+    }
+
+    #[tokio::test]
     async fn admin_routes_create_restricted_folder_and_rotate_access_removal() {
         let admin_keys = Keys::generate();
         let member_keys = Keys::generate();
@@ -8140,13 +8244,22 @@ mod tests {
     }
 
     async fn latest_sync_sequence(router: &Router, keys: &Keys, vault_id: &str) -> u64 {
+        latest_sync_sequence_at(router, keys, vault_id, TEST_NOW - 1).await
+    }
+
+    async fn latest_sync_sequence_at(
+        router: &Router,
+        keys: &Keys,
+        vault_id: &str,
+        created_at: u64,
+    ) -> u64 {
         let response = authed_request(
             router.clone(),
             keys,
             "GET",
             &format!("/_admin/vaults/{vault_id}/sync/bootstrap"),
             None,
-            TEST_NOW - 1,
+            created_at,
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);

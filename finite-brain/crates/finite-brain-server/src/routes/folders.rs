@@ -195,7 +195,7 @@ pub(crate) async fn grant_folder_access_handler(
     OriginalUri(uri): OriginalUri,
     AxumPath((vault_id, folder_id)): AxumPath<(String, String)>,
     body: Bytes,
-) -> Result<Json<VaultMetadataResponse>, ApiError> {
+) -> Result<Json<GrantFolderAccessResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: GrantFolderAccessRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
@@ -229,16 +229,27 @@ pub(crate) async fn grant_folder_access_handler(
         &grant_created_at,
     )?;
 
-    mutate_as_admin_with_grants(
-        state,
-        vault_id,
-        actor,
-        event,
-        payload,
-        vec![grant.clone()],
-        |store, vault_id| store.grant_folder_access(vault_id, &folder_id, &target, &grant),
-    )
-    .map(Json)
+    let (metadata, outcome) = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_vault(&vault_id)?;
+        ensure_vault_admin(&stored, &actor)?;
+        let outcome = store.grant_folder_access(&vault_id, &folder_id, &target, &grant)?;
+        if outcome == GrantFolderAccessOutcome::Granted {
+            append_folder_key_grant_record(&mut store, &vault_id, &grant)?;
+            append_admin_access_change_record(&mut store, &vault_id, &actor, &event, &payload)?;
+        }
+        let stored = store.load_vault(&vault_id)?;
+        let mut metadata = metadata_response(stored);
+        enrich_metadata_identities(&store, &mut metadata)?;
+        (metadata, outcome)
+    };
+    let outcome = match outcome {
+        GrantFolderAccessOutcome::Granted => GrantFolderAccessResponseOutcome::Granted,
+        GrantFolderAccessOutcome::AlreadyHasAccess => {
+            GrantFolderAccessResponseOutcome::AlreadyHasAccess
+        }
+    };
+    Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
 pub(crate) async fn remove_folder_access_handler(
