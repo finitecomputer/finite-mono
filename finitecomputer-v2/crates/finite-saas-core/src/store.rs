@@ -1044,6 +1044,7 @@ impl MemoryCoreStore {
         Ok(Some(BrainAgentAccount {
             workos_user_id: workos_user_id.clone(),
             managed_agent_email: email,
+            verified_email: user.email.clone(),
             status: "active".to_owned(),
         }))
     }
@@ -1769,7 +1770,7 @@ impl PostgresCoreStore {
         let client = self.client.lock().await;
         client
             .query_opt(
-                "SELECT u.workos_user_id, p.agent_email
+                "SELECT u.workos_user_id, u.normalized_email, p.agent_email
                  FROM projects p
                  JOIN users u ON u.id = p.owner_user_id
                  WHERE p.agent_email = $1 AND u.workos_user_id IS NOT NULL",
@@ -1781,6 +1782,7 @@ impl PostgresCoreStore {
                 Ok(BrainAgentAccount {
                     workos_user_id: row.get("workos_user_id"),
                     managed_agent_email: row.get("agent_email"),
+                    verified_email: row.get("normalized_email"),
                     status: "active".to_owned(),
                 })
             })

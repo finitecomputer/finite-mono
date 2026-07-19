@@ -725,6 +725,7 @@ pub struct Project {
 pub struct BrainAgentAccount {
     pub workos_user_id: String,
     pub managed_agent_email: String,
+    pub verified_email: String,
     pub status: String,
 }
 

@@ -166,6 +166,8 @@ struct IdentityAgentResolutionResponse {
 struct CoreAgentAccountResponse {
     workos_user_id: String,
     managed_agent_email: String,
+    #[serde(default)]
+    verified_email: Option<String>,
     status: String,
 }
 
@@ -986,6 +988,24 @@ fn resolve_agent_bootstrap_principals(
         .lock()
         .map_err(lock_error)?
         .record_identity_alias(&alias)?;
+
+    if let Some(owner_email) = account.verified_email.as_deref() {
+        let owner_email = canonical_email(owner_email)?;
+        let owner_key = NostrPublicKey::parse(owner_npub.as_str()).map_err(nostr_identity_error)?;
+        let owner_alias = IdentityAlias {
+            npub: owner_npub.clone(),
+            hex_public_key: owner_key.to_hex(),
+            preferred_nip05: Some(owner_email),
+            nip05_verified_at: Some(server_timestamp(state)),
+            nip05_relays: Vec::new(),
+            updated_at: server_timestamp(state),
+        };
+        state
+            .store
+            .lock()
+            .map_err(lock_error)?
+            .record_identity_alias(&owner_alias)?;
+    }
 
     Ok(AgentBootstrapPrincipals {
         owner_npub,
@@ -4721,6 +4741,7 @@ mod tests {
         let competing_agent_npub = npub(&competing_agent_keys);
         let agent_email = "cheater-a1b2c3d4e5f60708@finite.vip";
         let competing_agent_email = "other-a1b2c3d4e5f60708@finite.vip";
+        let owner_email = "owner@finite.computer";
         let (identity_url, identity_server) = spawn_json_authority(vec![
             (
                 "/api/v1/operator/brain/agent-resolution",
@@ -4771,6 +4792,7 @@ mod tests {
                 serde_json::json!({
                     "workosUserId": "user_workos_owner",
                     "managedAgentEmail": agent_email,
+                    "verifiedEmail": owner_email,
                     "status": "active",
                 }),
             ),
@@ -4779,6 +4801,7 @@ mod tests {
                 serde_json::json!({
                     "workosUserId": "user_workos_owner",
                     "managedAgentEmail": agent_email,
+                    "verifiedEmail": owner_email,
                     "status": "active",
                 }),
             ),
@@ -4787,6 +4810,7 @@ mod tests {
                 serde_json::json!({
                     "workosUserId": "user_workos_owner",
                     "managedAgentEmail": competing_agent_email,
+                    "verifiedEmail": owner_email,
                     "status": "active",
                 }),
             ),
@@ -4830,6 +4854,13 @@ mod tests {
         assert_eq!(
             response.vault.vault_id,
             format!("personal-{}", &owner_key.to_hex()[..16])
+        );
+        assert!(
+            response
+                .vault
+                .identities
+                .iter()
+                .any(|identity| { identity.npub == owner_npub && identity.display == owner_email })
         );
 
         let retry = authed_request(
