@@ -228,16 +228,22 @@ pub(crate) async fn grant_folder_access_handler(
         Some(event.as_json()),
         &grant_created_at,
     )?;
+    let control_records = [
+        folder_key_grant_sync_record(&grant)?,
+        admin_access_change_sync_record(&actor, &event, &payload)?,
+    ];
 
     let (metadata, outcome) = {
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_vault(&vault_id)?;
         ensure_vault_admin(&stored, &actor)?;
-        let outcome = store.grant_folder_access(&vault_id, &folder_id, &target, &grant)?;
-        if outcome == GrantFolderAccessOutcome::Granted {
-            append_folder_key_grant_record(&mut store, &vault_id, &grant)?;
-            append_admin_access_change_record(&mut store, &vault_id, &actor, &event, &payload)?;
-        }
+        let outcome = store.grant_folder_access_with_control_records(
+            &vault_id,
+            &folder_id,
+            &target,
+            &grant,
+            &control_records,
+        )?;
         let stored = store.load_vault(&vault_id)?;
         let mut metadata = metadata_response(stored);
         enrich_metadata_identities(&store, &mut metadata)?;

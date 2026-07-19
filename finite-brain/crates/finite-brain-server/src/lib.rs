@@ -5976,9 +5976,27 @@ mod tests {
                 .unwrap()["accessUserIds"],
             serde_json::json!([member_npub])
         );
+        let bootstrap = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/_admin/vaults/acme/sync/bootstrap",
+            None,
+            TEST_NOW - 2,
+        )
+        .await;
+        assert_eq!(bootstrap.status(), StatusCode::OK);
+        let bootstrap: SyncBootstrapResponse = read_json(bootstrap).await;
+        assert_eq!(bootstrap.latest_sequence, before_sequence + 2);
+        let new_record_types = bootstrap
+            .control_records
+            .iter()
+            .filter(|record| record.sequence > before_sequence)
+            .map(|record| record.record_type.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(
-            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 2).await,
-            before_sequence + 2
+            new_record_types,
+            ["folder_key_grant", "vault_admin_access_change"]
         );
     }
 

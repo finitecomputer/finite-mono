@@ -2974,35 +2974,42 @@ mod tests {
     fn grants_restricted_folder_access_with_current_recipient_grant() {
         let mut store = store_with_strategy_folder();
         let vault_id = VaultId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&vault_id, &member).unwrap();
+        let before_sequence = store.latest_sequence(&vault_id).unwrap();
+        let new_grant = grant(
+            "grant-strategy-member",
+            "strategy",
+            1,
+            "npub-admin",
+            member.as_str(),
+        );
 
         store
-            .grant_folder_access(
-                &vault_id,
-                &FolderId::new("strategy").unwrap(),
-                &member,
-                &grant(
-                    "grant-strategy-member",
-                    "strategy",
-                    1,
-                    "npub-admin",
-                    member.as_str(),
-                ),
-            )
+            .grant_folder_access(&vault_id, &folder_id, &member, &new_grant)
             .unwrap();
 
         let stored = store.load_vault(&vault_id).unwrap();
         assert_eq!(
-            stored
-                .folder_access
-                .get(&FolderId::new("strategy").unwrap()),
+            stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([member.clone()]))
         );
         assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == FolderId::new("strategy").unwrap()
-                && grant.key_version == 1
-                && grant.recipient_npub == member
+            grant.folder_id == folder_id && grant.key_version == 1 && grant.recipient_npub == member
+        }));
+        assert_eq!(
+            store.latest_sequence(&vault_id).unwrap(),
+            before_sequence + 2
+        );
+        let bootstrap = store.sync_bootstrap(&vault_id).unwrap();
+        assert!(bootstrap.control_records.iter().any(|record| {
+            record.record_event_id == "grant-strategy-member-key-record"
+                && record.record_type == SyncRecordType::FolderKeyGrant
+        }));
+        assert!(bootstrap.control_records.iter().any(|record| {
+            record.record_event_id == "grant-strategy-member-access-record"
+                && record.record_type == SyncRecordType::VaultAdminAccessChange
         }));
     }
 
@@ -3155,6 +3162,7 @@ mod tests {
         let folder_id = FolderId::new("team-notes").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let before = store.load_vault(&vault_id).unwrap();
+        let before_sequence = store.latest_sequence(&vault_id).unwrap();
 
         let outcome = store
             .grant_folder_access(
@@ -3175,6 +3183,87 @@ mod tests {
         let after = store.load_vault(&vault_id).unwrap();
         assert_eq!(after.folder_access, before.folder_access);
         assert_eq!(after.grants, before.grants);
+        assert_eq!(store.latest_sequence(&vault_id).unwrap(), before_sequence);
+    }
+
+    #[test]
+    fn folder_grant_rolls_back_authority_when_a_control_record_conflicts() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let vault_id = output.vault.id.clone();
+        store.create_vault_bootstrap(&output, &[]).unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &vault_id,
+                &folder,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-personal-owner",
+                    "strategy",
+                    1,
+                    "npub-owner",
+                    "npub-owner",
+                )],
+            )
+            .unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let before = store.load_vault(&vault_id).unwrap();
+        let before_sequence = store.latest_sequence(&vault_id).unwrap();
+        let colliding = folder_access_control_record(
+            "event-colliding-access-change",
+            SyncRecordType::VaultAdminAccessChange,
+            "strategy",
+            "npub-owner",
+        );
+        store.submit_sync_record(&vault_id, &colliding).unwrap();
+        let sequence_with_collision = store.latest_sequence(&vault_id).unwrap();
+        assert_eq!(sequence_with_collision, before_sequence + 1);
+
+        let new_grant = grant(
+            "grant-strategy-member-atomic",
+            "strategy",
+            1,
+            "npub-owner",
+            member.as_str(),
+        );
+        let records = [
+            folder_access_control_record(
+                "event-new-folder-key-grant",
+                SyncRecordType::FolderKeyGrant,
+                "strategy",
+                "npub-owner",
+            ),
+            colliding,
+        ];
+
+        store
+            .grant_folder_access_with_control_records(
+                &vault_id, &folder_id, &member, &new_grant, &records,
+            )
+            .unwrap_err();
+
+        let after = store.load_vault(&vault_id).unwrap();
+        assert_eq!(after.vault.members, before.vault.members);
+        assert_eq!(after.folder_access, before.folder_access);
+        assert_eq!(after.grants, before.grants);
+        assert_eq!(
+            store.latest_sequence(&vault_id).unwrap(),
+            sequence_with_collision
+        );
+        assert!(
+            store
+                .sync_bootstrap(&vault_id)
+                .unwrap()
+                .control_records
+                .iter()
+                .all(|record| record.record_event_id != "event-new-folder-key-grant")
+        );
     }
 
     #[test]
@@ -4849,7 +4938,7 @@ mod tests {
         }));
 
         let bootstrap = store.sync_bootstrap(&vault_id).unwrap();
-        assert_eq!(bootstrap.latest_sequence, 2);
+        assert_eq!(bootstrap.latest_sequence, 4);
         assert_eq!(bootstrap.objects[0].revision, 2);
         assert_eq!(
             bootstrap.objects[0].payload_json,
@@ -4952,7 +5041,7 @@ mod tests {
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([member]))
         );
-        assert_eq!(store.sync_bootstrap(&vault_id).unwrap().latest_sequence, 1);
+        assert_eq!(store.sync_bootstrap(&vault_id).unwrap().latest_sequence, 3);
     }
 
     #[test]
@@ -5824,6 +5913,44 @@ mod tests {
         }
     }
 
+    trait BrainStoreFolderGrantTestExt {
+        fn grant_folder_access(
+            &mut self,
+            vault_id: &VaultId,
+            folder_id: &FolderId,
+            user_id: &UserId,
+            grant: &FolderKeyGrantMetadata,
+        ) -> Result<GrantFolderAccessOutcome, StoreError>;
+    }
+
+    impl BrainStoreFolderGrantTestExt for BrainStore {
+        fn grant_folder_access(
+            &mut self,
+            vault_id: &VaultId,
+            folder_id: &FolderId,
+            user_id: &UserId,
+            grant: &FolderKeyGrantMetadata,
+        ) -> Result<GrantFolderAccessOutcome, StoreError> {
+            let records = [
+                folder_access_control_record(
+                    &format!("{}-key-record", grant.id),
+                    SyncRecordType::FolderKeyGrant,
+                    folder_id.as_str(),
+                    grant.issuer_npub.as_str(),
+                ),
+                folder_access_control_record(
+                    &format!("{}-access-record", grant.id),
+                    SyncRecordType::VaultAdminAccessChange,
+                    folder_id.as_str(),
+                    grant.issuer_npub.as_str(),
+                ),
+            ];
+            self.grant_folder_access_with_control_records(
+                vault_id, folder_id, user_id, grant, &records,
+            )
+        }
+    }
+
     fn revision_record(
         event_id: &str,
         object_id: &str,
@@ -5839,6 +5966,26 @@ mod tests {
             base_revision,
             body,
         ))
+    }
+
+    fn folder_access_control_record(
+        event_id: &str,
+        record_type: SyncRecordType,
+        folder_id: &str,
+        actor_npub: &str,
+    ) -> SyncRecordInput {
+        SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: event_id.to_owned(),
+            record_type,
+            folder_id: Some(FolderId::new(folder_id).unwrap()),
+            actor_npub: UserId::new(actor_npub).unwrap(),
+            client_created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            payload_json: "{\"control\":true}".to_owned(),
+            record_event_kind: match record_type {
+                SyncRecordType::FolderKeyGrant => NIP59_GIFT_WRAP_KIND,
+                _ => APP_SPECIFIC_KIND,
+            },
+        })
     }
 
     fn revision_record_struct(

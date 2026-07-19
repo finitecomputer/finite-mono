@@ -152,16 +152,17 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Grant the current Folder Key to one organization member.
+    /// Grant the current Folder Key and append its signed control records atomically.
     ///
     /// Restricted Folders also add the member to the Folder access list. All-members Folders
     /// already grant metadata access to every member, so this path only records the missing key.
-    pub fn grant_folder_access(
+    pub fn grant_folder_access_with_control_records(
         &mut self,
         vault_id: &VaultId,
         folder_id: &FolderId,
         user_id: &UserId,
         grant: &FolderKeyGrantMetadata,
+        control_records: &[SyncRecordInput],
     ) -> Result<GrantFolderAccessOutcome, StoreError> {
         let mut stored = self.load_vault(vault_id)?;
         let folder = stored
@@ -244,6 +245,8 @@ impl BrainStore {
             return Ok(GrantFolderAccessOutcome::AlreadyHasAccess);
         }
 
+        validate_folder_grant_control_records(folder_id, grant, control_records)?;
+
         let inserts_access_row = match folder.access {
             FolderAccessMode::Restricted => !current_access.contains(user_id),
             FolderAccessMode::AllMembers => false,
@@ -274,6 +277,11 @@ impl BrainStore {
             )?;
         }
         insert_grant(&tx, vault_id, grant)?;
+        for input in control_records {
+            sync_records::validate_sync_conflict(&tx, vault_id, input)?;
+            let sequence = sync_records::next_sequence(&tx, vault_id)?;
+            sync_records::insert_sync_record(&tx, vault_id, sequence, input)?;
+        }
         tx.commit()?;
         Ok(GrantFolderAccessOutcome::Granted)
     }
@@ -390,4 +398,39 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn validate_folder_grant_control_records(
+    folder_id: &FolderId,
+    grant: &FolderKeyGrantMetadata,
+    control_records: &[SyncRecordInput],
+) -> Result<(), StoreError> {
+    if control_records.len() != 2 {
+        return Err(StoreError::BrokenInvariant {
+            reason: "Folder access grant requires one Folder Key Grant record and one access-change record"
+                .to_owned(),
+        });
+    }
+    let expected_types = [
+        SyncRecordType::FolderKeyGrant,
+        SyncRecordType::VaultAdminAccessChange,
+    ];
+    for (input, expected_type) in control_records.iter().zip(expected_types) {
+        sync_records::validate_sync_input(input)?;
+        let SyncRecordInput::Control(record) = input else {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Folder access grant records must be control records".to_owned(),
+            });
+        };
+        if record.record_type != expected_type
+            || record.folder_id.as_ref() != Some(folder_id)
+            || record.actor_npub != grant.issuer_npub
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Folder access grant control records do not match the signed mutation"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
