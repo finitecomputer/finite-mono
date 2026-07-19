@@ -359,9 +359,18 @@ pub(crate) struct AccessSummaryReport {
     pub(crate) vault_id: String,
     pub(crate) members: Vec<String>,
     pub(crate) admins: Vec<String>,
-    pub(crate) folders: Vec<FolderMetadataView>,
+    pub(crate) folders: Vec<FolderAccessSummary>,
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
     pub(crate) grant_count: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderAccessSummary {
+    #[serde(flatten)]
+    pub(crate) metadata: FolderMetadataView,
+    pub(crate) explicit_access_user_ids: Vec<String>,
+    pub(crate) effective_access_user_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

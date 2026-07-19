@@ -1324,7 +1324,7 @@ fn access<W: Write>(
         }
         Some("list") | Some("ls") => {
             let metadata = fetch_vault_metadata_for_command(env, args)?;
-            let report = access_summary_report(metadata);
+            let report = access_summary_report(metadata)?;
             if json {
                 write_json(output, &report)
             } else {
@@ -1450,15 +1450,30 @@ fn fetch_vault_metadata_for_command(
     fetch_vault_metadata(env, args, &vault_id)
 }
 
-fn access_summary_report(metadata: VaultMetadataView) -> AccessSummaryReport {
-    AccessSummaryReport {
+fn access_summary_report(metadata: VaultMetadataView) -> Result<AccessSummaryReport, CliError> {
+    let folders = metadata
+        .folders
+        .iter()
+        .map(|folder| {
+            Ok(FolderAccessSummary {
+                metadata: folder.clone(),
+                explicit_access_user_ids: folder.access_user_ids.clone(),
+                effective_access_user_ids: folder_required_recipients(
+                    &metadata,
+                    &folder.access,
+                    &folder.access_user_ids,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    Ok(AccessSummaryReport {
         vault_id: metadata.vault_id,
         members: metadata.members,
         admins: metadata.admins,
-        folders: metadata.folders,
+        folders,
         mounted_folders: metadata.mounted_folders,
         grant_count: metadata.grant_count,
-    }
+    })
 }
 
 fn write_access_summary_rows<W: Write>(
@@ -1473,7 +1488,18 @@ fn write_access_summary_rows<W: Write>(
         report.members.len(),
         report.grant_count
     )?;
-    write_folder_rows(output, &report.folders)?;
+    if report.folders.is_empty() {
+        writeln!(output, "no folders")?;
+    } else {
+        for folder in &report.folders {
+            let access_details = format!(
+                " explicitAccessUserIds=[{}] effectiveAccessUserIds=[{}]",
+                folder.explicit_access_user_ids.join(","),
+                folder.effective_access_user_ids.join(",")
+            );
+            write_folder_row(output, &folder.metadata, &access_details)?;
+        }
+    }
     write_mount_rows(output, &report.mounted_folders)
 }
 
@@ -1699,22 +1725,31 @@ fn write_folder_rows<W: Write>(
         return Ok(());
     }
     for folder in folders {
-        let setup = if folder.setup_incomplete {
-            "setup-incomplete"
-        } else {
-            "ready"
-        };
-        let source = if folder.shared_folder_source {
-            " shared-source"
-        } else {
-            ""
-        };
-        writeln!(
-            output,
-            "folder {} path={} access={} keyVersion={} state={}{}",
-            folder.id, folder.path, folder.access, folder.current_key_version, setup, source
-        )?;
+        write_folder_row(output, folder, "")?;
     }
+    Ok(())
+}
+
+fn write_folder_row<W: Write>(
+    output: &mut W,
+    folder: &FolderMetadataView,
+    details: &str,
+) -> Result<(), CliError> {
+    let setup = if folder.setup_incomplete {
+        "setup-incomplete"
+    } else {
+        "ready"
+    };
+    let source = if folder.shared_folder_source {
+        " shared-source"
+    } else {
+        ""
+    };
+    writeln!(
+        output,
+        "folder {} path={} access={} keyVersion={} state={}{}{}",
+        folder.id, folder.path, folder.access, folder.current_key_version, setup, source, details
+    )?;
     Ok(())
 }
 
@@ -3314,6 +3349,28 @@ mod tests {
                         "accessUserIds": [],
                         "currentKeyVersion": 2,
                         "setupIncomplete": false
+                    }, {
+                        "id": "leadership",
+                        "name": "Leadership",
+                        "role": "folder",
+                        "access": "admin_only",
+                        "parentFolderId": null,
+                        "path": "leadership",
+                        "sharedFolderSource": false,
+                        "accessUserIds": [],
+                        "currentKeyVersion": 1,
+                        "setupIncomplete": false
+                    }, {
+                        "id": "project",
+                        "name": "Project",
+                        "role": "folder",
+                        "access": "restricted",
+                        "parentFolderId": null,
+                        "path": "project",
+                        "sharedFolderSource": false,
+                        "accessUserIds": ["npub-member"],
+                        "currentKeyVersion": 1,
+                        "setupIncomplete": false
                     }],
                     "mountedFolders": [{
                         "mountId": "mount-1",
@@ -3335,6 +3392,57 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
             requests
+        });
+        (url, handle)
+    }
+
+    fn start_personal_access_listing_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, _) = read_http_request(&mut stream);
+            let body = serde_json::json!({
+                "vaultId": "personal-alice",
+                "kind": "personal",
+                "name": "Personal Brain",
+                "ownerUserId": "npub-owner",
+                "personalAgent": { "agentNpub": "npub-agent" },
+                "members": ["npub-owner", "npub-collaborator"],
+                "admins": [],
+                "folders": [{
+                    "id": "private",
+                    "name": "Private",
+                    "role": "folder",
+                    "access": "owner",
+                    "parentFolderId": null,
+                    "path": "private",
+                    "sharedFolderSource": false,
+                    "accessUserIds": [],
+                    "currentKeyVersion": 1,
+                    "setupIncomplete": false
+                }, {
+                    "id": "shared",
+                    "name": "Shared",
+                    "role": "folder",
+                    "access": "restricted",
+                    "parentFolderId": null,
+                    "path": "shared",
+                    "sharedFolderSource": false,
+                    "accessUserIds": ["npub-collaborator"],
+                    "currentKeyVersion": 1,
+                    "setupIncomplete": false
+                }],
+                "mountedFolders": [],
+                "grantCount": 5
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            request_line
         });
         (url, handle)
     }
@@ -5096,7 +5204,7 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let (server_url, server) = start_metadata_listing_server(3);
+        let (server_url, server) = start_metadata_listing_server(4);
 
         let mut output = Vec::new();
         run_with_env(
@@ -5155,7 +5263,46 @@ mod tests {
         assert_eq!(access["vaultId"], "acme");
         assert_eq!(access["grantCount"], 3);
         assert_eq!(access["folders"][0]["currentKeyVersion"], 2);
+        assert_eq!(access["folders"][0]["accessUserIds"], serde_json::json!([]));
+        assert_eq!(
+            access["folders"][0]["explicitAccessUserIds"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            access["folders"][0]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin", "npub-member"])
+        );
+        assert_eq!(
+            access["folders"][1]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin"])
+        );
+        assert_eq!(
+            access["folders"][2]["explicitAccessUserIds"],
+            serde_json::json!(["npub-member"])
+        );
+        assert_eq!(
+            access["folders"][2]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin", "npub-member"])
+        );
         assert_eq!(access["mountedFolders"][0]["sourceVaultId"], "partner");
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["access", "list", "--vault", "acme", "--server", &server_url],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let access_text = String::from_utf8(output).unwrap();
+        assert!(access_text.contains(
+            "folder general path=general access=all_members keyVersion=2 state=ready shared-source explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin,npub-member]"
+        ));
+        assert!(access_text.contains(
+            "folder leadership path=leadership access=admin_only keyVersion=1 state=ready explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin]"
+        ));
+        assert!(access_text.contains(
+            "folder project path=project access=restricted keyVersion=1 state=ready explicitAccessUserIds=[npub-member] effectiveAccessUserIds=[npub-admin,npub-member]"
+        ));
 
         let requests = server.join().unwrap();
         assert_eq!(
@@ -5163,7 +5310,51 @@ mod tests {
                 .iter()
                 .filter(|request| request.contains("/_admin/vaults/acme/metadata"))
                 .count(),
-            3
+            4
+        );
+    }
+
+    #[test]
+    fn access_list_reports_personal_owner_and_personal_agent_as_effective() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let (server_url, server) = start_personal_access_listing_server();
+        let mut output = Vec::new();
+
+        run_with_env(
+            [
+                "access",
+                "list",
+                "--vault",
+                "personal-alice",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let access: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            access["folders"][0]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-agent", "npub-owner"])
+        );
+        assert_eq!(
+            access["folders"][1]["explicitAccessUserIds"],
+            serde_json::json!(["npub-collaborator"])
+        );
+        assert_eq!(
+            access["folders"][1]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-agent", "npub-collaborator", "npub-owner"])
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            "GET /_admin/vaults/personal-alice/metadata HTTP/1.1"
         );
     }
 
