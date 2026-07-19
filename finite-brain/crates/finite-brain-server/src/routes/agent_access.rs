@@ -122,7 +122,7 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
     let _request: BootstrapPersonalVaultForAgentRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let agent_npub = UserId::new(agent_actor)?;
-    let principals = resolve_agent_bootstrap_principals(&state, &agent_npub)?;
+    let principals = resolve_account_agent_principals(&state, &agent_npub)?;
     let owner_key =
         NostrPublicKey::parse(principals.owner_npub.as_str()).map_err(nostr_identity_error)?;
     let vault_id = VaultId::new(format!("personal-{}", &owner_key.to_hex()[..16]))?;
@@ -132,14 +132,16 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
         principals.owner_npub.to_string(),
     )?;
     let created_at = server_timestamp(&state);
+    let identity_aliases = account_agent_identity_aliases(&principals, &created_at)?;
     {
         let mut store = state.store.lock().map_err(lock_error)?;
-        store.create_personal_vault_bootstrap(
+        store.create_personal_vault_bootstrap_with_identities(
             &output,
             &[],
             &principals.agent_npub,
             &principals.agent_npub,
             &created_at,
+            &identity_aliases,
         )?;
     }
 

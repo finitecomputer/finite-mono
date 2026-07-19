@@ -58,7 +58,7 @@ pub(crate) async fn create_vault_handler(
             let email_identity = request
                 .personal_agent_email
                 .as_deref()
-                .map(|email| resolve_managed_agent_email(&state, email))
+                .map(|email| resolve_identity_input(&state, email))
                 .transpose()?;
             let npub_identity = request
                 .personal_agent_npub
@@ -73,13 +73,32 @@ pub(crate) async fn create_vault_handler(
                     "personalAgentEmail and personalAgentNpub resolve to different Agent Principals",
                 ));
             }
-            let identity = email_identity.or(npub_identity);
-            if let Some(identity) = identity.as_ref() {
-                record_resolved_identity(&state, identity.clone())?;
+            let requested_agent = email_identity
+                .as_ref()
+                .or(npub_identity.as_ref())
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "Personal Vault creation requires a Personal Agent email or npub",
+                    )
+                })?;
+            let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
+            let principals = resolve_account_agent_principals(&state, &requested_agent_npub)?;
+            if principals.owner_npub != UserId::new(actor_npub.clone())? {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "selected Personal Agent does not belong to the signed owner's account",
+                ));
             }
-            identity
-                .map(|identity| UserId::new(identity.npub))
-                .transpose()?
+            if let Some(email) = request.personal_agent_email.as_deref()
+                && canonical_email(email)? != principals.managed_agent_email
+            {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "Finite Identity returned a mismatched Managed Agent email",
+                ));
+            }
+            Some(principals)
         }
     };
     let output = match request.kind {
@@ -113,13 +132,16 @@ pub(crate) async fn create_vault_handler(
 
     let stored = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        if let Some(agent_npub) = personal_agent.as_ref() {
-            store.create_personal_vault_bootstrap(
+        if let Some(principals) = personal_agent.as_ref() {
+            let created_at = server_timestamp(&state);
+            let identity_aliases = account_agent_identity_aliases(principals, &created_at)?;
+            store.create_personal_vault_bootstrap_with_identities(
                 &output,
                 &grants,
-                agent_npub,
+                &principals.agent_npub,
                 &UserId::new(actor_npub.clone())?,
-                &server_timestamp(&state),
+                &created_at,
+                &identity_aliases,
             )?;
         } else {
             store.create_vault_bootstrap(&output, &grants)?;

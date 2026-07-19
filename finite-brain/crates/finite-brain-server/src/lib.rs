@@ -150,9 +150,11 @@ struct AgentBootstrapAuthorities {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-struct AgentBootstrapPrincipals {
+struct AccountAgentPrincipals {
     owner_npub: UserId,
     agent_npub: UserId,
+    owner_email: String,
+    managed_agent_email: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -905,14 +907,14 @@ fn resolve_managed_agent_email(
     Ok(resolved)
 }
 
-fn resolve_agent_bootstrap_principals(
+fn resolve_account_agent_principals(
     state: &ServerState,
-    caller_npub: &UserId,
-) -> Result<AgentBootstrapPrincipals, ApiError> {
+    agent_npub: &UserId,
+) -> Result<AccountAgentPrincipals, ApiError> {
     let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "agent-first Brain bootstrap is not configured",
+            "Brain account-agent authority is not configured",
         )
     })?;
     let agent: IdentityAgentResolutionResponse = post_authority_json(
@@ -922,11 +924,11 @@ fn resolve_agent_bootstrap_principals(
         ),
         "X-Finite-Operator-Token",
         &authorities.identity_token,
-        &serde_json::json!({ "agentNpub": caller_npub.as_str() }),
+        &serde_json::json!({ "agentNpub": agent_npub.as_str() }),
         "Finite Identity Agent Principal resolution",
     )?;
     let resolved_agent = UserId::new(agent.agent_npub)?;
-    if resolved_agent != *caller_npub {
+    if resolved_agent != *agent_npub {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "Finite Identity returned a mismatched Agent Principal",
@@ -971,51 +973,58 @@ fn resolve_agent_bootstrap_principals(
         ));
     }
     let owner_npub = UserId::new(owner.user_npub)?;
-    if owner_npub == *caller_npub {
+    if owner_npub == *agent_npub {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "User and Agent Principals must be distinct",
         ));
     }
 
-    let agent_key = NostrPublicKey::parse(caller_npub.as_str()).map_err(nostr_identity_error)?;
-    let now = server_timestamp(state);
-    let alias = IdentityAlias {
-        npub: caller_npub.clone(),
-        hex_public_key: agent_key.to_hex(),
-        preferred_nip05: Some(managed_agent_email.clone()),
-        nip05_verified_at: Some(now.clone()),
-        nip05_relays: Vec::new(),
-        updated_at: now,
-    };
-    state
-        .store
-        .lock()
-        .map_err(lock_error)?
-        .record_identity_alias(&alias)?;
+    let owner_email = account
+        .verified_email
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Finite Core account-agent association has no verified owner email",
+            )
+        })
+        .and_then(canonical_email)?;
 
-    if let Some(owner_email) = account.verified_email.as_deref() {
-        let owner_email = canonical_email(owner_email)?;
-        let owner_key = NostrPublicKey::parse(owner_npub.as_str()).map_err(nostr_identity_error)?;
-        let owner_alias = IdentityAlias {
-            npub: owner_npub.clone(),
-            hex_public_key: owner_key.to_hex(),
-            preferred_nip05: Some(owner_email),
-            nip05_verified_at: Some(server_timestamp(state)),
-            nip05_relays: Vec::new(),
-            updated_at: server_timestamp(state),
-        };
-        state
-            .store
-            .lock()
-            .map_err(lock_error)?
-            .record_identity_alias(&owner_alias)?;
-    }
-
-    Ok(AgentBootstrapPrincipals {
+    Ok(AccountAgentPrincipals {
         owner_npub,
-        agent_npub: caller_npub.clone(),
+        agent_npub: agent_npub.clone(),
+        owner_email,
+        managed_agent_email,
     })
+}
+
+fn account_agent_identity_aliases(
+    principals: &AccountAgentPrincipals,
+    updated_at: &str,
+) -> Result<[IdentityAlias; 2], ApiError> {
+    let owner_key =
+        NostrPublicKey::parse(principals.owner_npub.as_str()).map_err(nostr_identity_error)?;
+    let agent_key =
+        NostrPublicKey::parse(principals.agent_npub.as_str()).map_err(nostr_identity_error)?;
+    Ok([
+        IdentityAlias {
+            npub: principals.owner_npub.clone(),
+            hex_public_key: owner_key.to_hex(),
+            preferred_nip05: Some(principals.owner_email.clone()),
+            nip05_verified_at: Some(updated_at.to_owned()),
+            nip05_relays: Vec::new(),
+            updated_at: updated_at.to_owned(),
+        },
+        IdentityAlias {
+            npub: principals.agent_npub.clone(),
+            hex_public_key: agent_key.to_hex(),
+            preferred_nip05: Some(principals.managed_agent_email.clone()),
+            nip05_verified_at: Some(updated_at.to_owned()),
+            nip05_relays: Vec::new(),
+            updated_at: updated_at.to_owned(),
+        },
+    ])
 }
 
 fn post_authority_json<T: for<'de> Deserialize<'de>>(
@@ -3358,12 +3367,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_creates_empty_personal_vault_with_one_personal_agent_atomically() {
+    async fn organization_vault_creation_rejects_personal_agent_fields() {
+        let admin_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let state = test_state();
+        let body = serde_json::json!({
+            "vaultId": "acme",
+            "kind": "organization",
+            "name": "Acme",
+            "personalAgentNpub": npub(&agent_keys),
+        })
+        .to_string();
+
+        let response = post_vault(
+            router_with_state(state.clone()),
+            &admin_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "Personal Agent identity is only valid for a Personal Vault",
+        )
+        .await;
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_visible_vaults(&UserId::new(npub(&admin_keys)).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_creates_empty_personal_vault_by_verified_agent_npub_with_email_aliases() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
-        let replacement_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
-        let router = test_router();
+        let owner_email = "owner@finite.computer";
+        let agent_email = "cheater@finite.vip";
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": agent_email,
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": owner_npub,
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            serde_json::json!({
+                "workosUserId": "user_workos_owner",
+                "managedAgentEmail": agent_email,
+                "verifiedEmail": owner_email,
+                "status": "active",
+            }),
+        )]);
+        let router = router_with_state(test_state().with_agent_bootstrap_authorities(
+            core_url,
+            "core-token",
+            identity_url,
+            "identity-token",
+        ));
         let body = serde_json::json!({
             "vaultId": "personal",
             "kind": "personal",
@@ -3385,10 +3467,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::OK);
         let created: VaultMetadataResponse = read_json(created).await;
         assert_eq!(created.kind, VaultKind::Personal);
-        assert_eq!(
-            created.owner_user_id.as_deref(),
-            Some(npub(&owner_keys).as_str())
-        );
+        assert_eq!(created.owner_user_id.as_deref(), Some(owner_npub.as_str()));
         assert!(created.folders.is_empty());
         assert_eq!(created.grant_count, 0);
         assert_eq!(
@@ -3413,53 +3492,121 @@ mod tests {
         assert_eq!(agent_vaults.vaults.len(), 1);
         assert_eq!(agent_vaults.vaults[0].vault_id, "personal");
         assert_eq!(agent_vaults.vaults[0].role, "personal_agent");
+        assert!(
+            created
+                .identities
+                .iter()
+                .any(|identity| { identity.npub == owner_npub && identity.display == owner_email })
+        );
+        assert!(
+            created
+                .identities
+                .iter()
+                .any(|identity| { identity.npub == agent_npub && identity.display == agent_email })
+        );
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
 
-        let duplicate = post_vault(
-            router.clone(),
-            &owner_keys,
-            &body,
-            TEST_NOW + 2,
-            None,
-            None,
-            None,
+    #[tokio::test]
+    async fn owner_cannot_create_a_personal_vault_without_selecting_a_personal_agent() {
+        let owner_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let body = create_vault_body("personal", "personal");
+
+        let response = post_vault(router, &owner_keys, &body, TEST_NOW, None, None, None).await;
+
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "Personal Vault creation requires a Personal Agent email or npub",
         )
         .await;
-        assert_eq!(duplicate.status(), StatusCode::OK);
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_visible_vaults(&UserId::new(npub(&owner_keys)).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
 
-        let conflicting_body = serde_json::json!({
+    #[tokio::test]
+    async fn owner_cannot_select_an_agent_from_another_workos_account() {
+        let owner_keys = Keys::generate();
+        let other_owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "other-agent@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_other",
+                    "userNpub": npub(&other_owner_keys),
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            serde_json::json!({
+                "workosUserId": "user_workos_other",
+                "managedAgentEmail": "other-agent@finite.vip",
+                "verifiedEmail": "other@finite.computer",
+                "status": "active",
+            }),
+        )]);
+        let state = test_state().with_agent_bootstrap_authorities(
+            core_url,
+            "core-token",
+            identity_url,
+            "identity-token",
+        );
+        let router = router_with_state(state.clone());
+        let body = serde_json::json!({
             "vaultId": "personal",
             "kind": "personal",
             "name": "Personal Brain",
-            "personalAgentNpub": npub(&replacement_keys),
+            "personalAgentNpub": agent_npub,
         })
         .to_string();
-        let conflict = post_vault(
-            router.clone(),
-            &owner_keys,
-            &conflicting_body,
-            TEST_NOW + 3,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_error(
-            conflict,
-            StatusCode::BAD_REQUEST,
-            "personal vault already has a different personal agent",
-        )
-        .await;
 
-        let metadata = get_metadata(router, &owner_keys, "personal", TEST_NOW + 4).await;
-        assert_eq!(metadata.status(), StatusCode::OK);
-        let metadata: VaultMetadataResponse = read_json(metadata).await;
-        assert_eq!(
-            metadata
-                .personal_agent
-                .as_ref()
-                .map(|relationship| relationship.agent_npub.as_str()),
-            Some(agent_npub.as_str())
+        let response = post_vault(router, &owner_keys, &body, TEST_NOW, None, None, None).await;
+
+        assert_error(
+            response,
+            StatusCode::FORBIDDEN,
+            "selected Personal Agent does not belong to the signed owner's account",
+        )
+        .await;
+        let store = state.store.lock().unwrap();
+        assert!(
+            store
+                .list_visible_vaults(&UserId::new(npub(&owner_keys)).unwrap())
+                .unwrap()
+                .is_empty()
         );
+        assert!(
+            store
+                .load_identity_aliases(&[
+                    UserId::new(npub(&owner_keys)).unwrap(),
+                    UserId::new(agent_npub).unwrap(),
+                ])
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
     }
 
     #[tokio::test]
@@ -3468,28 +3615,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
-        let router = test_router();
-        let create_vault = serde_json::json!({
-            "vaultId": "personal",
-            "kind": "personal",
-            "name": "Personal Brain",
-            "personalAgentNpub": agent_npub,
-        })
-        .to_string();
-        assert_eq!(
-            post_vault(
-                router.clone(),
-                &owner_keys,
-                &create_vault,
-                TEST_NOW,
-                None,
-                None,
-                None,
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
+        let router = personal_test_router(&owner_keys, &agent_keys);
 
         for (actor, folder_id, name, now) in [
             (&owner_keys, "owner-notes", "Owner notes", TEST_NOW + 1),
@@ -3571,28 +3697,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
-        let router = test_router();
-        let create_vault = serde_json::json!({
-            "vaultId": "personal",
-            "kind": "personal",
-            "name": "Personal Brain",
-            "personalAgentNpub": agent_npub,
-        })
-        .to_string();
-        assert_eq!(
-            post_vault(
-                router.clone(),
-                &owner_keys,
-                &create_vault,
-                TEST_NOW,
-                None,
-                None,
-                None,
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
+        let router = personal_test_router(&owner_keys, &agent_keys);
 
         let create_folder_body = serde_json::json!({
             "folderId": "agent-notes",
@@ -3808,7 +3913,7 @@ mod tests {
             ),
             ("/api/core/v1/brain/agent-account", account_resolution),
         ]);
-        let state = test_state()
+        let state = personal_test_state(&owner_keys, &old_agent_keys)
             .with_nip05_fixture(identifier.well_known_request().url, document)
             .with_agent_bootstrap_authorities(
                 core_url,
@@ -3817,27 +3922,6 @@ mod tests {
                 "identity-token",
             );
         let router = router_with_state(state.clone());
-        let create_vault = serde_json::json!({
-            "vaultId": "personal",
-            "kind": "personal",
-            "name": "Personal Brain",
-            "personalAgentNpub": old_agent_npub,
-        })
-        .to_string();
-        assert_eq!(
-            post_vault(
-                router.clone(),
-                &owner_keys,
-                &create_vault,
-                TEST_NOW,
-                None,
-                None,
-                None,
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
 
         let create_folder = serde_json::json!({
             "folderId": "personal-notes",
@@ -4098,22 +4182,23 @@ mod tests {
         let account_resolution = serde_json::json!({
             "workosUserId": "user_workos_owner",
             "managedAgentEmail": "cheater@finite.vip",
+            "verifiedEmail": "owner@finite.computer",
             "status": "active",
         });
         let (identity_url, identity_server) = spawn_json_authority(vec![
-            (
-                "/api/v1/operator/brain/agent-resolution",
-                agent_resolution.clone(),
-            ),
             ("/api/v1/operator/brain/agent-resolution", agent_resolution),
-        ]);
-        let (core_url, core_server) = spawn_json_authority(vec![
             (
-                "/api/core/v1/brain/agent-account",
-                account_resolution.clone(),
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": npub(&owner_keys),
+                }),
             ),
-            ("/api/core/v1/brain/agent-account", account_resolution),
         ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            account_resolution,
+        )]);
         let state = test_state()
             .with_nip05_fixture(identifier.well_known_request().url, document)
             .with_agent_bootstrap_authorities(
@@ -4203,6 +4288,10 @@ mod tests {
         assert!(created.identities.iter().any(|identity| {
             identity.npub == agent_npub && identity.nip05.as_deref() == Some("cheater@finite.vip")
         }));
+        assert!(created.identities.iter().any(|identity| {
+            identity.npub == npub(&owner_keys)
+                && identity.nip05.as_deref() == Some("owner@finite.computer")
+        }));
 
         let agent_vaults = authed_request(
             router,
@@ -4223,54 +4312,67 @@ mod tests {
     #[tokio::test]
     async fn same_owner_cannot_create_multiple_personal_vaults() {
         let keys = Keys::generate();
-        let router = test_router();
-        let first = post_vault(
-            router.clone(),
-            &keys,
-            &create_vault_body("personal-a", "personal"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        let second = post_vault(
-            router,
-            &keys,
-            &create_vault_body("personal-b", "personal"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
+        let agent_keys = Keys::generate();
+        let agent_npub = npub(&agent_keys);
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "agent@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": npub(&keys),
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            serde_json::json!({
+                "workosUserId": "user_workos_owner",
+                "managedAgentEmail": "agent@finite.vip",
+                "verifiedEmail": "owner@finite.computer",
+                "status": "active",
+            }),
+        )]);
+        let router = router_with_state(
+            personal_test_state(&keys, &agent_keys).with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            ),
+        );
+        let body = serde_json::json!({
+            "vaultId": "personal-b",
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentNpub": agent_npub,
+        })
+        .to_string();
+        let second = post_vault(router, &keys, &body, TEST_NOW, None, None, None).await;
 
-        assert_eq!(first.status(), StatusCode::OK);
         assert_error(
             second,
             StatusCode::BAD_REQUEST,
             "user already has a personal vault",
         )
         .await;
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
     }
 
     #[tokio::test]
     async fn visible_vaults_lists_personal_and_member_organizations() {
         let keys = Keys::generate();
+        let agent_keys = Keys::generate();
         let invited_keys = Keys::generate();
         let invited_npub = npub(&invited_keys);
-        let router = test_router();
-        let personal = post_vault(
-            router.clone(),
-            &keys,
-            &create_vault_body("personal", "personal"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(personal.status(), StatusCode::OK);
+        let router = personal_test_router(&keys, &agent_keys);
 
         let org = post_vault(
             router.clone(),
@@ -4508,22 +4610,10 @@ mod tests {
     #[tokio::test]
     async fn personal_vault_owner_can_create_owner_folder() {
         let keys = Keys::generate();
+        let agent_keys = Keys::generate();
         let owner_npub = npub(&keys);
-        let router = test_router();
-        let create = post_vault(
-            router.clone(),
-            &keys,
-            &create_vault_body("personal", "personal"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(create.status(), StatusCode::OK);
-        let metadata: VaultMetadataResponse = read_json(create).await;
-        assert!(metadata.folders.is_empty());
-        assert_eq!(metadata.grant_count, 0);
+        let agent_npub = npub(&agent_keys);
+        let router = personal_test_router(&keys, &agent_keys);
 
         let body = serde_json::json!({
             "folderId": "notes",
@@ -4535,7 +4625,8 @@ mod tests {
             "sharedFolderSource": false,
             "accessUserIds": [],
             "grants": [
-                folder_key_grant_value("grant-notes-owner-v1", 1, owner_npub.as_str())
+                folder_key_grant_value("grant-notes-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-notes-agent-v1", 1, agent_npub.as_str())
             ],
             "accessChangeEvent": admin_event(
                 &keys,
@@ -4566,22 +4657,12 @@ mod tests {
     #[tokio::test]
     async fn personal_vault_member_sees_and_writes_only_their_restricted_folder() {
         let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
         let member_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
         let member_npub = npub(&member_keys);
-        let router = test_router();
-
-        let create = post_vault(
-            router.clone(),
-            &owner_keys,
-            &create_vault_body("personal", "personal"),
-            TEST_NOW,
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(create.status(), StatusCode::OK);
+        let router = personal_test_router(&owner_keys, &agent_keys);
 
         let all_members_folder_body = serde_json::json!({
             "folderId": "implicit-personal-share",
@@ -4633,6 +4714,7 @@ mod tests {
             "accessUserIds": [member_npub],
             "grants": [
                 folder_key_grant_value("grant-member-workspace-owner-v1", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-member-workspace-agent-v1", 1, agent_npub.as_str()),
                 folder_key_grant_value("grant-member-workspace-member-v1", 1, member_npub.as_str())
             ],
             "accessChangeEvent": admin_event(
@@ -4984,7 +5066,7 @@ mod tests {
         assert_error(
             unconfigured,
             StatusCode::SERVICE_UNAVAILABLE,
-            "agent-first Brain bootstrap is not configured",
+            "Brain account-agent authority is not configured",
         )
         .await;
     }
@@ -8265,6 +8347,29 @@ mod tests {
     fn test_state() -> ServerState {
         let store = BrainStore::open_in_memory().unwrap();
         ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn personal_test_state(owner_keys: &Keys, agent_keys: &Keys) -> ServerState {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let owner_npub = UserId::new(npub(owner_keys)).unwrap();
+        let agent_npub = UserId::new(npub(agent_keys)).unwrap();
+        let output =
+            bootstrap_personal_vault("personal", "Personal Brain", owner_npub.as_str().to_owned())
+                .unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &[],
+                &agent_npub,
+                &owner_npub,
+                &test_rfc3339(),
+            )
+            .unwrap();
+        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+    }
+
+    fn personal_test_router(owner_keys: &Keys, agent_keys: &Keys) -> Router {
+        router_with_state(personal_test_state(owner_keys, agent_keys))
     }
 
     fn spawn_json_authority(

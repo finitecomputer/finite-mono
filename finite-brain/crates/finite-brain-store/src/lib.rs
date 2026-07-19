@@ -840,58 +840,8 @@ impl BrainStore {
 
     /// Upsert verified display metadata for a canonical Nostr identity.
     pub fn record_identity_alias(&mut self, alias: &IdentityAlias) -> Result<(), StoreError> {
-        let relays_json = serde_json::to_string(&alias.nip05_relays).map_err(|error| {
-            StoreError::InvalidRecord {
-                reason: format!("identity alias relays did not serialize: {error}"),
-            }
-        })?;
         let tx = self.conn.transaction()?;
-        if let Some(nip05) = &alias.preferred_nip05 {
-            tx.execute(
-                "DELETE FROM identity_aliases WHERE preferred_nip05 = ?1 AND npub <> ?2",
-                params![nip05, alias.npub.as_str()],
-            )?;
-            tx.execute(
-                r#"
-                INSERT INTO identity_aliases (
-                    npub, hex_public_key, preferred_nip05, nip05_verified_at,
-                    nip05_relays_json, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(npub) DO UPDATE SET
-                    hex_public_key = excluded.hex_public_key,
-                    preferred_nip05 = excluded.preferred_nip05,
-                    nip05_verified_at = excluded.nip05_verified_at,
-                    nip05_relays_json = excluded.nip05_relays_json,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    alias.npub.as_str(),
-                    alias.hex_public_key,
-                    nip05,
-                    alias.nip05_verified_at,
-                    relays_json,
-                    alias.updated_at,
-                ],
-            )?;
-        } else {
-            tx.execute(
-                r#"
-                INSERT INTO identity_aliases (
-                    npub, hex_public_key, preferred_nip05, nip05_verified_at,
-                    nip05_relays_json, updated_at
-                ) VALUES (?1, ?2, NULL, NULL, ?3, ?4)
-                ON CONFLICT(npub) DO UPDATE SET
-                    hex_public_key = excluded.hex_public_key,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    alias.npub.as_str(),
-                    alias.hex_public_key,
-                    relays_json,
-                    alias.updated_at,
-                ],
-            )?;
-        }
+        upsert_identity_alias(&tx, alias)?;
         tx.commit()?;
         Ok(())
     }
@@ -1390,6 +1340,60 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn upsert_identity_alias(tx: &Transaction<'_>, alias: &IdentityAlias) -> Result<(), StoreError> {
+    let relays_json =
+        serde_json::to_string(&alias.nip05_relays).map_err(|error| StoreError::InvalidRecord {
+            reason: format!("identity alias relays did not serialize: {error}"),
+        })?;
+    if let Some(nip05) = &alias.preferred_nip05 {
+        tx.execute(
+            "DELETE FROM identity_aliases WHERE preferred_nip05 = ?1 AND npub <> ?2",
+            params![nip05, alias.npub.as_str()],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO identity_aliases (
+                npub, hex_public_key, preferred_nip05, nip05_verified_at,
+                nip05_relays_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(npub) DO UPDATE SET
+                hex_public_key = excluded.hex_public_key,
+                preferred_nip05 = excluded.preferred_nip05,
+                nip05_verified_at = excluded.nip05_verified_at,
+                nip05_relays_json = excluded.nip05_relays_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                alias.npub.as_str(),
+                alias.hex_public_key,
+                nip05,
+                alias.nip05_verified_at,
+                relays_json,
+                alias.updated_at,
+            ],
+        )?;
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO identity_aliases (
+                npub, hex_public_key, preferred_nip05, nip05_verified_at,
+                nip05_relays_json, updated_at
+            ) VALUES (?1, ?2, NULL, NULL, ?3, ?4)
+            ON CONFLICT(npub) DO UPDATE SET
+                hex_public_key = excluded.hex_public_key,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                alias.npub.as_str(),
+                alias.hex_public_key,
+                relays_json,
+                alias.updated_at,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 impl SyncRecordType {
@@ -2869,10 +2873,37 @@ mod tests {
         let db = temp.path().join("vault-sync.sqlite3");
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            store.create_vault_bootstrap(&output, &grants).unwrap();
+            store
+                .create_personal_vault_bootstrap_with_identities(
+                    &output,
+                    &grants,
+                    &UserId::new("npub-agent").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-06-23T00:00:00Z",
+                    &aliases,
+                )
+                .unwrap();
         }
 
         let store = BrainStore::open(&db).unwrap();
@@ -2886,10 +2917,100 @@ mod tests {
             Some(UserId::new("npub-owner").unwrap())
         );
         assert!(stored.vault.folders.is_empty());
+        assert_eq!(
+            stored.personal_agent.unwrap().agent_npub,
+            UserId::new("npub-agent").unwrap()
+        );
         assert!(stored.folder_access.is_empty());
         assert!(stored.grants.is_empty());
         assert_same_grants(&stored.grants, &grants);
         assert!(stored.setup_incomplete_folder_ids.is_empty());
+        assert_eq!(
+            store
+                .load_identity_aliases(&[
+                    UserId::new("npub-owner").unwrap(),
+                    UserId::new("npub-agent").unwrap(),
+                ])
+                .unwrap(),
+            aliases
+        );
+    }
+
+    #[test]
+    fn ordinary_vault_bootstrap_cannot_create_a_vacant_personal_agent_role() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+
+        assert_eq!(
+            store.create_vault_bootstrap(&output, &[]).unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "Personal Vault bootstrap requires a Personal Agent".to_owned(),
+            }
+        );
+        assert!(
+            matches!(
+                store.load_vault(&output.vault.id),
+                Err(StoreError::MissingVault { .. })
+            ),
+            "a rejected vacant bootstrap must not create a Vault"
+        );
+    }
+
+    #[test]
+    fn personal_bootstrap_rolls_back_vault_and_agent_when_identity_alias_insert_fails() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .record_identity_alias(&IdentityAlias {
+                npub: UserId::new("npub-existing").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("existing@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
+
+        assert!(
+            store
+                .create_personal_vault_bootstrap_with_identities(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-06-23T00:00:00Z",
+                    &aliases,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            store.load_vault(&output.vault.id),
+            Err(StoreError::MissingVault { .. })
+        ));
+        assert!(
+            store
+                .load_personal_agent(&output.vault.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3195,7 +3316,15 @@ mod tests {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let vault_id = output.vault.id.clone();
-        store.create_vault_bootstrap(&output, &[]).unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &[],
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let folder = Folder {
             parent_folder_id: None,
@@ -3207,13 +3336,22 @@ mod tests {
                 &vault_id,
                 &folder,
                 &BTreeSet::new(),
-                &[grant(
-                    "grant-personal-owner",
-                    "strategy",
-                    1,
-                    "npub-owner",
-                    "npub-owner",
-                )],
+                &[
+                    grant(
+                        "grant-personal-owner",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-owner",
+                    ),
+                    grant(
+                        "grant-personal-agent",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
+                ],
             )
             .unwrap();
         let member = UserId::new("npub-member").unwrap();
@@ -4021,8 +4159,14 @@ mod tests {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let owner = UserId::new("npub-owner").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
         let vault_id = output.vault.id.clone();
-        store.create_vault_bootstrap(&output, &[]).unwrap();
+        store
+            .create_personal_vault_bootstrap(&output, &[], &agent, &owner, "2026-06-23T00:00:00Z")
+            .unwrap();
+        store
+            .replace_personal_agent(&vault_id, &owner, None, &[], "2026-06-23T00:01:00Z")
+            .unwrap();
         let folder = Folder {
             parent_folder_id: None,
             path: SafeRelativePath::new("folder_path", "Private").unwrap(),
@@ -5553,7 +5697,15 @@ mod tests {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
-        store.create_vault_bootstrap(&output, &grants).unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &grants,
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
         let vault_id = VaultId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
 
@@ -5570,7 +5722,15 @@ mod tests {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
-        store.create_vault_bootstrap(&output, &grants).unwrap();
+        store
+            .create_personal_vault_bootstrap(
+                &output,
+                &grants,
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
         let vault_id = VaultId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
         let folder = Folder {
@@ -5598,6 +5758,13 @@ mod tests {
                         "npub-owner",
                         member.as_str(),
                     ),
+                    grant(
+                        "grant-personal-strategy-agent",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
                 ],
             )
             .unwrap();
@@ -5608,13 +5775,22 @@ mod tests {
                 &folder.id,
                 &member,
                 2,
-                &[grant(
-                    "grant-personal-strategy-owner-v2",
-                    "strategy",
-                    2,
-                    "npub-owner",
-                    "npub-owner",
-                )],
+                &[
+                    grant(
+                        "grant-personal-strategy-owner-v2",
+                        "strategy",
+                        2,
+                        "npub-owner",
+                        "npub-owner",
+                    ),
+                    grant(
+                        "grant-personal-strategy-agent-v2",
+                        "strategy",
+                        2,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
+                ],
                 &[],
                 "2026-07-13T00:00:00.000Z",
             )

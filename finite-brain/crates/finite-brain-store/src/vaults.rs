@@ -9,6 +9,26 @@ impl BrainStore {
         created_by_npub: &UserId,
         created_at: &str,
     ) -> Result<(), StoreError> {
+        self.create_personal_vault_bootstrap_with_identities(
+            output,
+            grants,
+            agent_npub,
+            created_by_npub,
+            created_at,
+            &[],
+        )
+    }
+
+    /// Atomically create a Personal Vault, its Personal Agent, and both verified display aliases.
+    pub fn create_personal_vault_bootstrap_with_identities(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        agent_npub: &UserId,
+        created_by_npub: &UserId,
+        created_at: &str,
+        identity_aliases: &[IdentityAlias],
+    ) -> Result<(), StoreError> {
         validate_bootstrap_output(output)?;
         validate_required_grants(&output.vault, &output.required_key_grants, grants)?;
         if output.vault.kind != VaultKind::Personal {
@@ -33,6 +53,24 @@ impl BrainStore {
             return Err(StoreError::BrokenInvariant {
                 reason: "Personal Agent bootstrap actor must be the owner or agent".to_owned(),
             });
+        }
+        if !identity_aliases.is_empty() {
+            let alias_npubs = identity_aliases
+                .iter()
+                .map(|alias| alias.npub.clone())
+                .collect::<BTreeSet<_>>();
+            let alias_emails = identity_aliases
+                .iter()
+                .filter_map(|alias| alias.preferred_nip05.clone())
+                .collect::<BTreeSet<_>>();
+            if identity_aliases.len() != 2
+                || alias_npubs != BTreeSet::from([owner_npub.clone(), agent_npub.clone()])
+                || alias_emails.len() != 2
+            {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "Personal Agent bootstrap identities must name the owner and agent with verified emails".to_owned(),
+                });
+            }
         }
 
         let existing_vault_id = self
@@ -70,6 +108,9 @@ impl BrainStore {
         }
         for grant in grants {
             insert_grant(&tx, &output.vault.id, grant)?;
+        }
+        for alias in identity_aliases {
+            upsert_identity_alias(&tx, alias)?;
         }
         tx.execute(
             r#"
@@ -122,10 +163,10 @@ impl BrainStore {
         }
         validate_bootstrap_output(output)?;
         validate_required_grants(&output.vault, &output.required_key_grants, grants)?;
-        if let (VaultKind::Personal, Some(owner)) =
-            (output.vault.kind, output.vault.owner_user_id.as_ref())
-        {
-            self.ensure_personal_vault_available(owner)?;
+        if output.vault.kind == VaultKind::Personal {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Vault bootstrap requires a Personal Agent".to_owned(),
+            });
         }
 
         let tx = self.conn.transaction()?;
@@ -318,20 +359,6 @@ impl BrainStore {
             "DELETE FROM vault_members WHERE vault_id = ?1 AND user_id = ?2",
             params![vault_id.as_str(), user_id.as_str()],
         )?;
-        Ok(())
-    }
-
-    fn ensure_personal_vault_available(&self, owner: &UserId) -> Result<(), StoreError> {
-        let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM vaults WHERE kind = 'personal' AND owner_user_id = ?1)",
-            params![owner.as_str()],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if exists {
-            return Err(StoreError::BrokenInvariant {
-                reason: "user already has a personal vault".to_owned(),
-            });
-        }
         Ok(())
     }
 }
