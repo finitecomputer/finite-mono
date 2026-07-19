@@ -9,7 +9,8 @@
 - Feature branch: `codex/brain-personal-agent`
 - Human owner: Austin
 - Started: 2026-07-19
-- Current status: #128 implemented and verified; #129 implementation in progress
+- Current status: #128 and #129 implemented and verified; #130 implementation
+  in progress
 - Skill setup status: present (`finite-brain/AGENTS.md` and
   `finite-brain/docs/agents/`)
 
@@ -29,9 +30,9 @@ Keep the work on the existing Brain mega-branch and PR #121.
 - Prototype source branch, if any: none
 - Spec issue: #127 — https://github.com/finitecomputer/finite-mono/issues/127
 - Tickets: #128, #129, #130
-- Ticket sessions: #128 recorded; #129 and #130 pending
-- Agent briefs: #128 recorded in its issue session; #129 and #130 pending
-- Review packets: #128 recorded; #129 and #130 pending
+- Ticket sessions: #128 and #129 recorded; #130 pending
+- Agent briefs: #128 and #129 recorded in their issue sessions; #130 pending
+- Review packets: #128 and #129 recorded; #130 pending
 - Local CodeRabbit report: pending
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/121
 
@@ -50,7 +51,7 @@ Keep the work on the existing Brain mega-branch and PR #121.
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
 | #128 | AFK | complete | direct worker review passed | none | yes |
-| #129 | AFK | ready | pending | idempotent redundant grant result | pending |
+| #129 | AFK | complete | direct worker review passed | none | yes |
 | #130 | AFK | ready | pending | concurrent-change actor evidence and skill behavior | pending |
 
 ## Parked HITL Slices
@@ -64,6 +65,7 @@ Keep the work on the existing Brain mega-branch and PR #121.
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
 | #128 | `fc6dad8` | `/root/ticket_128_effective_access` | `b8dcb7ac` | standards pass; spec pass | focused public CLI tests (2); full `finite-brain-cli` tests (95); fmt; clippy; diff check |
+| #129 | `5435f62` | `/root/ticket_129_redundant_grant` | `ff6b5261` | standards pass; spec pass | CLI (97), server (56), and store (46) tests; fmt; clippy; diff check |
 
 ## Open Questions
 
