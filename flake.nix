@@ -138,8 +138,8 @@
         ];
       };
 
-      # The qualified blank-slate host now carries the drained Standard Runner
-      # candidate. Its timer remains disabled until the one-Agent handoff.
+      # The qualified blank-slate host carries the Standard Runner accepting
+      # new creation with its host-configured hard sandbox limit.
       nixosConfigurations.finite-lat-3 = lat3;
     };
 }
