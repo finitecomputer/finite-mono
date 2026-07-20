@@ -10,8 +10,9 @@ unchanged), DynamicUser with SQLite at the real path
 `/var/lib/private/finite-chat/data/server.sqlite3`, fronted by the one host
 Caddy (`chat.finite.computer` → 127.0.0.1:8788, Let's Encrypt cert via ACME
 HTTP-01). Config: `infra/nixos/modules/finitechat-server.nix`; topology:
-`infra/nixos/README.md`; box rebuild:
-[lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
+`infra/nixos/README.md`. The
+[2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) supplies historical
+facts only and is not current rebuild/recovery authority.
 
 The migration from clawland is **DONE**: `finitechat-server` on clawland is
 `systemctl disable`d (single-writer doctrine below), and the SQLite was
@@ -169,11 +170,13 @@ matching the expected finite-chat commit, and `source_dirty: false`.
 deploy the previous known-good rev's exact closure from lat2), then verify
 `/run/current-system` against the selected rollback path and re-run the gate.
 Data rollback (SQLite) comes from the coordinated Hosted Web Chat recovery
-set. FLAG: its
-rsync.net repository is configured in Nix, but credentials, deployment, first
-archive, and empty-target proof are still outstanding on single-disk lat1.
-Follow [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md); configuration
-alone is not a backup.
+set. FLAG: the rsync.net repository has a verified first archive and its
+offsite-health jobs passed the 2026-07-18 live inventory, but the complete
+empty-target proof is still outstanding. Snapshot creation is deploy/manual-
+triggered after the disruptive 15-minute timer was removed, so the accepted
+RPO is also unproved. Agent Runtime `/data` is outside this Recovery Set. Follow
+[hosted-web-chat-recovery.md](hosted-web-chat-recovery.md); a green archive
+alone is not a proved restore.
 
 ## Single-writer doctrine (Paul, 2026-07-09 — applies to every chat move, forever)
 
@@ -208,6 +211,7 @@ then flip `chat.finite.computer` DNS (keep the TTL low ahead of the move).
 Chat had no users at the 2026-07-09 move, so the outage window was free —
 treat that as rehearsal, not license to skip the discipline when it is not.
 
-The `lat1-nixos-reinstall.md` "Data restore → Chat" note is the compact
-checklist for standing chat up on a freshly built lat1; a full host-to-host
-move should get its own dated runbook at the time it is scheduled.
+The historical `lat1-nixos-reinstall.md` “Data restore → Chat” note records the
+2026-07-09 path mapping only; it is not a current rebuild checklist. A future
+host move follows the finite-lat recovery plan and gets its own accepted,
+rehearsed cutover record before any writer moves.

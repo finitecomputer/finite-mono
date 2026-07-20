@@ -2,6 +2,15 @@
 
 Status: ACTIVE
 
+> **Disposition 2026-07-20:** the July 13 first-cohort/customer-mode authority
+> remains historical evidence; it does not authorize additional paid or Launch
+> Code Agent creation under the newer
+> [`finite-lat` capacity/redundancy plan](finite-lat-capacity-and-redundancy.md).
+> Existing subscriptions and Agents remain supported. Reopening the scarce
+> creation path is Phase 11 of that plan and needs its own authorization. This
+> documentation disposition does not claim the current Core/UI mode was
+> changed.
+
 Sequence note: Paul requested this production plan on 2026-07-13 after gaining
 access to the official Finite Supply Stripe organization, then explicitly
 activated it later that day with the direction to rebase onto `main`, build,

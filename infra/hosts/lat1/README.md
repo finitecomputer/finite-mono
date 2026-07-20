@@ -1,8 +1,9 @@
 # finite-lat-1 (lat1)
 
 > **SUPERSEDED 2026-07-09 — lat1 is now NixOS.** Its live config is
-> **`infra/nixos/`** (host `finite-lat-1`); reinstall/recovery procedure is
-> `infra/runbooks/lat1-nixos-reinstall.md`. The k8s manifests, systemd units,
+> **`infra/nixos/`** (host `finite-lat-1`). The old
+> `infra/runbooks/lat1-nixos-reinstall.md` file is historical cutover evidence,
+> not current destructive authority. The k8s manifests, systemd units,
 > and Caddyfile in **this** directory are **PRE-CUTOVER historical reference**:
 > the single-node k3s control plane they describe was **wiped** in the 2026-07-09
 > consolidation cutover. lat1 now runs everything natively — finite-saas-core,

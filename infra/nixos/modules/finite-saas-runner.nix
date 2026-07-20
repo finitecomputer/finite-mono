@@ -26,16 +26,17 @@
   # The stock defaults (1 vCPU / 2048 MiB) size every sandbox VM: the runner
   # launches through nerdctl, so OCI-level --cpus/--memory limits never reach
   # hypervisor sizing (static_sandbox_resource_mgmt reads CRI pod annotations
-  # only). Patch the defaults to a 2 vCPU / 8 GiB envelope (Paul, 2026-07-14).
+  # only). Patch the defaults to the declared Standard 4 vCPU / 8 GiB envelope.
   environment.etc."kata-containers/configuration.toml".source =
-    pkgs.runCommand "kata-configuration-qemu-finite.toml" { } ''
-      sed -e 's/^default_vcpus = .*/default_vcpus = 2/' \
-          -e 's/^default_memory = .*/default_memory = 8192/' \
-          ${kataPackages.kata-runtime}/share/defaults/kata-containers/configuration-qemu.toml \
-          > "$out"
-      grep -q '^default_vcpus = 2$' "$out"
-      grep -q '^default_memory = 8192$' "$out"
-    '';
+    pkgs.runCommand "kata-configuration-qemu-finite.toml" { }
+      ''
+        sed -e 's/^default_vcpus = .*/default_vcpus = 4/' \
+            -e 's/^default_memory = .*/default_memory = 8192/' \
+            ${kataPackages.kata-runtime}/share/defaults/kata-containers/configuration-qemu.toml \
+            > "$out"
+        grep -q '^default_vcpus = 4$' "$out"
+        grep -q '^default_memory = 8192$' "$out"
+      '';
 
   # nerdctl's rootful CNI network is declared rather than generated at first
   # launch, keeping host rebuilds reproducible and port publishing available.

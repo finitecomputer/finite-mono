@@ -12,6 +12,7 @@ use finite_saas_runner::{
 };
 use std::collections::BTreeMap;
 use std::env;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -235,6 +236,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     DEFAULT_FINITE_AGENT_PICTURE_URL,
                 ),
                 name_prefix: optional_env("FC_RUNNER_KATA_NAME_PREFIX", "finite-kata"),
+                host_address: optional_ip_addr("FC_RUNNER_KATA_HOST_ADDRESS", "127.0.0.1")?,
                 container_port: optional_u16("FC_RUNNER_KATA_CONTAINER_PORT", 8080)?,
                 cpus: optional_u32_value("FC_RUNNER_KATA_CPUS")?.or(Some(4)),
                 memory: optional_env_value("FC_RUNNER_KATA_MEMORY")
@@ -596,6 +598,12 @@ fn optional_u16(name: &str, default: u16) -> Result<u16> {
     value
         .parse::<u16>()
         .with_context(|| format!("{name} must be an integer between 1 and 65535"))
+}
+
+fn optional_ip_addr(name: &str, default: &str) -> Result<IpAddr> {
+    optional_env(name, default)
+        .parse::<IpAddr>()
+        .with_context(|| format!("{name} must be an IP address"))
 }
 
 fn optional_u32_value(name: &str) -> Result<Option<u32>> {

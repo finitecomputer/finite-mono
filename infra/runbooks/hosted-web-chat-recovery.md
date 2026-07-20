@@ -5,12 +5,22 @@ Device identity, encrypted client stores and Agent bindings; the complete
 Finite Chat server SQLite database; and a custom-format SaaS Core Postgres
 dump. The separately retained Agent Runtime is not in this snapshot.
 
-## Admission gate
+**Current cadence, 2026-07-20:** the snapshot is deploy/manual-triggered. The
+former 15-minute timer was removed because stopping Chat and every Hosted
+Device broke live streams. Snapshot health allows seven days; Borg re-ships the
+latest snapshot daily and its offsite health allows 50 hours. A verified first
+archive exists. This is not the accepted 15-minute RPO.
 
-Paid admission is blocked unless all of these are true, regardless of Stripe:
+## New-capacity admission gate
 
-- `finite-hosted-web-chat-snapshot.timer` runs every 15 minutes and its latest
-  successful snapshot is at most 30 minutes old.
+The July 13 first-cohort exception is historical. Under the accepted July 20
+capacity plan, do not authorize additional paid or Launch Code Agent creation
+until all of these are true, regardless of Stripe. This runbook does not claim
+that a Core/UI maintenance gate has already been deployed:
+
+- a proven non-disruptive snapshot mechanism produces a recovery point at most
+  15 minutes old without breaking an open stream or cold-restarting Hosted
+  Devices. No current timer satisfies this bullet.
 - `finite.recoveryBackup.borgRepository` names the dedicated
   `finitecomputer/finite-lat-1` repository at the same rsync.net destination as
   existing finitecomputer backups. It reuses the established finitecomputer
@@ -31,7 +41,11 @@ server-enforced append-only protection is **not** present. Restricting it while
 preserving separate administrative retention access remains recommended
 hardening; it is not an admission blocker. The empty-target drill still is.
 
-## One-time Borg activation
+## Historical Borg activation record
+
+The activation below completed in July 2026. It records custody and exact
+paths; do not repeat credential copies or repository initialization as a
+routine repair.
 
 1. Reuse the existing finitecomputer credential bundle. Its source-of-truth
    host path is `/var/lib/finitecomputer/backups/rsync-net`; the ignored
@@ -68,22 +82,23 @@ hardening; it is not an admission blocker. The empty-target drill still is.
 The host job intentionally does not prune or compact. Prefer an append-only
 archival credential that cannot erase recovery history. Perform reviewed
 retention and compaction from an off-host administrative credential after
-restore proof; start from the existing finitecomputer policy (7 daily, 4
-weekly, 6 monthly) and retain the last 48 hours of 15-minute archives unless a
-later accepted retention decision replaces it.
+restore proof. Once a non-disruptive cadence exists, the accepted plan retains
+48 hours of fine-grained points, then 7 daily, 4 weekly, and 6 monthly points;
+no current 15-minute archive series is claimed.
 
 ## Snapshot checks
 
 On the source host:
 
 ```sh
-systemctl status finite-hosted-web-chat-snapshot.timer
 systemctl status borgbackup-job-finite-hosted-web-chat-offsite.timer
 systemctl status finite-hosted-web-chat-snapshot-health.service
 systemctl status finite-hosted-web-chat-offsite-health.service
 journalctl -u finite-hosted-web-chat-snapshot -u borgbackup-job-finite-hosted-web-chat-offsite -u finite-hosted-web-chat-offsite-health
 latest=/data/recovery-snapshots/hosted-web-chat/latest
-test $(( $(date +%s) - $(stat -Lc %Y "$latest") )) -le 1800
+age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
+test "$age" -le 604800      # current health threshold only
+test "$age" -le 900         # separate admission/RPO gate; expected to fail today
 (cd "$latest" && sha256sum --check manifest.sha256)
 ```
 
@@ -132,7 +147,8 @@ Do not switch traffic as part of the drill. A production traffic switch needs
 its own authorization and rollback plan.
 
 Schedule the first drill immediately after the first verified archive and
-repeat it before paid admission and after any snapshot-format/schema change.
+repeat it before Phase 11 authorizes additional paid/Launch Code creation and
+after any snapshot-format/schema change.
 The operator records the scheduled date in the active run's Acceptance Request;
 this public runbook does not invent an appointment.
 

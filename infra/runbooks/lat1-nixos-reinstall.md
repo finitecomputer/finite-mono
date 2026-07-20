@@ -1,12 +1,22 @@
 # Reinstalling / recovering finite-lat-1 (NixOS)
 
-How lat1 was cut over to NixOS on 2026-07-09, written as a repeatable
-procedure. Use it to rebuild lat1 from bare metal, or to recover if it won't
-boot. The NixOS definition is `infra/nixos/` (host: `finite-lat-1`).
+> **HISTORICAL 2026-07-09 CUTOVER PROCEDURE — DO NOT REPEAT THE DESTRUCTIVE
+> INSTALL AS WRITTEN.** It does not contain the accepted Agent Recovery Set,
+> empty-target relaunch, exact-geometry RAID, or current backup boundaries, and
+> it incorrectly treated lat2 as the state handoff. Current planning authority
+> is [`docs/runs/finite-lat-capacity-and-redundancy.md`](../../docs/runs/finite-lat-capacity-and-redundancy.md).
+> During an actual lat1 incident, begin with
+> [`break-glass.md`](break-glass.md), preserve disks and state, and gather
+> read-only evidence. A future exercised runbook must replace this banner
+> before any bare-metal reinstall is considered repeatable.
 
-**Data safety rule:** every destructive step is preceded by a restore-verified
-backup on a DIFFERENT box. The cutover kept all state on lat2 and restore-
-drilled the Postgres dump into a scratch container before wiping. Do the same.
+How lat1 was cut over to NixOS on 2026-07-09. The NixOS definition is
+`infra/nixos/` (host: `finite-lat-1`), but this historical transcript is not
+current rebuild authority.
+
+**Historical data-safety note:** the cutover kept state temporarily on lat2 and
+restore-drilled a Postgres dump. That does not satisfy the current complete
+Recovery Set and must not be copied as the next recovery design.
 
 ## Hard-won facts baked into the config (do not "fix" these)
 
@@ -16,8 +26,9 @@ drilled the Postgres dump into a scratch container before wiping. Do the same.
   kernel rejected every member with `md: md_import_device returned -22` and
   stage-1 could not mount root. Reproduced on the 6.12 initrd AND a 6.14
   rescue kernel — the arrays themselves were bad, not a config toggle. Root +
-  /data are single NVMes; two spare NVMes are free for a future mirror (ZFS,
-  or mdadm on a newer nixpkgs). Redundancy today = backups (see below).
+  `/data` are single NVMes. The matching disks retain stale metadata from that
+  failed install and are not free spares. Redundancy today depends on the
+  separately described backups; RAID conversion is governed by the new plan.
 - **Disks addressed by `/dev/disk/by-id`** (serial-stable) so the installer
   kernel's enumeration order can't mismatch them.
 - **WAN bound by MAC, not interface name** (`default.nix`, systemd-networkd

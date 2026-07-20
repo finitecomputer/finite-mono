@@ -1,7 +1,7 @@
 # Postgres backup + restore drill (lat1 finite_core)
 
 **Highest-priority runbook in this tree. A restore has never been drilled.**
-"Backups are only real once restored" — `infra/README.md` principle 4.
+"Backups are only real once restored" — `infra/README.md` deploy principle 5.
 
 ## Current reality (post 2026-07-09 cutover)
 
@@ -19,12 +19,15 @@ retention (see the module). `/data/backups/postgres` is 0750 postgres:postgres.
 
 > **REDUNDANCY GAP (top follow-up):** the coordinated Hosted Web Chat snapshot
 > now includes a fresh custom-format `finite_core` dump and its Nix definition
-> selects a dedicated repository at the existing rsync.net destination, but
-> credentials, deployment, first archive, and restore proof are not complete.
-> lat1 root is **single-disk, no mdadm** ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)) —
-> so today the timestamped dumps and the live db share one disk. A dump that
-> never leaves that disk survives a bad `DELETE`, not a disk loss. Enabling
-> offsite borg is the highest-priority infra follow-up.
+> selects a dedicated repository at the existing rsync.net destination. The
+> 2026-07-18 live inventory observed healthy offsite jobs and a verified first
+> archive, but the complete empty-target restore proof is not complete. lat1
+> root and `/data` are both **single-disk, no mdadm**
+> ([lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)): the live database is on
+> root and the six-hourly local dumps are on the separate `/data` NVMe. They do
+> not share one disk, but they do share one chassis and provider failure
+> domain. The off-host archive is necessary; only an independent restore makes
+> it recovery evidence.
 
 ## THE RESTORE DRILL
 
@@ -102,8 +105,11 @@ The drill is read-only against production.
 The drill passes when: `pg_restore` completes without fatal errors; row
 counts are consistent with live; `finite_private_api_keys` = 87; and the
 recorded end-to-end time is within the tolerable data-loss + recovery window
-(currently up to ~6h of writes between dumps, and — until offsite borg —
-zero disk-loss protection).
+(the standalone local dump cadence is up to ~6h; the separately monitored
+coordinated off-host Recovery Set has an accepted 15-minute target but is
+currently deploy/manual-triggered). The latest verified off-host archive
+provides a disk-loss recovery point, but no full recovery claim exists until
+the non-disruptive cadence and independent empty-target drill pass.
 
 ### ROLLBACK
 
@@ -114,9 +120,10 @@ reads). Cleanup:
 
 ## Restoring INTO production lat1 (real recovery)
 
-For an actual restore onto the native db — e.g. rebuilding lat1 per
-[lat1-nixos-reinstall.md](lat1-nixos-reinstall.md), or recovering from a bad
-migration:
+For an actual restore onto the native database after a separately authorized
+target has been built, or when recovering from a bad migration, use the steps
+below. The [2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) is
+historical evidence, not authority to wipe/rebuild the target:
 
 1. Bootstrap the role/db ownership before the restore (the db exists from
    `services.postgresql` but the role password + ownership come from the old
@@ -146,14 +153,15 @@ migration:
 
 ## Structural fixes to schedule (in priority order)
 
-1. **Activate and prove offsite Borg (redundancy gap — do this first).** The
+1. **Maintain and restore-prove offsite Borg (do this first).** The
    coordinated recovery snapshot uses `pg_dump`, SQLite backup APIs, and a
    brief writer fence; `modules/backups.nix` archives that artifact to the
-   configured rsync.net repository. Provision only the named root-owned Borg
-   credential files documented in `hosted-web-chat-recovery.md`, deploy, and
-   complete its Borg archive and empty-target drill. Brain and Sites need
+   configured rsync.net repository. Its first archive and offsite-health jobs
+   passed the 2026-07-18 live inventory. Preserve that path and complete the
+   independent empty-target drill. Brain, Sites, and Agent `/data` need
    separately declared recovery sets; do not imply they are covered here.
-2. **Disk mirror.** Two spare NVMes on lat1 are free for a future mirror (ZFS,
-   or mdadm on a newer nixpkgs — the cutover's mdadm arrays were
-   unassemblable; see [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)).
-   Backups remain the safety net until this lands.
+2. **Disk mirror.** The matching lat1 NVMes contain stale metadata from the
+   failed 2026-07-09 MD install; they are not free spares. Reuse only the
+   storage design proved on lat3, after a fresh serial-stable lat1 inventory,
+   exact-geometry synthetic test, recovery proof, and separate destructive
+   authorization. Backups remain the safety net until this lands.

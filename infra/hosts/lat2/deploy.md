@@ -1,10 +1,17 @@
 # Deploying finite-sites to finite-lat-2
 
+> **SUPERSEDED 2026-07-09 — DO NOT RUN.** Sites and its edge moved to
+> `finite-lat-1`; `finite-lat-2` is the CI/build host. Current Sites deployment
+> authority is [`infra/runbooks/deploy-sites.md`](../../runbooks/deploy-sites.md).
+> Everything below is historical evidence of the former build-on-box flow,
+> including sections labelled “today” or “target.” Do not restart services,
+> install binaries, copy Caddy configuration, or delete captured paths on lat2.
+
 ## Today's flow — DEPRECATED (build-on-box)
 
 Documented in full in `finite-sites/docs/deploy-finite-lat-2.md` (§3 box
 setup, §5a routine rollout); this is a summary, not a replacement. The flow
-still works and is what produced the running v0.2.16 binaries:
+produced the former v0.2.16 binaries:
 
 1. From a dev machine: `rsync -az --delete` the finite-sites source to
    `finite-lat-2:~/finite-sites/` (excluding `.git`, `target`, env files).
