@@ -82,9 +82,9 @@ capacity. The one accepted next candidate and its hard gates live in
 
 | Host | Role | Services |
 |---|---|---|
-| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
+| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
 | **finite-lat-2** (64.34.80.19) | **finite-mono CI + sole approved x86_64 Nix build host** (Ubuntu 26.04+nix). Healthy root and `/data` MD RAID1, one populated ESP, no swap at the 2026-07-18 inventory. | Builds production lat1 closures and runs `finite-lat-2-mono` plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). Do not use it for Agent capacity, recovery authority, or this storage experiment. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
-| **finite-lat-3** (207.188.7.157) | **NixOS 26.05 storage-qualified, drained Agent Runner candidate.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | Installed 2026-07-20 from pinned input `fd14620`; Runner/Kata closure from merged PR #131 is active. The private lat1 connection and unique credential are proven: one manual invocation reported `runner is draining`. Containerd has zero containers; the Runner and its guarded timer are inactive. No user Agent or Recovery Authority exists here. The next gate is one synthetic Agent with public/Launch Code admission positively fenced. |
+| **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 32.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | Installed 2026-07-20 from pinned input `fd14620`; Runner/Kata closure from merged PR #131 is active. The private lat1 connection and unique credential are proven. The Runner timer is active with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=32`; its first open cycle returned idle and containerd had zero containers. No Recovery Authority exists here. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |
 | Tinfoil | Measured enclaves (unchanged) | glm-5-2 inference + finite-private-limiter enclave; searxng enclave. The limiter validates usage against **lat1** Core. Deployed from the public satellite repos (`tinfoil/`). |
@@ -150,14 +150,13 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
    latest snapshot daily to the dedicated rsync.net repository. A verified
    first archive exists, but this is not a 15-minute RPO. Destination-side
    append-only restriction is recommended hardening; a non-disruptive cadence
-   and complete empty-target restore remain gates before public lat3 customer
-   admission; they do not block the explicitly disposable internal canary.
+   and complete empty-target restore remain known gaps. On 2026-07-20 Paul
+   explicitly waived them as prerequisites for opening lat3 at a hard limit of
+   32 Agents.
    Agent Runtime `/data` is not covered.
-   The July 13 first-cohort Stripe exception remains history; under the
-   accepted July 20 plan, public paid and Launch Code admission stays closed
-   through the one-Agent lat3 canary. This documentation change did not deploy
-   a Core/UI gate, so inspect the current runtime mode rather than claiming it
-   is already closed. The matching lat1 disks contain stale
-   metadata from the failed 2026-07-09 MD install; they are not clean spares
+   The July 13 first-cohort Stripe exception remains history. No new Core/UI
+   admission gate was deployed for the July 20 lat3 opening; the enforced
+   bound is the Runner's 32-sandbox maximum. The matching lat1 disks contain
+   stale metadata from the failed 2026-07-09 MD install; they are not clean spares
    and may be touched only by a serial-stable, separately authorized reinstall.
    A future mirror remains defense in depth, not a backup.
