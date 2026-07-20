@@ -36,6 +36,12 @@ commands against the owning source folder before relying on them.
 - [Production baseline — Sites and Agent Runtime rollout](runs/production-baseline-2026-07-15.md):
   the first-cohort known-good production checkpoint, accepted deploy/rollout
   behavior, regression gates, and the separately proposed recovery run.
+- [Boss Hosted Chat recovery post-mortem](postmortems/boss-hosted-chat-recovery-2026-07-16.md):
+  the legacy binding compatibility failure, ineffective first hotfix,
+  misleading test fixtures, and dashboard deploy improvements.
+- [Agent Runtime upgrade and rollout post-mortem](postmortems/agent-runtime-upgrade-rollout-2026-07-16.md):
+  why upgrades and deploys risked stranding Agents, which guardrails now exist,
+  and the prioritized build, rollout, and recovery work still required.
 
 ## Imported Orientation Docs
 
