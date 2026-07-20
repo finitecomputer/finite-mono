@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Output;
 
 const KATA_PROVIDER_DIR: &str = "kata";
@@ -44,6 +45,10 @@ pub struct KataConfig {
     pub finitechat_server_url: String,
     pub agent_picture_url: String,
     pub name_prefix: String,
+    /// Host address used both for the containerd port binding and the
+    /// Core-persisted Runtime URL. Loopback remains the single-host default;
+    /// a remote Runner supplies its private overlay address.
+    pub host_address: IpAddr,
     pub container_port: u16,
     pub cpus: Option<u32>,
     pub memory: Option<String>,
@@ -74,6 +79,7 @@ impl Default for KataConfig {
             finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
             agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
             name_prefix: "finite-kata".to_string(),
+            host_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             container_port: DEFAULT_DOCKER_CONTAINER_PORT,
             cpus: Some(4),
             memory: Some("8G".to_string()),
@@ -112,6 +118,11 @@ impl KataConfig {
         }
         if self.container_port == 0 {
             return Err(RunnerError::InvalidDockerHostPort);
+        }
+        if self.host_address.is_unspecified() || self.host_address.is_multicast() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata host address must be a specific unicast address".to_string(),
+            ));
         }
         validate_identifier("Kata namespace", &self.namespace)?;
         validate_identifier("Kata runtime", &self.runtime)?;
@@ -167,12 +178,13 @@ pub struct KataLaunchPlan {
     pub state_root: PathBuf,
     pub metadata_root: PathBuf,
     pub env_file: PathBuf,
+    pub host_address: IpAddr,
     pub container_port: u16,
 }
 
 impl KataLaunchPlan {
     fn public_base_url(&self, host_port: u16) -> String {
-        format!("http://127.0.0.1:{host_port}")
+        format!("http://{}", SocketAddr::new(self.host_address, host_port))
     }
 
     fn health_url(&self, host_port: u16) -> String {
@@ -2012,8 +2024,16 @@ fn kata_launch_plan_for_source_machine(
             .join(durable_state_id),
         env_file: metadata_root.join("launch.env"),
         metadata_root,
+        host_address: config.host_address,
         container_port,
         container_name,
+    }
+}
+
+fn kata_publish_spec(host_address: IpAddr, container_port: u16) -> String {
+    match host_address {
+        IpAddr::V4(address) => format!("{address}::{container_port}"),
+        IpAddr::V6(address) => format!("[{address}]::{container_port}"),
     }
 }
 
@@ -2035,7 +2055,7 @@ pub(crate) fn kata_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2399,6 +2419,7 @@ fn kata_recovery_plan(canonical: &KataLaunchPlan, request_id: &str) -> KataLaunc
             "recovery-{}.env",
             sanitize_sandbox_name(request_id)
         )),
+        host_address: canonical.host_address,
         container_port: canonical.container_port,
     }
 }
@@ -2654,6 +2675,7 @@ fn kata_upgrade_plan(
         env_file: canonical
             .metadata_root
             .join(format!("upgrade-{}.env", sanitize_sandbox_name(request_id))),
+        host_address: canonical.host_address,
         container_port: canonical.container_port,
     }
 }
@@ -2725,7 +2747,7 @@ fn kata_upgrade_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2810,7 +2832,7 @@ fn kata_recovery_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2960,6 +2982,32 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn private_host_address_controls_binding_and_advertised_urls() {
+        let host_address = "10.254.3.2".parse::<IpAddr>().unwrap();
+        let plan = KataLaunchPlan {
+            container_name: "finite-kata-test".to_string(),
+            state_root: PathBuf::from("/data/finite-saas-runner/kata/test"),
+            metadata_root: PathBuf::from("/data/finite-saas-runner/kata-metadata/test"),
+            env_file: PathBuf::from("/data/finite-saas-runner/kata-metadata/test/launch.env"),
+            host_address,
+            container_port: 8080,
+        };
+
+        assert_eq!(kata_publish_spec(host_address, 8080), "10.254.3.2::8080");
+        assert_eq!(plan.public_base_url(41002), "http://10.254.3.2:41002");
+        assert_eq!(plan.contact_url(41002), "http://10.254.3.2:41002/contact");
+    }
+
+    #[test]
+    fn unspecified_kata_host_address_fails_closed() {
+        let config = KataConfig {
+            host_address: "0.0.0.0".parse().unwrap(),
+            ..KataConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
 
     #[derive(Clone)]
     struct TestRecoveryBehavior {

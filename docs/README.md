@@ -33,6 +33,16 @@ commands against the owning source folder before relying on them.
 - [`finite-agentd` is the agent-owned platform boundary](adr/0003-agentd-is-the-agent-owned-platform-boundary.md):
   typed agent-local commands and supervision over Finite Chat without widening
   Runner or the outbound-only Runtime Management Pipe.
+- [Products own bounded identity adapters](adr/0004-products-own-bounded-identity-adapters.md):
+  product-specific identity intents over shared key primitives without a
+  generic signer authority.
+- [finite-lat host roles and safe initial placement](adr/0005-finite-lat-host-roles-and-placement.md):
+  lat1 control/existing Agents, lat2 CI/building, lat3 initial new-Agent
+  capacity, and fail-closed provider-neutral placement.
+- [Current deployed infrastructure](../infra/README.md): exact observed fleet
+  roles and the boundary between executable configuration and dated captures.
+- [finite-lat capacity, redundancy, and admission](runs/finite-lat-capacity-and-redundancy.md):
+  the one proposed next candidate, evidence gates, and explicit non-goals.
 - [Production baseline — Sites and Agent Runtime rollout](runs/production-baseline-2026-07-15.md):
   the first-cohort known-good production checkpoint, accepted deploy/rollout
   behavior, regression gates, and the separately proposed recovery run.

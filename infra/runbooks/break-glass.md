@@ -12,13 +12,17 @@ For incidents. Host facts (services, ports, secrets locations) live in
 
 Since the 2026-07-09 cutover lat1 runs EVERYTHING (Core, dashboard, native
 Postgres, chat, sites, search) as NixOS. No k3s, no kubectl. Config is
-`infra/nixos/`; deploy/rebuild is [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
+`infra/nixos/`; routine deploy uses the service runbooks and the exact prebuilt
+closure. There is currently no accepted bare-metal rebuild procedure.
 
 - **Get on:** `ssh root@64.34.82.77` — **key-only, NO console password.** If
-  the box won't boot and ssh is dead, recover via Latitude **Rescue Mode +
-  IPMI console** per [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md)
-  ("If it won't boot"). Diagnose from the IPMI console first (it shows the
-  real screen even with no network).
+  the box will not boot and SSH is dead, use Latitude Rescue Mode and IPMI only
+  for read-only diagnosis. The historical
+  [2026-07-09 transcript](lat1-nixos-reinstall.md) may supply console/network
+  facts, but none of its wipe/install commands is current authority. Preserve
+  every disk and state source, fence writers if needed, and escalate to the
+  [finite-lat capacity/redundancy recovery plan](../../docs/runs/finite-lat-capacity-and-redundancy.md)
+  before mutation.
 - **Logs** (all native systemd/journald — no kubectl):
   - `journalctl -u caddy` — the single edge (finite.computer,
     chat.finite.computer, *.finite.chat)

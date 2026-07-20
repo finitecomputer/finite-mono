@@ -7,7 +7,9 @@ Since the 2026-07-09 cutover, finitesitesd runs on finite-lat-1
 (finitesitesd on 127.0.0.1:8787), fronted by the one host Caddy with the
 Cloudflare Origin CA cert. Data `/var/lib/finite-sites` (16 published sites,
 npubs intact, restored from lat2 at cutover). Topology:
-`infra/nixos/README.md`; box rebuild: [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
+`infra/nixos/README.md`. The historical
+[2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) is not current box-
+rebuild authority.
 
 > **KATA GAP (flagged follow-up):** this module ships `--app-runner none` —
 > sites run WITHOUT microVM isolation, so tier-2 tenant apps do not run until
