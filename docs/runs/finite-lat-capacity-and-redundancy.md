@@ -7,11 +7,9 @@ Owner: Paul
 Opened: 2026-07-20
 
 Acceptance: `finite-lat-3` runs the pinned NixOS configuration on mirrored
-root and data storage with swap, then launches one synthetic Standard Agent
-through a private, source-host-bound Runner path without moving, restarting,
-or rewriting any existing Agent. After that canary passes, lat3 becomes the
-only Runner accepting bounded new Standard-Agent creation while lat1 continues
-lifecycle control for its existing Agents and lat2 remains CI/build-only.
+root and data storage with swap and is the only Runner accepting new Standard-
+Agent creation, with a hard limit of 32. `finite-lat-1` remains available for
+existing-Agent lifecycle work, and `finite-lat-2` remains CI/build-only.
 
 ## Outcome and scope
 
@@ -35,15 +33,16 @@ real stop point, inspect the exact Nix service impact, and verify the affected
 Agent rather than relying on generic health. PR
 [#125](https://github.com/finitecomputer/finite-mono/pull/125) remains the
 separate Runtime Retirement proposal; no removal or purge behavior is added
-here.
+here. On 2026-07-20 Paul explicitly chose to skip the synthetic canary and
+admission-fence work and open lat3 directly with a 32-Agent hard limit.
 
 ## Exact deployed state
 
 | Host | Current role and state | Next change |
 | --- | --- | --- |
-| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Core binds `127.0.0.1:4200`. The Kata Runner timer is active. Root and `/data` are single-disk. | Add only the private lat3 peer, private Core proxy, and a distinct lat3 Runner credential. Drain new creation only after lat3 proves the drained path. No storage or existing-Agent change in this slice. |
+| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. A `/run`-only WireGuard peer, peer-scoped firewall rules, and private proxy connect lat3 to Core. Core still binds `127.0.0.1:4200`; one runtime drop-in runs the exact PR #131 Core binary with the legacy lat1 and distinct lat3 credentials. Root and `/data` remain single-disk. | Keep the temporary overlay and Core override in place without rebooting. Do not switch the broad lat1 Nix closure. |
 | `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix finite-mono CI Runner and sole approved x86_64 production Nix builder. | No role or storage change. Build the reviewed closures here. |
-| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged Runner/Kata closure is active; containerd is active with zero containers, while the Runner timer and service are inactive and `/etc/finite/runner.env` is absent. The lat3 WireGuard peer is configured but cannot handshake until lat1 is activated. No user Agent or Recovery Authority exists here. | Connect lat1 through the already-declared private peer and Core proxy without a broad application restart; prove the drained path and one synthetic Agent before accepting bounded new creation. |
+| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged Runner/Kata closure and root-only host environment are installed. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is active. Its first open cycle returned `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and lat2 CI/build-only. |
 
 The pinned lat3 nixpkgs revision is
 `fd1462031fdee08f65fd0b4c6b64e22239a77870`.
@@ -59,13 +58,41 @@ The pinned lat3 nixpkgs revision is
   found no failed units, both arrays `[UU]`, 64 GiB swap active, the storage
   health check successful, containerd active with zero namespaces or
   containers, and public SSH available.
-- The Runner remains fail closed: its timer is not attached to a target, its
-  service is inactive, and its required root-only environment file is absent.
-- Lat1 has not been changed. Its full candidate closure would restart more
-  application services than this run accepts because Finite packages still
-  hash the monorepo source as a whole. Do not switch that closure. The next
-  action requires an explicitly bounded lat1 activation or a separately
-  reviewed package-source fix.
+- Before the private connection, the Runner remained fail closed: its timer
+  was not attached to a target, its service was inactive, and its required
+  root-only environment file was absent.
+- Lat1's full candidate closure would restart more application services than
+  this run accepts because Finite packages still hash the monorepo source as a
+  whole. Do not switch that closure.
+
+### Drained private connection record
+
+- The bounded 2026-07-20 activation used runtime-only networkd files, two exact
+  peer-scoped iptables rules, and a transient socket proxy. It did not restart
+  systemd-networkd or change the public Core binding. A reboot intentionally
+  removes this temporary network/proxy state and is therefore a stop, not a
+  rollback step.
+- The exact PR #131 Core package is
+  `/nix/store/0sp1fcwpbrkgdj12165mq4qxhclq44y9-finite-saas-core-0.1.0`.
+  A `/run` drop-in changed only Core's `ExecStart`. The combined legacy-lat1
+  plus unique-lat3 credential environment passed an offline parse before one
+  intentional Core restart. The byte-identical prior environment is retained
+  root-only at `/var/lib/finite-lat3-canary/core.env.before-lat3`.
+- Lat3 received the unique Runner token and unchanged Runtime secrets directly
+  file-to-file. Both environment files are `root:root 0600`; drain is set in
+  the Runner environment and forced again by a later runtime-only environment
+  file. The timer is inactive, absent from `timers.target`, and refuses manual
+  start.
+- One manual Runner invocation authenticated through
+  `http://10.254.3.1:14200`, reported `runner is draining`, advertised a
+  six-sandbox maximum with zero active sandboxes, and exited successfully.
+- Before and after that invocation, all 34 existing Runtime rows, all creation
+  and control rows, and all 27 existing lat1 containers had identical ordered
+  hashes. There were zero pending creation/control requests, zero lat3
+  containers, and no Chat, Hosted Device, containerd, Postgres, or existing
+  Runtime restart. Core was the only intentionally restarted service.
+- This was the original stop before a synthetic Agent. Paul subsequently
+  waived that canary and admission-fence gate for this opening.
 
 ### finite-lat-3 storage truth
 
@@ -102,7 +129,7 @@ are not gates for the Runner slice.
   The current queue accepts untargeted creation work, so active-active creation
   waits for a later, durable source-host reservation path.
 - A lat3 outage closes new admission. It never automatically undrains lat1.
-- The initial hard maximum is six Standard Agents at 4 vCPU and 8 GiB each.
+- The hard maximum is 32 Standard Agents at 4 vCPU and 8 GiB each.
   Swap is not counted as Agent capacity.
 
 This keeps product concepts provider-neutral: Core still owns Hosting Tier,
@@ -148,9 +175,9 @@ The lat3 Runner uses:
 - `FC_RUNNER_KATA_HOST_ADDRESS=10.254.3.2`;
 - the existing public Sites, Brain, Chat, and Identity endpoints;
 - a direct copy of the current runtime secret file, never repository values;
-- `FC_RUNNER_DRAIN=true` initially;
-- `FC_RUNNER_MAX_SANDBOXES=6`; and
-- a disabled timer until the canary passes.
+- `FC_RUNNER_DRAIN=false`;
+- `FC_RUNNER_MAX_SANDBOXES=32`; and
+- an active recurring Runner timer.
 
 The Nix Kata configuration uses the declared Standard shape of 4 vCPU and
 8 GiB. Agent state is a host bind beneath `/data`; replacing compute must not
@@ -190,9 +217,11 @@ and no change to lat1 Agents.
 Rollback is to stop the lat3 Runner, disable its timer, and remove only the
 private overlay activation. Existing Agents are not involved.
 
-## One-Agent handoff
+## Superseded one-Agent handoff
 
-Public paid and Launch Code admission remain closed during the canary.
+This canary plan was not executed. Paul explicitly waived it on 2026-07-20 in
+favor of opening lat3 directly with the hard 32-Agent limit. It remains below
+only as historical rollback context.
 
 1. Confirm zero pending/in-flight creation requests and zero conflicting
    runtime operations.
@@ -217,31 +246,28 @@ On failure, drain lat3 and stop its timer. Preserve the synthetic Runtime and
 existing-Agent lifecycle remains active. Reopening lat1 creation is an
 explicit operator decision after the queue is clear.
 
-## Promotion after the canary
+## Public opening
 
-After the canary passes:
+Executed on 2026-07-20:
 
 - enable the lat3 Runner timer;
 - set lat3 creation drain false;
 - keep lat1 creation drain true while its lifecycle operations remain active;
-- keep the six-Agent hard maximum; and
+- keep the 32-Agent hard maximum; and
 - retain the source revision, closures, Runner result, Core binding, Runtime
-  artifact/digest, Agent Principal, chat/restart/reboot result, and rollback
-  state in this run record.
+  artifact/digest, and rollback state in this run record.
 
-This makes lat3 useful internal capacity. It does not by itself reopen public
-self-service.
+No synthetic-Agent chat/restart/reboot result is claimed.
 
 ## Next bounded slices
 
 ### Capacity admission
 
-Before accepting more public users, make checkout, Launch Code redemption, and
+As a later bounded product slice, make checkout, Launch Code redemption, and
 Agent creation fail closed when no creation slot is reserved. Signup, login,
 existing-Agent access, and Contact Finite remain available. The UI should say
-capacity is full and direct the user to contact Paul. This is a separate code
-and product slice after lat3 works; it is not a prerequisite for the internal
-canary while public admission remains closed.
+capacity is full and direct the user to contact Paul. This was not added as
+part of opening lat3.
 
 ### finite-lat-1 improvement
 
@@ -269,6 +295,7 @@ Append only decisive checkpoints here:
 | 2026-07-20 | Installed pinned NixOS on RAID1 root/data with dual ESPs and 64-GiB swap | Pass |
 | 2026-07-20 | Full member rebuilds, degraded boots, checksums, ESP guard, and swap activation | Pass |
 | 2026-07-20 | PR #110 and PR #125 merged | Pass |
-| pending | Exact lat1/lat3 closure build and impact review | Open |
-| pending | Drained lat3 Runner authentication | Open |
-| pending | One synthetic Agent handoff and persistence check | Open |
+| 2026-07-20 | Exact lat3 closure build and bounded activation | Pass |
+| 2026-07-20 | Drained lat3 Runner authentication | Pass |
+| 2026-07-20 | Open lat3 for creation; drain lat1 creation; hard maximum 32 | Pass |
+| 2026-07-20 | One synthetic Agent handoff and persistence check | Waived by owner |

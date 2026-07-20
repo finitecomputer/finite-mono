@@ -211,10 +211,9 @@ in
     "z /etc/finite/wireguard-private-key 0600 root root - -"
   ];
 
-  # Install and exercise the Runner while it is explicitly drained. The
-  # timer becomes a declarative boot service only after the synthetic Agent
-  # passes; until then operators invoke the oneshot unit deliberately.
-  systemd.timers.finite-saas-runner.wantedBy = lib.mkForce [ ];
+  # Accept new Standard-Agent creation on the recurring Runner schedule.
+  # /etc/finite/runner.env supplies the host credential, drain state, and
+  # hard sandbox limit.
   systemd.services.finite-saas-runner.unitConfig.ConditionPathExists = "/etc/finite/runner.env";
 
   environment.systemPackages = with pkgs; [
