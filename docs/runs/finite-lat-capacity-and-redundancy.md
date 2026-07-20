@@ -43,10 +43,29 @@ here.
 | --- | --- | --- |
 | `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Core binds `127.0.0.1:4200`. The Kata Runner timer is active. Root and `/data` are single-disk. | Add only the private lat3 peer, private Core proxy, and a distinct lat3 Runner credential. Drain new creation only after lat3 proves the drained path. No storage or existing-Agent change in this slice. |
 | `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix finite-mono CI Runner and sole approved x86_64 production Nix builder. | No role or storage change. Build the reviewed closures here. |
-| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. No Finite service, Runner, user state, or traffic before this Runner slice. | Install Kata/containerd and the Runner in drained, timer-disabled state; prove one synthetic Agent; then accept bounded new creation. |
+| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged Runner/Kata closure is active; containerd is active with zero containers, while the Runner timer and service are inactive and `/etc/finite/runner.env` is absent. The lat3 WireGuard peer is configured but cannot handshake until lat1 is activated. No user Agent or Recovery Authority exists here. | Connect lat1 through the already-declared private peer and Core proxy without a broad application restart; prove the drained path and one synthetic Agent before accepting bounded new creation. |
 
 The pinned lat3 nixpkgs revision is
 `fd1462031fdee08f65fd0b4c6b64e22239a77870`.
+
+### finite-lat-3 Runner deployment record
+
+- PR [#131](https://github.com/finitecomputer/finite-mono/pull/131) merged as
+  `36db4bada0b55bab4ca08b51678231fea4ae06cf` on 2026-07-20.
+- `finite-lat-2` built that exact revision with remote builders disabled. The
+  active and system-profile closure is
+  `/nix/store/pran9m5218x8mbsznmp5v4hdd3a4myds-nixos-system-finite-lat-3-26.05.20260719.fd14620`.
+- Activation completed through a named transient unit. The post-switch check
+  found no failed units, both arrays `[UU]`, 64 GiB swap active, the storage
+  health check successful, containerd active with zero namespaces or
+  containers, and public SSH available.
+- The Runner remains fail closed: its timer is not attached to a target, its
+  service is inactive, and its required root-only environment file is absent.
+- Lat1 has not been changed. Its full candidate closure would restart more
+  application services than this run accepts because Finite packages still
+  hash the monorepo source as a whole. Do not switch that closure. The next
+  action requires an explicitly bounded lat1 activation or a separately
+  reviewed package-source fix.
 
 ### finite-lat-3 storage truth
 
