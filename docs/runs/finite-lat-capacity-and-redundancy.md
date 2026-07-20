@@ -40,9 +40,9 @@ admission-fence work and open lat3 directly with a 32-Agent hard limit.
 
 | Host | Current role and state | Next change |
 | --- | --- | --- |
-| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. A `/run`-only WireGuard peer, peer-scoped firewall rules, and private proxy connect lat3 to Core. Core still binds `127.0.0.1:4200`; one runtime drop-in runs the exact PR #131 Core binary with the legacy lat1 and distinct lat3 credentials. Root and `/data` remain single-disk. | Keep the temporary overlay and Core override in place without rebooting. Do not switch the broad lat1 Nix closure. |
+| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. A `/run`-only WireGuard peer, peer-scoped firewall rules, private proxy, and Core override connect lat3 to Core. The WireGuard key now also has a byte-identical root-only persistent copy. PR #134 declares the complete bridge, but the broad lat1 closure was not activated. Root and `/data` remain single-disk. | Keep the temporary overlay and Core override in place without rebooting. Activate the declarative bridge only with an accepted broader lat1 rollout or a separately reviewed next-boot plan. |
 | `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix finite-mono CI Runner and sole approved x86_64 production Nix builder. | No role or storage change. Build the reviewed closures here. |
-| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged Runner/Kata closure and root-only host environment are installed. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is active. Its first open cycle returned `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and lat2 CI/build-only. |
+| `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and lat2 CI/build-only. |
 
 The pinned lat3 nixpkgs revision is
 `fd1462031fdee08f65fd0b4c6b64e22239a77870`.
@@ -52,7 +52,7 @@ The pinned lat3 nixpkgs revision is
 - PR [#131](https://github.com/finitecomputer/finite-mono/pull/131) merged as
   `36db4bada0b55bab4ca08b51678231fea4ae06cf` on 2026-07-20.
 - `finite-lat-2` built that exact revision with remote builders disabled. The
-  active and system-profile closure is
+  initial closure was
   `/nix/store/pran9m5218x8mbsznmp5v4hdd3a4myds-nixos-system-finite-lat-3-26.05.20260719.fd14620`.
 - Activation completed through a named transient unit. The post-switch check
   found no failed units, both arrays `[UU]`, 64 GiB swap active, the storage
@@ -93,6 +93,35 @@ The pinned lat3 nixpkgs revision is
   Runtime restart. Core was the only intentionally restarted service.
 - This was the original stop before a synthetic Agent. Paul subsequently
   waived that canary and admission-fence gate for this opening.
+
+### Reboot-persistence record
+
+- PR [#134](https://github.com/finitecomputer/finite-mono/pull/134) merged as
+  `f5feb0401f0264ea00f10e23ac8877d37680bbbd`. It retains lat3-only firewall
+  admission while declaring the existing lat1 WireGuard peer and private Core
+  socket proxy.
+- Lat2 built the exact merged lat3 closure
+  `/nix/store/7mz7h9s5w4c69rf8hlsmch316xa25hrc-nixos-system-finite-lat-3-26.05.20260719.fd14620`.
+  Dry activation proposed no service stop, restart, reload, or start. Lat3 was
+  switched to that closure, and both `/run/current-system` and the system
+  profile resolve to it.
+- The runtime-only lat3 timer symlinks were removed. The active timer is now
+  enabled through `/etc/systemd/system/timers.target.wants`, its fragment is
+  from the merged closure, repeated Runner cycles return `idle`, private Core
+  health is good, and containerd still has zero containers.
+- Lat1's live WireGuard key was copied byte-for-byte to
+  `/etc/finite/wireguard-private-key` as `root:root 0600`. No unit was reloaded
+  or restarted.
+- Lat1 candidate
+  `/nix/store/i81dpv94lx2ppnmgc0n7kpz22zrvsv5p-nixos-system-finite-lat-1-25.11.20260630.b6018f8`
+  was built and copied but not activated. Dry activation would stop and start
+  Brain, Core, Sites, Hosted Device, and Chat, restart systemd-networkd, and
+  reload the firewall. The five application unit diffs each select a different
+  binary store path, so this is a real broad rollout rather than harmless unit
+  relinking. The agreed boundary therefore makes the lat1 switch a no-go.
+- Result: lat3's own Runner schedule is reboot-persistent. The lat1 half of the
+  private bridge remains runtime-only; do not reboot lat1 until a broader
+  rollout or separately reviewed next-boot activation is accepted.
 
 ### finite-lat-3 storage truth
 
@@ -299,3 +328,5 @@ Append only decisive checkpoints here:
 | 2026-07-20 | Drained lat3 Runner authentication | Pass |
 | 2026-07-20 | Open lat3 for creation; drain lat1 creation; hard maximum 32 | Pass |
 | 2026-07-20 | One synthetic Agent handoff and persistence check | Waived by owner |
+| 2026-07-20 | PR #134 merged; exact lat3 closure activated with declarative Runner timer | Pass |
+| 2026-07-20 | Exact lat1 persistence closure dry activation | No-go: broad application restart set |
