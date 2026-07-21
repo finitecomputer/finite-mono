@@ -25,6 +25,9 @@
       # required active-operation preflight was clean before first use; see
       # the rollback-rescue procedure in infra/runbooks/runtime-image.md.
       FC_CORE_ENABLE_RUNTIME_UPGRADES = "true";
+      # Independent default-off kill switch for new owner retirement requests.
+      # In-flight same-ID retirement completion routes remain available.
+      FC_CORE_ENABLE_RUNTIME_RETIREMENT = "false";
       # Core persists these bounded, public service endpoints into each new
       # RuntimeSpec. Runner keeps its process-global copy only for N-1 rows
       # without a spec during the expand window.

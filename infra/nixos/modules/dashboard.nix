@@ -22,6 +22,9 @@
       FC_DASHBOARD_RUNTIME_MODE = "customer";
       FC_DASHBOARD_DEFAULT_RUNNER_CLASS = "kata";
       FC_DASHBOARD_RUNNER_CLASSES = "kata";
+      # Owner-facing retirement stays hidden until the same deployment opens
+      # Core's independent request gate and configures the Kata archive path.
+      FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT = "false";
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";

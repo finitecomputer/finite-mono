@@ -31,9 +31,10 @@ is historical, not current authority.
 
 - [ ] Fail closed when no Agent capacity is available; keep login and existing
   Agents working and tell new users to contact Paul.
-- [ ] Activate and implement the bounded
-  [`Runtime Retirement`](runtime-retirement-readiness.md) plan, using disposable
-  canaries before any real user-owned Agent.
+- [x] Activate and implement the bounded, default-off repository and synthetic
+  [`Runtime Retirement`](runtime-retirement-readiness.md) plan.
+- [ ] Separately provision its restricted Borg authority, deploy with all gates
+  off, and pass a disposable canary plus independent restore before broad enablement.
 
 ## Parked / later
 

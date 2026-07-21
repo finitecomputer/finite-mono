@@ -1,6 +1,6 @@
 # Runtime Retirement Readiness
 
-Status: PROPOSED
+Status: ACTIVE (repository implementation and synthetic testing only)
 
 Owner: Paul
 
@@ -24,8 +24,31 @@ retryable. Paul performs the final dashboard and restored-Agent checks; a
 successful upload, retained lat1 directory, or stopped container alone does not
 claim acceptance.
 
-Merging this proposal does not activate it. `PROPOSED` status grants no work or
-production authority.
+Paul activated repository implementation and synthetic testing on 2026-07-21.
+This does not grant production or external-service mutation authority. In
+particular, provisioning retirement backup credentials, deploying the feature,
+or retiring an Agent still requires a separate explicit authorization after
+the local gates pass.
+
+PR [#110](https://github.com/finitecomputer/finite-mono/pull/110) remains the
+post-mortem context for fail-closed rollout and recoverability. The broader
+ordering and deferred product work remain tracked in
+[`triage-and-priorities-2026-07-17.md`](../triage-and-priorities-2026-07-17.md)
+and the concise
+[`platform-reliability-checklist-2026-07-21.md`](platform-reliability-checklist-2026-07-21.md).
+
+## Live session checklist
+
+- [x] Park Latitude Kubernetes; continue normal Latitude expansion.
+- [x] Bring finite-lat-3 up as the default new-Agent Runner with a hard 32-Agent limit.
+- [x] Land the declarative finite-lat-1/finite-lat-3 bridge and safe lat1 rollout.
+- [x] Prove one real Agent empty-target restore and the bounded in-flight-chat recovery boundary.
+- [x] Implement and locally fault-test Runtime Retirement; keep all production gates off.
+- [ ] Separately authorize and provision the restricted retirement Borg namespace and credentials.
+- [ ] Separately authorize deployment and one disposable retirement/independent-restore canary.
+- [ ] Add fail-closed Agent-creation capacity admission and the contact-Paul UI.
+- [ ] Extend recovery proof to the complete finite-lat-1 Recovery Set, then schedule its NixOS/RAID reprovision for an evening window.
+- [ ] Consider finite-lat-2 Agent capacity later; keep its CI Runner untouched for now.
 
 ## Problem statement
 
@@ -104,7 +127,12 @@ fail closed without mutation.
   project/runtime labels, durable-state identifier, and bind mount before
   stopping or reading it.
 - Gracefully stop compute and confirm writers are quiescent before creating the
-  ZIP. Do not copy live SQLite database and WAL files while Hermes is writing.
+  ZIP. The exact canonical container must be stopped, its containerd task must
+  be absent, and two complete source manifests must match before the ZIP is
+  finalized. A bounded stop escalation is permitted, but must be recorded and
+  is never described as graceful; task absence and stable manifests remain the
+  archive authority. Do not copy live SQLite database and WAL files while
+  Hermes is writing.
 - Create one root-only staging ZIP with a versioned manifest and a `data/`
   tree. The manifest records opaque project, runtime, request, and durable-state
   identifiers; Runtime artifact digest; expected Agent Principal when
@@ -126,6 +154,12 @@ fail closed without mutation.
 - The snapshot recovery point is the quiesced `/data` state immediately before
   compute removal. This is an on-retirement snapshot, not periodic backup, and
   it makes no claim about an earlier recovery point.
+- Retirement and restore promise a usable post-restore chat state, not every
+  in-flight token or message. The isolated local fixture requires the preserved
+  Agent Principal and canonical Room/MLS/Hermes state plus two new decryptable
+  chat round trips; the interrupted response may be absent, partial, or
+  complete. A production restore stays network-fenced unless separately
+  authorized, and proves its persisted state without silently reactivating it.
 - v1 promises that authorized Finite support can independently retrieve,
   verify, extract, and boot the retained Recovery Set in an isolated target.
   It does not promise a production reactivation time, automatic reconnection,
@@ -176,17 +210,25 @@ the deployed [`backups.nix`](../../infra/nixos/modules/backups.nix), and the
    repository, and verifies the exact ZIP SHA-256 and manifest. Repository
    listing or upload exit status alone is insufficient.
 4. After remote verification, the Runner removes the canonical container and
-   verifies it is absent. This releases one Runner capacity slot.
-5. The Runner completes the leased control with the typed snapshot receipt.
+   verifies its exact container ID and name and its containerd task are absent,
+   and that the Runner's active-sandbox count decreased by exactly one. This
+   releases one Runner capacity slot.
+5. The Runner removes the plaintext staging tree while retaining the original
+   durable state root. Cleanup is a required retryable phase: a failure returns
+   the same request to the queue, and a retry re-verifies the remote archive
+   from its persisted receipt before trying cleanup again.
+6. Only after staging cleanup succeeds, the Runner completes the leased control
+   with the typed snapshot receipt.
    One Core transaction stores the immutable receipt, marks the Runtime
    offline, archives only the target Project membership, deactivates only the
    target runtime link, clears its published app URLs and Hermes availability,
    and revokes only its runtime-scoped relay and Finite Private credentials. This
    releases one owner entitlement and makes the Agent disappear.
-6. The Runner removes only the staging ZIP. It retains the original durable
-   state root.
 
-Retries use the same request and archive name. Before remote verification, any
+Retries use the same request, persisted phase record, and archive name. A
+transient failure returns the leased request to the queue instead of marking it
+terminally failed; lease renewal keeps long artifact and transfer phases bound
+to the same worker. Before remote verification, any
 failure leaves compute, visibility, entitlement, and credentials intact, though
 the Agent may remain stopped and visibly retryable. After remote verification,
 a retry may finish retirement. If compute is already absent, completion is
@@ -243,11 +285,11 @@ item is required.
   backend, locator, size, hash, lease, and replay all fail closed; identical
   completion replay is idempotent.
 - Implement the Kata stop, ZIP, upload, remote readback, verification, compute
-  removal, completion, and staging cleanup sequence. Renew the existing lease
+  removal, staging cleanup, and completion sequence. Renew the existing lease
   rather than increasing one fixed timeout to hide large snapshots.
 - Make every transition boundary restartable. Fault-inject before and after
   stop, ZIP finalization, upload, readback, receipt creation, container removal,
-  Core completion, and staging cleanup. An absent container is acceptable only
+  staging cleanup, and Core completion. An absent container is acceptable only
   with the exact remotely verified retirement artifact.
 - Prove Core completion archives only the intended membership, deactivates only
   the intended runtime link, revokes only target-scoped credentials, preserves
@@ -287,6 +329,28 @@ item is required.
   enable the owner-facing action broadly before acceptance.
 
 ## Evaluation, rollback, and stop conditions
+
+### Repository implementation evidence (2026-07-21)
+
+- The versioned ZIP/verifier has positive and negative fixtures for exact
+  content, modes, symlinks, unsafe paths, corruption, truncation, identity
+  mismatch, and non-empty restore targets. A SQLite WAL fixture restores and
+  accepts a new write.
+- Core has an immutable receipt migration, exact receipt validation,
+  same-request lease renewal/retry, idempotent completion, independent
+  default-off product gate, and an exercised real-Postgres transaction test.
+- The configured Kata path requires task absence and two stable manifests,
+  verifies Borg readback before removal, persists restartable phases, checks
+  removal convergence, and retains original `/data`. Synthetic tests cover
+  readback failure before removal and restart after removal before Core commit.
+- The owner UI remains independently default-off, reports Retiring/retrying
+  without exposing Runner failure details, and disappears only after Core
+  archives the target membership.
+- The repository-wide services-only `just dev smoke` gate passes with the new
+  migration and default-off behavior.
+- External Borg provisioning, deployment, the disposable canary, and its
+  independent empty-target restore remain separately authorized work; no
+  repository test claims those production gates have happened.
 
 Required repository gates are Core and Runner unit/integration tests, dashboard
 lint/test/build, runtime fixture tests, migration rollback where supported, and

@@ -83,6 +83,8 @@
     kataPackages.kata-runtime
     kataPackages.nerdctl
     kataPackages.cni-plugins
+    pkgs.borgbackup
+    pkgs.containerd
   ];
 
   systemd.services.finite-saas-runner = {
@@ -97,6 +99,8 @@
       kataPackages.kata-runtime
       kataPackages.nerdctl
       kataPackages.cni-plugins
+      pkgs.borgbackup
+      pkgs.containerd
       pkgs.iproute2
       pkgs.iptables
     ];
