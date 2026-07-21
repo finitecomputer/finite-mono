@@ -1,6 +1,6 @@
 # Runtime Retirement Readiness
 
-Status: ACTIVE (repository implementation and synthetic testing only)
+Status: ACCEPTED (production rollout and independent restore passed 2026-07-21)
 
 Owner: Paul
 
@@ -24,11 +24,13 @@ retryable. Paul performs the final dashboard and restored-Agent checks; a
 successful upload, retained lat1 directory, or stopped container alone does not
 claim acceptance.
 
-Paul activated repository implementation and synthetic testing on 2026-07-21.
-This does not grant production or external-service mutation authority. In
-particular, provisioning retirement backup credentials, deploying the feature,
-or retiring an Agent still requires a separate explicit authorization after
-the local gates pass.
+Paul separately authorized the production rollout on 2026-07-21: merge the
+reviewed implementation, provision a dedicated restricted Borg namespace,
+deploy Runtime Retirement on finite-lat-1, retire AEON Canary 0714, and require
+an independent empty-target restore before proceeding. That acceptance passed.
+The authorization then covered Agent Camp Demo and Sites Canary 0715, plus a
+separate data-preserving cleanup of stranded Waffle. It explicitly excluded
+Upgrade Canary 0715 and Waffle Prime.
 
 PR [#110](https://github.com/finitecomputer/finite-mono/pull/110) remains the
 post-mortem context for fail-closed rollout and recoverability. The broader
@@ -44,11 +46,50 @@ and the concise
 - [x] Land the declarative finite-lat-1/finite-lat-3 bridge and safe lat1 rollout.
 - [x] Prove one real Agent empty-target restore and the bounded in-flight-chat recovery boundary.
 - [x] Implement and locally fault-test Runtime Retirement; keep all production gates off.
-- [ ] Separately authorize and provision the restricted retirement Borg namespace and credentials.
-- [ ] Separately authorize deployment and one disposable retirement/independent-restore canary.
+- [x] Separately authorize and provision the restricted retirement Borg namespace and credentials.
+- [x] Deploy Runtime Retirement and pass a disposable retirement/independent-restore canary.
 - [ ] Add fail-closed Agent-creation capacity admission and the contact-Paul UI.
 - [ ] Extend recovery proof to the complete finite-lat-1 Recovery Set, then schedule its NixOS/RAID reprovision for an evening window.
 - [ ] Consider finite-lat-2 Agent capacity later; keep its CI Runner untouched for now.
+
+## Production acceptance evidence — 2026-07-21
+
+- PR [#139](https://github.com/finitecomputer/finite-mono/pull/139) merged the
+  reviewed Runtime Retirement implementation. PR
+  [#140](https://github.com/finitecomputer/finite-mono/pull/140) added the
+  independent product gates and deployed the digest-pinned Core, Runner, and
+  dashboard configuration on finite-lat-1.
+- The existing rsync.net account now has a retirement-only encrypted Borg
+  repository. finite-lat-1 holds only its restricted writer credential; the
+  recovery credential, passphrase, and Borg key export are held off-host.
+- AEON Canary 0714 retired only after remote Borg readback verification. Its
+  archive was then retrieved with the separate recovery credential, restored
+  onto an empty finite-lat-3 target, checked against every manifest entry, and
+  passed identity, mode, symlink, and all four SQLite integrity checks. A
+  network-isolated Kata boot returned `status=ready` with the restored chat
+  state. The retained finite-lat-1 source was not used for that restore.
+- Agent Camp Demo and Sites Canary 0715 then retired sequentially through the
+  same product flow. Each has one immutable Borg receipt, an inactive Runtime
+  link, retained local durable state, and no remaining compute.
+- Waffle was handled afterward under Paul's separate stranded-cleanup
+  authorization. Its one exact runtime-bound durable-state directory was
+  copied before repair, booted without external networking, and proved to
+  expose the same Agent Principal as the repaired canonical runtime. It then
+  adopted the accepted Runtime artifact and retired through the normal Borg
+  and Core flow. The temporary repair copies were removed only after the
+  immutable receipt existed; the original retained state and Borg archive
+  remain.
+- Sol 2 remains untouched. Core records an active Runtime, but finite-lat-1 has
+  neither its canonical container metadata nor its expected durable-state
+  directory. That is an unresolved storage ambiguity, not authority to retire
+  or rewrite its records.
+- Upgrade Canary 0715 and Waffle Prime remained linked, receipt-free, and
+  healthy. The three healthy-batch retirements reduced running Kata sandboxes
+  from 26 to 23 exactly; the temporary Waffle repair returned the count to 23.
+- Kata occasionally retained a stopped task after graceful shutdown. The
+  retirement request stayed retryable and did not archive or remove compute
+  early; deleting only the exact verified `STOPPED` task allowed the same
+  request to complete. No broad container or task cleanup was used.
 
 ## Problem statement
 
@@ -348,9 +389,9 @@ item is required.
   archives the target membership.
 - The repository-wide services-only `just dev smoke` gate passes with the new
   migration and default-off behavior.
-- External Borg provisioning, deployment, the disposable canary, and its
-  independent empty-target restore remain separately authorized work; no
-  repository test claims those production gates have happened.
+- The production Borg provisioning, deployment, disposable canary, and
+  independent empty-target restore are recorded above. Repository tests remain
+  synthetic evidence and are not substituted for that acceptance result.
 
 Required repository gates are Core and Runner unit/integration tests, dashboard
 lint/test/build, runtime fixture tests, migration rollback where supported, and
@@ -419,8 +460,9 @@ Stop and escalate without mutation on:
 - Finite Chat history deletion, Sites unpublishing, Brain cleanup, or changes to
   product-owned data outside the Runtime Recovery Set.
 - Phala or another Runner adapter.
-- Retiring Sol 2, Waffle, or another historically stranded/missing-compute
-  Runtime through bespoke logic. Use a healthy disposable canary.
+- Generic missing-compute relaunch or retirement remains out of scope. The one
+  owner-authorized Waffle cleanup is recorded above; Sol 2 remains excluded
+  because its durable-state binding cannot be proved from finite-lat-1.
 
 ## Governing documents
 
