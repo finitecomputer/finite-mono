@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::{
     CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport, find_agent_state,
-    load_signer, mutate_agent_state, option_value, read_agent_state, reconcile_search_indexes,
+    load_signer, mutate_agent_state, option_value, pending_working_tree_change_paths,
+    read_agent_state, reconcile_local_search_paths, reconcile_search_changes,
     run_working_tree_sync, signed_http_auth_header,
 };
 
@@ -32,10 +33,36 @@ pub(crate) fn sync_once(
     args: &[String],
     activity_kind: &str,
 ) -> Result<SyncOnceReport, CliError> {
+    sync_once_with_local_paths(env, args, activity_kind, None)
+}
+
+pub(crate) fn sync_once_with_local_paths(
+    env: &CliEnvironment,
+    args: &[String],
+    activity_kind: &str,
+    discovered_local_paths: Option<Vec<String>>,
+) -> Result<SyncOnceReport, CliError> {
+    let root = find_agent_state(&env.cwd).ok().flatten();
+    let local_paths = discovered_local_paths.map_or_else(
+        || {
+            root.as_deref()
+                .map(pending_working_tree_change_paths)
+                .transpose()
+        },
+        |paths| Ok(Some(paths)),
+    );
     let report = run_working_tree_sync(env, args, activity_kind);
-    if let Ok(Some(root)) = find_agent_state(&env.cwd)
-        && let Err(error) = reconcile_search_indexes(&root)
-    {
+    let reconciliation = root.as_deref().map(|root| match &report {
+        Ok(report) => reconcile_search_changes(root, report),
+        Err(_) => match &local_paths {
+            Ok(Some(paths)) => reconcile_local_search_paths(root, paths),
+            Ok(None) => Ok(0),
+            Err(error) => Err(CliError::SearchIndex(format!(
+                "local change discovery failed: {error}"
+            ))),
+        },
+    });
+    if let Some(Err(error)) = reconciliation {
         let message = error.to_string();
         let _ = mutate_agent_state(env, |state, now| {
             state.add_activity(

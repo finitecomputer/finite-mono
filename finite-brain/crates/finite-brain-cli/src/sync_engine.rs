@@ -217,9 +217,28 @@ fn newly_readable_session_key_count(
     primary.count() + mounted.count()
 }
 
+#[cfg(test)]
 pub(crate) fn pending_working_tree_change_count(root: &Path) -> Result<usize, CliError> {
+    Ok(pending_working_tree_change_paths(root)?.len())
+}
+
+pub(crate) fn pending_working_tree_change_paths(root: &Path) -> Result<Vec<String>, CliError> {
     let tree_state = read_working_tree_state(root)?;
-    Ok(scan_working_tree_changes(root, &tree_state)?.len())
+    let mut paths = Vec::new();
+    for change in scan_working_tree_changes(root, &tree_state)? {
+        match change {
+            WorkingTreeChange::Upsert { path, .. }
+            | WorkingTreeChange::UpsertAsset { path, .. }
+            | WorkingTreeChange::Delete { path } => paths.push(path.to_string()),
+            WorkingTreeChange::Rename { from_path, to_path } => {
+                paths.push(from_path.to_string());
+                paths.push(to_path.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn fetch_encrypted_export(

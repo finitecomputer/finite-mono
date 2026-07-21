@@ -677,6 +677,20 @@ fn daemon_watch<W: Write>(
         Ok(())
     })?;
 
+    // A cold daemon performs one complete reconciliation. Hot ticks below use
+    // the exact Page paths returned by sync rather than rescanning every Folder.
+    if let Err(error) = reconcile_search_indexes(&root) {
+        let message = error.to_string();
+        mutate_agent_state(env, |state, now| {
+            state.add_activity(
+                now,
+                "search.index.blocked",
+                format!("Cold search index reconciliation failed: {message}"),
+            );
+            Ok(())
+        })?;
+    }
+
     let mut ticks = 0_usize;
     let mut failures = 0_usize;
     let mut skipped_ticks = 0_usize;
@@ -686,8 +700,9 @@ fn daemon_watch<W: Write>(
     let mut last_error: Option<String>;
     loop {
         ticks += 1;
+        let discovered_local_paths = pending_working_tree_change_paths(&root)?;
         let local_change_count = if file_aware {
-            Some(pending_working_tree_change_count(&root)?)
+            Some(discovered_local_paths.len())
         } else {
             None
         };
@@ -697,7 +712,12 @@ fn daemon_watch<W: Write>(
         let should_sync = !file_aware || ticks == 1 || local_changes_due || remote_poll_due;
 
         if should_sync {
-            match sync_once(env, args, "daemon.watch.tick") {
+            match sync_once_with_local_paths(
+                env,
+                args,
+                "daemon.watch.tick",
+                Some(discovered_local_paths),
+            ) {
                 Ok(report) => {
                     last_status = Some(report.status);
                     last_error = None;
@@ -6229,14 +6249,14 @@ mod tests {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: vec![
                     WorkingTreeFolderRoot {
-                        folder_id: "general".to_owned(),
+                        folder_id: "z-general".to_owned(),
                         source_brain_id: None,
                         path: "General".to_owned(),
                         can_read: true,
                         metadata_only: false,
                     },
                     WorkingTreeFolderRoot {
-                        folder_id: "research".to_owned(),
+                        folder_id: "a-research".to_owned(),
                         source_brain_id: None,
                         path: "Research".to_owned(),
                         can_read: true,
@@ -6258,6 +6278,11 @@ mod tests {
             "# Mineral notes\n\nQuartz is a crystalline mineral used in timing hardware.\n",
         )
         .unwrap();
+        fs::write(
+            tree.join("General/OPS-142.md"),
+            "# Recovery Runbook\n\nRoutine service recovery procedure.\n",
+        )
+        .unwrap();
 
         let mut env = env_for(&tmp);
         env.cwd = tree.join("General");
@@ -6274,10 +6299,10 @@ mod tests {
         assert_eq!(report["mode"], "lexical");
         assert_eq!(
             report["searchedFolders"],
-            serde_json::json!(["general", "research"])
+            serde_json::json!(["a-research", "z-general"])
         );
         assert_eq!(report["results"][0]["rank"], 1);
-        assert_eq!(report["results"][0]["folderId"], "general");
+        assert_eq!(report["results"][0]["folderId"], "z-general");
         assert_eq!(report["results"][0]["pagePath"], "authentication.md");
         assert_eq!(report["results"][0]["pageTitle"], "Authentication");
         assert_eq!(
@@ -6291,11 +6316,80 @@ mod tests {
         );
 
         let mut human = Vec::new();
-        run_with_env(["search", "quartz token"], env, &mut human).unwrap();
+        run_with_env(["search", "quartz token"], env.clone(), &mut human).unwrap();
         let human = String::from_utf8(human).unwrap();
         assert!(human.contains("General/authentication.md > Quartz protocol"));
         assert!(human.contains("[local_only; lexical]"));
         assert!(human.contains("Rotate the quartz token"));
+
+        let mut filename_output = Vec::new();
+        run_with_env(["search", "OPS-142", "--json"], env, &mut filename_output).unwrap();
+        let filename_report: Value = serde_json::from_slice(&filename_output).unwrap();
+        assert_eq!(filename_report["results"][0]["pagePath"], "OPS-142.md");
+
+        fs::write(
+            tree.join("General/plain.md"),
+            "Saffron evidence without a heading.\n",
+        )
+        .unwrap();
+        for index in 0..55 {
+            fs::write(
+                tree.join(format!("General/bulk-{index:02}.md")),
+                format!("# Bulk {index}\n\nBulkneedle evidence {index}.\n"),
+            )
+            .unwrap();
+        }
+        let mut root_env = env_for(&tmp);
+        root_env.cwd = tree.clone();
+        let mut scoped_output = Vec::new();
+        run_with_env(
+            [
+                "search",
+                "quartz token",
+                "--folder",
+                "Research",
+                "--folder",
+                "General",
+                "--json",
+            ],
+            root_env.clone(),
+            &mut scoped_output,
+        )
+        .unwrap();
+        let scoped: Value = serde_json::from_slice(&scoped_output).unwrap();
+        assert_eq!(scoped["searchedFolders"], report["searchedFolders"]);
+        assert_eq!(scoped["results"][0]["pagePath"], "authentication.md");
+
+        let mut plain_output = Vec::new();
+        run_with_env(
+            ["search", "saffron", "--json"],
+            root_env.clone(),
+            &mut plain_output,
+        )
+        .unwrap();
+        let plain: Value = serde_json::from_slice(&plain_output).unwrap();
+        assert_eq!(plain["results"][0]["pageTitle"], "plain");
+        assert!(plain["results"][0]["heading"].is_null());
+
+        let mut default_output = Vec::new();
+        run_with_env(
+            ["search", "bulkneedle", "--json"],
+            root_env.clone(),
+            &mut default_output,
+        )
+        .unwrap();
+        let default_report: Value = serde_json::from_slice(&default_output).unwrap();
+        assert_eq!(default_report["results"].as_array().unwrap().len(), 10);
+
+        let mut fifty_output = Vec::new();
+        run_with_env(
+            ["search", "bulkneedle", "--limit", "50", "--json"],
+            root_env,
+            &mut fifty_output,
+        )
+        .unwrap();
+        let fifty_report: Value = serde_json::from_slice(&fifty_output).unwrap();
+        assert_eq!(fifty_report["results"].as_array().unwrap().len(), 50);
     }
 
     #[test]
@@ -6333,12 +6427,23 @@ mod tests {
         run_with_env(["search", "amber", "--json"], env.clone(), &mut output).unwrap();
         let first: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(first["results"][0]["pagePath"], "runbook.md");
-        let index_paths = fs::read_dir(tree.join(".finitebrain/search-indexes"))
+        let index_directories = fs::read_dir(tree.join(".finitebrain/search-indexes"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
-        assert_eq!(index_paths.len(), 1);
-        let stable_rowid = rusqlite::Connection::open(&index_paths[0])
+        assert_eq!(index_directories.len(), 1);
+        let index_path = index_directories[0].join("index.sqlite3");
+        let legacy_index = tree
+            .join(".finitebrain/search-indexes")
+            .join(format!("{}.sqlite3", "a".repeat(64)));
+        let legacy_journal = tree
+            .join(".finitebrain/search-indexes")
+            .join(format!("{}.sqlite3-journal", "a".repeat(64)));
+        fs::write(&legacy_index, b"legacy derived plaintext").unwrap();
+        fs::write(&legacy_journal, b"legacy rollback plaintext").unwrap();
+        set_private_file_permissions(&legacy_index).unwrap();
+        set_private_file_permissions(&legacy_journal).unwrap();
+        let stable_rowid = rusqlite::Connection::open(&index_path)
             .unwrap()
             .query_row(
                 "SELECT rowid FROM sections WHERE heading = 'Stable procedure'",
@@ -6356,7 +6461,9 @@ mod tests {
         run_with_env(["search", "cobalt", "--json"], env.clone(), &mut output).unwrap();
         let changed: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(changed["results"][0]["pagePath"], "runbook.md");
-        let stable_rowid_after_edit = rusqlite::Connection::open(&index_paths[0])
+        assert!(!legacy_index.exists());
+        assert!(!legacy_journal.exists());
+        let stable_rowid_after_edit = rusqlite::Connection::open(&index_path)
             .unwrap()
             .query_row(
                 "SELECT rowid FROM sections WHERE heading = 'Stable procedure'",
@@ -6373,11 +6480,45 @@ mod tests {
         let stale: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(stale["results"], serde_json::json!([]));
 
-        fs::write(&index_paths[0], b"not a sqlite database").unwrap();
+        fs::write(&index_path, b"not a sqlite database").unwrap();
         let mut output = Vec::new();
         run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
         let rebuilt: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(rebuilt["results"][0]["pagePath"], "runbook.md");
+
+        let connection = rusqlite::Connection::open(&index_path).unwrap();
+        connection
+            .execute("DELETE FROM metadata WHERE key = 'version'", [])
+            .unwrap();
+        drop(connection);
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        let rebuilt_without_version: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            rebuilt_without_version["results"][0]["pagePath"],
+            "runbook.md"
+        );
+
+        let connection = rusqlite::Connection::open(&index_path).unwrap();
+        connection
+            .execute_batch("DROP TABLE pages; CREATE TABLE pages (wrong TEXT);")
+            .unwrap();
+        drop(connection);
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        let rebuilt_partial_schema: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            rebuilt_partial_schema["results"][0]["pagePath"],
+            "runbook.md"
+        );
+
+        let journal_residue = index_directories[0].join("index.sqlite3-journal");
+        fs::write(&journal_residue, b"synthetic plaintext rollback residue").unwrap();
+        set_private_file_permissions(&journal_residue).unwrap();
 
         let mut state = read_working_tree_state(&tree).unwrap();
         state.folder_roots[0].can_read = false;
@@ -6394,6 +6535,189 @@ mod tests {
                 .unwrap()
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn hot_sync_search_reconciliation_reads_only_reported_pages() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "General".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/stable.md"),
+            "# Stable\n\nOld stable text.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/changed.md"),
+            "# Changed\n\n## Stable procedure\n\nKeep violet text.\n\n## Active procedure\n\nAmber text.\n",
+        )
+        .unwrap();
+        fs::write(tree.join("General/z-broken.md"), "# Guard\n\nSmall text.\n").unwrap();
+        reconcile_search_indexes(&tree).unwrap();
+        let index_directory = fs::read_dir(tree.join(".finitebrain/search-indexes"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let index_path = index_directory.join("index.sqlite3");
+        let stable_rowid = rusqlite::Connection::open(&index_path)
+            .unwrap()
+            .query_row(
+                "SELECT rowid FROM sections WHERE page_path = 'changed.md' AND heading = 'Stable procedure'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+
+        // A full Folder scan would reject this unrelated Page, making this a
+        // high-seam assertion that the hot path follows the sync report only.
+        fs::write(
+            tree.join("General/stable.md"),
+            "x".repeat((4 * 1024 * 1024) + 1),
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/changed.md"),
+            "# Changed\n\n## Stable procedure\n\nKeep violet text.\n\n## Active procedure\n\nCobalt text.\n",
+        )
+        .unwrap();
+        let report = SyncOnceReport {
+            status: "ok".to_owned(),
+            latest_sequence: 1,
+            record_count: 1,
+            server_url: "http://127.0.0.1".to_owned(),
+            local_changes: vec![SyncChangeReport {
+                status: "submitted".to_owned(),
+                action: "update".to_owned(),
+                actor_npub: None,
+                sequence: None,
+                path: Some("General/changed.md".to_owned()),
+                from_path: None,
+                folder_id: Some("general".to_owned()),
+                source_brain_id: None,
+                object_id: Some("changed".to_owned()),
+                route: "encrypted-object-write".to_owned(),
+                reason: None,
+            }],
+            remote_changes: Vec::new(),
+            conflicts: Vec::new(),
+        };
+
+        assert_eq!(reconcile_search_changes(&tree, &report).unwrap(), 1);
+        let connection = rusqlite::Connection::open(&index_path).unwrap();
+        let changed_body: String = connection
+            .query_row(
+                "SELECT body FROM sections WHERE page_path = 'changed.md' AND heading = 'Active procedure'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(changed_body.contains("Cobalt"));
+        let stable_rowid_after = connection
+            .query_row(
+                "SELECT rowid FROM sections WHERE page_path = 'changed.md' AND heading = 'Stable procedure'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(stable_rowid_after, stable_rowid);
+
+        fs::write(
+            tree.join("General/changed.md"),
+            "# Changed\n\n## Stable procedure\n\nKeep violet text.\n\n## Active procedure\n\nEmerald text.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/z-broken.md"),
+            "x".repeat((4 * 1024 * 1024) + 1),
+        )
+        .unwrap();
+        let mut failing_report = report.clone();
+        let mut broken_change = failing_report.local_changes[0].clone();
+        broken_change.path = Some("General/z-broken.md".to_owned());
+        failing_report.local_changes.push(broken_change);
+        assert!(reconcile_search_changes(&tree, &failing_report).is_err());
+        let body_after_failed_transaction: String = connection
+            .query_row(
+                "SELECT body FROM sections WHERE page_path = 'changed.md' AND heading = 'Active procedure'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(body_after_failed_transaction.contains("Cobalt"));
+        assert!(!body_after_failed_transaction.contains("Emerald"));
+        drop(connection);
+
+        fs::write(
+            tree.join("General/stable.md"),
+            "# Stable\n\nRestored stable text.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/z-broken.md"),
+            "# Guard\n\nSmall again.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/changed.md"),
+            "# Changed\n\n## Active procedure\n\nSilver text.\n",
+        )
+        .unwrap();
+        fs::write(&index_path, b"not a sqlite database").unwrap();
+        reconcile_search_changes(&tree, &report).unwrap();
+        let connection = rusqlite::Connection::open(&index_path).unwrap();
+        let stable_pages: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pages WHERE path = 'stable.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stable_pages, 1, "corrupt hot index must rebuild every Page");
+        connection
+            .execute(
+                "UPDATE metadata SET value = 'wrong-version' WHERE key = 'version'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        fs::write(
+            tree.join("General/changed.md"),
+            "# Changed\n\n## Active procedure\n\nGold text.\n",
+        )
+        .unwrap();
+        reconcile_search_changes(&tree, &report).unwrap();
+        let stable_pages: i64 = rusqlite::Connection::open(index_path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM pages WHERE path = 'stable.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stable_pages, 1,
+            "incompatible hot index must rebuild every Page"
         );
     }
 
@@ -6878,6 +7202,63 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(indexes.len(), 1);
+    }
+
+    #[test]
+    fn failed_remote_sync_still_indexes_a_local_save_after_cold_start() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "General".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        fs::write(tree.join("General/local.md"), "# Local\n\nAmber text.\n").unwrap();
+        let bootstrap_report = SyncOnceReport {
+            status: "bootstrapped".to_owned(),
+            latest_sequence: 1,
+            record_count: 0,
+            server_url: "http://127.0.0.1".to_owned(),
+            local_changes: Vec::new(),
+            remote_changes: Vec::new(),
+            conflicts: Vec::new(),
+        };
+        assert!(reconcile_search_changes(&tree, &bootstrap_report).unwrap() > 0);
+        fs::write(tree.join("General/local.md"), "# Local\n\nCobalt text.\n").unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        assert!(sync_once(&env, &[], "test.failed-sync").is_err());
+
+        let index_directory = fs::read_dir(tree.join(".finitebrain/search-indexes"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let connection = rusqlite::Connection::open(index_directory.join("index.sqlite3")).unwrap();
+        let body: String = connection
+            .query_row(
+                "SELECT body FROM sections WHERE page_path = 'local.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(body.contains("Cobalt"));
     }
 
     #[test]

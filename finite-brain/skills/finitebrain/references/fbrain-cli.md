@@ -125,9 +125,11 @@ Each `remoteChanges` entry produced from a signed sync record includes
 
 `fbrain search` returns ranked Markdown Sections from every currently readable
 Folder in one result list. Repeat `--folder` to deliberately narrow the scope;
-an unknown or unreadable Folder fails closed. Results identify the Folder,
-Page path and title, heading ancestry, excerpt, sync disposition, and lexical
-signal. The default is ten results and the maximum explicit limit is fifty.
+an unknown or unreadable Folder fails closed. When mounted Folders reuse an ID,
+use `<source-brain-id>:<folder-id>` to select one unambiguously. Results identify
+the Folder and source Brain, Page path and title, heading ancestry, excerpt,
+sync disposition, and lexical signal. The default is ten results and the
+maximum explicit limit is fifty.
 
 The lexical index is private disposable state under `.finitebrain/`. It is
 maintained from live daemon saves, startup reconciliation, and sync, but it is

@@ -38,12 +38,6 @@ directory. Verify the normal Chat Completions answer and the top-level
 that `/metrics` reports fresh, independent `image`, `audio`, and `video`
 capability health.
 
-Also run one authenticated `/v1/embeddings` request containing a synthetic
-query and synthetic Markdown Section. Confirm that the response reports
-`nomic-embed-text-v1-5`, the pinned model version, one finite 768-dimensional
-vector per opaque input ID, and no submitted text. Never use customer content
-for this deployment smoke or print the worker credential.
-
 ## Rollback
 
 If rollout or semantic verification fails:

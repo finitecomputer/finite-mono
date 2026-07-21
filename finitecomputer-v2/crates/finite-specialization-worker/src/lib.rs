@@ -1,4 +1,5 @@
-use axum::extract::{DefaultBodyLimit, State};
+use axum::body::to_bytes;
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -40,6 +41,10 @@ const DEFAULT_MAX_VIDEO_FRAMES: usize = 4;
 const DEFAULT_MAX_EMBEDDING_BATCH: usize = 64;
 const DEFAULT_MAX_EMBEDDING_INPUT_CHARS: usize = 32 * 1024;
 const DEFAULT_MAX_EMBEDDING_DIMENSIONS: usize = 8192;
+const DEFAULT_MAX_EMBEDDING_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+// 64 inputs at the public character bounds can approach 10 MiB when every
+// character is four-byte UTF-8; keep a small JSON envelope allowance.
+const DEFAULT_MAX_EMBEDDING_REQUEST_BYTES: usize = 12 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct WorkerConfig {
@@ -51,6 +56,7 @@ pub struct WorkerConfig {
     pub vision_model: String,
     pub embedding_model: Option<String>,
     pub embedding_model_version: Option<String>,
+    pub embedding_concurrency: usize,
     pub max_image_bytes: u64,
     pub max_inline_image_bytes: u64,
     pub max_output_chars: usize,
@@ -88,6 +94,10 @@ impl WorkerConfig {
                 non_empty_env("FINITE_SPECIALIZATION_EMBEDDING_MODEL_VERSION")
                     .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_VERSION.to_owned()),
             ),
+            embedding_concurrency: non_empty_env("FINITE_SPECIALIZATION_EMBEDDING_CONCURRENCY")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(4)
+                .clamp(1, 16),
             max_image_bytes: non_empty_env("FINITE_SPECIALIZATION_MAX_IMAGE_BYTES")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
@@ -172,6 +182,7 @@ struct WorkerState {
     client: Client,
     metrics: CapabilityMetrics,
     media_slots: Arc<Semaphore>,
+    embedding_slots: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,11 +496,13 @@ pub fn app_with_client(config: WorkerConfig, client: Client) -> Router {
     let audio_canary_interval = config.audio_canary_interval_seconds;
     let video_canary_interval = config.video_canary_interval_seconds;
     let media_concurrency = config.media_concurrency;
+    let embedding_concurrency = config.embedding_concurrency;
     let state = Arc::new(WorkerState {
         config,
         client,
         metrics: CapabilityMetrics::default(),
         media_slots: Arc::new(Semaphore::new(media_concurrency)),
+        embedding_slots: Arc::new(Semaphore::new(embedding_concurrency)),
     });
     if let Some(interval_seconds) = image_canary_interval {
         tokio::spawn(run_image_canary_loop(Arc::clone(&state), interval_seconds));
@@ -511,10 +524,24 @@ pub fn app_with_client(config: WorkerConfig, client: Client) -> Router {
 
 async fn embeddings(
     State(state): State<Arc<WorkerState>>,
-    headers: HeaderMap,
-    Json(input): Json<EmbeddingBatchRequest>,
+    request: Request,
 ) -> Result<Json<Value>, WorkerError> {
-    authenticate_worker_request(&state.config, &headers)?;
+    authenticate_worker_request(&state.config, request.headers())?;
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(state.config.request_deadline_seconds);
+    let _permit = Arc::clone(&state.embedding_slots)
+        .try_acquire_owned()
+        .map_err(|_| WorkerError::capacity("embedding capacity exhausted"))?;
+    let (parts, body) = request.into_parts();
+    let body = tokio::time::timeout_at(
+        deadline,
+        to_bytes(body, DEFAULT_MAX_EMBEDDING_REQUEST_BYTES),
+    )
+    .await
+    .map_err(|_| WorkerError::request_timeout("embedding request deadline expired"))?
+    .map_err(|_| WorkerError::bad_request("embedding request exceeded its byte limit"))?;
+    let input: EmbeddingBatchRequest = serde_json::from_slice(&body)
+        .map_err(|_| WorkerError::bad_request("embedding request was not valid"))?;
     let model = state
         .config
         .embedding_model
@@ -531,10 +558,9 @@ async fn embeddings(
         .as_deref()
         .ok_or_else(|| WorkerError::unavailable("Spark gateway token is not configured"))?;
     let normalized = validate_embedding_batch(&input)?;
-    let request_id = correlation_request_id(&headers);
-    let response = tokio::time::timeout(
-        Duration::from_secs(state.config.request_deadline_seconds),
-        state
+    let request_id = correlation_request_id(&parts.headers);
+    let embedding_operation = async {
+        let response = state
             .client
             .post(format!(
                 "{}/embeddings",
@@ -543,31 +569,30 @@ async fn embeddings(
             .bearer_auth(spark_token)
             .header("x-request-id", &request_id)
             .json(&json!({ "model": model, "input": normalized }))
-            .send(),
-    )
-    .await
-    .map_err(|_| WorkerError::request_timeout("embedding request deadline expired"))?
-    .map_err(|error| {
-        if error.is_timeout() {
-            WorkerError::request_timeout("embedding request timed out")
-        } else {
-            WorkerError::bad_gateway("embedding upstream request failed")
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    WorkerError::request_timeout("embedding request timed out")
+                } else {
+                    WorkerError::bad_gateway("embedding upstream request failed")
+                }
+            })?;
+        let status = response.status();
+        let body = read_bounded_embedding_response(response).await?;
+        if !status.is_success() {
+            return Err(WorkerError::bad_gateway(format!(
+                "embedding upstream returned status {}",
+                status.as_u16()
+            )));
         }
-    })?;
-    let status = response.status();
-    let body = response
-        .text()
+        let upstream: UpstreamEmbeddingResponse = serde_json::from_slice(&body)
+            .map_err(|_| WorkerError::bad_gateway("embedding response was not valid"))?;
+        validate_upstream_embeddings(&input, model, upstream)
+    };
+    let (dimensions, embeddings) = tokio::time::timeout_at(deadline, embedding_operation)
         .await
-        .map_err(|_| WorkerError::bad_gateway("embedding response was not readable"))?;
-    if !status.is_success() {
-        return Err(WorkerError::bad_gateway(format!(
-            "embedding upstream returned status {}",
-            status.as_u16()
-        )));
-    }
-    let upstream: UpstreamEmbeddingResponse = serde_json::from_str(&body)
-        .map_err(|_| WorkerError::bad_gateway("embedding response was not valid"))?;
-    let (dimensions, embeddings) = validate_upstream_embeddings(&input, model, upstream)?;
+        .map_err(|_| WorkerError::request_timeout("embedding request deadline expired"))??;
     let vectors = input
         .inputs
         .iter()
@@ -581,6 +606,24 @@ async fn embeddings(
         "vectors": vectors,
         "requestId": request_id,
     })))
+}
+
+async fn read_bounded_embedding_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, WorkerError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|_| WorkerError::bad_gateway("embedding response was not readable"))?;
+        if body.len().saturating_add(chunk.len()) > DEFAULT_MAX_EMBEDDING_RESPONSE_BYTES {
+            return Err(WorkerError::bad_gateway(
+                "embedding response exceeded its byte limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn validate_embedding_batch(input: &EmbeddingBatchRequest) -> Result<Vec<String>, WorkerError> {
@@ -3397,6 +3440,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_embedding_upstream_response_is_rejected() {
+        let upstream_url = spawn_spark_mock(
+            Arc::new(Mutex::new(None)),
+            StatusCode::OK,
+            Value::String("x".repeat(DEFAULT_MAX_EMBEDDING_RESPONSE_BYTES)),
+        )
+        .await;
+        let worker = spawn_worker(test_config(&upstream_url)).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/embeddings"))
+            .bearer_auth("worker-secret")
+            .json(&json!({
+                "inputs": [{ "id": "query-1", "kind": "query", "text": "find it" }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn embedding_deadline_covers_a_stalled_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/embeddings",
+                post(|| async {
+                    let stream = futures_util::stream::unfold(0_u8, |state| async move {
+                        match state {
+                            0 => Some((
+                                Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"{")),
+                                1,
+                            )),
+                            1 => {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                Some((
+                                    Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"}")),
+                                    2,
+                                ))
+                            }
+                            _ => None,
+                        }
+                    });
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(axum::body::Body::from_stream(stream))
+                        .unwrap()
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut config = test_config(&upstream_url);
+        config.request_deadline_seconds = 1;
+        let worker = spawn_worker(config).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/embeddings"))
+            .bearer_auth("worker-secret")
+            .json(&json!({
+                "inputs": [{ "id": "query-1", "kind": "query", "text": "find it" }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
     async fn embedding_batch_rejects_prohibited_folder_metadata() {
         let response = app(test_config("http://127.0.0.1:9"))
             .oneshot(
@@ -3423,7 +3538,140 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn embedding_capacity_is_bounded_before_upstream_transport() {
+        let mut config = test_config("http://127.0.0.1:9");
+        config.embedding_concurrency = 1;
+        let state = Arc::new(test_state(config));
+        let _held = Arc::clone(&state.embedding_slots)
+            .try_acquire_owned()
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/embeddings")
+            .header("authorization", "Bearer worker-secret")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({ "inputs": [{ "id": "query-1", "kind": "query", "text": "find it" }] })
+                    .to_string(),
+            ))
+            .unwrap();
+
+        let error = embeddings(State(state), request).await.unwrap_err();
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "capacity_exceeded");
+    }
+
+    #[tokio::test]
+    async fn embedding_auth_and_capacity_precede_bounded_body_loading() {
+        let app = app(test_config("http://127.0.0.1:9"));
+        let oversized = "x".repeat(DEFAULT_MAX_EMBEDDING_REQUEST_BYTES + 1);
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("authorization", "Bearer wrong")
+                    .body(axum::body::Body::from(oversized.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let oversized = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("authorization", "Bearer worker-secret")
+                    .body(axum::body::Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn embedding_deadline_covers_a_stalled_request_body() {
+        let mut config = test_config("http://127.0.0.1:9");
+        config.request_deadline_seconds = 1;
+        let stream = futures_util::stream::unfold(0_u8, |state| async move {
+            match state {
+                0 => Some((
+                    Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"{")),
+                    1,
+                )),
+                1 => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Some((
+                        Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"}")),
+                        2,
+                    ))
+                }
+                _ => None,
+            }
+        });
+        let response = app(config)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("authorization", "Bearer worker-secret")
+                    .body(axum::body::Body::from_stream(stream))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn malformed_embedding_vectors_fail_closed() {
+        let input = EmbeddingBatchRequest {
+            inputs: vec![EmbeddingInput {
+                id: "query-1".to_owned(),
+                kind: EmbeddingInputKind::Query,
+                page_title: None,
+                heading_ancestry: Vec::new(),
+                text: "find it".to_owned(),
+            }],
+        };
+        let invalid = [
+            UpstreamEmbeddingResponse {
+                model: Some("embed-test".to_owned()),
+                data: vec![UpstreamEmbeddingVector {
+                    index: 1,
+                    embedding: vec![1.0],
+                }],
+            },
+            UpstreamEmbeddingResponse {
+                model: Some("embed-test".to_owned()),
+                data: vec![UpstreamEmbeddingVector {
+                    index: 0,
+                    embedding: vec![f32::NAN],
+                }],
+            },
+            UpstreamEmbeddingResponse {
+                model: Some("wrong-model".to_owned()),
+                data: vec![UpstreamEmbeddingVector {
+                    index: 0,
+                    embedding: vec![1.0],
+                }],
+            },
+        ];
+
+        for upstream in invalid {
+            let error = validate_upstream_embeddings(&input, "embed-test", upstream).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        }
     }
 
     #[test]
@@ -3792,6 +4040,7 @@ mod tests {
             vision_model: "qwopus-test".to_string(),
             embedding_model: Some("embed-test".to_string()),
             embedding_model_version: Some("embed-test-v1".to_string()),
+            embedding_concurrency: 4,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_inline_image_bytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
             max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
@@ -3855,6 +4104,7 @@ mod tests {
 
     fn test_state(config: WorkerConfig) -> WorkerState {
         let media_concurrency = config.media_concurrency;
+        let embedding_concurrency = config.embedding_concurrency;
         WorkerState {
             config,
             client: Client::builder()
@@ -3863,6 +4113,7 @@ mod tests {
                 .unwrap(),
             metrics: CapabilityMetrics::default(),
             media_slots: Arc::new(Semaphore::new(media_concurrency)),
+            embedding_slots: Arc::new(Semaphore::new(embedding_concurrency)),
         }
     }
 

@@ -160,7 +160,13 @@ loopback addresses, or the exact development host explicitly named by
 `fbrain search <query>` uses private, persistent per-Folder BM25 indexes over
 the readable Markdown Sections in the current Brain Working Tree. It searches
 all readable Folders by default; repeat `--folder <id-or-path>` to narrow the
-scope, use `--limit <1-50>` to bound evidence, and use `--json` for agents.
+scope. If mounted Folders reuse an ID, select one with
+`--folder <source-brain-id>:<folder-id>`. Use `--limit <1-50>` to bound
+evidence and `--json` for agents; JSON evidence includes `sourceBrainId`.
+Each Folder keeps its own BM25 corpus; query-time BM25 relevance is normalized
+within that Folder before the candidate lists are merged, with raw BM25 as the
+cross-Folder tie-break. The final lexical order therefore remains BM25-derived
+without comparing unnormalized per-Folder scales.
 Search indexes are disposable derived state under `.finitebrain/`, never synced
 knowledge or a Recovery Set.
 

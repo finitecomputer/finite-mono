@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::Read;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,12 @@ use crate::{CliError, validate_http_url};
 const MAX_EMBEDDING_BATCH: usize = 64;
 const MAX_EMBEDDING_INPUTS: usize = 4096;
 const MAX_EMBEDDING_DIMENSIONS: usize = 8192;
+const MAX_EMBEDDING_TEXT_CHARS: usize = 32 * 1024;
+const MAX_EMBEDDING_PAGE_TITLE_CHARS: usize = 512;
+const MAX_EMBEDDING_HEADINGS: usize = 12;
+const MAX_EMBEDDING_HEADING_CHARS: usize = 512;
+const MAX_EMBEDDING_TOTAL_CHARS: usize = 8 * 1024 * 1024;
+const MAX_EMBEDDING_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Runtime-injected connection settings for one replaceable Embedding Provider.
 #[derive(Clone)]
@@ -205,7 +212,20 @@ impl EmbeddingProviderAdapter {
                 )));
             }
         };
-        let wire: WireEmbeddingProviderResponse = response.into_json().map_err(|_| {
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .take((MAX_EMBEDDING_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut body)
+            .map_err(|_| {
+                CliError::EmbeddingProvider("provider response was not readable".to_owned())
+            })?;
+        if body.len() > MAX_EMBEDDING_RESPONSE_BYTES {
+            return Err(CliError::EmbeddingProvider(
+                "provider response exceeded its byte limit".to_owned(),
+            ));
+        }
+        let wire: WireEmbeddingProviderResponse = serde_json::from_slice(&body).map_err(|_| {
             CliError::EmbeddingProvider("provider returned invalid JSON".to_owned())
         })?;
         validate_provider_response(inputs, wire)
@@ -219,6 +239,7 @@ fn validate_input_identifiers(inputs: &[EmbeddingProviderInput]) -> Result<(), C
         )));
     }
     let mut identifiers = BTreeSet::new();
+    let mut total_chars = 0_usize;
     for input in inputs {
         if input.id.is_empty()
             || input.id.len() > 128
@@ -231,6 +252,63 @@ fn validate_input_identifiers(inputs: &[EmbeddingProviderInput]) -> Result<(), C
             return Err(CliError::InvalidInput(
                 "Embedding Provider input IDs must be unique safe opaque identifiers".to_owned(),
             ));
+        }
+        let text_chars = input.text.chars().count();
+        if input.text.trim().is_empty() || text_chars > MAX_EMBEDDING_TEXT_CHARS {
+            return Err(CliError::InvalidInput(format!(
+                "Embedding Provider text must contain 1 to {MAX_EMBEDDING_TEXT_CHARS} characters"
+            )));
+        }
+        match input.kind {
+            EmbeddingProviderInputKind::Section => {
+                if !input.page_title.as_deref().is_some_and(|title| {
+                    !title.trim().is_empty()
+                        && title.chars().count() <= MAX_EMBEDDING_PAGE_TITLE_CHARS
+                }) {
+                    return Err(CliError::InvalidInput(
+                        "Section embeddings require a bounded Page title".to_owned(),
+                    ));
+                }
+                if input.heading_ancestry.len() > MAX_EMBEDDING_HEADINGS
+                    || input.heading_ancestry.iter().any(|heading| {
+                        heading.trim().is_empty()
+                            || heading.chars().count() > MAX_EMBEDDING_HEADING_CHARS
+                    })
+                {
+                    return Err(CliError::InvalidInput(
+                        "Section embedding heading ancestry exceeds its bounds".to_owned(),
+                    ));
+                }
+            }
+            EmbeddingProviderInputKind::Query => {
+                if input.page_title.is_some() || !input.heading_ancestry.is_empty() {
+                    return Err(CliError::InvalidInput(
+                        "Query embeddings may contain only query text".to_owned(),
+                    ));
+                }
+            }
+        }
+        total_chars = total_chars
+            .saturating_add(text_chars)
+            .saturating_add(
+                input
+                    .page_title
+                    .as_deref()
+                    .map(str::chars)
+                    .map(Iterator::count)
+                    .unwrap_or_default(),
+            )
+            .saturating_add(
+                input
+                    .heading_ancestry
+                    .iter()
+                    .map(|heading| heading.chars().count())
+                    .sum::<usize>(),
+            );
+        if total_chars > MAX_EMBEDDING_TOTAL_CHARS {
+            return Err(CliError::InvalidInput(format!(
+                "Embedding Provider request exceeds {MAX_EMBEDDING_TOTAL_CHARS} total characters"
+            )));
         }
     }
     Ok(())
@@ -305,4 +383,63 @@ fn validate_provider_response(
 fn safe_transport_error(error: &str) -> String {
     let error = error.replace(['\r', '\n'], " ");
     error.chars().take(256).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_rejects_oversized_plaintext_before_transport() {
+        let input =
+            EmbeddingProviderInput::query("query-1", "x".repeat(MAX_EMBEDDING_TEXT_CHARS + 1));
+
+        let error = validate_input_identifiers(&[input]).unwrap_err();
+
+        assert!(error.to_string().contains("text must contain"));
+    }
+
+    #[test]
+    fn provider_response_rejects_unknown_duplicate_and_non_finite_vectors() {
+        let inputs = [EmbeddingProviderInput::query("query-1", "find this")];
+        let invalid = [
+            WireEmbeddingProviderResponse {
+                model: "model".to_owned(),
+                model_version: "v1".to_owned(),
+                dimensions: 1,
+                vectors: vec![WireEmbeddingProviderVector {
+                    id: "unknown".to_owned(),
+                    embedding: vec![1.0],
+                }],
+            },
+            WireEmbeddingProviderResponse {
+                model: "model".to_owned(),
+                model_version: "v1".to_owned(),
+                dimensions: 1,
+                vectors: vec![
+                    WireEmbeddingProviderVector {
+                        id: "query-1".to_owned(),
+                        embedding: vec![1.0],
+                    },
+                    WireEmbeddingProviderVector {
+                        id: "query-1".to_owned(),
+                        embedding: vec![1.0],
+                    },
+                ],
+            },
+            WireEmbeddingProviderResponse {
+                model: "model".to_owned(),
+                model_version: "v1".to_owned(),
+                dimensions: 1,
+                vectors: vec![WireEmbeddingProviderVector {
+                    id: "query-1".to_owned(),
+                    embedding: vec![f32::NAN],
+                }],
+            },
+        ];
+
+        for response in invalid {
+            assert!(validate_provider_response(&inputs, response).is_err());
+        }
+    }
 }
