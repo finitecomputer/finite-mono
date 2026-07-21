@@ -315,6 +315,52 @@ Executed on 2026-07-20:
 
 No synthetic-Agent chat/restart/reboot result is claimed.
 
+### Existing-Agent empty-target recovery proof
+
+On 2026-07-20 Paul authorized the Agents owned by `paul@finite.vip` as
+disposable recovery-test candidates, specifically Sol 2, Waffle, AEON Canary
+0714, and Sites Canary 0715. This authority does not activate Runtime
+Retirement, change Core records or entitlements, or authorize deletion. The
+separate proposal remains
+[`runtime-retirement-readiness.md`](runtime-retirement-readiness.md).
+
+AEON Canary 0714 was selected because it was online on the current Runtime
+artifact; Waffle was stale, Sol 2 used an older artifact, and Sites Canary
+would add publishing side effects. The bounded drill passed:
+
+- the lat1 Runner timer was paused, the one canonical container was gracefully
+  stopped, and its 35-MiB `/data` Recovery Set was archived while no writer was
+  running;
+- the authoritative container was immediately restarted and returned healthy
+  before the Runner timer resumed;
+- the checksummed artifact was copied off lat1 to a root-only directory on
+  lat3 and extracted only into an empty target;
+- the exact pinned image booted the restored state in a Kata VM with container
+  network mode `none`; an explicit outbound connection probe failed;
+- the restored and authoritative instances reported matching Agent Principal
+  hashes and matching identity-file hashes, all four SQLite candidates passed
+  `PRAGMA integrity_check`, and the restored tree matched the archive's 328
+  files and 143 directories; and
+- the restored VM, transient environment, and extracted tree were removed.
+  Lat3 returned to zero containers and tasks. Root-only copies of the
+  36,024,320-byte artifact remain at
+  `/data/recovery-snapshots/agent-runtime/20260721T014619Z-aeon-canary-0714`
+  on lat1 and
+  `/data/recovery-drills/agent-runtime/20260721T014619Z-aeon-canary-0714`
+  on lat3, with SHA-256
+  `4265110a1aab16a4b7fac27df65e95237f5f68017be91609b4d29cc792400af3`.
+
+The first isolated cleanup exposed a bounded Kata/nerdctl issue: VM cleanup
+timed out and left one stopped container metadata record plus a stale local
+name reservation. There was no task or second writer. The exact metadata
+record was removed, a fresh drill name completed, and the stale name is not
+reused. This does not invalidate the restored data or identity proof.
+
+This proves the Agent Runtime portion for one representative Agent. It is not
+yet authority to wipe lat1: the complete fleet artifact, Hosted Web Chat/Core
+empty-target restore, Sites and Brain recovery sets, secrets bootstrap, and
+the exact lat1 RAID closure remain separate go/no-go gates.
+
 ## Next bounded slices
 
 ### Capacity admission
@@ -330,8 +376,8 @@ part of opening lat3.
 After lat3 is stable capacity:
 
 1. add swap and pin the next lat1 NixOS generation without changing storage;
-2. prove the existing backup and restore path, including chat-safe SQLite
-   handling;
+2. extend the passed single-Agent empty-target proof to the complete lat1
+   Recovery Set, including chat-safe SQLite handling;
 3. schedule the destructive lat1 reprovision for an evening window; and
 4. restore and verify before reopening normal operation.
 
@@ -358,3 +404,4 @@ Append only decisive checkpoints here:
 | 2026-07-20 | PR #134 merged; exact lat3 closure activated with declarative Runner timer | Pass |
 | 2026-07-20 | Exact lat1 persistence closure dry activation | No-go: broad application restart set |
 | 2026-07-21 | Owner-authorized evening lat1 rollout; exact merged closure and declarative bridge | Pass |
+| 2026-07-21 | AEON Canary 0714 write-fenced archive and network-isolated empty-target restore on lat3 | Pass |
