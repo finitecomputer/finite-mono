@@ -361,6 +361,52 @@ yet authority to wipe lat1: the complete fleet artifact, Hosted Web Chat/Core
 empty-target restore, Sites and Brain recovery sets, secrets bootstrap, and
 the exact lat1 RAID closure remain separate go/no-go gates.
 
+The follow-up in-flight-chat drill on 2026-07-21 established the narrower
+recovery boundary needed for that gate:
+
+- a deterministic local matrix used the canonical Runtime image, real Hermes
+  0.18.2, real Finite Chat MLS state, and a local streaming provider held after
+  response headers but before its first data frame;
+- graceful stop, `SIGKILL`, and a stopped-writer empty-target restore each
+  preserved the Agent Principal and Room and completed two new chats after
+  restart;
+- AEON Canary 0714 was stopped while a provider response was in flight, then
+  restored into an empty canonical state path from the off-host-verified
+  archive. Its four SQLite databases passed `PRAGMA integrity_check`, and the
+  restored file and directory manifests exactly matched the stable source;
+- the first archive attempt was rejected before launch because Kata task
+  cleanup continued after `nerdctl stop` returned and changed WAL/SHM files.
+  The required snapshot gate is therefore: the container is stopped, its
+  containerd task is absent, and two source manifests are stable before the
+  archive begins; and
+- after restore, Paul's existing Hosted Web device decrypted one AEON response
+  containing both the interrupted prompt's requested marker and the first
+  fresh-chat marker, then decrypted a second independent reply in the same
+  chat. AEON remained healthy and connected after normal Runner reconciliation
+  resumed.
+
+The stable root-only artifact is retained on lat1 at
+`/data/recovery-snapshots/agent-runtime/20260721T141627Z-aeon-canary-0714-inflight-stable`
+and off-host on lat3 at
+`/data/recovery-drills/agent-runtime/20260721T141627Z-aeon-canary-0714-inflight-stable`.
+Its archive SHA-256 is
+`f6eb8fb1e34c68e9b52535276b2bc32310490a066d82c4460df710fa697e4a4c`.
+The earlier artifact is marked `REJECTED` at both locations and must never be
+used as a restore source.
+
+The Docker matrix fences its source by removing the container and unmounting
+the named volume before `tar`; it does not model Kata's delayed task cleanup.
+The AEON task-absence and stable-manifest evidence is the production snapshot
+gate.
+
+This does not promise delivery of every in-flight token or message. It proves
+the supported boundary that matters here: snapshot only stable, stopped-writer
+state; preserve both sides' current Finite Chat state; after restore require
+the same identity and Room plus two fresh decryptable chats. A live filesystem
+copy, a snapshot taken while Kata cleanup is still changing the tree, or an
+older Agent snapshot after the peer has advanced its MLS state remains outside
+the guarantee.
+
 ## Next bounded slices
 
 ### Capacity admission
@@ -405,3 +451,5 @@ Append only decisive checkpoints here:
 | 2026-07-20 | Exact lat1 persistence closure dry activation | No-go: broad application restart set |
 | 2026-07-21 | Owner-authorized evening lat1 rollout; exact merged closure and declarative bridge | Pass |
 | 2026-07-21 | AEON Canary 0714 write-fenced archive and network-isolated empty-target restore on lat3 | Pass |
+| 2026-07-21 | Real-Hermes interruption matrix: graceful, `SIGKILL`, and empty-target restore | Pass |
+| 2026-07-21 | AEON in-flight stop, stable empty-target restore, and two fresh decryptable chats | Pass |
