@@ -18,6 +18,9 @@ const RESPONSE_HEADERS = [
   "last-modified",
 ] as const;
 
+export const BRAIN_CLIENT_CONTENT_SECURITY_POLICY =
+  "sandbox allow-scripts allow-forms allow-downloads allow-modals; connect-src 'self' https: http:; frame-ancestors 'self'";
+
 const MAX_BRAIN_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_BRAIN_CLIENT_HTML_BYTES = 2 * 1024 * 1024;
 const BRAIN_PROXY_TIMEOUT_MS = 60_000;
@@ -129,8 +132,7 @@ export async function proxyBrainRequest(
         status: response.status,
         headers: {
           "cache-control": "no-store",
-          "content-security-policy":
-            "sandbox allow-scripts allow-forms allow-downloads; connect-src 'self' https: http:; frame-ancestors 'self'",
+          "content-security-policy": BRAIN_CLIENT_CONTENT_SECURITY_POLICY,
           "content-type": response.headers.get("content-type") ?? "text/html; charset=utf-8",
           "referrer-policy": "no-referrer",
           "x-frame-options": "SAMEORIGIN",

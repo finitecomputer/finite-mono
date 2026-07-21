@@ -7553,6 +7553,7 @@ const FiniteBrainProductClient = (() => {
           : "available";
     const button = document.createElement("button");
     button.type = "button";
+    button.dataset.brainId = brain.brainId;
     button.className = `brain-switch-button${isSelected ? " selected" : ""}${isLoaded ? " loaded" : ""}${isLocked ? " locked" : ""}`;
     button.setAttribute("aria-pressed", String(isSelected));
     button.setAttribute(

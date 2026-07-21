@@ -5,7 +5,8 @@ export const BRAIN_PERSONAL_AGENT_CONFIRMATION_REQUEST =
   "finite-brain-personal-agent-confirmation-request-v1";
 export const BRAIN_PERSONAL_AGENT_CONFIRMATION_RESPONSE =
   "finite-brain-personal-agent-confirmation-response-v1";
-export const BRAIN_FRAME_SANDBOX = "allow-downloads allow-forms allow-scripts";
+export const BRAIN_FRAME_SANDBOX =
+  "allow-downloads allow-forms allow-modals allow-scripts";
 
 export type BrainSessionProofRequest = {
   type: typeof BRAIN_SESSION_PROOF_REQUEST;

@@ -505,6 +505,7 @@ async function assertBrainSwitcherLoadsSelectedBrain() {
     state.visibleBrains[1],
     "switcher"
   );
+  assert.equal(organizationButton.dataset.brainId, "organization-fixture");
   await organizationButton.click();
 
   assert.equal(state.activeBrainId, "organization-fixture");

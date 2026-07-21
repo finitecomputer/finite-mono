@@ -159,6 +159,8 @@ else:
         (r"ask\s+one\s+short\s+natural-language\s+question", "ambiguous type clarification"),
         (r"Personal Brain.*already exists", "existing Personal Brain handling"),
         (r"same-named Organization Brain", "same-named Organization Brain handling"),
+        (r"event\.source\.user_id", "authenticated requester identity"),
+        (r"both.*active admins", "creator and requester admin verification"),
         (r"\[Open Brain\]\(\.\/brain\?brainId=", "Open Brain navigation"),
         (r"navigation only; it does not\s+grant access", "navigation is not authority"),
     )

@@ -599,15 +599,67 @@ if (count && (brains[0].kind !== kind || brains[0].role !== role)) {
 JS
 }
 
+agent_visible_brain_id() {
+  local expected_kind="$1"
+  local expected_role="$2"
+  assert_agent_brain_list "$expected_kind" "$expected_role" 1
+  node - "$brains_json" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(response.brains[0].brainId);
+JS
+}
+
+assert_agent_brain_shape() {
+  local brain_id="$1"
+  local expected_folder_count="$2"
+  local expected_admin_count="$3"
+  local metadata_json="$state_dir/brain-matrix-metadata.json"
+  container exec "$container_machine_id" fbrain brain metadata "$brain_id" --json >"$metadata_json"
+  node - "$metadata_json" "$brain_id" "$expected_folder_count" "$expected_admin_count" <<'JS'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [brainId, folderCountText, adminCountText] = process.argv.slice(3);
+const folderCount = Number(folderCountText);
+const adminCount = Number(adminCountText);
+if (value.brainId !== brainId) throw new Error(`expected ${brainId}, received ${value.brainId}`);
+if (value.folders.length !== folderCount) throw new Error(`expected ${folderCount} Folders, received ${JSON.stringify(value.folders)}`);
+if (value.admins.length !== adminCount || new Set(value.admins).size !== value.admins.length) {
+  throw new Error(`expected ${adminCount} unique admins, received ${JSON.stringify(value.admins)}`);
+}
+if (folderCount === 0 && value.grantCount !== 0) throw new Error(`empty Brain has ${value.grantCount} grants`);
+if ((value.identities || []).some((identity) => !identity.display)) throw new Error("identity display metadata is empty");
+JS
+}
+
+browser_brain_id() {
+  local action="$1"
+  local expected_text="${2:-}"
+  local target_brain_id="${3:-}"
+  local output
+  output="$(brain_browser_smoke "$action" "$expected_text" "$target_brain_id")"
+  printf '%s\n' "$output" >&2
+  sed -n 's/^BRAIN_ID=//p' <<<"$output" | tail -1
+}
+
 run_brain_setup_matrix() {
   local requester_npub
+  local agent_id
+  local browser_id
   local org_id="matrix-agent-org"
   requester_npub="$(requesting_user_account_id)"
 
   reset_brain_setup_matrix_state
   container exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
-  assert_agent_brain_list personal personal_agent 1
-  brain_browser_smoke assert-existing-personal
+  container exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
+  agent_id="$(agent_visible_brain_id personal personal_agent)"
+  assert_agent_brain_shape "$agent_id" 0 0
+  browser_id="$(browser_brain_id assert-existing-personal)"
+  [[ "$browser_id" == "$agent_id" ]] || { echo "agent-first Personal Brain ids differ" >&2; return 1; }
+  container exec "$container_machine_id" fbrain folder create matrix-agent-personal-folder \
+    --brain "$agent_id" --name "Matrix Agent Personal Folder" --path matrix-agent-personal-folder --json >/dev/null
+  assert_agent_brain_shape "$agent_id" 1 0
+  brain_browser_smoke assert-folder "matrix-agent-personal-folder" "$agent_id"
 
   reset_brain_setup_matrix_state
   container exec "$container_machine_id" fbrain brain create "$org_id" \
@@ -620,19 +672,36 @@ run_brain_setup_matrix() {
     --name "Matrix Agent Org" \
     --requesting-user-npub "$requester_npub" \
     --json >/dev/null
-  assert_agent_brain_list organization admin 1
-  brain_browser_smoke assert-org-first "$org_id"
+  agent_id="$(agent_visible_brain_id organization admin)"
+  [[ "$agent_id" == "$org_id" ]] || { echo "idempotent Org create changed its id" >&2; return 1; }
+  assert_agent_brain_shape "$agent_id" 0 2
+  browser_id="$(browser_brain_id assert-org-first "$org_id")"
+  [[ "$browser_id" == "$agent_id" ]] || { echo "agent-first Org Brain ids differ" >&2; return 1; }
+  container exec "$container_machine_id" fbrain folder create matrix-agent-org-folder \
+    --brain "$agent_id" --name "Matrix Agent Org Folder" --path matrix-agent-org-folder --json >/dev/null
+  assert_agent_brain_shape "$agent_id" 1 2
+  brain_browser_smoke assert-folder "matrix-agent-org-folder" "$agent_id"
 
   reset_brain_setup_matrix_state
-  brain_browser_smoke bootstrap
-  assert_agent_brain_list personal personal_agent 1
+  browser_id="$(browser_brain_id bootstrap)"
+  agent_id="$(agent_visible_brain_id personal personal_agent)"
+  [[ "$browser_id" == "$agent_id" ]] || { echo "user-first Personal Brain ids differ" >&2; return 1; }
+  assert_agent_brain_shape "$agent_id" 0 0
+  brain_browser_smoke create-folder "Matrix User Personal Folder" "$browser_id"
+  assert_agent_brain_shape "$agent_id" 1 0
 
   reset_brain_setup_matrix_state
-  brain_browser_smoke create-org-agent "Matrix User Agent Org"
-  assert_agent_brain_list organization admin 1
+  browser_id="$(browser_brain_id create-org-agent "Matrix User Agent Org")"
+  agent_id="$(agent_visible_brain_id organization admin)"
+  [[ "$browser_id" == "$agent_id" ]] || { echo "user-first paired Org Brain ids differ" >&2; return 1; }
+  assert_agent_brain_shape "$agent_id" 0 2
+  brain_browser_smoke create-folder "Matrix User Org Folder" "$browser_id"
+  assert_agent_brain_shape "$agent_id" 1 2
 
   reset_brain_setup_matrix_state
-  brain_browser_smoke create-org-human "Matrix Human Only Org"
+  browser_id="$(browser_brain_id create-org-human "Matrix Human Only Org")"
+  assert_agent_brain_list organization admin 0
+  brain_browser_smoke create-folder "Matrix Human Only Folder" "$browser_id"
   assert_agent_brain_list organization admin 0
 
   echo "devfinity Brain setup/reconciliation matrix passed"
@@ -665,11 +734,13 @@ runtime_agent_npub() {
 brain_browser_smoke() {
   local action="$1"
   local expected_text="${2:-}"
+  local target_brain_id="${3:-}"
   (
     cd "$dashboard_dir"
       DEVFINITY_BRAIN_MACHINE_ID="$machine_id" \
       DEVFINITY_BRAIN_AGENT_EMAIL="$agent_email" \
       DEVFINITY_BRAIN_EXPECTED_TEXT="$expected_text" \
+      DEVFINITY_BRAIN_TARGET_ID="$target_brain_id" \
       node --import tsx scripts/devfinity-brain-smoke.ts "$action"
   )
 }
@@ -1115,16 +1186,20 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
   open_and_sync_personal_brain
   write_personal_agent_note
   brain_browser_smoke assert-note "$brain_proof"
-  publish_private_requesting_user_site
+  if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+    publish_private_requesting_user_site
+  fi
 fi
 
 restart_process finitechat
 wait_http "Finite Chat after restart" "$chat_url/health" 120
 restart_process hosted-web-device
 wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
-restart_process finitesites
-wait_http "Finite Sites after restart" "$sites_api_url/api/v1/healthz" 120
-if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+  restart_process finitesites
+  wait_http "Finite Sites after restart" "$sites_api_url/api/v1/healthz" 120
+fi
+if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" && "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
   assert_site_cookie_works "$sites_cookie_jar_before"
   issue_and_redeem_site_preview "$sites_cookie_jar_after"
 fi
@@ -1175,9 +1250,11 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
     >"$brain_sync_json"
   assert_personal_agent_scope
   brain_browser_smoke assert-note "$brain_proof"
-  assert_site_cookie_works "$sites_cookie_jar_before"
-  assert_site_cookie_works "$sites_cookie_jar_after"
-  revoke_requesting_user_site
+  if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
+    assert_site_cookie_works "$sites_cookie_jar_before"
+    assert_site_cookie_works "$sites_cookie_jar_after"
+    revoke_requesting_user_site
+  fi
 fi
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then

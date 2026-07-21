@@ -1297,11 +1297,16 @@ wait "$postgres_pid"
         if self.inference_mode == InferenceMode::ChainedLimiter {
             urls.push(format!("{}/health", self.runtime_limiter_root_url()));
         }
-        let probe_script = urls
+        let probe_once = urls
             .iter()
             .map(|url| format!("curl -fsS --max-time 5 {} >/dev/null", shell_quote(url)))
             .collect::<Vec<_>>()
             .join(" && ");
+        // A process can be healthy on loopback a moment before Apple Container's
+        // host-gateway route is ready. Bound that separate readiness seam too.
+        let probe_script = format!(
+            "for attempt in $(seq 1 120); do ({probe_once}) && exit 0; sleep 1; done; exit 1"
+        );
         let command = format!(
             "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
             shell_quote(RUNTIME_IMAGE_REF),
@@ -3272,6 +3277,7 @@ mod tests {
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
         assert!(yaml.contains("apple-network-probe:"));
+        assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));
         assert!(yaml.contains("runtime-artifact-upsert"));
         assert!(yaml.contains(".image_metadata.digest"));

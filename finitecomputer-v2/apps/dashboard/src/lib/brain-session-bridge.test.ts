@@ -15,6 +15,7 @@ test("the Brain frame permits its bounded confirmation dialogs without broader n
   assert.deepEqual(BRAIN_FRAME_SANDBOX.split(" "), [
     "allow-downloads",
     "allow-forms",
+    "allow-modals",
     "allow-scripts",
   ]);
 });

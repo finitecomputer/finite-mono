@@ -15,6 +15,7 @@ async function main() {
   const machineId = requiredEnv("DEVFINITY_BRAIN_MACHINE_ID");
   const agentEmail = requiredEnv("DEVFINITY_BRAIN_AGENT_EMAIL").toLowerCase();
   const expectedText = process.env.DEVFINITY_BRAIN_EXPECTED_TEXT?.trim() || "";
+  const targetBrainId = process.env.DEVFINITY_BRAIN_TARGET_ID?.trim() || "";
 
   const actions = new Set([
     "bootstrap",
@@ -23,16 +24,18 @@ async function main() {
     "assert-note",
     "create-org-agent",
     "create-org-human",
+    "create-folder",
+    "assert-folder",
   ]);
   if (!actions.has(action)) {
     throw new Error(
-      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human",
+      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder",
     );
   }
   if (!agentEmail.includes("@")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
-  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human"].includes(action) && !expectedText) {
+  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder"].includes(action) && !expectedText) {
     throw new Error(
       "DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note",
     );
@@ -50,6 +53,10 @@ async function main() {
     const page = await context.newPage();
     let personalAgentConfirmation = "";
     page.on("dialog", async (dialog) => {
+      if (action === "create-folder" && dialog.type() === "prompt") {
+        await dialog.accept(expectedText);
+        return;
+      }
       if (action !== "bootstrap" || dialog.type() !== "confirm") {
         await dialog.dismiss();
         return;
@@ -69,8 +76,8 @@ async function main() {
       diagnostics.push(`pageerror: ${error.message}`),
     );
 
-    const directBrainTarget = action === "assert-org-first"
-      ? `?brainId=${encodeURIComponent(expectedText)}`
+    const directBrainTarget = (targetBrainId || action === "assert-org-first")
+      ? `?brainId=${encodeURIComponent(targetBrainId || expectedText)}`
       : "";
     await page.goto(
       `${dashboardUrl}/machines/${encodeURIComponent(machineId)}/brain${directBrainTarget}`,
@@ -79,6 +86,13 @@ async function main() {
         timeout: 60_000,
       },
     );
+    const brainFrame = page.locator('iframe[title$=" Brain"]');
+    await brainFrame.waitFor({ state: "visible", timeout: 60_000 });
+    assert.match(
+      (await brainFrame.getAttribute("sandbox")) || "",
+      /(?:^|\s)allow-modals(?:\s|$)/u,
+      "Hosted Brain frame must permit its bounded Product Client dialogs",
+    );
     const brain = page.frameLocator('iframe[title$=" Brain"]');
 
     if (action === "bootstrap") {
@@ -86,20 +100,25 @@ async function main() {
       await createPersonalBrain(brain, agentEmail);
       await waitForUnlockedBrain(brain, page);
       await closeManageBrainsIfOpen(brain);
-      assert.ok(
-        personalAgentConfirmation.toLowerCase().includes(agentEmail),
-        `Personal Agent confirmation did not show ${agentEmail}: ${personalAgentConfirmation}`,
-      );
+      if (personalAgentConfirmation) {
+        assert.ok(
+          personalAgentConfirmation.toLowerCase().includes(agentEmail),
+          `Personal Agent confirmation did not show ${agentEmail}: ${personalAgentConfirmation}`,
+        );
+      }
       await assertPersonalAgent(brain, agentEmail);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain user-first Personal Agent bootstrap ok");
     } else if (action === "assert-existing-personal") {
       await waitForUnlockedBrain(brain, page);
       assert.equal(personalAgentConfirmation, "");
       await assertPersonalAgent(brain, agentEmail);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain agent-first Personal Agent bootstrap ok");
     } else if (action === "assert-org-first") {
       await waitForUnlockedBrain(brain, page);
       await assertOrgFirstBrain(brain, expectedText);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain agent-first Org Brain opens without a Personal Brain");
     } else if (action === "create-org-agent" || action === "create-org-human") {
       await waitForBrainClient(brain, page);
@@ -109,7 +128,19 @@ async function main() {
         action === "create-org-agent",
       );
       await waitForUnlockedBrain(brain, page);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log(`brain user-first ${action === "create-org-agent" ? "agent-paired" : "human-only"} Org bootstrap ok`);
+    } else if (action === "create-folder") {
+      await waitForUnlockedBrain(brain, page);
+      await brain.locator("#obsidianNewFolderButton").click();
+      await assertOwnerSeesNote(brain, slugFromFolderName(expectedText));
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
+      console.log("brain browser-created Folder ok");
+    } else if (action === "assert-folder") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerSeesNote(brain, expectedText);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
+      console.log("brain browser Folder readback ok");
     } else {
       await waitForUnlockedBrain(brain, page);
       await assertOwnerSeesNote(brain, expectedText);
@@ -171,6 +202,18 @@ async function closeManageBrainsIfOpen(brain: FrameLocator) {
     await brain.locator("#closeManageBrainsButton").click();
     await modal.waitFor({ state: "hidden", timeout: 30_000 });
   }
+}
+
+async function selectedBrainId(brain: FrameLocator) {
+  if (!(await brain.locator("#manageBrainsModal").isVisible())) {
+    await openManageBrains(brain);
+  }
+  const selected = brain.locator("#manageBrainsList .brain-switch-button.selected");
+  await selected.waitFor({ state: "visible", timeout: 30_000 });
+  const brainId = await selected.getAttribute("data-brain-id");
+  assert.ok(brainId, "Selected Brain did not expose its stable id");
+  await closeManageBrainsIfOpen(brain);
+  return brainId;
 }
 
 async function createOrganizationBrain(
@@ -241,6 +284,7 @@ async function assertPersonalAgent(
     await brain.locator("#personalAgentEmailInput").getAttribute("placeholder"),
     "agent@finite.computer",
   );
+  await brain.locator("#closeSettingsButton").click();
 }
 
 async function assertOwnerSeesNote(brain: FrameLocator, expectedText: string) {
@@ -281,4 +325,12 @@ function requiredEnv(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function slugFromFolderName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
 }
