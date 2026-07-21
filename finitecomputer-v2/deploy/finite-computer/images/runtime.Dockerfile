@@ -123,6 +123,7 @@ ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
 # The limiter domain keeps the historical kimi-k2-6 name but serves glm-5-2.
 ENV FINITE_PRIVATE_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1
+ENV FINITE_PRIVATE_CONTROL_URL=https://finite.computer/api/core/v1/finite-private
 ENV FINITE_PRIVATE_MODEL=glm-5-2
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
 ENV FINITE_AGENTD_REQUIRED=1

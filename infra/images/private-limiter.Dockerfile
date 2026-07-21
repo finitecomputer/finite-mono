@@ -13,9 +13,13 @@ FROM rust:bookworm AS builder
 
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p finite-private-limiter
+RUN cargo build --release --locked -p finite-private-limiter
 
 FROM debian:bookworm-slim
+
+ARG FINITE_MONO_REV
+LABEL org.opencontainers.image.source="https://github.com/finitecomputer/finite-mono" \
+      org.opencontainers.image.revision="$FINITE_MONO_REV"
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \

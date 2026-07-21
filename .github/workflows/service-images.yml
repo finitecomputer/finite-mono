@@ -77,8 +77,13 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           docker buildx create --use
+          BUILD_ARGS=()
+          if [ "${{ inputs.image }}" = "private-limiter" ]; then
+            BUILD_ARGS+=(--build-arg "FINITE_MONO_REV=$GITHUB_SHA")
+          fi
           docker buildx build \
             --platform linux/amd64 \
+            "${BUILD_ARGS[@]}" \
             --file "${{ steps.params.outputs.dockerfile }}" \
             --tag "$IMAGE:$VERSION" \
             --tag "$IMAGE:sha-${GITHUB_SHA::12}" \
@@ -90,6 +95,10 @@ jobs:
             echo "::error::docker buildx did not return an image digest"
             cat image-metadata.json
             exit 1
+          fi
+          if [ "${{ inputs.image }}" = "private-limiter" ]; then
+            docker pull "$IMAGE@$DIGEST" >/dev/null
+            test "$(docker image inspect "$IMAGE@$DIGEST" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           fi
           echo "pinned=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_OUTPUT"
 

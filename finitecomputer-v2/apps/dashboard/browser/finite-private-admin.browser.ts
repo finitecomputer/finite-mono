@@ -39,6 +39,19 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     assert.equal(await page.getByText("Legacy Agent", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
 
+    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+    await page.getByRole("heading", { name: "Finite Private usage" }).waitFor({ state: "visible" });
+    await page.getByText(/25% remains in your account-wide burst window/u).waitFor({
+      state: "visible",
+    });
+    await page.getByText(/2026-07-21T20:00:00Z/u).waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "Use free daily reset" }).click();
+    await waitFor(() => core.state.resetPosts === 1);
+    await page.getByText(/Usage reset.*2026-07-21T23:00:00Z/u).waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "Free reset used today" }).waitFor({
+      state: "visible",
+    });
+
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByText("fp_grant_1", { exact: true }).waitFor({ state: "visible" });
@@ -109,6 +122,7 @@ function startDashboard(port: number, coreUrl: string) {
 async function startFakeCore() {
   const state = {
     issuancePosts: [] as Array<Record<string, unknown>>,
+    resetPosts: 0,
   };
   const server = http.createServer(async (request, response) => {
     try {
@@ -133,7 +147,7 @@ async function startFakeCore() {
 async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  state: { issuancePosts: Array<Record<string, unknown>> }
+  state: { issuancePosts: Array<Record<string, unknown>>; resetPosts: number }
 ) {
   if (
     request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
@@ -212,7 +226,34 @@ async function handleCoreRequest(
     return;
   }
 
+  if (request.method === "GET" && request.url === "/api/core/v1/me/finite-private/usage") {
+    writeJson(response, 200, finitePrivateUsage(state.resetPosts > 0));
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/api/core/v1/me/finite-private/usage/reset") {
+    await readBody(request);
+    state.resetPosts += 1;
+    writeJson(response, 200, {
+      performed: true,
+      status: finitePrivateUsage(true),
+    });
+    return;
+  }
+
   writeJson(response, 404, { error: "not found" });
+}
+
+function finitePrivateUsage(resetUsed: boolean) {
+  return {
+    burstLimitUnits: 100_000_000,
+    burstUsedUnits: resetUsed ? 0 : 75_000_000,
+    burstRemainingUnits: resetUsed ? 100_000_000 : 25_000_000,
+    burstResetAt: resetUsed ? "2026-07-21T23:00:00Z" : "2026-07-21T20:00:00Z",
+    freeDailyResetAvailable: !resetUsed,
+    freeDailyResetAvailableAgainAt: "2026-07-22T00:00:00Z",
+    notice: null,
+  };
 }
 
 function launchCodeBatches() {
@@ -283,7 +324,7 @@ function finitePrivateAdminState() {
       {
         id: "fp_grant_1",
         user_id: "user_private",
-        limit_profile_id: "finite-private-generous",
+        limit_profile_id: "finite-private-generous-v2",
         status: "active",
         current_window_started_at: "2026-05-28T12:00:00Z",
         current_window_used_units: 84,

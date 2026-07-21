@@ -1,0 +1,114 @@
+# Staging copy for the next measured release in
+# finitecomputer/confidential-kimi-k2-6. This file is intentionally not
+# releasable without the explicit downtime approval named in the runbook.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "glm-5-2"
+    repo: "zai-org/GLM-5.2-FP8@a0b55e88465d1a06afece97bc8d6b366aff39089"
+    mpk: "98d8b697173111b91b32a4daafc179bb5d8c5dbcd8fb8732f1f73ffcbc7a9b9f_755663769600_4e76874a-36d8-54fd-a07e-6fc22dd54b6b"
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "glm-5-2"
+    image: "ghcr.io/tinfoilsh/confidential-glm5-2@sha256:0a73ccd09e52d63ef101ac2911e54760b58ca6e0596cadfd219e096d54b1a396" # upstream v0.0.17, commit 84b2e80
+    runtime: nvidia
+    gpus: all
+    restart: always
+    env:
+      - PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      - RUNAI_STREAMER_MEMORY_LIMIT: "4294967296"
+      - RUNAI_STREAMER_CONCURRENCY: "8"
+    command:
+      [
+        "--model",
+        "/tinfoil/mpk/mpk-98d8b697173111b91b32a4daafc179bb5d8c5dbcd8fb8732f1f73ffcbc7a9b9f",
+        "--kv-cache-dtype",
+        "fp8",
+        "--tensor-parallel-size",
+        "8",
+        "--decode-context-parallel-size",
+        "8",
+        "--dcp-sparse-indexer-mode",
+        "union",
+        "--attention-backend",
+        "FLASHMLA_SPARSE",
+        "--tool-call-parser",
+        "glm47",
+        "--enable-auto-tool-choice",
+        "--enable-prompt-tokens-details",
+        "--reasoning-parser",
+        "glm45",
+        "--served-model-name",
+        "glm-5-2",
+        "--scheduling-policy",
+        "priority",
+        "--port",
+        "8001",
+        "--load-format",
+        "runai_streamer",
+        "--disable-custom-all-reduce",
+        "--max-model-len",
+        "393216",
+        "--max-num-seqs",
+        "32",
+        "--speculative-config",
+        '{"method":"mtp","num_speculative_tokens":5}',
+      ]
+    tmpfs:
+      /tmp: size=512m,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    networks: [model-net]
+    secrets:
+      - VLLM_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120m
+
+  - name: "finite-private-limiter"
+    # 2026-07-21.1, source cafe85246bce88201c23a46ec7b33c8e28cc25e4.
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b"
+    restart: always
+    env:
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://glm-5-2:8001"
+      - FINITE_PRIVATE_MODEL: "glm-5-2"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "600"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  paths:
+    - /v1/chat/completions
+    - /v1/responses
+    - /metrics
+    - /live
+    - /health
+    - /ready

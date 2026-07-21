@@ -29,16 +29,16 @@ notes = "v0.1.3 hard-cuts durable CLI unlock state, scopes raw Folder Keys to op
 [field.agent-runtime-image]
 # Hosted agents pinned at launch time; they do NOT auto-update.
 image = "ghcr.io/finitecomputer/agent-runtime"
-deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "2026-07-10.6", "2026-07-11.2", "2026-07-11.3", "2026-07-11.4", "2026-07-11.6", "2026-07-14.1", "2026-07-14.2", "2026-07-14.3", "2026-07-15.1", "2026-07-15.2", "2026-07-15.3", "2026-07-15.4", "2026-07-15.5"]
-digest = "sha256:1dff15eb01fbea28d59a65a0b9d0252aaea413def10ecfed254d7a333d5a0628"
-source_commit = "0284b32869b86591263805257bbdb012a25c46e3"
+deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "2026-07-10.6", "2026-07-11.2", "2026-07-11.3", "2026-07-11.4", "2026-07-11.6", "2026-07-14.1", "2026-07-14.2", "2026-07-14.3", "2026-07-15.1", "2026-07-15.2", "2026-07-15.3", "2026-07-15.4", "2026-07-15.5", "2026-07-16.1", "2026-07-16.2", "2026-07-21.1"]
+digest = "sha256:6f8ee0c18af13fd1ac56a0cd76fe199a1b78c22eed4373df262bca864f0bf9f8"
+source_commit = "28c1e55dced1fb5e972d88651367248e24c102ff"
 hermes = "0.18.2"
-notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents can be rolled serially through Core's guarded same-volume upgrade path while preserving their Agent Principal and durable /data mount. 2026-07-15.5 includes the PR #84 skill guidance for FAL model selection and Sites/GWS authentication recovery. Upgrade Canary, Boss, Chester, MyDearPaul, and Waffle Prime were rolled to the exact digest with their existing /data mounts; Core and the containers agreed on the target afterward. Each existing agent then explicitly adopted the image's tested 47-skill baseline with `finite skills sync`; the three PR #84 skill files byte-matched the bundle afterward. New launches also use this artifact."
+notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents can be rolled serially through Core's guarded same-volume upgrade path while preserving their Agent Principal and durable /data mount. 2026-07-21.1 adds Finite Private threshold/reset-time notices in the existing chat error surface. Its exact image passed the durable two-turn restart smoke; Upgrade Canary 0715 was upgraded once with an unchanged Agent Principal, one /data writer, and a successful authenticated usage-status call. New launches use this artifact. The remaining existing fleet stays on its prior pinned artifacts until a separately reviewed cohort wave."
 
 [servers]
 finitechat_server = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8788 behind chat.finite.computer" }
 finitechat_hosted_device = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :38918, shared server-only token with dashboard" }
 finite_saas_core = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :4200, native Postgres" }
-finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-15.4@sha256:d2f4013b6c840115b209d010d84c9c9a5ceb79d711c3af9311ced101c2a12f64", contract = "finite.computer, WorkOS + Stripe customer mode; Skills visible to signed-in users; Brain navigation disabled while the Identity Authority cutover remains deferred" }
+finite_saas_dashboard = { host = "finite-lat-1", deployed_from = "2026-07-21.2@sha256:5e8974efe1c4d3903c79e12a3f760017947e9cbb8df2f7a263b0516d9f490cd6", contract = "finite.computer, WorkOS + Stripe customer mode; Finite Private usage, reset, and reset-time controls; Skills visible to signed-in users; Brain navigation disabled while the Identity Authority cutover remains deferred" }
 finitesitesd = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :8787 behind api.finite.chat and site domains" }
 finite_brain = { host = "finite-lat-1", deployed_from = "finite-mono NixOS flake", contract = "loopback :3015; WorkOS-gated /client and Brain-authorized /_admin through the dashboard proxy" }

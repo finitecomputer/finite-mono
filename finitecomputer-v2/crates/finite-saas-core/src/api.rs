@@ -13,17 +13,17 @@ use crate::{
     CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
     CustomerBillingAccount, ExistingHostProjectImport, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, HostingTier, ImportCandidateStatus, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    FinitePrivateApiKey, FinitePrivateDailyResetResult, FinitePrivateGrant,
+    FinitePrivateSettlementKind, FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
+    ImportCandidateStatus, IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
+    ProjectImportCandidate, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
@@ -874,6 +874,14 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             get(finite_private_admin_state),
         )
         .route(
+            "/api/core/v1/finite-private/usage",
+            get(finite_private_usage_status_for_api_key),
+        )
+        .route(
+            "/api/core/v1/finite-private/usage/reset",
+            post(claim_finite_private_daily_reset_for_api_key),
+        )
+        .route(
             "/internal/finite-private/v1/health",
             get(finite_private_usage_health),
         )
@@ -923,6 +931,14 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(admin_reset_finite_private_usage_window),
         )
         .route("/api/core/v1/me", get(me))
+        .route(
+            "/api/core/v1/me/finite-private/usage",
+            get(finite_private_usage_status_for_user),
+        )
+        .route(
+            "/api/core/v1/me/finite-private/usage/reset",
+            post(claim_finite_private_daily_reset_for_user),
+        )
         .route(
             "/api/core/v1/me/runtime-routes/{identifier}",
             get(resolve_runtime_route),
@@ -1609,6 +1625,66 @@ async fn settle_finite_private_reservation(
                 upstream_error_class: input.upstream_error_class,
                 now: input.now,
             })
+            .await?,
+    ))
+}
+
+async fn finite_private_usage_status_for_api_key(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<FinitePrivateUsageStatus>, ApiError> {
+    let presented_api_key = bearer_token(&headers)
+        .ok_or_else(|| ApiError::unauthorized("invalid Finite Private API key"))?;
+    let status = state
+        .store
+        .finite_private_usage_status_for_api_key(&presented_api_key, true, None)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("invalid Finite Private API key"))?;
+    Ok(Json(status))
+}
+
+async fn claim_finite_private_daily_reset_for_api_key(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<FinitePrivateDailyResetResult>, ApiError> {
+    let presented_api_key = bearer_token(&headers)
+        .ok_or_else(|| ApiError::unauthorized("invalid Finite Private API key"))?;
+    Ok(Json(
+        state
+            .store
+            .claim_finite_private_daily_reset_for_api_key(&presented_api_key, None)
+            .await
+            .map_err(|error| match error {
+                CoreError::InvalidFinitePrivateApiKey => {
+                    ApiError::unauthorized("invalid Finite Private API key")
+                }
+                other => ApiError::from(other),
+            })?,
+    ))
+}
+
+async fn finite_private_usage_status_for_user(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Option<FinitePrivateUsageStatus>>, ApiError> {
+    let identity = require_verified_identity(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .finite_private_usage_status_for_workos_user(&identity.workos_user_id, None)
+            .await?,
+    ))
+}
+
+async fn claim_finite_private_daily_reset_for_user(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Option<FinitePrivateDailyResetResult>>, ApiError> {
+    let identity = require_verified_identity(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .claim_finite_private_daily_reset_for_workos_user(&identity.workos_user_id, None)
             .await?,
     ))
 }
@@ -4326,6 +4402,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finite_private_user_controls_share_one_daily_claim_across_key_and_dashboard() {
+        let store = CoreStore::memory();
+        let grant = store
+            .approve_finite_private_grant(crate::ApproveFinitePrivateGrantInput {
+                verified_email: "controls@finite.vip".to_string(),
+                workos_user_id: Some("user_workos_controls".to_string()),
+                limit_profile_id: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        store
+            .issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id,
+                raw_key: "fpk_live_controls".to_string(),
+                project_id: None,
+                agent_runtime_id: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        let app = router(store, test_auth());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/finite-private/usage")
+                    .header("authorization", "Bearer fpk_live_controls")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: crate::FinitePrivateUsageStatus = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status.burst_limit_units, 100_000_000);
+        assert!(status.free_daily_reset_available);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/finite-private/usage/reset")
+                    .header("authorization", "Bearer fpk_live_controls")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reset: crate::FinitePrivateDailyResetResult = serde_json::from_slice(&body).unwrap();
+        assert!(reset.performed);
+
+        let dashboard_authorization = format!(
+            "Bearer {}",
+            access_token_with_subject("user_workos_controls", "controls@finite.vip", true, None,)
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/me/finite-private/usage/reset")
+                    .header("authorization", &dashboard_authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let dashboard_reset: Option<crate::FinitePrivateDailyResetResult> =
+            serde_json::from_slice(&body).unwrap();
+        assert!(!dashboard_reset.unwrap().performed);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/finite-private/usage")
+                    .header("authorization", "Bearer invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn core_api_serves_finite_private_usage_reserve_and_settle() {
         let store = CoreStore::memory();
         let grant = store
@@ -6937,7 +7112,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(reset["current_window_used_units"], 0);
-        assert!(reset["current_window_started_at"].is_null());
+        assert_eq!(reset["current_window_started_at"], "2026-05-25T15:00:00Z");
 
         // Unknown ids surface as 404s, and every admin action was audited
         // with the admin as actor.

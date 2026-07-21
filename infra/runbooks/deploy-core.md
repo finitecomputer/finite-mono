@@ -17,7 +17,8 @@ facts only; no current destructive rebuild/recovery authority exists.
   `EnvironmentFile=/etc/finite/dashboard.env`, `FC_CORE_BASE_URL=
   http://127.0.0.1:4200`.
 - **Edge** = the single host Caddy: `finite.computer/internal/finite-private/*`
-  → core:4200, everything else → dashboard:3000.
+  plus the exact API-key usage and reset paths → core:4200, everything else →
+  dashboard:3000. No general `/api/core/*` route is public.
 
 > History: this box previously ran Core/dashboard/Postgres as a single-node
 > k3s cluster with on-host podman builds and `kubectl set image`. That cluster
@@ -45,6 +46,24 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
   clawland, or lat1.
 - For a dashboard bump: the new image is CI-built and pushed to GHCR, and you
   have its `name@sha256:...` digest (from the Service Images workflow summary).
+- For a Core schema change: capture the pre-deploy Postgres backup named in
+  [postgres-backup-restore.md](postgres-backup-restore.md), record its path and
+  checksum, and keep the previous exact system closure as the binary rollback
+  target. A binary rollback does not reverse additive schema changes.
+- Before enabling Finite Private reset epochs, query production read-only for
+  total reservation cardinality, active `reserved` rows (including age), and
+  `EXPLAIN` the grant/epoch/status/window usage sum. Record recent reservation
+  counts separately from historical rows left in `reserved`; never rewrite
+  either as part of deployment. Stop if a recent reservation is still plausibly
+  in flight or the added per-turn status query lacks measured headroom; do not
+  discover either condition after activation. Migration 0014 adds the reviewed
+  `(grant_id,status,burst_window_epoch,created_at)` index; include its brief DDL
+  lock in the activation window and verify it exists afterward.
+- Finite Private epoch/reset history is a one-way Core binary boundary. Once
+  this generation accepts traffic, do not use the ordinary N-1 binary rollback:
+  N-1 ignores epochs and can charge a freshly reset window from a late
+  settlement, and N-1 rows can be undercounted after re-upgrade. Prefer a
+  forward fix on the epoch-aware generation.
 
 ### STEPS
 
@@ -194,6 +213,13 @@ remaining planned projects are attempted.
    `curl -s https://finite.computer/internal/finite-private/v1/health` → 401
    with an invalid-token error (core alive + gated — the limiter path; the
    bare `/internal/finite-private/` prefix 404s, only `/v1/*` routes exist).
+   When the Finite Private self-service routes are changed, also verify the
+   narrow edge contract: an invalid bearer returns 401 from both
+   `/api/core/v1/finite-private/usage` and
+   `/api/core/v1/finite-private/usage/reset`, while a neighboring path such as
+   `/api/core/v1/admin/runtimes` still reaches the dashboard/404 rather than
+   public Core. Then use a canary Finite Private key from a mode-0600 env file
+   to GET status and POST reset; never put the raw key in argv or logs.
 3. Units are up: `ssh root@64.34.82.77 'systemctl status finite-saas-core
    finite-saas-dashboard'` (`podman-finite-saas-dashboard.service` for the
    container unit name if querying journald).
@@ -204,7 +230,8 @@ remaining planned projects are attempted.
 
 ### ROLLBACK
 
-1. Fast path: `ssh root@64.34.82.77 nixos-rebuild switch --rollback` — boots
+1. For changes that have **not** activated Finite Private epochs, the fast path
+   is `ssh root@64.34.82.77 nixos-rebuild switch --rollback` — boots
    the previous generation (both Core binary and dashboard digest revert
    together). Then reconcile git to match what is running within a day
    (break-glass rule).
@@ -213,3 +240,13 @@ remaining planned projects are attempted.
    for a dashboard-only regression, first revert the digest in
    `modules/dashboard.nix`).
 3. Re-run VERIFY.
+
+After the epoch-aware Core has accepted traffic, the previous N-1 closure is
+not a safe live binary rollback target. Keep serving or deploy a forward fix on
+an epoch-aware closure. If an emergency nevertheless requires N-1, first enter
+an explicitly approved Finite Private maintenance window: disable all reserve,
+settle, status, and reset callers; prove every `reserved` row has been resolved;
+capture a database backup; and document how epoch>0 grants plus any rows written
+by N-1 will be reconciled before re-upgrade. Do not re-enable the limiter or
+re-upgrade until that reconciliation has been tested on synthetic restored
+state. A profile replay check alone is not proof of this boundary.

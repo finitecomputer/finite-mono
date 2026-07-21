@@ -33,15 +33,19 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0011_agent_email.sql"),
     "\n",
-    include_str!("../migrations/0012_runtime_retirement_snapshots.sql")
+    include_str!("../migrations/0012_runtime_retirement_snapshots.sql"),
+    "\n",
+    include_str!("../migrations/0013_double_finite_private_default.sql"),
+    "\n",
+    include_str!("../migrations/0014_finite_private_user_controls.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
-const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous";
+const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
 const DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS: i64 = 5 * 60 * 60;
-const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 50_000_000;
+const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 100_000_000;
 const DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS: Option<i64> = None;
 const FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
@@ -1092,6 +1096,8 @@ pub struct FinitePrivateGrant {
     pub status: FinitePrivateGrantStatus,
     pub current_window_started_at: Option<String>,
     pub current_window_used_units: i64,
+    #[serde(default)]
+    pub burst_window_epoch: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1142,6 +1148,8 @@ pub struct FinitePrivateReservation {
     pub settled_usage_units: Option<i64>,
     pub settlement_kind: Option<FinitePrivateSettlementKind>,
     pub status: FinitePrivateReservationStatus,
+    #[serde(default)]
+    pub burst_window_epoch: i64,
     pub usage_formula_version: String,
     pub upstream_status: Option<i32>,
     pub upstream_error_class: Option<String>,
@@ -1173,6 +1181,32 @@ pub struct FinitePrivateUsageError {
     pub reset_at: Option<String>,
     pub dashboard_url: String,
     pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateUsageNotice {
+    pub threshold_remaining_percent: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateUsageStatus {
+    pub burst_limit_units: i64,
+    pub burst_used_units: i64,
+    pub burst_remaining_units: i64,
+    pub burst_reset_at: String,
+    pub free_daily_reset_available: bool,
+    pub free_daily_reset_available_again_at: String,
+    pub notice: Option<FinitePrivateUsageNotice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateDailyResetResult {
+    pub performed: bool,
+    pub status: FinitePrivateUsageStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1307,6 +1341,10 @@ pub struct BridgeCoreState {
     pub finite_private_api_keys: BTreeMap<String, FinitePrivateApiKey>,
     pub finite_private_admin_audit_events: BTreeMap<String, FinitePrivateAdminAuditEvent>,
     pub finite_private_reservations: BTreeMap<String, FinitePrivateReservation>,
+    #[serde(default)]
+    pub finite_private_daily_resets: BTreeSet<String>,
+    #[serde(default)]
+    pub finite_private_notice_claims: BTreeSet<String>,
     pub customer_billing_accounts: BTreeMap<String, CustomerBillingAccount>,
 }
 
@@ -4884,6 +4922,11 @@ impl BridgeCoreState {
             .get(&grant_id)
             .map(|grant| grant.created_at.clone())
             .unwrap_or_else(|| now.clone());
+        let burst_window_epoch = self
+            .finite_private_grants
+            .get(&grant_id)
+            .map(|grant| grant.burst_window_epoch + 1)
+            .unwrap_or(0);
         let grant = FinitePrivateGrant {
             id: grant_id.clone(),
             user_id: user.id,
@@ -4891,6 +4934,7 @@ impl BridgeCoreState {
             status: FinitePrivateGrantStatus::Active,
             current_window_started_at: None,
             current_window_used_units: 0,
+            burst_window_epoch,
             created_at,
             updated_at: now.clone(),
         };
@@ -5160,8 +5204,9 @@ impl BridgeCoreState {
         let Some(grant) = self.finite_private_grants.get_mut(&grant_id) else {
             return Err(CoreError::FinitePrivateGrantNotFound);
         };
-        grant.current_window_started_at = None;
+        grant.current_window_started_at = Some(now.clone());
         grant.current_window_used_units = 0;
+        grant.burst_window_epoch += 1;
         grant.updated_at = now.clone();
         let grant = grant.clone();
         self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
@@ -5426,13 +5471,17 @@ impl BridgeCoreState {
 
         let (window_started_at, current_used_units, reset_at) =
             finite_private_active_window(&grant, &profile, now_time)?;
+        let begins_new_epoch = finite_private_begins_new_epoch(&grant, &window_started_at)?;
+        let reservation_epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
         let remaining_before = profile.burst_limit_units - current_used_units;
         if input.estimated_usage_units > remaining_before {
             let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
+            let message =
+                finite_private_limit_reached_message("burst window", &reset_at, retry_after);
             return Ok(finite_private_denial(
                 request_id,
                 dashboard_url,
-                "Finite Private burst window limit reached.",
+                &message,
                 "burst_window_limit_exceeded",
                 Some(retry_after),
                 Some(reset_at),
@@ -5447,10 +5496,12 @@ impl BridgeCoreState {
                         .unwrap_or_else(|_| now.clone())
                 });
                 let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
+                let message =
+                    finite_private_limit_reached_message("weekly", &reset_at, retry_after);
                 return Ok(finite_private_denial(
                     request_id,
                     dashboard_url,
-                    "Finite Private weekly limit reached.",
+                    &message,
                     "weekly_limit_exceeded",
                     Some(retry_after),
                     Some(reset_at),
@@ -5462,6 +5513,7 @@ impl BridgeCoreState {
         if let Some(grant_mut) = self.finite_private_grants.get_mut(&grant.id) {
             grant_mut.current_window_started_at = Some(window_started_at);
             grant_mut.current_window_used_units = new_used_units;
+            grant_mut.burst_window_epoch = reservation_epoch;
             grant_mut.updated_at = now.clone();
         }
         let reservation = FinitePrivateReservation {
@@ -5476,6 +5528,7 @@ impl BridgeCoreState {
             settled_usage_units: None,
             settlement_kind: None,
             status: FinitePrivateReservationStatus::Reserved,
+            burst_window_epoch: reservation_epoch,
             usage_formula_version: trim_or_fallback(&input.usage_formula_version, "2026-05-26.v1"),
             upstream_status: None,
             upstream_error_class: None,
@@ -5521,17 +5574,36 @@ impl BridgeCoreState {
         if existing.request_id != request_id {
             return Err(CoreError::FinitePrivateReservationNotFound);
         }
-        if existing.status == FinitePrivateReservationStatus::Settled {
-            return Err(CoreError::FinitePrivateReservationAlreadySettled);
-        }
         let settled_units = input
             .usage_units
             .unwrap_or(existing.reserved_usage_units)
             .max(0);
-        if let Some(grant) = self.finite_private_grants.get_mut(&existing.grant_id) {
-            let delta = settled_units - existing.reserved_usage_units;
-            grant.current_window_used_units = (grant.current_window_used_units + delta).max(0);
-            grant.updated_at = now.clone();
+        if existing.status == FinitePrivateReservationStatus::Settled {
+            let formula = trim_or_fallback(
+                &input.usage_formula_version,
+                &existing.usage_formula_version,
+            );
+            if existing.settled_usage_units == Some(settled_units)
+                && existing.settlement_kind == Some(input.settlement)
+                && existing.usage_formula_version == formula
+                && existing.upstream_status == input.upstream_status
+                && existing.upstream_error_class
+                    == trim_to_option(input.upstream_error_class.as_deref())
+            {
+                return Ok(SettleFinitePrivateReservationResult {
+                    settled: true,
+                    reservation_id,
+                });
+            }
+            return Err(CoreError::FinitePrivateReservationAlreadySettled);
+        }
+        match self.finite_private_grants.get_mut(&existing.grant_id) {
+            Some(grant) if grant.burst_window_epoch == existing.burst_window_epoch => {
+                let delta = settled_units - existing.reserved_usage_units;
+                grant.current_window_used_units = (grant.current_window_used_units + delta).max(0);
+                grant.updated_at = now.clone();
+            }
+            _ => {}
         }
         let Some(reservation) = self.finite_private_reservations.get_mut(&reservation_id) else {
             return Err(CoreError::FinitePrivateReservationNotFound);
@@ -5549,6 +5621,203 @@ impl BridgeCoreState {
         Ok(SettleFinitePrivateReservationResult {
             settled: true,
             reservation_id,
+        })
+    }
+
+    pub fn finite_private_usage_status_for_api_key(
+        &mut self,
+        presented_api_key: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let Some((_, grant)) = self.finite_private_key_and_grant(presented_api_key)? else {
+            return Ok(None);
+        };
+        self.finite_private_usage_status_for_grant(&grant.id, claim_notice, now)
+            .map(Some)
+    }
+
+    pub fn finite_private_usage_status_for_workos_user(
+        &mut self,
+        workos_user_id: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let Some(grant_id) = self.finite_private_grant_id_for_workos_user(workos_user_id) else {
+            return Ok(None);
+        };
+        self.finite_private_usage_status_for_grant(&grant_id, claim_notice, now)
+            .map(Some)
+    }
+
+    pub fn claim_finite_private_daily_reset_for_api_key(
+        &mut self,
+        presented_api_key: &str,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateDailyResetResult> {
+        let Some((_, grant)) = self.finite_private_key_and_grant(presented_api_key)? else {
+            return Err(CoreError::InvalidFinitePrivateApiKey);
+        };
+        self.claim_finite_private_daily_reset_for_grant(&grant.id, now)
+    }
+
+    pub fn claim_finite_private_daily_reset_for_workos_user(
+        &mut self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
+        let Some(grant_id) = self.finite_private_grant_id_for_workos_user(workos_user_id) else {
+            return Ok(None);
+        };
+        self.claim_finite_private_daily_reset_for_grant(&grant_id, now)
+            .map(Some)
+    }
+
+    fn finite_private_grant_id_for_workos_user(&self, workos_user_id: &str) -> Option<String> {
+        let user_id = self
+            .users
+            .values()
+            .find(|user| user.workos_user_id.as_deref() == Some(workos_user_id))?
+            .id
+            .as_str();
+        self.finite_private_grants
+            .values()
+            .find(|grant| {
+                grant.user_id == user_id && grant.status == FinitePrivateGrantStatus::Active
+            })
+            .map(|grant| grant.id.clone())
+    }
+
+    fn claim_finite_private_daily_reset_for_grant(
+        &mut self,
+        grant_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateDailyResetResult> {
+        let now = now.unwrap_or(current_time_iso()?);
+        let now_time = parse_time(&now)?;
+        let grant = self
+            .finite_private_grants
+            .get(grant_id)
+            .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+        if grant.status != FinitePrivateGrantStatus::Active {
+            return Err(CoreError::FinitePrivateGrantNotActive);
+        }
+        let reset_key = finite_private_daily_reset_key(grant_id, now_time);
+        let performed = self.finite_private_daily_resets.insert(reset_key);
+        if performed {
+            let grant = self
+                .finite_private_grants
+                .get_mut(grant_id)
+                .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+            grant.current_window_started_at = Some(now.clone());
+            grant.current_window_used_units = 0;
+            grant.burst_window_epoch += 1;
+            grant.updated_at = now.clone();
+        }
+        let status =
+            self.finite_private_usage_status_for_grant(grant_id, false, Some(now.clone()))?;
+        Ok(FinitePrivateDailyResetResult { performed, status })
+    }
+
+    fn finite_private_usage_status_for_grant(
+        &mut self,
+        grant_id: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateUsageStatus> {
+        let now = now.unwrap_or(current_time_iso()?);
+        let now_time = parse_time(&now)?;
+        let grant = self
+            .finite_private_grants
+            .get(grant_id)
+            .cloned()
+            .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+        if grant.status != FinitePrivateGrantStatus::Active {
+            return Err(CoreError::FinitePrivateGrantNotActive);
+        }
+        let profile = self
+            .finite_private_limit_profiles
+            .get(&grant.limit_profile_id)
+            .cloned()
+            .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
+        let (window_started_at, current_used_units, reset_at) =
+            finite_private_active_window(&grant, &profile, now_time)?;
+        let begins_new_epoch = finite_private_begins_new_epoch(&grant, &window_started_at)?;
+        let epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
+
+        let settled_used_units = self
+            .finite_private_reservations
+            .values()
+            .filter(|reservation| {
+                reservation.grant_id == grant_id
+                    && reservation.burst_window_epoch == epoch
+                    && reservation.status == FinitePrivateReservationStatus::Settled
+                    && reservation.created_at >= window_started_at
+            })
+            .map(|reservation| reservation.settled_usage_units.unwrap_or(0))
+            .sum::<i64>()
+            .max(0);
+        let notice = if claim_notice {
+            self.claim_finite_private_usage_notice(
+                grant_id,
+                epoch,
+                settled_used_units,
+                &profile,
+                &reset_at,
+                now_time,
+            )
+        } else {
+            None
+        };
+        let reset_key = finite_private_daily_reset_key(grant_id, now_time);
+        Ok(FinitePrivateUsageStatus {
+            burst_limit_units: profile.burst_limit_units,
+            burst_used_units: current_used_units.max(0),
+            burst_remaining_units: (profile.burst_limit_units - current_used_units).max(0),
+            burst_reset_at: reset_at,
+            free_daily_reset_available: !self.finite_private_daily_resets.contains(&reset_key),
+            free_daily_reset_available_again_at: finite_private_next_daily_reset_at(now_time)?,
+            notice,
+        })
+    }
+
+    fn claim_finite_private_usage_notice(
+        &mut self,
+        grant_id: &str,
+        epoch: i64,
+        settled_used_units: i64,
+        profile: &FinitePrivateLimitProfile,
+        reset_at: &str,
+        now_time: OffsetDateTime,
+    ) -> Option<FinitePrivateUsageNotice> {
+        let remaining = (profile.burst_limit_units - settled_used_units).max(0);
+        let threshold = if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 10
+        {
+            Some(10)
+        } else if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 25 {
+            Some(25)
+        } else {
+            None
+        }?;
+        if threshold == 10 {
+            self.finite_private_notice_claims
+                .insert(finite_private_notice_key(grant_id, epoch, 25));
+        }
+        if !self
+            .finite_private_notice_claims
+            .insert(finite_private_notice_key(grant_id, epoch, threshold))
+        {
+            return None;
+        }
+        let retry_after = (parse_time(reset_at).ok()? - now_time)
+            .whole_seconds()
+            .max(0);
+        Some(FinitePrivateUsageNotice {
+            threshold_remaining_percent: threshold,
+            message: format!(
+                "You have {threshold}% of your Finite Private burst limit remaining. Your usage resets at {reset_at} ({}).",
+                finite_private_retry_after_label(retry_after)
+            ),
         })
     }
 
@@ -7211,6 +7480,16 @@ fn finite_private_active_window(
     Ok((window_start.format(&Rfc3339)?, used_units, reset_at))
 }
 
+pub(crate) fn finite_private_begins_new_epoch(
+    grant: &FinitePrivateGrant,
+    projected_window_started_at: &str,
+) -> CoreResult<bool> {
+    let Some(current_window_started_at) = grant.current_window_started_at.as_deref() else {
+        return Ok(false);
+    };
+    Ok(parse_time(current_window_started_at)? != parse_time(projected_window_started_at)?)
+}
+
 fn finite_private_window_reset_at(
     grant: &FinitePrivateGrant,
     profile: &FinitePrivateLimitProfile,
@@ -7270,6 +7549,55 @@ fn finite_private_denial(
             request_id,
         }),
     }
+}
+
+fn finite_private_limit_reached_message(
+    window_label: &str,
+    reset_at: &str,
+    retry_after_seconds: i64,
+) -> String {
+    format!(
+        "Finite Private {window_label} limit reached. Your usage resets at {reset_at} ({}).",
+        finite_private_retry_after_label(retry_after_seconds)
+    )
+}
+
+fn finite_private_retry_after_label(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds == 0 {
+        return "resetting now".to_string();
+    }
+    let total_minutes = (seconds + 59) / 60;
+    let days = total_minutes / (24 * 60);
+    let hours = (total_minutes % (24 * 60)) / 60;
+    let minutes = total_minutes % 60;
+    if days > 0 && hours > 0 {
+        format!("in {days}d {hours}h")
+    } else if days > 0 {
+        format!("in {days}d")
+    } else if hours > 0 && minutes > 0 {
+        format!("in {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("in {hours}h")
+    } else {
+        format!("in {minutes}m")
+    }
+}
+
+fn finite_private_daily_reset_key(grant_id: &str, now: OffsetDateTime) -> String {
+    format!("{grant_id}|{}", now.date())
+}
+
+fn finite_private_notice_key(grant_id: &str, epoch: i64, threshold: i64) -> String {
+    format!("{grant_id}|{epoch}|{threshold}")
+}
+
+fn finite_private_next_daily_reset_at(now: OffsetDateTime) -> CoreResult<String> {
+    let next_midnight = (now.unix_timestamp().div_euclid(86_400) + 1) * 86_400;
+    OffsetDateTime::from_unix_timestamp(next_midnight)
+        .map_err(|_| CoreError::InvalidTimestamp)?
+        .format(&Rfc3339)
+        .map_err(CoreError::from)
 }
 
 #[cfg(test)]
@@ -10671,8 +10999,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(reserved.decision, "allow");
-        assert_eq!(reserved.burst_limit_units, Some(50_000_000));
-        assert_eq!(reserved.burst_remaining_units, Some(49_750_000));
+        assert_eq!(reserved.burst_limit_units, Some(100_000_000));
+        assert_eq!(reserved.burst_remaining_units, Some(99_750_000));
         assert_eq!(reserved.weekly_limit_units, None);
         assert_eq!(reserved.weekly_remaining_units, None);
         let reservation_id = reserved.reservation_id.clone().unwrap();
@@ -10875,6 +11203,9 @@ mod tests {
             denied.error.as_ref().map(|error| error.code.as_str()),
             Some("burst_window_limit_exceeded")
         );
+        let denied_error = denied.error.as_ref().unwrap();
+        assert!(denied_error.message.contains("2026-05-25T18:00:00Z"));
+        assert!(denied_error.message.contains("(in 5h)"));
         assert_eq!(
             state.finite_private_grants[&grant.id].current_window_used_units,
             0
@@ -10950,7 +11281,323 @@ mod tests {
             denied.error.as_ref().map(|error| error.code.as_str()),
             Some("weekly_limit_exceeded")
         );
+        let denied_error = denied.error.as_ref().unwrap();
+        assert!(denied_error.message.contains("2026-06-01T13:00:00Z"));
+        assert!(denied_error.message.contains("(in 6d)"));
         assert_eq!(state.finite_private_reservations.len(), 1);
+    }
+
+    #[test]
+    fn finite_private_status_does_not_start_or_roll_the_usage_window() {
+        let mut state = BridgeCoreState::default();
+        let grant = state
+            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                verified_email: "status-read@finite.vip".to_string(),
+                workos_user_id: None,
+                limit_profile_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id.clone(),
+                raw_key: "fpk_live_status_read".to_string(),
+                project_id: None,
+                agent_runtime_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+
+        let status = state
+            .finite_private_usage_status_for_api_key(
+                "fpk_live_status_read",
+                false,
+                Some("2026-05-26T13:00:00Z".to_string()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.burst_used_units, 0);
+        assert_eq!(status.burst_reset_at, "2026-05-26T18:00:00Z");
+        let after_unstarted_read = &state.finite_private_grants[&grant.id];
+        assert!(after_unstarted_read.current_window_started_at.is_none());
+        assert_eq!(
+            after_unstarted_read.burst_window_epoch,
+            grant.burst_window_epoch
+        );
+
+        state
+            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                request_id: "req-status-window".to_string(),
+                presented_api_key: "fpk_live_status_read".to_string(),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "glm-5.2".to_string(),
+                estimated_prompt_tokens: 10,
+                estimated_completion_tokens: 0,
+                estimated_usage_units: 10,
+                usage_formula_version: "v1".to_string(),
+                dashboard_url: "https://finite.computer/dashboard".to_string(),
+                now: Some("2026-05-26T14:00:00Z".to_string()),
+            })
+            .unwrap();
+        let started = state.finite_private_grants[&grant.id].clone();
+        assert_eq!(
+            started.current_window_started_at.as_deref(),
+            Some("2026-05-26T14:00:00Z")
+        );
+
+        let expired_status = state
+            .finite_private_usage_status_for_api_key(
+                "fpk_live_status_read",
+                false,
+                Some("2026-05-26T20:00:00Z".to_string()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired_status.burst_used_units, 0);
+        assert_eq!(expired_status.burst_reset_at, "2026-05-27T01:00:00Z");
+        assert_eq!(state.finite_private_grants[&grant.id], started);
+    }
+
+    #[test]
+    fn finite_private_daily_reset_is_once_per_utc_day_and_epoch_safe() {
+        let mut state = BridgeCoreState::default();
+        let grant = state
+            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                verified_email: "reset@finite.vip".to_string(),
+                workos_user_id: Some("user_workos_reset".to_string()),
+                limit_profile_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id.clone(),
+                raw_key: "fpk_live_reset".to_string(),
+                project_id: None,
+                agent_runtime_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let reserved = state
+            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                request_id: "req-before-reset".to_string(),
+                presented_api_key: "fpk_live_reset".to_string(),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "glm-5.2".to_string(),
+                estimated_prompt_tokens: 10,
+                estimated_completion_tokens: 0,
+                estimated_usage_units: 10,
+                usage_formula_version: "v1".to_string(),
+                dashboard_url: "https://finite.computer/dashboard".to_string(),
+                now: Some("2026-05-26T23:59:00Z".to_string()),
+            })
+            .unwrap();
+        let old_epoch = state.finite_private_grants[&grant.id].burst_window_epoch;
+
+        let reset = state
+            .claim_finite_private_daily_reset_for_api_key(
+                "fpk_live_reset",
+                Some("2026-05-26T23:59:30Z".to_string()),
+            )
+            .unwrap();
+        assert!(reset.performed);
+        assert_eq!(reset.status.burst_used_units, 0);
+        assert_eq!(
+            reset.status.free_daily_reset_available_again_at,
+            "2026-05-27T00:00:00Z"
+        );
+        assert_eq!(
+            state.finite_private_grants[&grant.id].burst_window_epoch,
+            old_epoch + 1
+        );
+
+        state
+            .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
+                reservation_id: reserved.reservation_id.unwrap(),
+                request_id: "req-before-reset".to_string(),
+                settlement: FinitePrivateSettlementKind::Actual,
+                prompt_tokens: Some(5),
+                completion_tokens: Some(0),
+                usage_units: Some(5),
+                usage_formula_version: "v1".to_string(),
+                upstream_status: Some(200),
+                upstream_error_class: None,
+                now: Some("2026-05-26T23:59:40Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            state.finite_private_grants[&grant.id].current_window_used_units,
+            0
+        );
+
+        let repeated = state
+            .claim_finite_private_daily_reset_for_api_key(
+                "fpk_live_reset",
+                Some("2026-05-26T23:59:50Z".to_string()),
+            )
+            .unwrap();
+        assert!(!repeated.performed);
+        let next_day = state
+            .claim_finite_private_daily_reset_for_workos_user(
+                "user_workos_reset",
+                Some("2026-05-27T00:00:00Z".to_string()),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(next_day.performed);
+    }
+
+    #[test]
+    fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
+        let mut state = BridgeCoreState::default();
+        let grant = state
+            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                verified_email: "notice@finite.vip".to_string(),
+                workos_user_id: Some("user_workos_notice".to_string()),
+                limit_profile_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id,
+                raw_key: "fpk_live_notice".to_string(),
+                project_id: None,
+                agent_runtime_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+
+        for (request_id, units, at) in [
+            ("req-notice-25", 76_000_000, "2026-05-26T13:00:00Z"),
+            ("req-notice-10", 16_000_000, "2026-05-26T13:10:00Z"),
+        ] {
+            let reserved = state
+                .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                    request_id: request_id.to_string(),
+                    presented_api_key: "fpk_live_notice".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: units,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: units,
+                    usage_formula_version: "v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some(at.to_string()),
+                })
+                .unwrap();
+            state
+                .settle_finite_private_reservation(SettleFinitePrivateReservationInput {
+                    reservation_id: reserved.reservation_id.unwrap(),
+                    request_id: request_id.to_string(),
+                    settlement: FinitePrivateSettlementKind::Actual,
+                    prompt_tokens: Some(units),
+                    completion_tokens: Some(0),
+                    usage_units: Some(units),
+                    usage_formula_version: "v1".to_string(),
+                    upstream_status: Some(200),
+                    upstream_error_class: None,
+                    now: Some(at.to_string()),
+                })
+                .unwrap();
+            let status = state
+                .finite_private_usage_status_for_api_key(
+                    "fpk_live_notice",
+                    true,
+                    Some(at.to_string()),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status
+                    .notice
+                    .as_ref()
+                    .map(|notice| notice.threshold_remaining_percent),
+                Some(if units == 76_000_000 { 25 } else { 10 })
+            );
+            assert!(
+                status
+                    .notice
+                    .unwrap()
+                    .message
+                    .contains(&status.burst_reset_at)
+            );
+        }
+        let repeated = state
+            .finite_private_usage_status_for_api_key(
+                "fpk_live_notice",
+                true,
+                Some("2026-05-26T13:20:00Z".to_string()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated.notice, None);
+    }
+
+    #[test]
+    fn finite_private_settlement_retry_is_idempotent_but_mismatch_conflicts() {
+        let mut state = BridgeCoreState::default();
+        let grant = state
+            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                verified_email: "settle@finite.vip".to_string(),
+                workos_user_id: None,
+                limit_profile_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        state
+            .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
+                grant_id: grant.id,
+                raw_key: "fpk_live_settle".to_string(),
+                project_id: None,
+                agent_runtime_id: None,
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let reserved = state
+            .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
+                request_id: "req-settle-retry".to_string(),
+                presented_api_key: "fpk_live_settle".to_string(),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "glm-5.2".to_string(),
+                estimated_prompt_tokens: 100,
+                estimated_completion_tokens: 0,
+                estimated_usage_units: 100,
+                usage_formula_version: "v1".to_string(),
+                dashboard_url: "https://finite.computer/dashboard".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let input = SettleFinitePrivateReservationInput {
+            reservation_id: reserved.reservation_id.unwrap(),
+            request_id: "req-settle-retry".to_string(),
+            settlement: FinitePrivateSettlementKind::Actual,
+            prompt_tokens: Some(80),
+            completion_tokens: Some(0),
+            usage_units: Some(80),
+            usage_formula_version: "v1".to_string(),
+            upstream_status: Some(200),
+            upstream_error_class: None,
+            now: Some(NOW.to_string()),
+        };
+        assert!(
+            state
+                .settle_finite_private_reservation(input.clone())
+                .unwrap()
+                .settled
+        );
+        assert!(
+            state
+                .settle_finite_private_reservation(input.clone())
+                .unwrap()
+                .settled
+        );
+        let mut mismatch = input;
+        mismatch.usage_units = Some(81);
+        assert!(matches!(
+            state.settle_finite_private_reservation(mismatch),
+            Err(CoreError::FinitePrivateReservationAlreadySettled)
+        ));
     }
 
     #[test]
@@ -10976,13 +11623,16 @@ mod tests {
             "finite_private_api_keys",
             "finite_private_admin_audit_events",
             "finite_private_reservations",
+            "finite_private_daily_resets",
+            "finite_private_notice_claims",
         ] {
             assert!(CORE_SCHEMA_SQL.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")));
         }
 
         assert!(CORE_SCHEMA_SQL.contains("JSONB"));
         assert!(CORE_SCHEMA_SQL.contains("TIMESTAMPTZ"));
-        assert!(CORE_SCHEMA_SQL.contains("burst_limit_units = 50000000"));
+        assert!(CORE_SCHEMA_SQL.contains("finite-private-generous-v2"));
+        assert!(CORE_SCHEMA_SQL.contains("100000000"));
         assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
         assert!(!CORE_SCHEMA_SQL.to_lowercase().contains("sqlite"));
     }
@@ -11393,7 +12043,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(issued.grant.status, FinitePrivateGrantStatus::Active);
-        assert_eq!(issued.grant.limit_profile_id, "finite-private-generous");
+        assert_eq!(issued.grant.limit_profile_id, "finite-private-generous-v2");
         assert_eq!(issued.api_key.status, FinitePrivateApiKeyStatus::Active);
         assert_ne!(issued.api_key.key_hash, raw_key);
         assert!(issued.api_key.project_id.is_none());
@@ -11528,7 +12178,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(reset.current_window_used_units, 0);
-        assert!(reset.current_window_started_at.is_none());
+        assert_eq!(
+            reset.current_window_started_at.as_deref(),
+            Some("2026-05-25T14:00:00Z")
+        );
 
         // Weekly usage is a rolling reservation window; reset must not touch it.
         let (weekly_used, _) = state

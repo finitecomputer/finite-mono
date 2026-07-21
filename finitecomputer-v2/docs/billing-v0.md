@@ -275,11 +275,15 @@ continuously instead of allowing it to hammer the shared service indefinitely.
 Launch and billing decisions do not attempt to translate usage units into
 dollars.
 
-Core creates the default `finite-private-generous` profile with:
+Core creates the default `finite-private-generous-v2` profile with:
 
 - burst window: 18,000 seconds
-- burst limit: 50,000,000 units
+- burst limit: 100,000,000 units
 - weekly limit: uncapped
+
+Existing grants are migrated from `finite-private-generous` to the v2 profile.
+The old profile is also held at 100,000,000 units so an N-1 Core replay cannot
+silently restore the previous default.
 
 Every Finite Private reservation checks both burst and weekly limits before
 upstream work. Denied weekly requests return `weekly_limit_exceeded` and do not

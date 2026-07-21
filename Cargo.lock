@@ -1155,7 +1155,6 @@ dependencies = [
  "async-stream",
  "axum",
  "clap",
- "finite-saas-core",
  "futures-util",
  "reqwest",
  "serde",

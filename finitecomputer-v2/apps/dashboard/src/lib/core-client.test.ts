@@ -31,6 +31,7 @@ import {
   type CoreAdminRuntimeOverview,
   type CoreRuntimeCapabilities,
   type CoreVisibleProject,
+  loadCoreFinitePrivateUsageStatus,
   loadCoreSourceHostRelayEndpoint,
   runtimeRetirementProductEnabled,
 } from "./core-client";
@@ -396,6 +397,65 @@ test("loadCoreSourceHostRelayEndpoint reads relay routing through service auth",
       delete process.env.FC_CORE_API_TOKEN;
     } else {
       process.env.FC_CORE_API_TOKEN = previousToken;
+    }
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("Finite Private usage is N-1 fail-soft on 404 but surfaces real Core failures", async () => {
+  const names = [
+    "FC_CORE_BASE_URL",
+    "FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH",
+    "FC_DASHBOARD_DEV_EMAIL",
+    "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+    "FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN",
+    "FC_WORKOS_AUTH_ENABLED",
+  ] as const;
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+
+  process.env.FC_CORE_BASE_URL = "https://core.example.com";
+  process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH = "1";
+  process.env.FC_DASHBOARD_DEV_EMAIL = "usage-test@finite.vip";
+  process.env.FC_DASHBOARD_DEV_WORKOS_USER_ID = "user_usage_test";
+  process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN = "dev-access-token";
+  delete process.env.FC_WORKOS_AUTH_ENABLED;
+
+  try {
+    for (const fixture of [
+      { status: 404, error: "route not found", expectedError: null },
+      { status: 503, error: "Core is warming up", expectedError: "Core is warming up" },
+    ]) {
+      globalThis.fetch = (async (input, init) => {
+        requests.push({
+          url: String(input),
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        return new Response(JSON.stringify({ error: fixture.error }), {
+          status: fixture.status,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+
+      const result = await loadCoreFinitePrivateUsageStatus();
+      assert.equal(result.usage, null);
+      assert.equal(result.error, fixture.expectedError);
+    }
+
+    assert.deepEqual(
+      requests.map((request) => request.url),
+      Array(2).fill("https://core.example.com/api/core/v1/me/finite-private/usage")
+    );
+    assert.deepEqual(
+      requests.map((request) => request.authorization),
+      Array(2).fill("Bearer dev-access-token")
+    );
+  } finally {
+    for (const name of names) {
+      const value = previous[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
     }
     globalThis.fetch = previousFetch;
   }
