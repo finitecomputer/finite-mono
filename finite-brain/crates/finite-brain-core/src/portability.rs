@@ -379,7 +379,7 @@ pub struct BrainDirectoryBrainSummary {
     pub kind: String,
     /// Brain name.
     pub name: String,
-    /// Owner npub for personal Brains.
+    /// Owner npub for Personal Brains.
     pub owner_npub: Option<String>,
 }
 

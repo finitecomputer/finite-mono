@@ -71,7 +71,7 @@ product's adapter to the client environment.
   access. Stopping that agent requires Brain access revocation and the required
   Folder Key rotation.
 - A product's hosted adapter is its server-side stand-in for the product's
-  future native adapter. This is Greenfield work: no legacy Brain Brain or
+  future native adapter. This is Greenfield work: no legacy Brain data or
   user-key migration/compatibility path is in scope. Future native custody and
   recovery design remain separate decisions.
 - Brain's adapter may open a validated Folder Key Grant, but the Brain Product

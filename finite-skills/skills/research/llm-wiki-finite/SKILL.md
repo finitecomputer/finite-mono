@@ -5,7 +5,7 @@ description: >
   topic-scoped wiki directories, querying compiled knowledge, auditing provenance,
   and generating outputs. Use when the user explicitly invokes llm-wiki, uses
   /wiki-style shorthand, or works in a repository with .wiki/, ~/wiki/, or a
-  configured hub path. Ordinary personal Brain/wiki knowledge-base requests use
+  configured hub path. Ordinary Personal Brain/wiki knowledge-base requests use
   finitebrain.
 ---
 

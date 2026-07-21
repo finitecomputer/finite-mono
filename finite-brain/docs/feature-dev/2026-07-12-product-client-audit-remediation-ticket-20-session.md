@@ -41,10 +41,10 @@
   concurrent read-only ticket analyses
 - Findings: none. The error predicate is exact and only invoked after the
   response has been authenticated and correlated with the active session epoch.
-- Final browser proof: a disposable admin created an organization Brain and
+- Final browser proof: a disposable admin created an Organization Brain and
   invited a disposable Member Identity through the Product Client. The Member
   accepted the invitation, saw the newly locked Session and safe unlock
-  notice, then unlocked the organization Brain. The admin removed that Member
+  notice, then unlocked the Organization Brain. The admin removed that Member
   through Brain People; the Member's real metadata refresh received the
   server's exact `403` reason `brain access required`, purged the Session,
   locked, and retained the Brain-change notice. The same isolated flow also

@@ -8,7 +8,7 @@ Issues covered:
 
 - `finitecomputer/finite-brain#48` Product Client Folder Key Grant hardening
 - `finitecomputer/finite-brain#51` `fbrain daemon watch`
-- `finitecomputer/finite-brain#49` Product Client organization Brain invitations
+- `finitecomputer/finite-brain#49` Product Client Organization Brain invitations
 - `finitecomputer/finite-brain#50` smoke alpha backup, restore, and SilverBullet cutover handoff
 
 ## Summary
@@ -24,7 +24,7 @@ Implemented:
   fallback helpers.
 - `fbrain daemon watch` runs the real Brain Working Tree sync path in a
   foreground loop with bounded smoke/test options.
-- Product Client Access sidebar now supports organization Brain invitation
+- Product Client Access sidebar now supports Organization Brain invitation
   create, inspect, accept, and revoke flows.
 - Smoke backup/restore/cutover runbook and local SQLite backup verifier were
   added.

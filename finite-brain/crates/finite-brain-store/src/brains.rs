@@ -281,7 +281,7 @@ impl BrainStore {
         Ok(brains)
     }
 
-    /// Add an organization Brain Member.
+    /// Add an Organization Brain Member.
     pub fn add_member(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
         self.require_organization_brain(brain_id)?;
         self.conn.execute(
@@ -291,7 +291,7 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Add an organization Brain Admin. The user must already be a member.
+    /// Add an Organization Brain Admin. The user must already be a member.
     pub fn add_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
         self.require_organization_brain(brain_id)?;
         if !self.member_exists(brain_id, user_id)? {
@@ -306,7 +306,7 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Remove an organization Brain Admin while preserving at least one admin.
+    /// Remove an Organization Brain Admin while preserving at least one admin.
     pub fn remove_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
         let brain = self.load_core_brain(brain_id)?;
         if brain.kind != BrainKind::Organization {
@@ -332,7 +332,7 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Remove an organization Brain Member after admin and restricted access cleanup.
+    /// Remove an Organization Brain Member after admin and restricted access cleanup.
     pub fn remove_member(
         &mut self,
         brain_id: &BrainId,

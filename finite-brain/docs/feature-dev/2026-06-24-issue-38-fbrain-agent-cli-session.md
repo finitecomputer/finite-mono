@@ -20,7 +20,7 @@
 - Added NIP-44 signer encrypt/decrypt and NIP-59 wrapped Folder Key Grant creation for CLI admin/share flows.
 - Added automatic sync attempts on `open` and `daemon start`, with strict diagnostic sync through `sync now`.
 - Fixed server issues surfaced by live CLI smoke:
-  - Bootstrap Folder Key Grant ids now include Brain id, avoiding collisions across multiple personal Brains owned by the same npub.
+  - Bootstrap Folder Key Grant ids now include Brain id, avoiding collisions across multiple Personal Brains owned by the same npub.
   - Personal Brain owners can pass the admin mutation gate for owner-scoped Folder creation.
 
 ## Files

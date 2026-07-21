@@ -405,7 +405,7 @@ pub enum FolderAccessMode {
     AdminOnly,
     /// Organization members and admins.
     AllMembers,
-    /// Brain admins, the personal owner for personal Brains, plus explicitly listed members.
+    /// Brain admins, the personal owner for Personal Brains, plus explicitly listed members.
     Restricted,
 }
 
@@ -459,7 +459,7 @@ pub struct Brain {
     pub kind: BrainKind,
     /// User-facing Brain name.
     pub name: DisplayName,
-    /// Personal Brain owner, if this is a personal Brain.
+    /// Personal Brain owner, if this is a Personal Brain.
     pub owner_user_id: Option<UserId>,
     /// Folders in this Brain.
     pub folders: Vec<Folder>,
@@ -718,7 +718,7 @@ impl BrainDraft {
     }
 }
 
-/// Build the initial personal Brain shape.
+/// Build the initial Personal Brain shape.
 pub fn bootstrap_personal_brain(
     brain_id: impl Into<String>,
     name: impl Into<String>,
@@ -744,7 +744,7 @@ pub fn bootstrap_personal_brain(
     })
 }
 
-/// Build the initial organization Brain shape.
+/// Build the initial Organization Brain shape.
 pub fn bootstrap_organization_brain(
     brain_id: impl Into<String>,
     name: impl Into<String>,
@@ -753,7 +753,7 @@ pub fn bootstrap_organization_brain(
     bootstrap_organization_brain_with_admins(brain_id, name, vec![admin_user_id.into()])
 }
 
-/// Build an organization Brain created by an agent for an authenticated human
+/// Build an Organization Brain created by an agent for an authenticated human
 /// requester. Both distinct Member Identities are initial admins.
 pub fn bootstrap_organization_brain_with_requester(
     brain_id: impl Into<String>,
@@ -765,7 +765,7 @@ pub fn bootstrap_organization_brain_with_requester(
     let requesting_user_id = requesting_user_id.into();
     if creator_user_id == requesting_user_id {
         return Err(CoreError::InvalidBootstrapInput {
-            reason: "organization Brain creator and requester must be distinct Member Identities"
+            reason: "Organization Brain creator and requester must be distinct Member Identities"
                 .to_owned(),
         });
     }

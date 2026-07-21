@@ -1,4 +1,4 @@
-# Productize organization Brain invitations in the Product Client
+# Productize Organization Brain invitations in the Product Client
 
 ## Parent
 
@@ -6,7 +6,7 @@ Parent PRD: #47
 
 ## What To Build
 
-Add organization Brain invitation controls to the Product Client so an admin can
+Add Organization Brain invitation controls to the Product Client so an admin can
 invite, inspect, accept, and revoke smoke-member access from the browser
 workflow without falling back to the development Smoke UI.
 

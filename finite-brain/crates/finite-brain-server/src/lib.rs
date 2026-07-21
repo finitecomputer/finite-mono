@@ -3281,7 +3281,7 @@ mod tests {
         assert_error(
             response,
             StatusCode::BAD_REQUEST,
-            "organization Brain creator and requester must be distinct Member Identities",
+            "Organization Brain creator and requester must be distinct Member Identities",
         )
         .await;
         let brains = authed_request(

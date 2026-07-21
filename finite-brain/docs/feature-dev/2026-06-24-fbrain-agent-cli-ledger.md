@@ -55,7 +55,7 @@ sync states, activity, and access explanations.
 - Build: `cargo build`
 - Diff hygiene: `git diff --check`
 - Live smoke: local app on `127.0.0.1:4017` with temp SQLite; verified auth,
-  Brain create, duplicate personal Brain creation for same owner, open auto-sync,
+  Brain create, duplicate Personal Brain creation for same owner, open auto-sync,
   status JSON, Folder create, and repeated metadata requests.
 - Visual verification: not applicable for CLI; use command output and JSON contracts
 

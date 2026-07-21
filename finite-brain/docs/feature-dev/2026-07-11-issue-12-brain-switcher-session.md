@@ -18,7 +18,7 @@
 ## Implementation
 
 - Public interface used: real Rust-served Product Client `/client`; existing Brain/session state and request functions
-- Behaviors covered: bottom-row Brain switcher menu, visible Brain selection, Manage Brains dialog, explicit Load/Resume, signer connection, organization Brain creation, focus return, Escape/backdrop close, and responsive layout
+- Behaviors covered: bottom-row Brain switcher menu, visible Brain selection, Manage Brains dialog, explicit Load/Resume, signer connection, Organization Brain creation, focus return, Escape/backdrop close, and responsive layout
 - Existing crypto/auth/sync semantics remain delegated to `setActiveBrainId`, `connectSigner`, `loadBrainReader`, `resumeSession`, and `createOrganizationBrainFromInput`
 - Commands run during implementation: JS syntax check and deterministic Product Client test
 - Full suite command: pending final integration ticket

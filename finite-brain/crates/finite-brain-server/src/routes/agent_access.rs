@@ -128,7 +128,7 @@ pub(crate) async fn bootstrap_personal_brain_for_agent_handler(
     let brain_id = BrainId::new(format!("personal-{}", &owner_key.to_hex()[..16]))?;
     let output = bootstrap_personal_brain(
         brain_id.as_str(),
-        "Personal brain",
+        "Personal Brain",
         principals.owner_npub.to_string(),
     )?;
     let created_at = server_timestamp(&state);

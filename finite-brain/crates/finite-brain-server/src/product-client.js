@@ -416,7 +416,7 @@ const FiniteBrainProductClient = (() => {
     return {
       brainId,
       kind: kind === "personal" ? "personal" : "organization",
-      name: brain.name || (kind === "personal" ? "Personal brain" : brainId),
+      name: brain.name || (kind === "personal" ? "Personal Brain" : brainId),
       role: brain.role || (kind === "personal" ? "owner" : "member"),
       inviteCode: brain.inviteCode || brain.invite_code || null,
     };
@@ -426,7 +426,7 @@ const FiniteBrainProductClient = (() => {
     return {
       brainId: personalBrainIdForPubkey(state.pubkeyHex),
       kind: "personal",
-      name: "Personal brain",
+      name: "Personal Brain",
       role: "owner",
       pending: true,
     };
@@ -452,7 +452,7 @@ const FiniteBrainProductClient = (() => {
       state.visibleBrains
     );
     if (lockedSelection) return lockedSelection.label;
-    return state.metadata?.name || activeBrainOption()?.name || state.activeBrainId || "Personal brain";
+    return state.metadata?.name || activeBrainOption()?.name || state.activeBrainId || "Personal Brain";
   }
 
   function nestedManageBrainsReturnToken() {
@@ -971,7 +971,7 @@ const FiniteBrainProductClient = (() => {
     if (!row) return "Load a Brain to inspect Folder access.";
     const keyOpen = openedFolderKeys.has(folderKeyVersionKey(row.id, row.currentKeyVersion || 1));
     if (row.setupIncomplete) return "This Folder still needs setup before its current key state is reliable.";
-    if (row.access === "owner") return "Only the personal Brain owner should be able to open this Folder.";
+    if (row.access === "owner") return "Only the Personal Brain owner should be able to open this Folder.";
     if (row.access === "admin_only") return "Brain admins can open this Folder. Ordinary members cannot.";
     if (row.access === "all_members") return "Every member of this Brain can open this Folder after their Folder Key is available.";
     if (row.access === "restricted" && metadata?.kind === "organization") {
@@ -7473,7 +7473,7 @@ const FiniteBrainProductClient = (() => {
         : "Choose a Brain, then load it to decrypt its readable Folders.";
     }
     if (metadata.kind === "personal") {
-      return "Personal brain loaded. Use Access for Folder permissions and share links.";
+      return "Personal Brain loaded. Use Access for Folder permissions and share links.";
     }
     return `Organization loaded. ${countLabel((metadata.members || []).length, "member")} • ${countLabel(
       (metadata.admins || []).length,
@@ -7587,7 +7587,7 @@ const FiniteBrainProductClient = (() => {
     setPill("brainPeopleCount", `${rows.length}`, rows.length ? "ready" : "muted");
     const emptyText = metadata?.kind === "personal"
       ? "Personal Brains do not use a member list."
-      : "Load an organization Brain to manage Member Identities.";
+      : "Load an Organization Brain to manage Member Identities.";
     const canManage = canManageBrainPeople(metadata);
     setList("brainPeopleList", rows, emptyText, (item, person) => {
       const personInfo = document.createElement("div");
@@ -7663,7 +7663,7 @@ const FiniteBrainProductClient = (() => {
     setOptionalDisabled("addBrainMemberButton", !canManage);
     setOptionalDisabled("addBrainAdminButton", !canManage);
     const hint = !metadata
-      ? "Load an organization Brain to manage Member Identities."
+      ? "Load an Organization Brain to manage Member Identities."
       : metadata.kind !== "organization"
         ? "Personal Brains use Folder access and share links instead of member lists."
         : actorIsBrainAdmin(metadata)
@@ -8694,7 +8694,7 @@ const FiniteBrainProductClient = (() => {
       .find((brain) => brain?.kind === "personal" && brain.brainId === state.activeBrainId);
     if (existing && !existing.pending) return;
     try {
-      const metadata = await createBrain(state.activeBrainId, "personal", "Personal brain");
+      const metadata = await createBrain(state.activeBrainId, "personal", "Personal Brain");
       state.metadata = metadata;
       rememberVisibleBrain(metadata);
     } catch (error) {
@@ -8740,7 +8740,7 @@ const FiniteBrainProductClient = (() => {
     state.sessionStatus = SESSION_STATUS.UNLOCKED;
     await loadVisibleBrains();
     requireCurrentSessionEpoch(createdBrainEpoch);
-    log("Created organization Brain.", { brainId: metadata.brainId });
+    log("Created Organization Brain.", { brainId: metadata.brainId });
     render();
   }
 
@@ -11302,7 +11302,7 @@ const FiniteBrainProductClient = (() => {
     $("manageCreateOrganizationBrainButton")?.addEventListener("click", () => {
       createOrganizationBrainFromInput("manageOrganizationBrainNameInput").catch((error) => {
         state.lastError = error.message;
-        log("Failed to create organization Brain from Manage Brains.", { error: error.message });
+        log("Failed to create Organization Brain from Manage Brains.", { error: error.message });
         render();
       });
     });

@@ -280,10 +280,10 @@ Folder rules:
 
 Access modes:
 
-- `owner`: personal Brain owner only.
+- `owner`: Personal Brain owner only.
 - `admin_only`: Brain Admins only.
-- `all_members`: all organization Brain Members and Brain Admins.
-- `restricted`: personal Brain owner, organization Brain Admins, plus members
+- `all_members`: all Organization Brain Members and Brain Admins.
+- `restricted`: Personal Brain owner, Organization Brain Admins, plus members
   listed in `folderAccess`.
 
 ### 4.3.1 Folder-scoped LLM Wiki Profile
@@ -1535,7 +1535,7 @@ The private server-side record also stores:
 Rules:
 
 - Only Brain Admins create Share Links.
-- Current server validation supports Share Links from organization Brains only.
+- Current server validation supports Share Links from Organization Brains only.
 - Link is scoped to `recipientNpub`.
 - Recipient must authorize with the matching Nostr key.
 - Accepting may optionally create a Personal Folder Mount.
@@ -1586,7 +1586,7 @@ Creation rules:
 - Source Folder MUST exist, be `sharedFolderSource: true`, and be
   `restricted`.
 - Source Folder setup MUST be complete.
-- Destination Brain MUST be an organization Brain.
+- Destination Brain MUST be an Organization Brain.
 - `destinationAdminNpub` MUST be an admin of the destination Brain.
 - A current Folder Key Grant for the destination admin is required.
 

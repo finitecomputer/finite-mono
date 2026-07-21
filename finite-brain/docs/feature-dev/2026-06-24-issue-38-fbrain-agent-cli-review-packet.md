@@ -11,7 +11,7 @@ Direct review in current thread. Subagent review was skipped because the user di
 - Verified signed server routes for Brain create, metadata, open sync, and Folder create against a live local app server.
 - Verified local signer supports public key, signing, NIP-44 encrypt, and NIP-44 decrypt.
 - Verified local signer state uses Unix `0600` file permissions.
-- Fixed server bootstrap grant-id collision across multiple personal Brains for the same owner.
+- Fixed server bootstrap grant-id collision across multiple Personal Brains for the same owner.
 - Fixed server personal-owner authorization for owner Folder creation.
 
 ## Domain/API Review

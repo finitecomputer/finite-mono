@@ -17,7 +17,7 @@
 Make the first internal smoke alpha ready across the selected remaining gaps:
 replace/archive the old SilverBullet smoke route, harden Product Client Folder
 Key Grant opening, add a real agent sync daemon/file watcher path, productize
-organization Brain invite/admin UX, and add a backup/restore runbook.
+Organization Brain invite/admin UX, and add a backup/restore runbook.
 
 ## Durable Artifacts
 
@@ -27,7 +27,7 @@ organization Brain invite/admin UX, and add a backup/restore runbook.
 - Slice issues:
   - `finitecomputer/finite-brain#48` Harden Product Client Folder Key Grant wrapping and opening
   - `finitecomputer/finite-brain#51` Add fbrain daemon watch loop for Brain Working Trees
-  - `finitecomputer/finite-brain#49` Productize organization Brain invitations in the Product Client
+  - `finitecomputer/finite-brain#49` Productize Organization Brain invitations in the Product Client
   - `finitecomputer/finite-brain#50` Add smoke alpha backup, restore, and SilverBullet cutover handoff
 - Issue sessions: current thread
 - Agent briefs: in-thread Feature Dev artifacts

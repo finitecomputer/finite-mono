@@ -68,7 +68,7 @@ Integrate the email invite flow into the Product Client frontend end to end, the
 ## Browser Smoke Evidence
 
 - Local app command: `FINITE_BRAIN_ADDR=127.0.0.1:4029 FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:4029 FINITE_BRAIN_DB=/tmp/finite-brain-email-invite-ui-smoke-20260707h.sqlite3 FINITE_BRAIN_SMOKE_NIP07_SECRET=... FINITE_BRAIN_SMOKE_EMAIL_PROOFS=friend@example.com cargo run -p finite-brain-app`
-- Admin browser flow created organization Brain `org-email-invite-smoke-ship-20260707-mraz0n9z`.
+- Admin browser flow created Organization Brain `org-email-invite-smoke-ship-20260707-mraz0n9z`.
 - Admin browser flow created email invite for `friend@example.com`; generated invite URL path was `http://127.0.0.1:4029/client` and the fragment contained `inviteCode`, `inviteEmail`, and `inviteSecret`.
 - Recipient browser flow opened that URL with a second smoke signer, landed on the invite panel with code/email/secret hydrated, connected signer from the panel, and claimed the invite.
 - Claim result: `Email invite claimed`; active Brain became `org-email-invite-smoke-ship-20260707-mraz0n9z`; opened keys count was `4`; Files view showed `getting-started` and `restricted`.

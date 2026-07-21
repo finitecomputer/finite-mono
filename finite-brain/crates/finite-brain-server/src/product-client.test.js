@@ -179,7 +179,7 @@ assert.equal(
   JSON.stringify(client.brainCreateBody({
     brainId: "personal-owner",
     kind: "personal",
-    name: "Personal brain",
+    name: "Personal Brain",
     bootstrapGrants: [],
     agentIdentity: client.suggestedAgentIdentityFromNavigation(
       `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
@@ -188,7 +188,7 @@ assert.equal(
   JSON.stringify({
     brainId: "personal-owner",
     kind: "personal",
-    name: "Personal brain",
+    name: "Personal Brain",
     bootstrapGrants: [],
     personalAgentEmail: "cheater@finite.vip",
   }),
@@ -198,14 +198,14 @@ assert.equal(
   JSON.stringify(client.brainCreateBody({
     brainId: "personal-owner",
     kind: "personal",
-    name: "Personal brain",
+    name: "Personal Brain",
     bootstrapGrants: [],
     agentIdentity: { email: null, name: null, npub: suggestedAgentNpub },
   })),
   JSON.stringify({
     brainId: "personal-owner",
     kind: "personal",
-    name: "Personal brain",
+    name: "Personal Brain",
     bootstrapGrants: [],
     personalAgentNpub: suggestedAgentNpub,
   }),
@@ -497,7 +497,7 @@ async function assertBrainSwitcherLoadsSelectedBrain() {
   state.sessionStatus = "unlocked";
   state.brainSwitcherOpen = true;
   state.visibleBrains = [
-    { brainId: "personal-fixture", kind: "personal", name: "Personal brain", role: "owner" },
+    { brainId: "personal-fixture", kind: "personal", name: "Personal Brain", role: "owner" },
     { brainId: "organization-fixture", kind: "organization", name: "Hermes Agent", role: "admin" },
   ];
 
@@ -1258,7 +1258,7 @@ assert.equal(
 assert.equal(
   JSON.stringify(client.visibleBrainOptions([
     { brainId: "acme", kind: "organization", name: "Acme", role: "admin" },
-    { brainId: "personal-ab", kind: "personal", name: "Personal brain", role: "owner" },
+    { brainId: "personal-ab", kind: "personal", name: "Personal Brain", role: "owner" },
   ]).map((brain) => [brain.brainId, brain.kind, brain.role])),
   JSON.stringify([
     ["personal-ab", "personal", "owner"],

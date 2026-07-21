@@ -45,9 +45,9 @@ or data behavior.
 5. As a Product Client user, I want a Manage Brains action in the switcher,
    so that Brain administration has a dedicated surface.
 6. As a Product Client user, I want Manage Brains to list visible Brains with
-   role and kind metadata, so that personal and organization Brains are easy to
+   role and kind metadata, so that personal and Organization Brains are easy to
    distinguish.
-7. As a Brain owner, I want to create an organization Brain from Manage Brains,
+7. As a Brain owner, I want to create an Organization Brain from Manage Brains,
    so that creation is not mixed into file browsing.
 8. As a Product Client user, I want the existing explicit Load/Resume behavior
    to remain available from Manage Brains, so that selecting a Brain does not

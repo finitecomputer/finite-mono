@@ -10,9 +10,9 @@ LLM Wiki treats each topic as an isolated wiki with its own `config.md`,
 `_index.md`, `log.md`, sources, compiled pages, inventory, datasets, and
 outputs. FiniteBrain adds encrypted Brains, Folder Keys, and Folder Access.
 
-If FiniteBrain used one Brain-level wiki log or index, organization Brains
+If FiniteBrain used one Brain-level wiki log or index, Organization Brains
 could leak private work through titles, summaries, source hints, or activity
-records from restricted areas. The same structure also helps personal Brains:
+records from restricted areas. The same structure also helps Personal Brains:
 one person still needs separate durable wiki scopes for work, projects, life,
 learning, and archives.
 

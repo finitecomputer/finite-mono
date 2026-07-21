@@ -33,7 +33,7 @@ synthesized wiki pages cite the source notes.
 - Defaults/Smoke follow-up: default Getting Started and AGENTS guidance, CLI
   empty-folder skeletons, Smoke seed content, and Smoke reset runbook now all
   describe the Asset Source Note paradigm.
-- Personal restricted bootstrap follow-up: new personal Brains now bootstrap the
+- Personal restricted bootstrap follow-up: new Personal Brains now bootstrap the
   default `restricted` Folder with restricted access while treating the owner as
   the implicit restricted recipient.
 

@@ -170,7 +170,7 @@ curl -fsS https://brain.smoke.finite.computer/client/config.json
 fbrain doctor --server https://brain.smoke.finite.computer
 ```
 
-Then verify at least one real personal Brain and one organization Brain invite
+Then verify at least one real Personal Brain and one Organization Brain invite
 flow:
 
 ```sh
@@ -209,10 +209,10 @@ Browser checks:
 
 - Open `/client`.
 - Connect a Nostr/NIP-07 signer.
-- Create or open a personal Brain.
+- Create or open a Personal Brain.
 - Open Folder Keys from encrypted grants.
-- Create an organization Brain invitation by npub.
-- Inspect and accept an organization Brain invitation as the invited signer.
+- Create an Organization Brain invitation by npub.
+- Inspect and accept an Organization Brain invitation as the invited signer.
 
 Agent checks:
 
