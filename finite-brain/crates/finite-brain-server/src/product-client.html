@@ -485,7 +485,7 @@
                 </svg>
               </span>
               <span class="session-account-summary">
-                <strong id="sessionAccountBrain">Personal Brain</strong>
+                <strong id="sessionAccountBrain">No Brain selected</strong>
                 <span>
                   <span id="sessionAccountIdentity">Signer unavailable</span>
                   <span aria-hidden="true"> · </span>
@@ -881,7 +881,7 @@ Start writing here.</textarea>
             <section class="manage-brains-summary settings-card">
               <div>
                 <span class="settings-card-label">Selected Brain</span>
-                <strong id="manageBrainsCurrentName">Personal Brain</strong>
+                <strong id="manageBrainsCurrentName">No Brain selected</strong>
               </div>
               <p id="manageBrainsCurrentDetail">Session locked. Select a Brain, then unlock it to open encrypted content.</p>
             </section>
@@ -899,6 +899,19 @@ Start writing here.</textarea>
               <button id="manageBrainsLoadButton" type="button" class="access-add-button manage-brain-unlock-button">Unlock Brain</button>
             </div>
 
+            <section id="managePersonalBrainCreate" class="manage-brain-create settings-card">
+              <div class="settings-section-header compact">
+                <p class="eyebrow">Personal</p>
+                <h3>Create Personal Brain</h3>
+              </div>
+              <label class="access-field" for="managePersonalAgentEmailInput">
+                <span>Personal Agent email</span>
+                <input id="managePersonalAgentEmailInput" type="email" autocomplete="off" placeholder="agent@finite.vip" />
+              </label>
+              <p class="settings-field-hint">Creates your empty Personal Brain and pairs this agent atomically.</p>
+              <button id="manageCreatePersonalBrainButton" type="button" class="access-add-button">Create Personal Brain</button>
+            </section>
+
             <details id="manageBrainCreateDetails" class="manage-brain-create">
               <summary>Create Organization Brain</summary>
               <div class="manage-brain-create-body">
@@ -907,7 +920,13 @@ Start writing here.</textarea>
                   <input id="manageOrganizationBrainNameInput" placeholder="New organization" autocomplete="off" spellcheck="false" />
                   <button id="manageCreateOrganizationBrainButton" type="button" class="access-add-button">Create</button>
                 </div>
-                <p class="settings-field-hint">Create an Organization Brain with the active signer as administrator.</p>
+                <label class="access-field" for="manageOrganizationAddAgentInput">
+                  <span>
+                    <input id="manageOrganizationAddAgentInput" type="checkbox" checked />
+                    Add <strong id="manageOrganizationAgentLabel">selected agent</strong> as an admin
+                  </span>
+                </label>
+                <p class="settings-field-hint">The selected agent is added as an active admin, not invited. Turn this off for a human-only Organization Brain.</p>
               </div>
             </details>
           </div>

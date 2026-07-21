@@ -23,6 +23,7 @@ export type BrainAgentIdentityHint = {
   email?: string | null;
   name?: string | null;
   npub?: string | null;
+  brainId?: string | null;
 };
 
 export function brainClientPath(identity: BrainAgentIdentityHint | null | undefined) {
@@ -30,13 +31,26 @@ export function brainClientPath(identity: BrainAgentIdentityHint | null | undefi
   const email = boundedAgentEmail(identity.email);
   const name = boundedAgentName(identity.name);
   const npub = boundedAgentNpub(identity.npub);
-  if (!email && !npub) return "/client";
+  const brainId = boundedBrainId(identity.brainId);
+  if (!email && !npub && !brainId) return "/client";
 
   const query = new URLSearchParams();
   if (email) query.set("agentEmail", email);
   if (name) query.set("agentName", name);
   if (!email && npub) query.set("agentNpub", npub);
+  if (brainId) query.set("brainId", brainId);
   return `/client?${query.toString()}`;
+}
+
+export function brainMachinePath(machineId: string, brainId?: string | null) {
+  const path = `/dashboard/machines/${encodeURIComponent(machineId)}/brain`;
+  const target = boundedBrainId(brainId);
+  return target ? `${path}?brainId=${encodeURIComponent(target)}` : path;
+}
+
+function boundedBrainId(value: string | null | undefined) {
+  const candidate = value?.trim();
+  return candidate && /^[a-z0-9][a-z0-9_-]{0,127}$/u.test(candidate) ? candidate : null;
 }
 
 function boundedAgentEmail(value: string | null | undefined) {

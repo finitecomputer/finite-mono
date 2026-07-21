@@ -3147,6 +3147,101 @@ mod tests {
     }
 
     #[test]
+    fn organization_bootstrap_rolls_back_brain_when_identity_alias_insert_fails() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .record_identity_alias(&IdentityAlias {
+                npub: UserId::new("npub-existing").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("existing@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        let output = finite_brain_core::bootstrap_organization_brain_with_requester(
+            "acme",
+            "Acme Brain",
+            "npub-owner",
+            "npub-agent",
+        )
+        .unwrap();
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
+
+        assert!(
+            store
+                .create_brain_bootstrap_with_identities(&output, &[], &aliases)
+                .is_err()
+        );
+        assert!(matches!(
+            store.load_brain(&output.brain.id),
+            Err(StoreError::MissingBrain { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_organization_bootstrap_retry_returns_the_existing_brain() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = finite_brain_core::bootstrap_organization_brain_with_requester(
+            "acme",
+            "Acme Brain",
+            "npub-owner",
+            "npub-agent",
+        )
+        .unwrap();
+
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+
+        let stored = store.load_brain(&output.brain.id).unwrap();
+        assert_eq!(stored.brain.id, output.brain.id);
+        assert_eq!(stored.brain.name, output.brain.name);
+        assert_eq!(stored.brain.members.len(), 2);
+        assert_eq!(stored.brain.admins.len(), 2);
+        assert!(stored.grants.is_empty());
+    }
+
+    #[test]
+    fn reused_organization_brain_id_cannot_claim_a_different_bootstrap() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let first = bootstrap_organization_brain("acme", "Acme Brain", "npub-first").unwrap();
+        let conflicting =
+            bootstrap_organization_brain("acme", "Different Brain", "npub-second").unwrap();
+
+        store.create_brain_bootstrap(&first, &[]).unwrap();
+        let error = store.create_brain_bootstrap(&conflicting, &[]).unwrap_err();
+
+        assert_eq!(
+            error,
+            StoreError::DuplicateId {
+                field: "brain_id",
+                value: "acme".to_owned(),
+            }
+        );
+        assert_eq!(
+            store.load_brain(&first.brain.id).unwrap().brain,
+            first.brain
+        );
+    }
+
+    #[test]
     fn persists_and_reloads_organization_bootstrap() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("brain-sync.sqlite3");

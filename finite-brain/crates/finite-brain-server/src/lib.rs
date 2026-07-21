@@ -3120,6 +3120,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_created_organization_brain_atomically_adds_selected_agent_admin_by_email() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_npub = npub(&owner_keys);
+        let agent_npub = npub(&agent_keys);
+        let agent_key = NostrPublicKey::from_protocol(agent_keys.public_key());
+        let identifier = Nip05Identifier::parse("cheater@finite.vip").unwrap();
+        let document =
+            serde_json::json!({ "names": { "cheater": agent_key.to_hex() } }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "cheater@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": owner_npub,
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            serde_json::json!({
+                "workosUserId": "user_workos_owner",
+                "managedAgentEmail": "cheater@finite.vip",
+                "verifiedEmail": "owner@finite.computer",
+                "status": "active",
+            }),
+        )]);
+        let state = test_state()
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let router = router_with_state(state);
+        let body = serde_json::json!({
+            "brainId": "acme",
+            "kind": "organization",
+            "name": "Acme Brain",
+            "initialAgentEmail": "cheater@finite.vip",
+        })
+        .to_string();
+
+        let created = post_brain(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created: BrainMetadataResponse = read_json(created).await;
+        assert!(created.folders.is_empty());
+        assert_eq!(created.members.len(), 2);
+        assert_eq!(created.admins.len(), 2);
+        assert!(created.admins.contains(&owner_npub));
+        assert!(created.admins.contains(&agent_npub));
+        assert!(created.identities.iter().any(|identity| {
+            identity.npub == agent_npub && identity.nip05.as_deref() == Some("cheater@finite.vip")
+        }));
+
+        let agent_brains = authed_request(
+            router,
+            &agent_keys,
+            "GET",
+            "/_admin/brains",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let agent_brains: VisibleBrainsResponse = read_json(agent_brains).await;
+        assert_eq!(agent_brains.brains.len(), 1);
+        assert_eq!(agent_brains.brains[0].role, "admin");
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn agent_created_organization_brain_includes_authenticated_requester() {
         let agent_keys = Keys::generate();
         let requester_keys = Keys::generate();
@@ -3156,8 +3245,24 @@ mod tests {
         assert!(metadata.admins.contains(&agent_npub));
         assert!(metadata.admins.contains(&requester_npub));
 
+        let retry = post_brain(
+            router.clone(),
+            &agent_keys,
+            &body,
+            TEST_NOW + 1,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retried: BrainMetadataResponse = read_json(retry).await;
+        assert_eq!(retried.brain_id, metadata.brain_id);
+        assert_eq!(retried.members, metadata.members);
+        assert_eq!(retried.admins, metadata.admins);
+
         let requester_metadata =
-            get_metadata(router.clone(), &requester_keys, "acme", TEST_NOW + 1).await;
+            get_metadata(router.clone(), &requester_keys, "acme", TEST_NOW + 2).await;
         assert_eq!(requester_metadata.status(), StatusCode::OK);
         let requester_brains = authed_request(
             router.clone(),
@@ -3165,7 +3270,7 @@ mod tests {
             "GET",
             "/_admin/brains",
             None,
-            TEST_NOW + 2,
+            TEST_NOW + 3,
         )
         .await;
         assert_eq!(requester_brains.status(), StatusCode::OK);

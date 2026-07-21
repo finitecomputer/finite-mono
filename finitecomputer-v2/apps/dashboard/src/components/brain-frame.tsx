@@ -33,11 +33,13 @@ export function BrainFrame({
   agentEmail,
   agentName,
   agentNpub,
+  brainId,
 }: {
   title: string;
   agentEmail?: string | null;
   agentName?: string | null;
   agentNpub?: string | null;
+  brainId?: string | null;
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const confirmationResultsRef = useRef(new Map<string, boolean>());
@@ -113,7 +115,7 @@ export function BrainFrame({
         ref={frameRef}
         className="size-full border-0"
         sandbox={BRAIN_FRAME_SANDBOX}
-        src={brainClientPath({ email: agentEmail, name: agentName, npub: agentNpub })}
+        src={brainClientPath({ email: agentEmail, name: agentName, npub: agentNpub, brainId })}
         title={title}
         allow="clipboard-read; clipboard-write"
         data-finite-brain-frame

@@ -100,10 +100,17 @@ fbrain -- <args>` may be the available entrypoint.
 
 ## First-Time Personal Brain Setup
 
-When the user's request requires Brain but `brain list --json` shows no Personal
-Brain, ask once in ordinary language whether they want you to set up their
-empty Personal Brain. Keep this to one short question; do not require exact
-wording, a slash command, a button, or a setup ticket.
+Before creating a Brain, run `brain list --json` and use that signed result as
+the source of truth. Proceed without a type question only when the user clearly
+says Personal Brain or Organization/Org Brain. If they ask to create a Brain or
+wiki without making the type clear, ask one short natural-language question:
+Personal Brain or Org Brain. Do not use a fixed script, slash command, button,
+or modal, and do not require exact wording.
+
+When the user explicitly requests a Personal Brain but one already exists,
+name it and ask whether to use it for the requested work. Do not pretend to
+create another. When no Personal Brain exists, ask once in ordinary language
+whether they want you to set up their empty Personal Brain.
 
 - On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" brain
   bootstrap-personal --server "$SERVER" --json`, list Brains again, open the
@@ -133,7 +140,9 @@ substitute.
 
 A clear natural-language request to create the Organization Brain is sufficient
 authorization. Do not add another confirmation. After `brain list --json`
-confirms the Brain does not already exist, create it atomically:
+confirms no same-named Organization Brain exists, create it atomically. If a
+same-named Organization Brain exists, ask whether to use it or intentionally
+create a separate Brain instead.
 
 ```sh
 fbrain --config-dir "$FBRAIN_CONFIG" brain create "$BRAIN" \
@@ -149,10 +158,12 @@ then continue that request in the new Folder.
 
 Do not replace this command with separate `add-member` and `add-admin` steps.
 On success, report the Brain name and that both you and the requester are
-admins, then continue the user's original task. This behavior applies only when
-you create an Organization Brain for an authenticated requester; it does not
-control the Product Client's separate, visible choice to include its selected
-agent as an initial admin.
+active admins, then include `[Open Brain](./brain?brainId=THE_BRAIN_ID)` using
+the exact returned Brain ID. This relative link is navigation only; it does not
+grant access. Continue the user's original task. This behavior applies only
+when you create an Organization Brain for an authenticated requester; it does
+not control the Product Client's separate, visible choice to include its
+selected agent as an initial admin.
 
 ## LLM Wiki Rules
 

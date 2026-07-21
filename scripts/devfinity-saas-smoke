@@ -399,6 +399,7 @@ send_site_and_require_ordered_chat() {
   local final_timestamp
   local site_url
   local site_body
+  local result_file
   chat_state
   IFS=$'\t' read -r room_id topic_id chat_id <<<"$(selected_chat_route)"
   if [[ -z "$sites_acceptance_room_id" ]]; then
@@ -417,7 +418,9 @@ send_site_and_require_ordered_chat() {
     "Use the installed Finite Sites skill to publish a minimal public Finite Site whose rendered page visibly contains only the exact marker ${marker}. This marker contains no private data, and this request is explicit approval to make that output public with the skill's documented public-sharing command. Actually publish it, verify it, and return verbatim the exact outputs[].output_url reported by fsite project status --output json in your final response. In this local test that authoritative URL will be an http://*.sites.localhost:<port>/ URL; never translate or synthesize a production hostname."
   wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id" 1
 
-  result="$(node - "$chat_state_json" "$before" "$room_id" "$topic_id" "$chat_id" "$sites_api_url" <<'JS'
+  result_file="$state_dir/saas-smoke-site-turn-result-$$-$RANDOM.txt"
+  track_sensitive_file "$result_file"
+  node - "$chat_state_json" "$before" "$room_id" "$topic_id" "$chat_id" "$sites_api_url" >"$result_file" <<'JS'
 const fs = require("node:fs");
 const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const previous = Number(process.argv[3]);
@@ -444,7 +447,7 @@ if (tools.some((message) => message.edit_of_message_id)) {
 const final = remote.findLast((message) => message.final_delivery === true);
 if (!final) throw new Error("site turn has no final delivery");
 const content = String(final.display_content || final.text || "");
-const match = content.match(/https?:\/\/[^\s<>)\]},"'`*]+/u);
+const match = content.match(/https?:\/\/[^\s<>)\]},"\x27\x60*]+/u);
 if (!match) throw new Error("site turn final delivery has no public URL");
 const candidate = match[0].replace(/[.,;:!?]+$/u, "");
 const url = new URL(candidate);
@@ -469,7 +472,7 @@ if (url.username || url.password || (!productionOutput && !localOutput)) {
 }
 process.stdout.write(`${Number(final.timestamp_unix_seconds) || 0}\t${url.href}`);
 JS
-)"
+  result="$(cat "$result_file")"
   IFS=$'\t' read -r final_timestamp site_url <<<"$result"
   if (( final_timestamp <= 0 )); then
     echo "site turn final delivery has no live timestamp" >&2
@@ -489,11 +492,8 @@ JS
   fi
 }
 
-restart_process() {
+stop_process() {
   local process="$1"
-  # A dependency restart can leave dependants in process-compose's Skipped
-  # state. `process restart` does not revive a skipped process, so model the
-  # actual outage explicitly and always finish with a start transition.
   process-compose \
     --use-uds \
     --unix-socket "${DEVFINITY_PROCESS_COMPOSE_SOCKET:?}" \
@@ -520,6 +520,14 @@ restart_process() {
     fi
     sleep 1
   done
+}
+
+restart_process() {
+  local process="$1"
+  # A dependency restart can leave dependants in process-compose's Skipped
+  # state. `process restart` does not revive a skipped process, so model the
+  # actual outage explicitly and always finish with a start transition.
+  stop_process "$process"
 
   process-compose \
     --use-uds \
@@ -554,6 +562,80 @@ restart_process() {
     fi
     sleep 1
   done
+}
+
+reset_brain_setup_matrix_state() {
+  # Wait for SQLite's owning process to exit before unlinking the database.
+  # Otherwise the still-open connection can recreate sidecars against an
+  # unlinked main file and leave the next scenario with no schema.
+  stop_process finite-brain
+  rm -f -- \
+    "$state_dir/finite-brain/finite-brain.sqlite3" \
+    "$state_dir/finite-brain/finite-brain.sqlite3-shm" \
+    "$state_dir/finite-brain/finite-brain.sqlite3-wal"
+  container exec "$container_machine_id" /bin/bash -lc \
+    'rm -rf /data/agent/fbrain /data/workspace/finitebrain'
+  restart_process finite-brain
+  wait_http "FiniteBrain matrix reset" "${FINITE_BRAIN_URL:?}/health" 120
+}
+
+assert_agent_brain_list() {
+  local expected_kind="$1"
+  local expected_role="$2"
+  local expected_count="$3"
+  container exec "$container_machine_id" fbrain brain list --json >"$brains_json"
+  node - "$brains_json" "$expected_kind" "$expected_role" "$expected_count" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [kind, role, countText] = process.argv.slice(3);
+const brains = response.brains || [];
+const count = Number(countText);
+if (brains.length !== count) {
+  throw new Error(`expected ${count} agent-visible Brains, received ${JSON.stringify(brains)}`);
+}
+if (count && (brains[0].kind !== kind || brains[0].role !== role)) {
+  throw new Error(`expected ${kind}/${role}, received ${JSON.stringify(brains[0])}`);
+}
+JS
+}
+
+run_brain_setup_matrix() {
+  local requester_npub
+  local org_id="matrix-agent-org"
+  requester_npub="$(requesting_user_account_id)"
+
+  reset_brain_setup_matrix_state
+  container exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
+  assert_agent_brain_list personal personal_agent 1
+  brain_browser_smoke assert-existing-personal
+
+  reset_brain_setup_matrix_state
+  container exec "$container_machine_id" fbrain brain create "$org_id" \
+    --kind organization \
+    --name "Matrix Agent Org" \
+    --requesting-user-npub "$requester_npub" \
+    --json >/dev/null
+  container exec "$container_machine_id" fbrain brain create "$org_id" \
+    --kind organization \
+    --name "Matrix Agent Org" \
+    --requesting-user-npub "$requester_npub" \
+    --json >/dev/null
+  assert_agent_brain_list organization admin 1
+  brain_browser_smoke assert-org-first "$org_id"
+
+  reset_brain_setup_matrix_state
+  brain_browser_smoke bootstrap
+  assert_agent_brain_list personal personal_agent 1
+
+  reset_brain_setup_matrix_state
+  brain_browser_smoke create-org-agent "Matrix User Agent Org"
+  assert_agent_brain_list organization admin 1
+
+  reset_brain_setup_matrix_state
+  brain_browser_smoke create-org-human "Matrix Human Only Org"
+  assert_agent_brain_list organization admin 0
+
+  echo "devfinity Brain setup/reconciliation matrix passed"
 }
 
 container_started_at() {
@@ -914,6 +996,10 @@ if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_BRAIN_ONLY_SMOKE
   echo "DEVFINITY_BRAIN_ONLY_SMOKE must be 0 or 1" >&2
   exit 64
 fi
+if [[ "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" != "0" && "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" != "1" ]]; then
+  echo "DEVFINITY_BRAIN_SETUP_MATRIX must be 0 or 1" >&2
+  exit 64
+fi
 if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_SITES_ONLY_SMOKE must be 0 or 1" >&2
   exit 64
@@ -1019,6 +1105,9 @@ fi
 
 agent_npub_before="$(runtime_agent_npub)"
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
+  if [[ "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" == "1" ]]; then
+    run_brain_setup_matrix
+  fi
   brain_browser_smoke bootstrap
   brain_id="$(personal_agent_brain_id)"
   brain_tree="/data/workspace/finitebrain/$brain_id"

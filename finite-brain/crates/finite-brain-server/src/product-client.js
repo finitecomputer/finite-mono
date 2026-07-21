@@ -12,7 +12,9 @@ const FiniteBrainProductClient = (() => {
     sessionEpoch: 0,
     sessionNotice: null,
     pubkeyHex: null,
-    activeBrainId: "personal",
+    activeBrainId: null,
+    requestedBrainId: null,
+    pendingOrganizationCreation: null,
     visibleBrains: [],
     metadata: null,
     keyring: null,
@@ -132,7 +134,6 @@ const FiniteBrainProductClient = (() => {
   const MAX_FOLDER_ROTATION_RECORDS = 1000;
   const MAX_PERSONAL_AGENT_ROTATION_GRANTS = 10000;
   const MAX_PERSONAL_AGENT_ROTATION_RECORDS = 10000;
-  const PERSONAL_BRAIN_PLACEHOLDER_ID = "personal";
   const BRAIN_ACCESS_CHANGED_NOTICE =
     "Brain access changed. This session was locked. Select a Brain you can open, then unlock again.";
   const BRAIN_ACCESS_REQUIRED_REASON = "brain access required";
@@ -155,6 +156,7 @@ const FiniteBrainProductClient = (() => {
     "accessShareTargetInput",
     "commandPaletteInput",
     "manageOrganizationBrainNameInput",
+    "managePersonalAgentEmailInput",
     "pageBaseRevisionInput",
     "pageDraftInput",
     "pageFolderIdInput",
@@ -251,7 +253,31 @@ const FiniteBrainProductClient = (() => {
   function reportClientActionFailure(error) {
     if (error && typeof error === "object" && handledAccessFailures.has(error)) return;
     if (error && typeof error === "object" && handledSessionLockFailures.has(error)) return;
-    state.lastError = error instanceof Error ? error.message : String(error || "Action failed");
+    lastErrorValue = error instanceof Error ? error.message : String(error || "Action failed");
+    setClientActionFeedback("error", clientFailureMessage(error), { expires: false });
+  }
+
+  function clientFailureMessage(error) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    if (error?.code === "brain_target_unavailable") {
+      return "That Brain is not yet available to this account. Refresh or check your access.";
+    }
+    if (error?.code === "brain_setup_cancelled" || /setup was cancelled/i.test(message)) {
+      return "Brain setup was cancelled. Nothing was created.";
+    }
+    if (
+      error?.code === "brain_identity_resolution_failed" ||
+      /managed agent|agent identity|identity.*resolv|does not belong to the signed owner's account/i.test(message)
+    ) {
+      return "Brain could not verify that agent. Check the Managed Agent Email and try again.";
+    }
+    if (/session is locked|unlock(?:ed)? session|session changed|signer identity changed/i.test(message)) {
+      return "Your Brain session is locked. Unlock it and try again.";
+    }
+    if (error instanceof TypeError || error?.code === "network_error" || Number(error?.status) >= 500) {
+      return "FiniteBrain could not connect to the server. Check your connection and try again.";
+    }
+    return CLIENT_ACTION_FEEDBACK.failure;
   }
 
   function markAccessFailureHandled(error) {
@@ -390,7 +416,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function personalBrainIdForPubkey(pubkeyHex) {
-    return pubkeyHex ? `personal-${pubkeyHex.slice(0, 16)}` : PERSONAL_BRAIN_PLACEHOLDER_ID;
+    return pubkeyHex ? `personal-${pubkeyHex.slice(0, 16)}` : null;
   }
 
   function signerIdentityChanged(previousPubkeyHex, nextPubkeyHex) {
@@ -399,6 +425,11 @@ const FiniteBrainProductClient = (() => {
         nextPubkeyHex &&
         previousPubkeyHex !== nextPubkeyHex
     );
+  }
+
+  function brainTargetFromSearch(search) {
+    const candidate = new URLSearchParams(String(search || "")).get("brainId")?.trim() || "";
+    return /^[a-z0-9][a-z0-9_-]{0,127}$/u.test(candidate) ? candidate : null;
   }
 
   function signedEventMatchesPinnedIdentity(expectedPubkeyHex, signedEvent) {
@@ -422,27 +453,36 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  function defaultPersonalBrain() {
-    return {
-      brainId: personalBrainIdForPubkey(state.pubkeyHex),
-      kind: "personal",
-      name: "Personal Brain",
-      role: "owner",
-      pending: true,
-    };
-  }
-
   function visibleBrainOptions(brains = state.visibleBrains) {
     const normalized = brains.map(normalizeVisibleBrain).filter(Boolean);
-    const personal = normalized.find((brain) => brain.kind === "personal") || defaultPersonalBrain();
+    const personal = normalized.find((brain) => brain.kind === "personal");
     const organizations = normalized
       .filter((brain) => brain.kind === "organization")
       .sort((left, right) => left.name.localeCompare(right.name) || left.brainId.localeCompare(right.brainId));
-    return [personal, ...organizations];
+    return personal ? [personal, ...organizations] : organizations;
   }
 
   function activeBrainOption() {
-    return visibleBrainOptions().find((brain) => brain.brainId === state.activeBrainId) || defaultPersonalBrain();
+    return visibleBrainOptions().find((brain) => brain.brainId === state.activeBrainId) || null;
+  }
+
+  function selectAccessibleBrain({ brains, currentBrainId, explicitTargetBrainId }) {
+    const visible = visibleBrainOptions(brains || []);
+    if (explicitTargetBrainId) {
+      const target = visible.find((brain) => brain.brainId === explicitTargetBrainId);
+      return target
+        ? { brainId: target.brainId, reason: "explicit_target" }
+        : { brainId: null, reason: "target_unavailable", targetBrainId: explicitTargetBrainId };
+    }
+    const current = visible.find((brain) => brain.brainId === currentBrainId);
+    if (current) return { brainId: current.brainId, reason: "current_session" };
+    const personal = visible.find((brain) => brain.kind === "personal");
+    if (personal) return { brainId: personal.brainId, reason: "personal_default" };
+    const organizations = visible.filter((brain) => brain.kind === "organization");
+    if (organizations.length === 1) {
+      return { brainId: organizations[0].brainId, reason: "sole_organization" };
+    }
+    return { brainId: null, reason: organizations.length ? "choose" : "empty" };
   }
 
   function activeBrainLabel() {
@@ -452,7 +492,7 @@ const FiniteBrainProductClient = (() => {
       state.visibleBrains
     );
     if (lockedSelection) return lockedSelection.label;
-    return state.metadata?.name || activeBrainOption()?.name || state.activeBrainId || "Personal Brain";
+    return state.metadata?.name || activeBrainOption()?.name || state.activeBrainId || "No Brain selected";
   }
 
   function nestedManageBrainsReturnToken() {
@@ -543,6 +583,22 @@ const FiniteBrainProductClient = (() => {
     return true;
   }
 
+  async function refreshVisibleBrainsAfterAccessChange() {
+    const lockedBrainId = state.activeBrainId;
+    state.sessionStatus = SESSION_STATUS.RESUMING;
+    try {
+      const response = await protectedRequest("/_admin/brains");
+      state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
+      if (!state.visibleBrains.some((brain) => brain.brainId === lockedBrainId)) {
+        state.activeBrainId = null;
+      }
+    } finally {
+      state.sessionStatus = SESSION_STATUS.LOCKED;
+      state.sessionNotice = BRAIN_ACCESS_CHANGED_NOTICE;
+      render();
+    }
+  }
+
   function handlePageHide() {
     lockSession();
   }
@@ -565,7 +621,6 @@ const FiniteBrainProductClient = (() => {
         target.lastEmailInviteUrl ||
         target.lastEmailInvitePostProof ||
         target.accessResult ||
-        target.visibleBrains?.length ||
         target.brainInvitations?.length ||
         target.folderShareLinks?.length ||
         target.sharedFolderInvitations?.length ||
@@ -591,7 +646,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function setActiveBrainId(brainId, options = {}) {
-    const nextBrainId = brainId || state.activeBrainId || personalBrainIdForPubkey(state.pubkeyHex);
+    const nextBrainId = brainId || null;
     const changed = nextBrainId !== state.activeBrainId;
     state.activeBrainId = nextBrainId;
     if (changed && options.reset !== false) resetBrainSessionState();
@@ -601,30 +656,8 @@ const FiniteBrainProductClient = (() => {
     if (status === SESSION_STATUS.UNLOCKED || visibleBrains.length) return null;
     return {
       label: "Selected Brain (locked)",
-      value: activeBrainId || PERSONAL_BRAIN_PLACEHOLDER_ID,
+      value: activeBrainId,
     };
-  }
-
-  function missingVisibleBrainFallback(
-    status,
-    activeBrainId,
-    visibleBrains,
-    pubkeyHex,
-    defaultBrainId
-  ) {
-    if (
-      status === SESSION_STATUS.LOCKED ||
-      !activeBrainId ||
-      activeBrainId === PERSONAL_BRAIN_PLACEHOLDER_ID ||
-      activeBrainId === defaultBrainId
-    ) {
-      return null;
-    }
-    const normalized = visibleBrains.map(normalizeVisibleBrain).filter(Boolean);
-    if (normalized.some((brain) => brain.brainId === activeBrainId)) return null;
-    const personal = normalized.find((brain) => brain.kind === "personal");
-    const fallbackBrainId = personal?.brainId || normalized[0]?.brainId || personalBrainIdForPubkey(pubkeyHex);
-    return fallbackBrainId && fallbackBrainId !== activeBrainId ? fallbackBrainId : null;
   }
 
   function brainIdFromName(prefix, name) {
@@ -2712,10 +2745,30 @@ const FiniteBrainProductClient = (() => {
       "manageBrainsLoadButton",
       state.sessionStatus === SESSION_STATUS.RESUMING || !canLoadBrain()
     );
-    safeSetHidden("manageBrainCreateDetails", !showsCreateOrganizationControl(state.metadata));
+    const personalBrain = visibleBrainOptions().find((brain) => brain.kind === "personal");
+    safeSetHidden("managePersonalBrainCreate", Boolean(personalBrain));
+    const suggestedAgent = suggestedAgentIdentityFromNavigation();
+    const personalAgentInput = $("managePersonalAgentEmailInput");
+    if (personalAgentInput && !personalAgentInput.value && suggestedAgent?.email) {
+      personalAgentInput.value = suggestedAgent.email;
+    }
+    const addAgentInput = $("manageOrganizationAddAgentInput");
+    const agentLabel = suggestedAgent?.email || suggestedAgent?.name || suggestedAgent?.npub || "selected agent";
+    setText("manageOrganizationAgentLabel", agentLabel);
+    if (addAgentInput) {
+      addAgentInput.disabled = !suggestedAgent;
+      if (!suggestedAgent) addAgentInput.checked = false;
+    }
+    safeSetHidden("manageBrainCreateDetails", false);
+    const canCreate = Boolean(
+      state.config &&
+      !state.readerBusy &&
+      (state.signerStatus === "connected" || deriveBrainIdentityProviderState(state.identityProvider).canConnect)
+    );
+    setOptionalDisabled("manageCreatePersonalBrainButton", !canCreate || Boolean(personalBrain));
     setOptionalDisabled(
       "manageCreateOrganizationBrainButton",
-      state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.signerStatus !== "connected" || state.readerBusy || !state.config
+      !canCreate
     );
     const rows = visibleBrainOptions();
     const emptyText = signerConnected ? "No Brains available." : "Connect a signer to list Brains.";
@@ -8562,43 +8615,56 @@ const FiniteBrainProductClient = (() => {
     }
     if (!response.ok) {
       const error = protectedRequestError(path, response.status, body);
-      lockSessionForBrainAccessChange(error, sessionEpoch);
+      if (lockSessionForBrainAccessChange(error, sessionEpoch)) {
+        await refreshVisibleBrainsAfterAccessChange().catch((refreshError) => {
+          log("Failed to refresh Brains after access changed.", { error: refreshError.message });
+        });
+      }
       throw error;
     }
     rememberIdentitiesFrom(body);
     return body;
   }
 
-  async function loadVisibleBrains() {
+  async function loadVisibleBrains(options = {}) {
     if (state.signerStatus !== "connected") {
       state.visibleBrains = [];
       render();
       return [];
     }
+    const previousIds = new Set(state.visibleBrains.map((brain) => normalizeVisibleBrain(brain)?.brainId).filter(Boolean));
     const response = await protectedRequest("/_admin/brains");
     state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
-    const fallbackBrainId = missingVisibleBrainFallback(
-      state.sessionStatus,
-      state.activeBrainId,
-      state.visibleBrains,
-      state.pubkeyHex,
-      state.config?.defaultBrainId
-    );
-    if (fallbackBrainId) {
-      setActiveBrainId(fallbackBrainId);
-      state.sessionNotice = "The previously selected Brain is no longer visible. Unlock the session to open the fallback Brain.";
-      render();
-      return state.visibleBrains;
+    const selection = selectAccessibleBrain({
+      brains: state.visibleBrains,
+      currentBrainId: state.activeBrainId,
+      explicitTargetBrainId: options.ignoreTarget
+        ? null
+        : options.explicitTargetBrainId || state.requestedBrainId || null,
+    });
+    if (selection.reason === "target_unavailable") {
+      const error = new Error("The requested Brain is not yet available to this account");
+      error.code = "brain_target_unavailable";
+      error.targetBrainId = selection.targetBrainId;
+      throw error;
     }
-    const personal = visibleBrainOptions().find((brain) => brain.kind === "personal");
-    if (
-      personal &&
-      (state.activeBrainId === PERSONAL_BRAIN_PLACEHOLDER_ID || state.activeBrainId === state.config?.defaultBrainId)
-    ) {
-      setActiveBrainId(personal.brainId, { reset: false });
+    setActiveBrainId(selection.brainId, { reset: false });
+    if (selection.reason === "explicit_target") state.requestedBrainId = null;
+    const discovered = state.visibleBrains.filter((brain) => !previousIds.has(brain.brainId));
+    if (previousIds.size && discovered.length && selection.reason === "current_session") {
+      state.sessionNotice = `${discovered.length} new ${discovered.length === 1 ? "Brain is" : "Brains are"} available.`;
     }
     render();
     return state.visibleBrains;
+  }
+
+  async function loadVisibleBrainsWithTargetRetry() {
+    try {
+      return await loadVisibleBrains();
+    } catch (error) {
+      if (error?.code !== "brain_target_unavailable") throw error;
+      return loadVisibleBrains();
+    }
   }
 
   async function createBrain(brainId, kind, name, options = {}) {
@@ -8612,13 +8678,16 @@ const FiniteBrainProductClient = (() => {
       name,
       bootstrapGrants: [],
       agentIdentity,
+      includeAgentAdmin: options.includeAgentAdmin === true,
     });
     if (kind === "personal" && !body.personalAgentEmail && !body.personalAgentNpub) {
       throw new Error("Select your agent by email before creating your Personal Brain");
     }
     if (kind === "personal" && options.confirmPersonalAgent !== false) {
       if (!(await confirmPersonalBrainAgent(body))) {
-        throw new Error("Personal Brain setup was cancelled");
+        const error = new Error("Personal Brain setup was cancelled");
+        error.code = "brain_setup_cancelled";
+        throw error;
       }
     }
     requireCurrentSessionEpoch(sessionEpoch);
@@ -8683,32 +8752,62 @@ const FiniteBrainProductClient = (() => {
     });
   }
 
-  async function ensurePersonalBrainForActiveSelection() {
-    const active = activeBrainOption();
-    if (active.kind !== "personal") return;
-    if (state.activeBrainId === PERSONAL_BRAIN_PLACEHOLDER_ID && state.pubkeyHex) {
-      setActiveBrainId(personalBrainIdForPubkey(state.pubkeyHex), { reset: false });
-    }
-    const existing = state.visibleBrains
-      .map(normalizeVisibleBrain)
-      .find((brain) => brain?.kind === "personal" && brain.brainId === state.activeBrainId);
-    if (existing && !existing.pending) return;
+  async function beginExplicitBrainCreation() {
+    const beganLocked = state.sessionStatus === SESSION_STATUS.LOCKED;
+    if (beganLocked) state.sessionStatus = SESSION_STATUS.RESUMING;
+    const sessionEpoch = state.sessionEpoch;
     try {
-      const metadata = await createBrain(state.activeBrainId, "personal", "Personal Brain");
-      state.metadata = metadata;
-      rememberVisibleBrain(metadata);
+      await connectSigner({ loadVisibleBrains: false, sessionEpoch });
+      requireCurrentSessionEpoch(sessionEpoch);
+      if (state.signerStatus !== "connected") throw new Error("Connect your Brain identity first");
+      await loadVisibleBrains({ ignoreTarget: true });
+      requireCurrentSessionEpoch(sessionEpoch);
+      return { beganLocked, sessionEpoch };
     } catch (error) {
-      if (!/already has a personal brain|duplicate id/.test(error.message)) throw error;
-      await loadVisibleBrains();
-      const personal = visibleBrainOptions().find((brain) => brain.kind === "personal");
-      if (!personal) throw error;
-      setActiveBrainId(personal.brainId, { reset: false });
+      if (beganLocked && state.sessionEpoch === sessionEpoch) resetBrainSessionState();
+      throw error;
+    }
+  }
+
+  async function finishExplicitBrainCreation(metadata, creation) {
+    requireCurrentSessionEpoch(creation.sessionEpoch);
+    rememberVisibleBrain(metadata);
+    setActiveBrainId(metadata.brainId, { reset: false });
+    state.metadata = metadata;
+    state.keyring = state.keyring || createSessionKeyring();
+    state.sessionStatus = SESSION_STATUS.UNLOCKED;
+    await loadVisibleBrains();
+    requireCurrentSessionEpoch(creation.sessionEpoch);
+    render();
+  }
+
+  async function createPersonalBrainFromInput() {
+    const creation = await beginExplicitBrainCreation();
+    try {
+      const existing = visibleBrainOptions().find((brain) => brain.kind === "personal");
+      if (existing) {
+        setActiveBrainId(existing.brainId, { reset: false });
+        throw new Error("Your Personal Brain already exists. Open it instead.");
+      }
+      const email = String($("managePersonalAgentEmailInput")?.value || "").trim().toLowerCase();
+      if (!looksLikeEmailIdentity(email)) {
+        throw new Error("Enter your agent's Managed Agent Email");
+      }
+      const brainId = personalBrainIdForPubkey(state.pubkeyHex);
+      const metadata = await createBrain(brainId, "personal", "Personal Brain", {
+        agentIdentity: { email },
+      });
+      await finishExplicitBrainCreation(metadata, creation);
+      log("Created Personal Brain.", { brainId: metadata.brainId });
+    } catch (error) {
+      if (creation.beganLocked && state.sessionEpoch === creation.sessionEpoch) resetBrainSessionState();
+      throw error;
     }
   }
 
   async function ensureInvitedBrainAcceptedForActiveSelection() {
     const active = activeBrainOption();
-    if (active.role !== "invited" || !active.inviteCode) return;
+    if (!active || active.role !== "invited" || !active.inviteCode) return;
     const invitation = await protectedRequest(brainInvitationAcceptPath(active.inviteCode), {
       method: "POST",
     });
@@ -8718,38 +8817,44 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createOrganizationBrainFromInput(inputId) {
-    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
-      throw new Error("Session is locked. Unlock the session before creating a Brain");
-    }
-    const sessionEpoch = state.sessionEpoch;
+    const creation = await beginExplicitBrainCreation();
     const input = $(inputId);
     const name = input?.value.trim() || "New organization";
-    if (state.signerStatus !== "connected") await connectSigner();
-    requireCurrentSessionEpoch(sessionEpoch);
-    if (state.signerStatus !== "connected") throw new Error("Connect your Brain identity first");
-    const brainId = brainIdFromName("org", name);
-    const metadata = await createBrain(brainId, "organization", name);
-    requireCurrentSessionEpoch(sessionEpoch);
-    const createdKeyring = cloneSessionKeyring(state.keyring);
-    if (input) input.value = "";
-    rememberVisibleBrain(metadata);
-    setActiveBrainId(metadata.brainId);
-    const createdBrainEpoch = state.sessionEpoch;
-    state.keyring = createdKeyring;
-    state.metadata = metadata;
-    state.sessionStatus = SESSION_STATUS.UNLOCKED;
-    await loadVisibleBrains();
-    requireCurrentSessionEpoch(createdBrainEpoch);
-    log("Created Organization Brain.", { brainId: metadata.brainId });
-    render();
+    try {
+      const includeAgentAdmin = Boolean($("manageOrganizationAddAgentInput")?.checked);
+      const agentIdentity = suggestedAgentIdentityFromNavigation();
+      const signature = JSON.stringify({
+        agent: includeAgentAdmin ? agentIdentity?.email || agentIdentity?.npub || null : null,
+        includeAgentAdmin,
+        name,
+      });
+      if (state.pendingOrganizationCreation?.signature !== signature) {
+        state.pendingOrganizationCreation = {
+          brainId: brainIdFromName("org", name),
+          signature,
+        };
+      }
+      const brainId = state.pendingOrganizationCreation.brainId;
+      const metadata = await createBrain(brainId, "organization", name, {
+        agentIdentity,
+        includeAgentAdmin,
+      });
+      if (input) input.value = "";
+      await finishExplicitBrainCreation(metadata, creation);
+      state.pendingOrganizationCreation = null;
+      log("Created Organization Brain.", { brainId: metadata.brainId });
+    } catch (error) {
+      if (Number(error?.status) >= 400 && Number(error?.status) < 500) {
+        state.pendingOrganizationCreation = null;
+      }
+      if (creation.beganLocked && state.sessionEpoch === creation.sessionEpoch) resetBrainSessionState();
+      throw error;
+    }
   }
 
   async function loadConfig() {
     const response = await fetch("/client/config.json");
     state.config = await response.json();
-    if (!state.activeBrainId || state.activeBrainId === "smoke") {
-      state.activeBrainId = state.config.defaultBrainId || PERSONAL_BRAIN_PLACEHOLDER_ID;
-    }
     log("Loaded Product Client config.", state.config);
     render();
   }
@@ -8787,13 +8892,10 @@ const FiniteBrainProductClient = (() => {
     const identityChanged = signerIdentityChanged(state.pubkeyHex, pubkey);
     if (identityChanged) {
       resetBrainSessionState({ preserveManageBrainsReturnToSettings: false });
-      setActiveBrainId(personalBrainIdForPubkey(pubkey), { reset: false });
+      setActiveBrainId(null, { reset: false });
     }
     state.pubkeyHex = pubkey;
     state.signerStatus = "connected";
-    if (state.activeBrainId === PERSONAL_BRAIN_PLACEHOLDER_ID || state.activeBrainId === state.config?.defaultBrainId) {
-      setActiveBrainId(personalBrainIdForPubkey(pubkey), { reset: false });
-    }
     log(identityChanged ? "Connected a different signer identity." : "Connected signer.", {
       status: "connected",
     });
@@ -8826,8 +8928,8 @@ const FiniteBrainProductClient = (() => {
   async function loadBrainMetadata(options = {}) {
     if (!options.preserveActive) {
       await ensureInvitedBrainAcceptedForActiveSelection();
-      await ensurePersonalBrainForActiveSelection();
     }
+    if (!state.activeBrainId) throw new Error("Choose a Brain to open");
     const path = `/_admin/brains/${encodeURIComponent(state.activeBrainId)}/metadata`;
     const metadata = await protectedRequest(path);
     state.metadata = metadata;
@@ -9028,9 +9130,7 @@ const FiniteBrainProductClient = (() => {
       if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) state.sessionStatus = SESSION_STATUS.RESUMING;
       sessionEpoch = state.sessionEpoch;
       render();
-      await loadVisibleBrains().catch((error) => {
-        log("Failed to refresh visible Brains before opening reader.", { error: error.message });
-      });
+      await loadVisibleBrainsWithTargetRetry();
       requireCurrentSessionEpoch(sessionEpoch);
       await loadBrainMetadata();
       requireCurrentSessionEpoch(sessionEpoch);
@@ -9066,6 +9166,8 @@ const FiniteBrainProductClient = (() => {
     state.readerBusy = true;
     render();
     try {
+      await loadVisibleBrainsWithTargetRetry();
+      requireCurrentSessionEpoch(sessionEpoch);
       await loadBrainMetadata();
       requireCurrentSessionEpoch(sessionEpoch);
       if (state.keyring?.openedGrants.length) await pullSyncBootstrap();
@@ -9577,7 +9679,17 @@ const FiniteBrainProductClient = (() => {
       name: input.name,
       bootstrapGrants: input.bootstrapGrants || [],
     };
-    if (input.kind !== "personal") return body;
+    if (input.kind === "organization") {
+      if (!input.includeAgentAdmin) return body;
+      const email = String(input.agentIdentity?.email || "").trim().toLowerCase();
+      if (email && looksLikeEmailIdentity(email)) {
+        body.initialAgentEmail = email;
+        return body;
+      }
+      const npub = publicKeyIdentityFromInput(input.agentIdentity?.npub)?.npub;
+      if (npub) body.initialAgentNpub = npub;
+      return body;
+    }
     const email = String(input.agentIdentity?.email || "").trim().toLowerCase();
     if (email && looksLikeEmailIdentity(email)) {
       body.personalAgentEmail = email;
@@ -11030,6 +11142,8 @@ const FiniteBrainProductClient = (() => {
         method: "POST",
       });
       requireCurrentSessionEpoch(sessionEpoch);
+      await loadVisibleBrains({ ignoreTarget: true });
+      requireCurrentSessionEpoch(sessionEpoch);
       setActiveBrainId(invitation.brainId);
       state.sessionNotice = invitation.duplicateAccept
         ? "This Member Identity already joined the selected Brain. An admin must grant any required Folder Keys before encrypted content can open."
@@ -11081,6 +11195,8 @@ const FiniteBrainProductClient = (() => {
         method: "POST",
         body: JSON.stringify(claimRequest.body),
       });
+      requireCurrentSessionEpoch(sessionEpoch);
+      await loadVisibleBrains({ ignoreTarget: true });
       requireCurrentSessionEpoch(sessionEpoch);
       setActiveBrainId(claimed.brainId);
       state.sessionNotice = claimed.duplicateAccept
@@ -11299,9 +11415,16 @@ const FiniteBrainProductClient = (() => {
     $("manageBrainsLoadButton")?.addEventListener("click", () => {
       manageBrainsLoadAction();
     });
+    $("manageCreatePersonalBrainButton")?.addEventListener("click", () => {
+      createPersonalBrainFromInput().catch((error) => {
+        reportClientActionFailure(error);
+        log("Failed to create Personal Brain from Manage Brains.", { error: error.message });
+        render();
+      });
+    });
     $("manageCreateOrganizationBrainButton")?.addEventListener("click", () => {
       createOrganizationBrainFromInput("manageOrganizationBrainNameInput").catch((error) => {
-        state.lastError = error.message;
+        reportClientActionFailure(error);
         log("Failed to create Organization Brain from Manage Brains.", { error: error.message });
         render();
       });
@@ -11820,6 +11943,7 @@ const FiniteBrainProductClient = (() => {
     bind();
     setEditorDraftText($("pageDraftInput").value);
     populateInviteFromHash();
+    state.requestedBrainId = brainTargetFromSearch(window.location?.search);
     await loadConfig();
     await detectSigner();
   }
@@ -11839,6 +11963,7 @@ const FiniteBrainProductClient = (() => {
     buildPageWriteRequest,
     buildAuthEventTemplate,
     buildBrainAuthorizationHeader,
+    brainTargetFromSearch,
     buildFolderAccessRemovalRequest,
     buildEmailInviteAuthorizationEvent,
     buildEmailInviteClaimProofEvent,
@@ -11945,6 +12070,7 @@ const FiniteBrainProductClient = (() => {
     searchHighlightSegments,
     searchPageRows,
     searchResultSnippet,
+    selectAccessibleBrain,
     settingsSectionsForSession,
     sharedFolderRelationshipRows,
     sessionGrantOpeningAllowed,
@@ -11964,8 +12090,8 @@ const FiniteBrainProductClient = (() => {
     rememberIdentity,
     identityMetadataForNpub,
     identityDisplay,
+    clientFailureMessage,
     lockedBrainSelection,
-    missingVisibleBrainFallback,
     visibleBrainOptions,
     brainHealthBadges,
     workspaceChromeState,

@@ -73,6 +73,14 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
+To run the destructive Greenfield Brain setup matrix, add
+`DEVFINITY_BRAIN_SETUP_MATRIX=1` to that command. The matrix resets only the
+local FiniteBrain database and the test agent's `fbrain` working state between
+cases. It proves agent-first and user-first Personal Brain setup, agent-first
+Org-Brain-first access, user-first Org Brain setup with the selected agent, and
+user-first human-only Org Brain setup. Do not use this option against shared or
+production state.
+
 Rerun the real launch/chat/restart acceptance test at any time with:
 
 ```sh

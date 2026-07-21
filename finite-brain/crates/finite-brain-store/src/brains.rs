@@ -160,6 +160,16 @@ impl BrainStore {
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
+        self.create_brain_bootstrap_with_identities(output, grants, &[])
+    }
+
+    /// Atomically create an Organization Brain and its verified member aliases.
+    pub fn create_brain_bootstrap_with_identities(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        identity_aliases: &[IdentityAlias],
+    ) -> Result<(), StoreError> {
         if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
             return Err(StoreError::BrokenInvariant {
                 reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}"),
@@ -177,6 +187,35 @@ impl BrainStore {
                 reason: "Personal Brain bootstrap requires a Personal Agent".to_owned(),
             });
         }
+        if identity_aliases.iter().any(|alias| {
+            !output
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == alias.npub)
+        }) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Organization Brain bootstrap identities must belong to initial members"
+                    .to_owned(),
+            });
+        }
+
+        match self.load_brain(&output.brain.id) {
+            Ok(existing)
+                if equivalent_bootstrap_brain(&existing.brain, &output.brain)
+                    && existing.grants == grants =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(StoreError::DuplicateId {
+                    field: "brain_id",
+                    value: output.brain.id.to_string(),
+                });
+            }
+            Err(StoreError::MissingBrain { .. }) => {}
+            Err(error) => return Err(error),
+        }
 
         let tx = self.conn.transaction()?;
         insert_brain(&tx, &output.brain)?;
@@ -186,6 +225,9 @@ impl BrainStore {
         }
         for grant in grants {
             insert_grant(&tx, &output.brain.id, grant)?;
+        }
+        for alias in identity_aliases {
+            upsert_identity_alias(&tx, alias)?;
         }
         tx.commit()?;
         Ok(())
@@ -370,4 +412,25 @@ impl BrainStore {
         )?;
         Ok(())
     }
+}
+
+fn equivalent_bootstrap_brain(existing: &Brain, requested: &Brain) -> bool {
+    let existing_members = existing
+        .members
+        .iter()
+        .map(|member| (&member.user_id, &member.folder_access))
+        .collect::<BTreeSet<_>>();
+    let requested_members = requested
+        .members
+        .iter()
+        .map(|member| (&member.user_id, &member.folder_access))
+        .collect::<BTreeSet<_>>();
+    existing.id == requested.id
+        && existing.kind == requested.kind
+        && existing.name == requested.name
+        && existing.owner_user_id == requested.owner_user_id
+        && existing.folders == requested.folders
+        && existing_members == requested_members
+        && existing.admins.iter().collect::<BTreeSet<_>>()
+            == requested.admins.iter().collect::<BTreeSet<_>>()
 }

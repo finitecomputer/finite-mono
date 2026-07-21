@@ -324,7 +324,7 @@ function accessFailureTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, lockSessionForBrainAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, loadVisibleBrainsWithTargetRetry, lockSession, lockSessionForBrainAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The access-failure test must capture the Product Client's real closure seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-access-failure.test.js" });
@@ -810,6 +810,10 @@ const claimEmailBrainInvitationFromPanelSource = source.slice(
   source.indexOf("async function claimEmailBrainInvitationFromPanel(code)"),
   source.indexOf("async function revokeBrainInvitationFromPanel()")
 );
+const createOrganizationBrainFromInputSource = source.slice(
+  source.indexOf("async function createOrganizationBrainFromInput(inputId)"),
+  source.indexOf("async function loadConfig()")
+);
 const revokeBrainInvitationFromPanelSource = source.slice(
   source.indexOf("async function revokeBrainInvitationFromPanel()"),
   source.indexOf("async function prepareDraftWrite(options = {})")
@@ -859,13 +863,18 @@ for (const invitationAcceptanceSource of [
 ]) {
   assert.match(
     invitationAcceptanceSource,
-    /setActiveBrainId\(\w+\.brainId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
-    "Accepting an invitation must render the newly locked Session and its safe unlock notice"
+    /await loadVisibleBrains\(\{ ignoreTarget: true \}\);\s*requireCurrentSessionEpoch\(sessionEpoch\);\s*setActiveBrainId\(\w+\.brainId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
+    "Accepting an invitation must refresh authoritative Brains before rendering the newly locked Session"
   );
 }
+assert.ok(
+  createOrganizationBrainFromInputSource.indexOf("state.pendingOrganizationCreation = null;")
+    > createOrganizationBrainFromInputSource.indexOf("await finishExplicitBrainCreation(metadata, creation);"),
+  "An ambiguous post-create refresh failure must retain the stable Organization Brain retry identity"
+);
 assert.match(
   protectedRequestSource,
-  /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForBrainAccessChange\(error, sessionEpoch\);\s*throw error;/s,
+  /const error = protectedRequestError\(path, response\.status, body\);\s*if \(lockSessionForBrainAccessChange\(error, sessionEpoch\)\) \{\s*await refreshVisibleBrainsAfterAccessChange\(\)/s,
   "Confirmed active-Brain authorization loss must lock before protected work can continue"
 );
 assert.match(
@@ -1245,6 +1254,8 @@ assert.equal(
   JSON.stringify(["signer connected", "organization", "1 folders", "2 grants", "1 mounts"])
 );
 assert.equal(client.personalBrainIdForPubkey("ab".repeat(32)), "personal-abababababababab");
+assert.equal(client.brainTargetFromSearch("?brainId=org-acme"), "org-acme");
+assert.equal(client.brainTargetFromSearch("?brainId=../../personal"), null);
 assert.equal(
   client.normalizeVisibleBrain({
     brainId: "acme",
@@ -2084,45 +2095,112 @@ assert.equal(
 );
 assert.equal(client.lockedBrainSelection("unlocked", "org-acme", []), null);
 assert.equal(client.lockedBrainSelection("locked", "org-acme", [{ brainId: "org-acme" }]), null);
-assert.equal(
-  client.missingVisibleBrainFallback(
-    "unlocked",
-    "org-acme",
-    [{ brainId: "personal-a", kind: "personal" }],
-    "aa".repeat(32),
-    "personal"
-  ),
-  "personal-a"
+assert.deepEqual(
+  client.visibleBrainOptions([]),
+  [],
+  "Create Personal Brain is an action, not a synthetic accessible Brain"
+);
+const loadMetadataSource = source.slice(
+  source.indexOf("async function loadBrainMetadata"),
+  source.indexOf("function canLoadBrainAdminLists")
+);
+assert.doesNotMatch(
+  loadMetadataSource,
+  /ensurePersonalBrainForActiveSelection/,
+  "Opening a Brain must never create a Personal Brain"
+);
+assert.doesNotMatch(
+  source,
+  /function ensurePersonalBrainForActiveSelection/,
+  "The client must not retain an implicit Personal Brain creation path"
+);
+assert.match(htmlSource, /id="manageCreatePersonalBrainButton"/);
+assert.match(htmlSource, /id="managePersonalAgentEmailInput"/);
+assert.match(htmlSource, /id="manageOrganizationAddAgentInput"[^>]*checked/);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.brainCreateBody({
+    brainId: "org-acme",
+    kind: "organization",
+    name: "Acme Brain",
+    bootstrapGrants: [],
+    agentIdentity: { email: "agent@finite.vip" },
+    includeAgentAdmin: true,
+  }))),
+  {
+    brainId: "org-acme",
+    kind: "organization",
+    name: "Acme Brain",
+    bootstrapGrants: [],
+    initialAgentEmail: "agent@finite.vip",
+  }
 );
 assert.equal(
-  client.missingVisibleBrainFallback(
-    "locked",
-    "org-acme",
-    [{ brainId: "personal-a", kind: "personal" }],
-    "aa".repeat(32),
-    "personal"
-  ),
-  null
+  client.brainCreateBody({
+    brainId: "org-human-only",
+    kind: "organization",
+    name: "Human Only",
+    includeAgentAdmin: false,
+    agentIdentity: { email: "agent@finite.vip" },
+  }).initialAgentEmail,
+  undefined
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.selectAccessibleBrain({
+    brains: [{ brainId: "org-only", kind: "organization", name: "Only Org", role: "admin" }],
+    currentBrainId: null,
+    explicitTargetBrainId: null,
+  }))),
+  { brainId: "org-only", reason: "sole_organization" },
+  "An Org-Brain-first account opens its only authoritative Brain"
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.selectAccessibleBrain({
+    brains: [
+      { brainId: "org-a", kind: "organization", name: "A", role: "admin" },
+      { brainId: "personal-a", kind: "personal", name: "Personal Brain", role: "owner" },
+      { brainId: "org-b", kind: "organization", name: "B", role: "admin" },
+    ],
+    currentBrainId: null,
+    explicitTargetBrainId: null,
+  }))),
+  { brainId: "personal-a", reason: "personal_default" }
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.selectAccessibleBrain({
+    brains: [
+      { brainId: "org-a", kind: "organization", name: "A", role: "admin" },
+      { brainId: "org-b", kind: "organization", name: "B", role: "admin" },
+    ],
+    currentBrainId: null,
+    explicitTargetBrainId: null,
+  }))),
+  { brainId: null, reason: "choose" },
+  "Multiple Org Brains require a user choice when there is no stronger signal"
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(client.selectAccessibleBrain({
+    brains: [{ brainId: "org-a", kind: "organization", name: "A", role: "admin" }],
+    currentBrainId: "org-a",
+    explicitTargetBrainId: "missing",
+  }))),
+  { brainId: null, reason: "target_unavailable", targetBrainId: "missing" },
+  "An explicit unavailable target must not silently fall back"
 );
 assert.equal(
-  client.missingVisibleBrainFallback(
-    "unlocked",
-    "personal-aaaaaaaaaaaaaaaa",
-    [],
-    "aa".repeat(32),
-    "personal"
-  ),
-  null
+  client.clientFailureMessage(Object.assign(new Error("raw target detail"), { code: "brain_target_unavailable" })),
+  "That Brain is not yet available to this account. Refresh or check your access."
 );
 assert.equal(
-  client.missingVisibleBrainFallback(
-    "resuming",
-    "personal-aaaaaaaaaaaaaaaa",
-    [{ brainId: "org-testr-mr9bmjs", kind: "organization" }],
-    "aa".repeat(32),
-    "personal"
-  ),
-  "org-testr-mr9bmjs"
+  client.clientFailureMessage(Object.assign(new Error("raw setup detail"), { code: "brain_setup_cancelled" })),
+  "Brain setup was cancelled. Nothing was created."
+);
+assert.equal(
+  client.clientFailureMessage(Object.assign(new TypeError("fetch failed: secret host"), { code: "network_error" })),
+  "FiniteBrain could not connect to the server. Check your connection and try again."
+);
+assert.equal(
+  client.clientFailureMessage(new Error("Session is locked. Unlock the session before refreshing")),
+  "Your Brain session is locked. Unlock it and try again."
 );
 assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
@@ -5977,11 +6055,19 @@ assert.equal(
       accessLoss.context.window.nostr
     )
   );
-  accessLoss.context.fetch = async () => ({
-    ok: false,
-    status: 403,
-    text: async () => JSON.stringify({ error: "brain access required" }),
-  });
+  accessLoss.context.fetch = async (path) => path === "/_admin/brains"
+    ? {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          brains: [{ brainId: "other-org", kind: "organization", name: "Other", role: "admin" }],
+        }),
+      }
+    : {
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: "brain access required" }),
+      };
   const accessLossState = accessLoss.seams.state;
   accessLossState.activeBrainId = "acme";
   accessLossState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
@@ -6019,11 +6105,66 @@ assert.equal(
   assert.equal(accessLossState.metadata, null);
   assert.equal(accessLossState.projection.pages.size, 0);
   assert.equal(accessLossState.readerBusy, false);
+  assert.equal(accessLossState.activeBrainId, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(accessLossState.visibleBrains)),
+    [{ brainId: "other-org", kind: "organization", name: "Other", role: "admin", inviteCode: null }],
+    "Access recovery refreshes authoritative Brains without selecting an unrelated fallback"
+  );
   assert.equal(accessLoss.context.document.getElementById("pageDraftInput").value, "");
   accessLoss.seams.reportClientActionFailure(capturedAccessLoss);
   const accessLossFeedback = accessLoss.elements.get("clientActionFeedback");
   assert.equal(accessLossFeedback.hidden, true);
   assert.equal(accessLossFeedback.textContent, "");
+
+  const targetedOpen = accessFailureTestSeams();
+  targetedOpen.context.window.nostr = {
+    getPublicKey: async () => "00".repeat(32),
+    signEvent: async (event) => ({ ...event, id: "auth-event", pubkey: "00".repeat(32), sig: "signature" }),
+  };
+  targetedOpen.context.window.FiniteBrainProductClient.configureBrainIdentityProvider(
+    targetedOpen.context.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(
+      targetedOpen.context.window.nostr
+    )
+  );
+  targetedOpen.seams.state.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
+  targetedOpen.seams.state.pubkeyHex = "00".repeat(32);
+  targetedOpen.seams.state.signerStatus = "connected";
+  targetedOpen.seams.state.sessionStatus = "resuming";
+  targetedOpen.seams.state.requestedBrainId = "just-created";
+  let targetedListRequests = 0;
+  targetedOpen.context.fetch = async () => {
+    targetedListRequests += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        brains: targetedListRequests === 1
+          ? []
+          : [{ brainId: "just-created", kind: "organization", name: "Just Created", role: "admin" }],
+      }),
+    };
+  };
+  await targetedOpen.seams.loadVisibleBrainsWithTargetRetry();
+  assert.equal(targetedListRequests, 2, "A targeted open performs one bounded visibility retry");
+  assert.equal(targetedOpen.seams.state.activeBrainId, "just-created");
+  assert.equal(targetedOpen.seams.state.requestedBrainId, null);
+
+  targetedOpen.seams.state.requestedBrainId = "never-visible";
+  targetedListRequests = 0;
+  targetedOpen.context.fetch = async () => {
+    targetedListRequests += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ brains: [] }),
+    };
+  };
+  await assert.rejects(
+    () => targetedOpen.seams.loadVisibleBrainsWithTargetRetry(),
+    (error) => error.code === "brain_target_unavailable"
+  );
+  assert.equal(targetedListRequests, 2, "An unavailable target never retries more than once");
 
   const staleAccessLoss = accessFailureTestSeams();
   staleAccessLoss.seams.state.activeBrainId = "acme";

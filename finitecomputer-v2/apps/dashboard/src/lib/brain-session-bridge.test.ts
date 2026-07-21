@@ -5,6 +5,7 @@ import {
   BRAIN_FRAME_SANDBOX,
   BRAIN_PERSONAL_AGENT_CONFIRMATION_REQUEST,
   brainClientPath,
+  brainMachinePath,
   BRAIN_SESSION_PROOF_REQUEST,
   parseBrainPersonalAgentConfirmationRequest,
   parseBrainSessionProofRequest,
@@ -31,6 +32,23 @@ test("the dashboard confirms only its selected Personal Agent identity", () => {
   assert.equal(
     parseBrainPersonalAgentConfirmationRequest(request, "someone-else@finite.vip"),
     null,
+  );
+  assert.equal(
+    brainClientPath({
+      email: "cheater-a1b2c3d4e5f60708@finite.vip",
+      name: "cheater",
+      brainId: "org-acme",
+    }),
+    "/client?agentEmail=cheater-a1b2c3d4e5f60708%40finite.vip&agentName=cheater&brainId=org-acme"
+  );
+  assert.equal(brainClientPath({ brainId: "../../personal" }), "/client");
+  assert.equal(
+    brainMachinePath("runtime_reconciled", "org-acme"),
+    "/dashboard/machines/runtime_reconciled/brain?brainId=org-acme",
+  );
+  assert.equal(
+    brainMachinePath("runtime_reconciled", "../../personal"),
+    "/dashboard/machines/runtime_reconciled/brain",
   );
   assert.equal(
     parseBrainPersonalAgentConfirmationRequest({ ...request, requestId: "short" }, request.identity),

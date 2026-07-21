@@ -16,13 +16,23 @@ async function main() {
   const agentEmail = requiredEnv("DEVFINITY_BRAIN_AGENT_EMAIL").toLowerCase();
   const expectedText = process.env.DEVFINITY_BRAIN_EXPECTED_TEXT?.trim() || "";
 
-  if (action !== "bootstrap" && action !== "assert-note") {
-    throw new Error("usage: devfinity-brain-smoke.ts bootstrap|assert-note");
+  const actions = new Set([
+    "bootstrap",
+    "assert-existing-personal",
+    "assert-org-first",
+    "assert-note",
+    "create-org-agent",
+    "create-org-human",
+  ]);
+  if (!actions.has(action)) {
+    throw new Error(
+      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human",
+    );
   }
   if (!agentEmail.includes("@")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
-  if (action === "assert-note" && !expectedText) {
+  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human"].includes(action) && !expectedText) {
     throw new Error(
       "DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note",
     );
@@ -59,24 +69,49 @@ async function main() {
       diagnostics.push(`pageerror: ${error.message}`),
     );
 
+    const directBrainTarget = action === "assert-org-first"
+      ? `?brainId=${encodeURIComponent(expectedText)}`
+      : "";
     await page.goto(
-      `${dashboardUrl}/machines/${encodeURIComponent(machineId)}/brain`,
+      `${dashboardUrl}/machines/${encodeURIComponent(machineId)}/brain${directBrainTarget}`,
       {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       },
     );
     const brain = page.frameLocator('iframe[title$=" Brain"]');
-    await waitForUnlockedBrain(brain, page);
 
     if (action === "bootstrap") {
+      await waitForBrainClient(brain, page);
+      await createPersonalBrain(brain, agentEmail);
+      await waitForUnlockedBrain(brain, page);
+      await closeManageBrainsIfOpen(brain);
       assert.ok(
         personalAgentConfirmation.toLowerCase().includes(agentEmail),
         `Personal Agent confirmation did not show ${agentEmail}: ${personalAgentConfirmation}`,
       );
       await assertPersonalAgent(brain, agentEmail);
       console.log("brain user-first Personal Agent bootstrap ok");
+    } else if (action === "assert-existing-personal") {
+      await waitForUnlockedBrain(brain, page);
+      assert.equal(personalAgentConfirmation, "");
+      await assertPersonalAgent(brain, agentEmail);
+      console.log("brain agent-first Personal Agent bootstrap ok");
+    } else if (action === "assert-org-first") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOrgFirstBrain(brain, expectedText);
+      console.log("brain agent-first Org Brain opens without a Personal Brain");
+    } else if (action === "create-org-agent" || action === "create-org-human") {
+      await waitForBrainClient(brain, page);
+      await createOrganizationBrain(
+        brain,
+        expectedText,
+        action === "create-org-agent",
+      );
+      await waitForUnlockedBrain(brain, page);
+      console.log(`brain user-first ${action === "create-org-agent" ? "agent-paired" : "human-only"} Org bootstrap ok`);
     } else {
+      await waitForUnlockedBrain(brain, page);
       await assertOwnerSeesNote(brain, expectedText);
       console.log("brain owner readback ok");
     }
@@ -94,16 +129,88 @@ async function main() {
 
 void main();
 
-async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
-  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
-  const status = brain.locator("#sessionAccountStatus");
-  await status
-    .waitFor({ state: "visible", timeout: timeoutMs })
+async function waitForBrainClient(brain: FrameLocator, page: Page) {
+  await brain
+    .locator("#sessionAccountStatus")
+    .waitFor({ state: "visible", timeout: 90_000 })
     .catch(async (error) => {
       throw new Error(
         `Brain Product Client did not render: ${String(error)}\n${await page.locator("body").innerText()}`,
       );
     });
+}
+
+async function createPersonalBrain(brain: FrameLocator, agentEmail: string) {
+  await openManageBrains(brain);
+  const create = brain.locator("#manageCreatePersonalBrainButton");
+  await create.waitFor({ state: "visible", timeout: 30_000 });
+  await brain.locator("#managePersonalAgentEmailInput").fill(agentEmail);
+  await create.click();
+}
+
+async function openManageBrains(brain: FrameLocator) {
+  const switcher = brain.locator("#sessionAccountBrainButton");
+  const manage = brain.locator("#manageBrainsButton");
+  await assertEventually(
+    async () => {
+      if (await manage.isVisible()) return true;
+      await switcher.click();
+      await manage.waitFor({ state: "visible", timeout: 2_000 }).catch(() => {});
+      return manage.isVisible();
+    },
+    30_000,
+    async () => "Brain switcher did not expose Manage Brains",
+  );
+  await manage.click();
+  await brain.locator("#manageBrainsModal").waitFor({ state: "visible", timeout: 30_000 });
+}
+
+async function closeManageBrainsIfOpen(brain: FrameLocator) {
+  const modal = brain.locator("#manageBrainsModal");
+  if (await modal.isVisible()) {
+    await brain.locator("#closeManageBrainsButton").click();
+    await modal.waitFor({ state: "hidden", timeout: 30_000 });
+  }
+}
+
+async function createOrganizationBrain(
+  brain: FrameLocator,
+  name: string,
+  includeAgent: boolean,
+) {
+  await openManageBrains(brain);
+  await brain.locator("#manageBrainCreateDetails").evaluate((element) => {
+    (element as HTMLDetailsElement).open = true;
+  });
+  await brain.locator("#manageOrganizationBrainNameInput").fill(name);
+  const checkbox = brain.locator("#manageOrganizationAddAgentInput");
+  if ((await checkbox.isChecked()) !== includeAgent) await checkbox.click();
+  await brain.locator("#manageCreateOrganizationBrainButton").click();
+}
+
+async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
+  await openManageBrains(brain);
+  const selected = await brain.locator("#manageBrainsCurrentDetail").textContent();
+  assert.match(selected || "", /Session unlocked/u);
+  const selectedBrain = brain.locator("#manageBrainsList .brain-switch-button.selected");
+  await selectedBrain.waitFor({ state: "visible", timeout: 30_000 });
+  assert.equal(await brain.locator("#manageBrainsList .brain-switch-button").count(), 1);
+  assert.match(
+    (await selectedBrain.getAttribute("aria-label")) || "",
+    /organization.*admin|admin.*organization/iu,
+    `Direct target ${brainId} was not the selected admin-visible Org Brain`,
+  );
+  await brain.locator("#managePersonalBrainCreate").waitFor({ state: "visible" });
+  assert.equal(
+    await brain.locator("#manageCreatePersonalBrainButton").isDisabled(),
+    false,
+  );
+}
+
+async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
+  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
+  const status = brain.locator("#sessionAccountStatus");
+  await waitForBrainClient(brain, page);
   await assertEventually(
     async () => (await status.textContent())?.trim() === "Session unlocked",
     timeoutMs,

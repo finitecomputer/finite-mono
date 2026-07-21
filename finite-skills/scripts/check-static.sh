@@ -154,6 +154,18 @@ else:
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
 
+    behavior_contracts = (
+        (r"clearly\s+says\s+Personal Brain\s+or\s+Organization/Org Brain", "explicit Brain types proceed"),
+        (r"ask\s+one\s+short\s+natural-language\s+question", "ambiguous type clarification"),
+        (r"Personal Brain.*already exists", "existing Personal Brain handling"),
+        (r"same-named Organization Brain", "same-named Organization Brain handling"),
+        (r"\[Open Brain\]\(\.\/brain\?brainId=", "Open Brain navigation"),
+        (r"navigation only; it does not\s+grant access", "navigation is not authority"),
+    )
+    for pattern, behavior in behavior_contracts:
+        if not re.search(pattern, brain_text, re.IGNORECASE | re.DOTALL):
+            errors.append(f"{brain_path}: missing managed Brain behavior for {behavior}")
+
     brain_reference_path = brain_path.parent / "references/fbrain-cli.md"
     component_brain_reference_path = Path(
         "../finite-brain/skills/finitebrain/references/fbrain-cli.md"

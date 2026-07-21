@@ -101,12 +101,77 @@ pub(crate) async fn create_brain_handler(
             Some(principals)
         }
     };
+    let initial_agent = match request.kind {
+        CreateBrainKind::Personal
+            if request.initial_agent_email.is_some() || request.initial_agent_npub.is_some() =>
+        {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Initial Organization Brain agent identity is only valid for an Organization Brain",
+            ));
+        }
+        CreateBrainKind::Personal => None,
+        CreateBrainKind::Organization => {
+            let email_identity = request
+                .initial_agent_email
+                .as_deref()
+                .map(|email| resolve_identity_input(&state, email))
+                .transpose()?;
+            let npub_identity = request
+                .initial_agent_npub
+                .as_deref()
+                .map(|npub| resolve_identity_input(&state, npub))
+                .transpose()?;
+            if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
+                && email.npub != npub.npub
+            {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "initialAgentEmail and initialAgentNpub resolve to different Agent Principals",
+                ));
+            }
+            if let Some(requested_agent) = email_identity.as_ref().or(npub_identity.as_ref()) {
+                if organization_requester.is_some() {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "requestingUserNpub and initial agent identity are mutually exclusive bootstrap paths",
+                    ));
+                }
+                let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
+                let principals = resolve_account_agent_principals(&state, &requested_agent_npub)?;
+                if principals.owner_npub != UserId::new(actor_npub.clone())? {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "selected Organization Brain agent does not belong to the signed owner's account",
+                    ));
+                }
+                if let Some(email) = request.initial_agent_email.as_deref()
+                    && canonical_email(email)? != principals.managed_agent_email
+                {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "Finite Identity returned a mismatched Managed Agent email",
+                    ));
+                }
+                Some(principals)
+            } else {
+                None
+            }
+        }
+    };
     let output = match request.kind {
         CreateBrainKind::Personal => {
             bootstrap_personal_brain(request.brain_id, request.name, actor_npub.clone())?
         }
         CreateBrainKind::Organization => {
-            if let Some(requester) = organization_requester {
+            if let Some(agent) = initial_agent.as_ref() {
+                bootstrap_organization_brain_with_requester(
+                    request.brain_id,
+                    request.name,
+                    actor_npub.clone(),
+                    agent.agent_npub.as_str().to_owned(),
+                )?
+            } else if let Some(requester) = organization_requester {
                 bootstrap_organization_brain_with_requester(
                     request.brain_id,
                     request.name,
@@ -143,6 +208,10 @@ pub(crate) async fn create_brain_handler(
                 &created_at,
                 &identity_aliases,
             )?;
+        } else if let Some(principals) = initial_agent.as_ref() {
+            let created_at = server_timestamp(&state);
+            let identity_aliases = account_agent_identity_aliases(principals, &created_at)?;
+            store.create_brain_bootstrap_with_identities(&output, &grants, &identity_aliases)?;
         } else {
             store.create_brain_bootstrap(&output, &grants)?;
         }
