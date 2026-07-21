@@ -4,9 +4,9 @@ use finite_saas_core::api::router_with_agent_creation_placement;
 use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
-    AdminRuntimeOverview, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
-    CoreResult, ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
-    IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
+    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeUpgradeExactInput,
+    ApproveFinitePrivateGrantInput, CoreResult, ExistingHostProjectImport, FinitePrivateApiKey,
+    FinitePrivateGrant, IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
@@ -119,6 +119,9 @@ enum Command {
     /// Roll active, upgrade-capable Agent Runtimes to one explicit artifact.
     #[command(name = "runtime-artifact-rollout")]
     RuntimeArtifactRollout(RuntimeArtifactRolloutCliArgs),
+    /// Archive a legacy Runtime only after exact binding and absence attestations.
+    #[command(name = "runtime-archive-unrecoverable")]
+    RuntimeArchiveUnrecoverable(RuntimeArchiveUnrecoverableCliArgs),
     /// Approve a verified email for Finite Private without issuing a key.
     ///
     /// Break-glass path: prefer the dashboard admin page at /dashboard/admin, which calls the Core admin API.
@@ -306,6 +309,32 @@ struct RuntimeArtifactRolloutCliArgs {
     wait_timeout_seconds: u64,
 }
 
+#[derive(Debug, clap::Args)]
+struct RuntimeArchiveUnrecoverableCliArgs {
+    #[arg(long)]
+    project_id: String,
+    #[arg(long)]
+    expected_agent_runtime_id: String,
+    #[arg(long)]
+    expected_source_host_id: String,
+    #[arg(long)]
+    expected_source_machine_id: String,
+    #[arg(long)]
+    expected_owner_email: String,
+    #[arg(long)]
+    admin_email: String,
+    #[arg(long)]
+    admin_workos_user_id: String,
+    #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+    confirm_compute_absent: bool,
+    #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+    confirm_durable_state_absent: bool,
+    #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+    confirm_owner_acknowledged_unrecoverable: bool,
+    #[arg(long)]
+    now: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CoreImportManifestInput {
     source_host_id: String,
@@ -402,6 +431,10 @@ async fn main() -> Result<()> {
             print_json(&artifact)
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
+        Command::RuntimeArchiveUnrecoverable(args) => {
+            let receipt = runtime_archive_unrecoverable_command(args).await?;
+            print_json(&receipt)
+        }
         Command::FinitePrivateGrantApprove {
             email,
             workos_user_id,
@@ -1193,6 +1226,28 @@ async fn runtime_artifact_rollout_command(args: RuntimeArtifactRolloutCliArgs) -
     Ok(())
 }
 
+async fn runtime_archive_unrecoverable_command(
+    args: RuntimeArchiveUnrecoverableCliArgs,
+) -> Result<finite_saas_core::UnrecoverableRuntimeArchiveReceipt> {
+    let store = postgres_store_from_env().await?;
+    store
+        .admin_archive_unrecoverable_runtime(AdminArchiveUnrecoverableRuntimeInput {
+            admin_verified_email: args.admin_email,
+            admin_workos_user_id: args.admin_workos_user_id,
+            project_id: args.project_id,
+            expected_agent_runtime_id: args.expected_agent_runtime_id,
+            expected_source_host_id: args.expected_source_host_id,
+            expected_source_machine_id: args.expected_source_machine_id,
+            expected_owner_email: args.expected_owner_email,
+            operator_observed_compute_absent: args.confirm_compute_absent,
+            operator_observed_durable_state_absent: args.confirm_durable_state_absent,
+            owner_acknowledged_unrecoverable: args.confirm_owner_acknowledged_unrecoverable,
+            now: args.now,
+        })
+        .await
+        .map_err(Into::into)
+}
+
 async fn finite_private_grant_approve(
     email: String,
     workos_user_id: Option<String>,
@@ -1956,6 +2011,37 @@ mod tests {
                 "3601",
             ]))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn unrecoverable_archive_cli_requires_all_three_acknowledgements() {
+        let common = [
+            "finite-saas-core",
+            "runtime-archive-unrecoverable",
+            "--project-id",
+            "project-a",
+            "--expected-agent-runtime-id",
+            "runtime-a",
+            "--expected-source-host-id",
+            "lat1",
+            "--expected-source-machine-id",
+            "finite-kata-a",
+            "--expected-owner-email",
+            "owner@finite.vip",
+            "--admin-email",
+            "admin@finite.vip",
+            "--admin-workos-user-id",
+            "workos-admin",
+        ];
+        assert!(Args::try_parse_from(common).is_err());
+        assert!(
+            Args::try_parse_from(common.into_iter().chain([
+                "--confirm-compute-absent",
+                "--confirm-durable-state-absent",
+                "--confirm-owner-acknowledged-unrecoverable",
+            ]))
+            .is_ok()
         );
     }
 
