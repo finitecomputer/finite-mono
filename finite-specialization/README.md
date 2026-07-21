@@ -39,6 +39,9 @@ building a router or generator.
 
 ## Working Checkpoints
 
+- [Nomic Embedding Specialization](docs/checkpoints/2026-07-21-nomic-embedding-specialization.md)
+  is the active semantic embedding capability through authenticated
+  `/v1/embeddings`, backed by the `nomic-embed-text-v1-5` Spark alias.
 - [Austin Multimodal Spark Nemotron 3 Nano Omni](docs/checkpoints/2026-07-18-austin-multimodal-spark-nemotron3-nano.md)
   is the active specialization for image input and the verified Spark model for
   audio interpretation and sampled-video analysis. The reusable Hermes vision
@@ -87,6 +90,9 @@ Prefer Spark-backed provider aliases for capabilities that are model inference:
   local or dedicated STT provider and feed the transcript to Spark-backed text
   models afterward.
 - Image generation when Spark exposes a healthy image route.
+- Semantic embeddings when Spark exposes a healthy embeddings-only route;
+  callers must select the model-defined query, document, clustering, or
+  classification task prefix.
 
 Do not force Spark into capabilities that are not model inference: browser
 state, terminal execution, MCP services, web search service adapters, file

@@ -197,6 +197,7 @@ def start_agent_container(
     home_volume: str,
     server_url: str,
     env: dict[str, str],
+    docker_extra_args: list[str] | None = None,
 ) -> str:
     docker_container_rm(container)
     command = [
@@ -205,6 +206,7 @@ def start_agent_container(
         "--name",
         container,
         "--detach",
+        *(docker_extra_args or []),
         "--mount",
         f"type=volume,src={home_volume},dst=/home/node",
         "--env",
@@ -290,12 +292,14 @@ def docker_user_app(
     args: list[str],
     env: dict[str, str],
     timeout: float = 180,
+    docker_extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     return run_json(
         [
             "docker",
             "run",
             "--rm",
+            *(docker_extra_args or []),
             "--mount",
             f"type=volume,src={user_volume},dst=/data/user",
             "--env",
@@ -328,6 +332,7 @@ def create_welcome_room(
     server_url: str,
     agent_account_id: str,
     env: dict[str, str],
+    docker_extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     # StartRuntime publishes the user's KeyPackages and performs an initial
     # sync. The user then creates the room and commits an MLS Add for the
@@ -340,6 +345,7 @@ def create_welcome_room(
         args=["state", "--start-runtime"],
         env=env,
         timeout=120,
+        docker_extra_args=docker_extra_args,
     )
     created = docker_user_app(
         image=image,
@@ -348,6 +354,7 @@ def create_welcome_room(
         args=["create-room", "--display-name", "Finite Durable Docker Smoke"],
         env=env,
         timeout=120,
+        docker_extra_args=docker_extra_args,
     )
     room_id = created.get("selected_room_id")
     if not isinstance(room_id, str) or not room_id:
@@ -367,6 +374,7 @@ def create_welcome_room(
         ],
         env=env,
         timeout=120,
+        docker_extra_args=docker_extra_args,
     )
     if added.get("status") != "people added":
         raise SmokeFailure(f"MLS Add did not complete: {added!r}")
@@ -435,6 +443,7 @@ def run_model_smoke(
     room_id: str,
     expected: str,
     env: dict[str, str],
+    docker_extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
     prompt = f"Reply with exactly: {expected}"
     started = time.monotonic()
@@ -445,6 +454,7 @@ def run_model_smoke(
         args=["send", "--room-id", room_id, "--text", prompt],
         env=env,
         timeout=120,
+        docker_extra_args=docker_extra_args,
     )
     deadline = time.monotonic() + 180
     last_state: dict[str, Any] | None = None
@@ -456,6 +466,7 @@ def run_model_smoke(
             args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
             env=env,
             timeout=60,
+            docker_extra_args=docker_extra_args,
         )
         last_state = state
         for message in state.get("messages") or []:

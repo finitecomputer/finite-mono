@@ -11,7 +11,10 @@ Everything Finite runs in production is defined here. The north star:
 
 **finite-lat-1 is now the consolidated NixOS app server, and it runs the whole
 coupled cluster.** Its definition is `infra/nixos/` (host `finite-lat-1`); the
-reinstall/recovery procedure is `infra/runbooks/lat1-nixos-reinstall.md`.
+2026-07-09 reinstall transcript is
+`infra/runbooks/lat1-nixos-reinstall.md`, but destructive reuse is paused while
+the finite-lat-3 capacity/redundancy plan produces a recovery-proved
+replacement.
 
 What the 2026-07-09 lat1 consolidation cutover changed:
 
@@ -63,22 +66,28 @@ infra/
   runbooks/    # per-service: deploy, rollback, backup/restore, break-glass
 ```
 
-`infra/nixos/` is the source of truth for lat1. The `hosts/lat1/` directory is
-now **pre-cutover historical reference** (the k3s control plane it documents
-was wiped in the cutover) — see the banner in `hosts/lat1/README.md`. The other
-`hosts/<name>/` dirs still map the unit files, Caddyfiles, and compose files
-that ARE those boxes' config, plus a captured-state appendix.
+`infra/nixos/` is the declared source of truth for lat1. Every
+`infra/hosts/<name>/` directory is a dated capture or migration record unless
+its own banner explicitly says otherwise; it is not permission to deploy its
+old units. `hosts/lat1/` describes the wiped pre-cutover k3s control plane, and
+the Sites/Search/Runner material under `hosts/lat2/` is historical except for
+the live CI runner inventory in `hosts/lat2/runners.md`.
 
-## Hosts and services (current topology, post-2026-07-09)
+## Hosts and services (observed topology, 2026-07-20)
+
+This table is current-state authority, not a desired topology. A provider
+server that is provisioning or under qualification is not deployed Finite
+capacity. The one accepted next candidate and its hard gates live in
+[`docs/runs/finite-lat-capacity-and-redundancy.md`](../docs/runs/finite-lat-capacity-and-redundancy.md).
 
 | Host | Role | Services |
 |---|---|---|
-| **lat1** (64.34.82.77) | **Consolidated NixOS app server** (`infra/nixos/`) | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata; the internal production browser canary was completed by the operator on 2026-07-11), a separately fenced **dark/disabled** Phala API worker definition (not started, credentialed, or authorized for spend), **one** Caddy edge for `finite.computer` + `brain.finite.computer` + `chat.finite.computer` + `*.finite.chat` + `*.docs.finite.chat`. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
-| **lat2** (64.34.80.19) | **finite-mono CI + x86_64 Nix build host** (Ubuntu+nix) | Builds production lat1 closures and runs `finite-lat-2-mono` plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). This is the only current finite-mono build host; do not use clawland or build on lat1. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
+| **finite-lat-1** (64.34.82.77) | **Consolidated NixOS app server and existing-Agent Kata Runner** (`infra/nixos/`). NixOS 25.11; single-disk root and `/data`; no swap at the 2026-07-18 inventory. New creation is drained; the Runner timer remains active for existing-Agent lifecycle work. The private lat3 WireGuard path, peer-scoped firewall, Core socket proxy, and multi-Runner Core are active declarative configuration from merged PR #134; no runtime bridge override remains. | finite-saas-core (:4200), dashboard (podman :3000), **native** Postgres 16 (`services.postgresql`, `finite_core`, 87 FP keys), finitechat-server (:8788), finitechat-hosted-device (loopback only, per-WorkOS-user identity and encrypted store), FiniteBrain (:3015), finitesitesd (:8787), finite-search (SearXNG :8080 + Firecrawl), finite-saas-runner (Kata), a separately fenced **dark/disabled** Phala API worker definition, and **one** Caddy edge. NO k3s, NO Traefik, NO on-host image builds. Deploy: `nixos-rebuild --flake ...#finite-lat-1`. |
+| **finite-lat-2** (64.34.80.19) | **finite-mono CI + sole approved x86_64 Nix build host** (Ubuntu 26.04+nix). Healthy root and `/data` MD RAID1, one populated ESP, no swap at the 2026-07-18 inventory. | Builds production lat1 closures and runs `finite-lat-2-mono` plus the 3 legacy-repo runners until those repos are archived (`hosts/lat2/runners.md`). Do not use it for Agent capacity, recovery authority, or this storage experiment. finite-saas-sites / finite-search / finite-core-tunnel are **DISABLED** (migrated to lat1). |
+| **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 32.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | Merged PR #134 closure is active and the system profile. The private lat1 connection and unique credential are proven. The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=32`; repeated cycles return idle and containerd has zero containers. No Recovery Authority exists here. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
 | **clawland** (15.204.108.57) | Legacy finite.vip fleet box | Legacy `*.finite.vip` fleet (k3s + Traefik + oauth2-proxy, `finited`, ~50 agent namespaces). finitechat-server here is **DISABLED** (migrated to lat1). |
 | Tinfoil | Measured enclaves (unchanged) | glm-5-2 inference + finite-private-limiter enclave; searxng enclave. The limiter validates usage against **lat1** Core. Deployed from the public satellite repos (`tinfoil/`). |
-| Phala | hosted-agent CVMs | Confidential Runner fast-follow; not the internal production-canary path. |
 
 ## DNS (current)
 
@@ -121,8 +130,9 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
 
 1. **lat1 = `nixos-rebuild` from a release rev.** The rev that tagged the
    binaries is the rev the host runs. Rollback: `nixos-rebuild --rollback` on
-   the host, or pin the previous rev. Source of truth: `infra/nixos/`; recovery:
-   `infra/runbooks/lat1-nixos-reinstall.md`.
+   the host, or pin the previous rev. Source of truth: `infra/nixos/`. The old
+   bare-metal transcript in `infra/runbooks/lat1-nixos-reinstall.md` is
+   historical and not current wipe authority.
 2. **Images are built by CI**, tagged with the git SHA, pushed to GHCR, and
    deployed by digest. No on-host builds.
 3. **Binaries ship from release tags** (component-scoped: `finitechat/v*`,
@@ -133,13 +143,20 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
 5. **Backups are only real once restored.** Before first-slice user data, every
    stateful service must have a service-consistent backup, an off-host copy, a
    restore runbook, and an empty-target restore drill. The current deployment
-   does not yet satisfy this rule: lat1 is single-disk, and the Hosted Web Chat
-   module now creates service-consistent 15-minute snapshots and configures a
-   dedicated repository at the existing finitecomputer rsync.net destination,
-   and now has a verified first archive. Destination-side append-only
-   restriction is recommended hardening; the complete empty-target restore
-   drill remains the admission gate.
+   does not yet satisfy this rule: lat1 is single-disk. The Hosted Web Chat
+   module creates a service-consistent snapshot only when a deploy or operator
+   triggers it; its disruptive 15-minute timer was removed after it broke live
+   streams. Snapshot health currently tolerates seven days, and Borg ships the
+   latest snapshot daily to the dedicated rsync.net repository. A verified
+   first archive exists, but this is not a 15-minute RPO. Destination-side
+   append-only restriction is recommended hardening; a non-disruptive cadence
+   and complete empty-target restore remain known gaps. On 2026-07-20 Paul
+   explicitly waived them as prerequisites for opening lat3 at a hard limit of
+   32 Agents.
    Agent Runtime `/data` is not covered.
-   Chat continuity or recovery failure blocks paid admission regardless of
-   Stripe. A disk mirror (2 spare NVMes) remains
-   defense in depth, not a backup.
+   The July 13 first-cohort Stripe exception remains history. No new Core/UI
+   admission gate was deployed for the July 20 lat3 opening; the enforced
+   bound is the Runner's 32-sandbox maximum. The matching lat1 disks contain
+   stale metadata from the failed 2026-07-09 MD install; they are not clean spares
+   and may be touched only by a serial-stable, separately authorized reinstall.
+   A future mirror remains defense in depth, not a backup.

@@ -31,7 +31,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0010_align_finite_private_generous.sql"),
     "\n",
-    include_str!("../migrations/0011_agent_email.sql")
+    include_str!("../migrations/0011_agent_email.sql"),
+    "\n",
+    include_str!("../migrations/0012_runtime_retirement_snapshots.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -539,6 +541,18 @@ pub enum CoreError {
     RuntimeControlOperationConflict,
     #[error("runtime upgrade completion did not match the requested artifact")]
     RuntimeUpgradeCompletionMismatch,
+    #[error("runtime retirement snapshot receipt did not match the leased runtime")]
+    RuntimeRetirementSnapshotMismatch,
+    #[error("runtime retirement snapshot receipt conflicts with the stored receipt")]
+    RuntimeRetirementSnapshotConflict,
+    #[error("runtime retirement is not enabled for this Core generation")]
+    RuntimeRetirementNotEnabled,
+    #[error("all unrecoverable runtime archive acknowledgements are required")]
+    UnrecoverableRuntimeArchiveAcknowledgementRequired,
+    #[error("unrecoverable runtime archive owner does not match")]
+    UnrecoverableRuntimeArchiveOwnerMismatch,
+    #[error("runtime has provider metadata and cannot use unrecoverable legacy archival")]
+    UnrecoverableRuntimeArchiveProviderMetadataPresent,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not running")]
@@ -960,6 +974,40 @@ pub struct RuntimeControlLease {
     pub target_runtime_artifact: Option<RuntimeArtifact>,
 }
 
+pub const RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA: &str = "runtime_retirement_snapshot.v1";
+pub const RUNTIME_RETIREMENT_BACKEND_BORG: &str = "borg";
+pub const RUNTIME_RETIREMENT_RETENTION_INDEFINITE: &str = "indefinite_until_purge";
+
+/// Restore-relevant facts produced only after an exact retirement ZIP has
+/// been uploaded and read back successfully. Locators are opaque archive
+/// names, never repository URLs or credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeRetirementSnapshotReceipt {
+    pub schema: String,
+    pub request_id: String,
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub durable_state_id: String,
+    pub runtime_artifact_id: String,
+    pub backend: String,
+    pub locator: String,
+    pub zip_bytes: u64,
+    pub zip_sha256: String,
+    pub manifest_sha256: String,
+    pub created_at: String,
+    pub verified_at: String,
+    pub recovery_authority_id: String,
+    pub retention_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRetirementSnapshot {
+    pub receipt: RuntimeRetirementSnapshotReceipt,
+    pub stored_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceHostRelayEndpoint {
     pub source_host_id: String,
@@ -1251,6 +1299,8 @@ pub struct BridgeCoreState {
     #[serde(skip)]
     pub(crate) launch_codes: BTreeMap<String, launch_codes::LaunchCodeRecord>,
     pub runtime_control_requests: BTreeMap<String, RuntimeControlRequest>,
+    #[serde(default)]
+    pub runtime_retirement_snapshots: BTreeMap<String, RuntimeRetirementSnapshot>,
     pub source_host_relays: BTreeMap<String, SourceHostRelayEndpoint>,
     pub finite_private_limit_profiles: BTreeMap<String, FinitePrivateLimitProfile>,
     pub finite_private_grants: BTreeMap<String, FinitePrivateGrant>,
@@ -1390,6 +1440,36 @@ pub struct AdminRuntimeControlInput {
     pub now: Option<String>,
 }
 
+/// Exact, operator-attested boundary for removing an unrecoverable legacy
+/// Runtime from active inventory. This path never deletes retained Core rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminArchiveUnrecoverableRuntimeInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub expected_owner_email: String,
+    pub operator_observed_compute_absent: bool,
+    pub operator_observed_durable_state_absent: bool,
+    pub owner_acknowledged_unrecoverable: bool,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnrecoverableRuntimeArchiveReceipt {
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub source_host_id: String,
+    pub source_machine_id: String,
+    pub owner_email: String,
+    pub archived_at: String,
+    pub revoked_finite_private_key_count: usize,
+}
+
 /// One provisioned box as seen by dashboard operators.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdminRuntimeOverview {
@@ -1468,6 +1548,16 @@ pub struct LeaseRuntimeControlRequestInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RenewRuntimeControlRequestInput {
+    pub request_id: String,
+    pub runner_id: String,
+    pub lease_token: String,
+    pub lease_seconds: Option<i64>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct CompleteRuntimeControlRequestInput {
     pub request_id: String,
     pub runner_id: String,
@@ -1483,12 +1573,26 @@ pub struct CompleteRuntimeControlRequestInput {
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_host: Option<String>,
     pub published_app_urls: Option<Vec<String>>,
+    /// Required only for Destroy. Core stores this immutable receipt in the
+    /// same transaction that offboards the Runtime.
+    #[serde(default)]
+    pub retirement_snapshot: Option<RuntimeRetirementSnapshotReceipt>,
     pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FailRuntimeControlRequestInput {
+    pub request_id: String,
+    pub runner_id: String,
+    pub lease_token: String,
+    pub failure_message: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryRuntimeControlRequestInput {
     pub request_id: String,
     pub runner_id: String,
     pub lease_token: String,
@@ -1547,10 +1651,7 @@ impl RunnerLeaseCapacity {
             return Ok(());
         };
         let capabilities = capabilities.v1();
-        if capabilities.runtime_retirement {
-            return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
-        }
-        if capabilities.recover_known_good_chat
+        if (capabilities.recover_known_good_chat || capabilities.runtime_retirement)
             && (self.runner_classes.is_empty()
                 || self
                     .runner_classes
@@ -1779,7 +1880,7 @@ impl BridgeCoreState {
         &mut self,
         input: ClaimProjectImportsInput,
     ) -> CoreResult<ClaimProjectImportsResult> {
-        let now = input.now.unwrap_or(current_time_iso()?);
+        let now = input.now.clone().unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
             .ok_or(CoreError::MissingVerifiedEmail)?;
         let workos_user_id = input.workos_user_id.trim().to_string();
@@ -2368,6 +2469,108 @@ impl BridgeCoreState {
             Some(input.target_runtime_artifact_id),
             Some(&expected),
         )
+    }
+
+    pub fn admin_archive_unrecoverable_runtime(
+        &mut self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        if !input.operator_observed_compute_absent
+            || !input.operator_observed_durable_state_absent
+            || !input.owner_acknowledged_unrecoverable
+        {
+            return Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired);
+        }
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+        if admin_workos_user_id.is_empty() {
+            return Err(CoreError::MissingWorkosUserId);
+        }
+        let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let project = self
+            .projects
+            .get(&input.project_id)
+            .cloned()
+            .ok_or(CoreError::ProjectNotFound)?;
+        let owner_email = self
+            .users
+            .get(&project.owner_user_id)
+            .map(|user| user.email.clone())
+            .ok_or(CoreError::ProjectNotFound)?;
+        if owner_email != expected_owner_email {
+            return Err(CoreError::UnrecoverableRuntimeArchiveOwnerMismatch);
+        }
+        let runtime = self
+            .active_runtime_for_project(&project.id)
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if runtime.id != input.expected_agent_runtime_id
+            || runtime.source_host_id != input.expected_source_host_id
+            || runtime.source_machine_id != input.expected_source_machine_id
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        if runtime.provider_runtime_handle.is_some()
+            || !runtime.provider_runtime_handle_history.is_empty()
+            || runtime.contact_endpoint.is_some()
+        {
+            return Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent);
+        }
+        if self.runtime_control_requests.values().any(|request| {
+            request.agent_runtime_id == runtime.id
+                && matches!(
+                    request.status,
+                    RuntimeControlRequestStatus::Requested | RuntimeControlRequestStatus::Running
+                )
+        }) {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        if self
+            .runtime_retirement_snapshots
+            .values()
+            .any(|snapshot| snapshot.receipt.agent_runtime_id == runtime.id)
+        {
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+
+        self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
+        let revoked_api_key_ids = self.offboard_runtime(
+            &project.id,
+            &runtime.id,
+            &now,
+            "finite_private.runtime.archive_unrecoverable_revoke_keys",
+            Some(&admin_email),
+        );
+        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
+            action: "runtime.admin_archive_unrecoverable",
+            target_type: "agent_runtime",
+            target_id: &runtime.id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": project.id,
+                "ownerEmail": owner_email,
+                "sourceHostId": runtime.source_host_id,
+                "sourceMachineId": runtime.source_machine_id,
+                "operatorObservedComputeAbsent": true,
+                "operatorObservedDurableStateAbsent": true,
+                "ownerAcknowledgedUnrecoverable": true,
+                "revokedApiKeyIds": revoked_api_key_ids,
+            }),
+            created_at: &now,
+        });
+        Ok(UnrecoverableRuntimeArchiveReceipt {
+            project_id: project.id,
+            agent_runtime_id: runtime.id,
+            source_host_id: runtime.source_host_id,
+            source_machine_id: runtime.source_machine_id,
+            owner_email,
+            archived_at: now,
+            revoked_finite_private_key_count: revoked_api_key_ids.len(),
+        })
     }
 
     /// Admin variant of `request_runtime_control`: the acting user does not
@@ -2990,7 +3193,9 @@ impl BridgeCoreState {
                 request.runner_id = Some(runner_id.clone());
                 request.lease_token = Some(lease_token.clone());
                 request.lease_expires_at = Some(lease_expires_at.clone());
-                request.failure_message = None;
+                if request.kind != RuntimeControlKind::Destroy {
+                    request.failure_message = None;
+                }
                 request.updated_at = now.clone();
                 request.clone()
             };
@@ -3016,12 +3221,61 @@ impl BridgeCoreState {
         runtime_secret_references: &[String],
     ) -> CoreResult<RuntimeControlRequest> {
         runtime_spec_secret_references(runtime_secret_references)?;
-        let now = input.now.unwrap_or(current_time_iso()?);
-        let verified = self.verified_runtime_control_request(
+        let now = input.now.clone().unwrap_or(current_time_iso()?);
+        if let Some(completed) = self.runtime_control_requests.get(&input.request_id)
+            && completed.status == RuntimeControlRequestStatus::Succeeded
+        {
+            let stored = self.runtime_retirement_snapshots.get(&input.request_id);
+            if completed.kind == RuntimeControlKind::Destroy
+                && stored.map(|snapshot| &snapshot.receipt) == input.retirement_snapshot.as_ref()
+                && runtime_control_completion_has_no_upgrade_facts(&input)
+            {
+                return Ok(completed.clone());
+            }
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+        let verified = self.verified_runtime_control_request_at(
             &input.request_id,
             &input.runner_id,
             &input.lease_token,
+            &now,
         )?;
+        let retirement_snapshot = if verified.kind == RuntimeControlKind::Destroy {
+            let receipt = input
+                .retirement_snapshot
+                .clone()
+                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+            let runtime = self
+                .agent_runtimes
+                .get(&verified.agent_runtime_id)
+                .ok_or(CoreError::ProjectRuntimeNotFound)?;
+            let runtime_spec = self
+                .agent_creation_requests
+                .values()
+                .filter(|request| {
+                    request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                        && request.runtime_spec.is_some()
+                })
+                .max_by_key(|request| (request.created_at.clone(), request.id.clone()))
+                .and_then(|request| request.runtime_spec.as_ref())
+                .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+            validate_runtime_retirement_snapshot_receipt(
+                &receipt,
+                &verified,
+                runtime,
+                runtime_spec,
+                &now,
+            )?;
+            Some(RuntimeRetirementSnapshot {
+                receipt,
+                stored_at: now.clone(),
+            })
+        } else {
+            if input.retirement_snapshot.is_some() {
+                return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+            }
+            None
+        };
         let upgrade_facts = if verified.kind == RuntimeControlKind::Upgrade {
             let target_id = verified
                 .target_runtime_artifact_id
@@ -3111,6 +3365,17 @@ impl BridgeCoreState {
             }
             None
         };
+        if retirement_snapshot.is_some()
+            && self
+                .runtime_retirement_snapshots
+                .contains_key(&input.request_id)
+        {
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+        if let Some(snapshot) = retirement_snapshot {
+            self.runtime_retirement_snapshots
+                .insert(input.request_id.clone(), snapshot);
+        }
         let request = {
             let Some(request) = self.runtime_control_requests.get_mut(&input.request_id) else {
                 return Err(CoreError::RuntimeControlRequestNotFound);
@@ -3199,6 +3464,77 @@ impl BridgeCoreState {
         request.failure_message = Some(failure_message);
         request.updated_at = now.clone();
         request.completed_at = Some(now.clone());
+        if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
+            runtime.host_facts.runtime_status = RuntimeSummaryStatus::Stale;
+            runtime.updated_at = now.clone();
+        }
+        if let Some(snapshot) = self
+            .runtime_status_snapshots
+            .get_mut(&request.agent_runtime_id)
+        {
+            snapshot.status = RuntimeSummaryStatus::Stale;
+            snapshot.updated_at = now;
+        }
+        Ok(request.clone())
+    }
+
+    pub fn renew_runtime_control_request(
+        &mut self,
+        input: RenewRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let now_time = parse_time(&now)?;
+        let lease_seconds = input
+            .lease_seconds
+            .unwrap_or(DEFAULT_AGENT_CREATION_LEASE_SECONDS);
+        if !(1..=MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
+            return Err(CoreError::InvalidAgentCreationLeaseDuration);
+        }
+        self.verified_runtime_control_request_at(
+            &input.request_id,
+            &input.runner_id,
+            &input.lease_token,
+            &now,
+        )?;
+        let request = self
+            .runtime_control_requests
+            .get_mut(&input.request_id)
+            .ok_or(CoreError::RuntimeControlRequestNotFound)?;
+        request.lease_expires_at =
+            Some((now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?);
+        request.updated_at = now;
+        Ok(request.clone())
+    }
+
+    /// Return a transiently failed retirement to the queue without changing
+    /// request/archive identity. Generic controls retain terminal failure.
+    pub fn retry_runtime_control_request(
+        &mut self,
+        input: RetryRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let failure_message = trim_to_option(Some(&input.failure_message))
+            .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
+        let verified = self.verified_runtime_control_request_at(
+            &input.request_id,
+            &input.runner_id,
+            &input.lease_token,
+            &now,
+        )?;
+        if verified.kind != RuntimeControlKind::Destroy {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        let request = self
+            .runtime_control_requests
+            .get_mut(&input.request_id)
+            .ok_or(CoreError::RuntimeControlRequestNotFound)?;
+        request.status = RuntimeControlRequestStatus::Requested;
+        request.runner_id = None;
+        request.lease_token = None;
+        request.lease_expires_at = None;
+        request.failure_message = Some(failure_message);
+        request.updated_at = now.clone();
+        request.completed_at = None;
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = RuntimeSummaryStatus::Stale;
             runtime.updated_at = now.clone();
@@ -3932,6 +4268,26 @@ impl BridgeCoreState {
         Ok(request)
     }
 
+    fn verified_runtime_control_request_at(
+        &self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+        now: &str,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let request = self.verified_runtime_control_request(request_id, runner_id, lease_token)?;
+        let now = parse_time(now)?;
+        let active = request
+            .lease_expires_at
+            .as_deref()
+            .and_then(|expires_at| parse_time(expires_at).ok())
+            .is_some_and(|expires_at| expires_at >= now);
+        if !active {
+            return Err(CoreError::RuntimeControlRequestLeaseConflict);
+        }
+        Ok(request)
+    }
+
     fn active_runtime_for_project(&self, project_id: &str) -> Option<AgentRuntime> {
         self.project_runtime_links
             .values()
@@ -4400,56 +4756,73 @@ impl BridgeCoreState {
     }
 
     fn offboard_destroyed_runtime(&mut self, request: &RuntimeControlRequest) {
+        self.offboard_runtime(
+            &request.project_id,
+            &request.agent_runtime_id,
+            &request.updated_at,
+            "finite_private.runtime.destroy_revoke_keys",
+            None,
+        );
+    }
+
+    fn offboard_runtime(
+        &mut self,
+        project_id: &str,
+        agent_runtime_id: &str,
+        now: &str,
+        revocation_action: &'static str,
+        actor: Option<&str>,
+    ) -> Vec<String> {
         if self
             .projects
-            .get(&request.project_id)
+            .get(project_id)
             .is_some_and(|project| project.import_candidate_id.is_none())
         {
             for membership in self
                 .project_room_memberships
                 .values_mut()
-                .filter(|membership| membership.project_id == request.project_id)
+                .filter(|membership| membership.project_id == project_id)
             {
                 if membership.archived_at.is_none() {
-                    membership.archived_at = Some(request.updated_at.clone());
+                    membership.archived_at = Some(now.to_string());
                 }
             }
         }
         for link in self
             .project_runtime_links
             .values_mut()
-            .filter(|link| link.agent_runtime_id == request.agent_runtime_id)
+            .filter(|link| link.agent_runtime_id == agent_runtime_id)
         {
             link.active = false;
         }
-        self.runtime_relay_credentials
-            .remove(&request.agent_runtime_id);
+        self.runtime_relay_credentials.remove(agent_runtime_id);
         let mut revoked_api_key_ids = Vec::new();
         for key in self.finite_private_api_keys.values_mut().filter(|key| {
-            key.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
-                || key.project_id.as_deref() == Some(request.project_id.as_str())
+            key.agent_runtime_id.as_deref() == Some(agent_runtime_id)
+                || key.project_id.as_deref() == Some(project_id)
         }) {
             if key.status == FinitePrivateApiKeyStatus::Active {
                 key.status = FinitePrivateApiKeyStatus::Revoked;
-                key.updated_at = request.updated_at.clone();
+                key.updated_at = now.to_string();
                 revoked_api_key_ids.push(key.id.clone());
             }
         }
         if !revoked_api_key_ids.is_empty() {
             self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-                action: "finite_private.runtime.destroy_revoke_keys",
+                action: revocation_action,
                 target_type: "agent_runtime",
-                target_id: &request.agent_runtime_id,
+                target_id: agent_runtime_id,
                 grant_id: None,
                 api_key_id: None,
-                actor: None,
+                actor,
                 metadata: json!({
-                    "projectId": request.project_id,
+                    "projectId": project_id,
                     "revokedApiKeyIds": revoked_api_key_ids,
                 }),
-                created_at: &request.updated_at,
+                created_at: now,
             });
         }
+        revoked_api_key_ids
     }
 
     pub fn source_host_relay_endpoint(
@@ -5926,6 +6299,70 @@ pub(crate) fn runtime_spec_v1(spec: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
     }
 }
 
+pub fn runtime_retirement_archive_locator(request_id: &str) -> String {
+    format!("retirement-{request_id}")
+}
+
+pub(crate) fn runtime_control_completion_has_no_upgrade_facts(
+    input: &CompleteRuntimeControlRequestInput,
+) -> bool {
+    input.runtime_artifact_id.is_none()
+        && input.state_schema_version.is_none()
+        && input.runtime_capabilities.is_none()
+        && input.runtime_host.is_none()
+        && input.published_app_urls.is_none()
+}
+
+pub(crate) fn validate_runtime_retirement_snapshot_receipt(
+    receipt: &RuntimeRetirementSnapshotReceipt,
+    request: &RuntimeControlRequest,
+    runtime: &AgentRuntime,
+    runtime_spec: &RuntimeSpecEnvelope,
+    now: &str,
+) -> CoreResult<()> {
+    let spec = runtime_spec_v1(runtime_spec);
+    let created_at = parse_time(&receipt.created_at)
+        .map_err(|_| CoreError::RuntimeRetirementSnapshotMismatch)?;
+    let verified_at = parse_time(&receipt.verified_at)
+        .map_err(|_| CoreError::RuntimeRetirementSnapshotMismatch)?;
+    let now = parse_time(now).map_err(|_| CoreError::RuntimeRetirementSnapshotMismatch)?;
+    let opaque_value_valid = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 256
+            && !value.chars().any(char::is_control)
+            && !value.contains("//")
+    };
+    let hash_valid = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if request.kind != RuntimeControlKind::Destroy
+        || receipt.schema != RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA
+        || receipt.request_id != request.id
+        || receipt.project_id != request.project_id
+        || receipt.agent_runtime_id != request.agent_runtime_id
+        || receipt.project_id != runtime.project_id
+        || receipt.durable_state_id != spec.durable_state_id
+        || receipt.runtime_artifact_id != spec.runtime_artifact_id
+        || runtime.runtime_artifact_id.as_deref() != Some(receipt.runtime_artifact_id.as_str())
+        || receipt.backend != RUNTIME_RETIREMENT_BACKEND_BORG
+        || receipt.locator != runtime_retirement_archive_locator(&request.id)
+        || receipt.zip_bytes == 0
+        || receipt.zip_bytes > i64::MAX as u64
+        || !hash_valid(&receipt.zip_sha256)
+        || !hash_valid(&receipt.manifest_sha256)
+        || !opaque_value_valid(&receipt.recovery_authority_id)
+        || receipt.retention_policy != RUNTIME_RETIREMENT_RETENTION_INDEFINITE
+        || created_at > verified_at
+        || verified_at > now
+    {
+        return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_runtime_spec_binding(
     envelope: &RuntimeSpecEnvelope,
     operation_id: Option<&str>,
@@ -6429,10 +6866,7 @@ pub(crate) fn validate_runtime_capabilities_policy(
         return Ok(());
     };
     let capabilities = capabilities.v1();
-    if capabilities.runtime_retirement {
-        return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
-    }
-    if capabilities.recover_known_good_chat
+    if (capabilities.recover_known_good_chat || capabilities.runtime_retirement)
         && placement.is_none_or(|placement| placement.runner_class != RunnerClass::Kata)
     {
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
@@ -8381,16 +8815,6 @@ mod tests {
             published_app_urls: Vec::new(),
             now: Some("2026-05-25T13:01:30Z".to_string()),
         };
-        let unauthorized = RuntimeCapabilitiesV1 {
-            runtime_retirement: true,
-            ..*kata_runtime_capabilities().v1()
-        };
-        let mut rejected = register_input.clone();
-        rejected.runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(unauthorized));
-        assert!(matches!(
-            state.register_agent_creation_runtime(rejected),
-            Err(CoreError::RuntimeCapabilitiesNotAuthorized)
-        ));
         let registered = state
             .register_agent_creation_runtime(register_input)
             .unwrap();
@@ -8541,6 +8965,7 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:04:30Z".to_string()),
             })
             .unwrap_err();
@@ -8564,6 +8989,7 @@ mod tests {
                 )),
                 runtime_host: None,
                 published_app_urls: None,
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:04:45Z".to_string()),
             })
             .unwrap_err();
@@ -8582,6 +9008,7 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -8741,6 +9168,7 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -8865,6 +9293,186 @@ mod tests {
             "unrelated membership remains active"
         );
         assert!(state.agent_runtimes.contains_key(&unrelated_runtime_id));
+    }
+
+    #[test]
+    fn retirement_requires_exact_immutable_receipt_and_retries_same_request() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "new@finite.vip",
+            "user_workos_new",
+            "retirement-submit",
+            "oslo-agent-retire",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            runtime_retirement: true,
+            ..*kata_runtime_capabilities().v1()
+        }));
+        let request = state
+            .request_runtime_destroy(RequestRuntimeDestroyInput {
+                verified_email: "new@finite.vip".to_string(),
+                workos_user_id: "user_workos_new".to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-05-25T13:03:00Z".to_string()),
+            })
+            .unwrap();
+        let capacity = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                runtime_retirement: true,
+                ..*kata_runtime_capabilities().v1()
+            })),
+            ..RunnerLeaseCapacity::default()
+        };
+        let first = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-1".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(capacity.clone()),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        let spec = runtime_spec_v1(first.runtime_spec.as_ref().unwrap());
+        let receipt = RuntimeRetirementSnapshotReceipt {
+            schema: RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+            request_id: request.id.clone(),
+            project_id: project_id.clone(),
+            agent_runtime_id: runtime_id.clone(),
+            durable_state_id: spec.durable_state_id.clone(),
+            runtime_artifact_id: spec.runtime_artifact_id.clone(),
+            backend: RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+            locator: runtime_retirement_archive_locator(&request.id),
+            zip_bytes: 4096,
+            zip_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+            created_at: "2026-05-25T13:04:10Z".to_string(),
+            verified_at: "2026-05-25T13:04:20Z".to_string(),
+            recovery_authority_id: "finite-assisted-v1".to_string(),
+            retention_policy: RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+        };
+
+        let bare = state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-1".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: None,
+                runtime_host: None,
+                published_app_urls: None,
+                retirement_snapshot: None,
+                now: Some("2026-05-25T13:04:25Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(bare, CoreError::RuntimeRetirementSnapshotMismatch));
+        assert!(state.runtime_retirement_snapshots.is_empty());
+        assert!(state.active_runtime_for_project(&project_id).is_some());
+
+        state
+            .renew_runtime_control_request(RenewRuntimeControlRequestInput {
+                request_id: request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-1".to_string(),
+                lease_seconds: Some(60),
+                now: Some("2026-05-25T13:04:30Z".to_string()),
+            })
+            .unwrap();
+        let retry = state
+            .retry_runtime_control_request(RetryRuntimeControlRequestInput {
+                request_id: request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-1".to_string(),
+                failure_message: "synthetic upload interruption".to_string(),
+                now: Some("2026-05-25T13:04:40Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(retry.id, request.id);
+        assert_eq!(retry.status, RuntimeControlRequestStatus::Requested);
+        let second = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-2".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(capacity),
+                now: Some("2026-05-25T13:04:45Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.request.id, request.id);
+
+        let completion = CompleteRuntimeControlRequestInput {
+            request_id: request.id.clone(),
+            runner_id: "runner-oslo-1".to_string(),
+            lease_token: "destroy-lease-2".to_string(),
+            runtime_artifact_id: None,
+            state_schema_version: None,
+            runtime_capabilities: None,
+            runtime_host: None,
+            published_app_urls: None,
+            retirement_snapshot: Some(receipt.clone()),
+            now: Some("2026-05-25T13:05:00Z".to_string()),
+        };
+        let completed = state
+            .complete_runtime_control_request(completion.clone())
+            .unwrap();
+        assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
+        assert_eq!(
+            state.runtime_retirement_snapshots[&request.id].receipt,
+            receipt
+        );
+        assert!(state.active_runtime_for_project(&project_id).is_none());
+        assert_eq!(
+            state
+                .visible_projects_for_user(&completed.requested_by_user_id)
+                .len(),
+            0
+        );
+
+        let replay = state
+            .complete_runtime_control_request(completion)
+            .expect("identical completion replay is idempotent");
+        assert_eq!(replay.id, request.id);
+        let mut conflicting = receipt;
+        conflicting.zip_sha256 = "c".repeat(64);
+        let conflict = state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: request.id.clone(),
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "destroy-lease-2".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: None,
+                runtime_host: None,
+                published_app_urls: None,
+                retirement_snapshot: Some(conflicting),
+                now: Some("2026-05-25T13:05:01Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            CoreError::RuntimeRetirementSnapshotConflict
+        ));
+        assert_eq!(
+            state.runtime_retirement_snapshots[&request.id]
+                .receipt
+                .zip_sha256,
+            "a".repeat(64),
+            "a conflicting replay must not replace the immutable receipt"
+        );
     }
 
     #[test]
@@ -10636,6 +11244,7 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: None,
                 published_app_urls: None,
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:05:00Z".to_string()),
             })
             .unwrap();
@@ -10669,6 +11278,103 @@ mod tests {
             !actions
                 .iter()
                 .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+        );
+    }
+
+    #[test]
+    fn unrecoverable_runtime_archive_is_exact_fail_closed_and_retains_history() {
+        let mut base = BridgeCoreState::default();
+        promote_runtime_artifact(&mut base);
+        let runtime_id = complete_self_serve_agent(
+            &mut base,
+            "owner@finite.vip",
+            "user_workos_owner_archive",
+            "archive-submit",
+            "legacy-agent-001",
+            "artifact-v1",
+            "2026-07-21T20:00:00Z",
+        );
+        let project_id = base.agent_runtimes[&runtime_id].project_id.clone();
+        let input = |compute_absent: bool| AdminArchiveUnrecoverableRuntimeInput {
+            admin_verified_email: "admin@finite.vip".to_string(),
+            admin_workos_user_id: "user_workos_admin_archive".to_string(),
+            project_id: project_id.clone(),
+            expected_agent_runtime_id: runtime_id.clone(),
+            expected_source_host_id: "oslo-host-1".to_string(),
+            expected_source_machine_id: "legacy-agent-001".to_string(),
+            expected_owner_email: "owner@finite.vip".to_string(),
+            operator_observed_compute_absent: compute_absent,
+            operator_observed_durable_state_absent: true,
+            owner_acknowledged_unrecoverable: true,
+            now: Some("2026-07-21T20:10:00Z".to_string()),
+        };
+
+        let mut missing_acknowledgement = base.clone();
+        assert!(matches!(
+            missing_acknowledgement.admin_archive_unrecoverable_runtime(input(false)),
+            Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired)
+        ));
+        assert!(
+            missing_acknowledgement
+                .active_runtime_for_project(&project_id)
+                .is_some()
+        );
+
+        let mut wrong_binding = base.clone();
+        let mut wrong_binding_input = input(true);
+        wrong_binding_input.expected_source_machine_id = "replacement-agent".to_string();
+        assert!(matches!(
+            wrong_binding.admin_archive_unrecoverable_runtime(wrong_binding_input),
+            Err(CoreError::RuntimeSpecMismatch)
+        ));
+
+        let mut provider_managed = base.clone();
+        provider_managed
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .contact_endpoint = Some("https://legacy-agent.example.test/contact".to_string());
+        assert!(matches!(
+            provider_managed.admin_archive_unrecoverable_runtime(input(true)),
+            Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent)
+        ));
+
+        let mut control_in_flight = base.clone();
+        control_in_flight
+            .admin_request_runtime_restart(AdminRuntimeControlInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_archive".to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-07-21T20:05:00Z".to_string()),
+            })
+            .unwrap();
+        assert!(matches!(
+            control_in_flight.admin_archive_unrecoverable_runtime(input(true)),
+            Err(CoreError::RuntimeControlOperationConflict)
+        ));
+
+        let receipt = base
+            .admin_archive_unrecoverable_runtime(input(true))
+            .unwrap();
+        assert_eq!(receipt.project_id, project_id);
+        assert_eq!(receipt.agent_runtime_id, runtime_id);
+        assert_eq!(receipt.owner_email, "owner@finite.vip");
+        assert_eq!(receipt.revoked_finite_private_key_count, 0);
+        assert!(base.active_runtime_for_project(&project_id).is_none());
+        assert!(base.projects.contains_key(&project_id));
+        assert!(base.agent_runtimes.contains_key(&runtime_id));
+        assert!(base.project_room_memberships.values().any(|membership| {
+            membership.project_id == project_id
+                && membership.archived_at.as_deref() == Some("2026-07-21T20:10:00Z")
+        }));
+        assert!(
+            base.finite_private_admin_audit_events
+                .values()
+                .any(|event| {
+                    event.action == "runtime.admin_archive_unrecoverable"
+                        && event.target_id == runtime_id
+                        && event.actor == "admin@finite.vip"
+                })
         );
     }
 
@@ -11197,6 +11903,7 @@ mod tests {
                 runtime_capabilities: None,
                 runtime_host: Some("http://127.0.0.1:41002".to_string()),
                 published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                retirement_snapshot: None,
                 now: Some("2026-05-25T13:06:00Z".to_string()),
             })
             .unwrap_err();
@@ -11236,6 +11943,7 @@ mod tests {
                     )),
                     runtime_host: Some("http://127.0.0.1:41002".to_string()),
                     published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                    retirement_snapshot: None,
                     now: Some("2026-05-25T13:06:40Z".to_string()),
                 },
                 &refreshed_secret_references,

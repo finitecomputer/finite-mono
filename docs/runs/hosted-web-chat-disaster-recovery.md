@@ -34,6 +34,11 @@ client stores and Agent bindings, the complete Finite Chat server SQLite
 database, and a SaaS Core Postgres dump. That machinery is not recovery proof
 until one selected archive passes the positive and negative empty-target drill.
 
+Current-state correction, 2026-07-20: snapshot creation is deploy/manual-only,
+not every 15 minutes. The old stop/start timer broke live chat streams and was
+removed. This run must prove a non-disruptive cadence at the accepted RPO; a
+daily re-archive of a snapshot that may be seven days old is not sufficient.
+
 This is a coordinated service-set restore, not a selective restore of one
 Project or Agent machine. The Agent Runtime is retained separately, fenced
 during the drill, and reconnected only after the restored service stack is
@@ -89,8 +94,9 @@ Work top-down only after this run is explicitly made ACTIVE.
   count-only comparison results, and pass/fail without plaintext or live
   identifiers. Update the recovery runbook for every discovered prerequisite.
 - Repeat the positive and negative drill after snapshot-format or schema
-  changes and before paid admission. Keep the 15-minute snapshot and off-host
-  age alerts green; neither substitutes for the drill.
+  changes and before new lat3 customer admission. Add and keep the proven
+  non-disruptive 15-minute recovery point and off-host age alerts green;
+  neither substitutes for the drill.
 - Produce the exact Acceptance Request from `README.md`: selected archive,
   isolated target, synthetic account URL, expected observation after each
   restore/browser step, stop conditions, and estimated minutes. Paul performs

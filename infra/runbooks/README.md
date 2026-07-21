@@ -1,10 +1,12 @@
 # Runbooks
 
-Operational procedures for everything Finite runs. Host facts live in
-`infra/hosts/<name>/` (captured 2026-07-08, authoritative); these runbooks
-reference them rather than duplicate them. This repo is public: **no secret
-values, ever** — env var names and locations only (`infra/README.md`,
-secrets policy).
+Operational procedures for everything Finite runs. The 2026-07-08 files under
+`infra/hosts/<name>/` are dated captures and may be historical. Current fleet
+roles live in `infra/README.md`; executable NixOS configuration is authority
+for declared NixOS state; a fresh read-only inventory is authority for physical
+state. These runbooks must name which source they rely on rather than silently
+promoting an old capture. This repo is public: **no secret values, ever** — env
+var names and locations only (`infra/README.md`, secrets policy).
 
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
@@ -16,14 +18,15 @@ not been exercised yet are marked `TODO:` with what must be learned.
 > rollback source during migration; clawland is legacy. **The topology runbooks
 > below (deploy-core / deploy-sites / deploy-finitechat-server /
 > postgres-backup-restore / break-glass) are NOW UPDATED to that reality.**
-> The reinstall runbook and the NixOS config (`infra/nixos/`) are the source
-> of truth for lat1.
+> The NixOS config (`infra/nixos/`) declares lat1; live inventory proves its
+> physical state. The reinstall file is historical cutover evidence, not
+> current destructive authority.
 
 ## Index
 
 | Runbook | Covers |
 |---|---|
-| [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Rebuilding / recovering lat1** (NixOS) — the cutover procedure + the mdadm / NIC-by-MAC / ACME gotchas |
+| [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Historical 2026-07-09 lat1 cutover evidence** — destructive reuse is paused; retain its MD / NIC-by-MAC / ACME findings while the finite-lat-3 plan produces a replacement |
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
 | [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 native Postgres — highest-priority runbook in this tree |
 | [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md) | Coordinated Hosted Web Device + Finite Chat + SaaS Core snapshot and empty-target drill |
@@ -64,9 +67,11 @@ Two rules apply to **every** release and promotion, no exceptions:
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
 - Backups are only real once restored. The coordinated Hosted Web Chat and
-  Postgres empty-target drills have not yet passed; paid admission remains
-  blocked until the real off-host repository and current restore evidence
-  exist.
+  Postgres empty-target drills have not yet passed. The accepted July 20 plan
+  does not authorize additional paid or Launch Code Agent creation before its
+  Phase 11; this docs edit does not claim the Core/UI gate is already deployed.
+  The off-host repository and verified first archive exist; do not regress
+  their health or mistake them for a completed drill.
 - Any manual change made on a box during an incident must land back in
   `infra/` (or be reverted) **within a day** — see
   [break-glass.md](break-glass.md).

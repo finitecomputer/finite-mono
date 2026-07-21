@@ -4,6 +4,7 @@ import {
   coreProjectLabel,
   coreProjectPrimaryUrl,
   coreProjectSupportsRetirement,
+  runtimeRetirementProductEnabled,
   loadCoreMe,
   resolveCoreRuntimeRoute,
   type CoreReadCacheMode,
@@ -56,7 +57,8 @@ export async function loadDashboardMachineAccess(
     machineId: runtime.id,
     displayName: coreProjectLabel(coreProject),
     primaryUrl: coreProjectPrimaryUrl(coreProject),
-    canRetireRuntime: coreProjectSupportsRetirement(coreProject),
+    canRetireRuntime:
+      runtimeRetirementProductEnabled() && coreProjectSupportsRetirement(coreProject),
   };
 }
 

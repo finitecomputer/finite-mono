@@ -4,6 +4,14 @@ Status: deferred post-MVP design TODO and open question. This is not a first
 slice launch gate. Restic suitability and the Recovery Snapshot/key-backup
 shape remain unresolved.
 
+> **Disposition 2026-07-20:** this remains architecture background, not
+> current admission or recovery authority. The accepted
+> [`finite-lat` capacity and redundancy plan](../../docs/runs/finite-lat-capacity-and-redundancy.md)
+> now requires periodic encrypted off-host Agent recovery, fail-closed
+> missing-compute handling, and an empty-target restore before admitting real
+> user state on `finite-lat-3`. PR #110's post-mortems govern that proof once
+> landed; the sentence above cannot waive the newer gate.
+
 System authority:
 [Recoverability precedes operator-blindness](../../docs/adr/0001-recoverability-precedes-operator-blindness.md).
 

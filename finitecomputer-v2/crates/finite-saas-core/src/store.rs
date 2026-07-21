@@ -4,46 +4,50 @@ use crate::launch_codes::{
     prepare_launch_code_batch,
 };
 use crate::{
-    AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
-    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
-    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
-    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
-    AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, BridgeCoreState,
-    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
-    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
+    AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
+    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeExactInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
+    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
+    ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass, BillingOverview,
+    BillingSubscriptionStatus, BrainAgentAccount, BridgeCoreState, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
+    FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
+    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
+    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RetryRuntimeControlRequestInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelayCredential, RuntimeSpecEnvelope, RuntimeSpecIdentity,
+    RuntimePlacement, RuntimeRelayCredential, RuntimeRetirementSnapshot,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
     RuntimeStatusSnapshot, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
-    agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
+    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
+    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
@@ -57,7 +61,8 @@ use crate::{
     runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
     should_replace_stripe_subscription, source_import_key, trim_to_option,
     validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -365,6 +370,26 @@ impl CoreStore {
         }
     }
 
+    pub async fn renew_runtime_control_request(
+        &self,
+        input: RenewRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.renew_runtime_control_request(input).await,
+            Self::Postgres(store) => store.renew_runtime_control_request(input).await,
+        }
+    }
+
+    pub async fn retry_runtime_control_request(
+        &self,
+        input: RetryRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.retry_runtime_control_request(input).await,
+            Self::Postgres(store) => store.retry_runtime_control_request(input).await,
+        }
+    }
+
     pub async fn complete_agent_creation_request(
         &self,
         input: CompleteAgentCreationRequestInput,
@@ -594,6 +619,16 @@ impl CoreStore {
         }
     }
 
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        match self {
+            Self::Memory(store) => store.admin_archive_unrecoverable_runtime(input).await,
+            Self::Postgres(store) => store.admin_archive_unrecoverable_runtime(input).await,
+        }
+    }
+
     pub async fn admin_request_runtime_restart(
         &self,
         input: AdminRuntimeControlInput,
@@ -734,6 +769,7 @@ impl CoreStore {
 pub struct VisibleProject {
     pub project: Project,
     pub runtime: Option<AgentRuntime>,
+    pub active_runtime_control: Option<RuntimeControlRequest>,
 }
 
 impl MemoryCoreStore {
@@ -951,6 +987,22 @@ impl MemoryCoreStore {
         state.fail_runtime_control_request(input)
     }
 
+    pub async fn renew_runtime_control_request(
+        &self,
+        input: RenewRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut state = self.state.lock().await;
+        state.renew_runtime_control_request(input)
+    }
+
+    pub async fn retry_runtime_control_request(
+        &self,
+        input: RetryRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut state = self.state.lock().await;
+        state.retry_runtime_control_request(input)
+    }
+
     pub async fn complete_agent_creation_request(
         &self,
         input: CompleteAgentCreationRequestInput,
@@ -1148,6 +1200,14 @@ impl MemoryCoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let state = self.state.lock().await;
         Ok(state.admin_runtime_overviews())
+    }
+
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        let mut state = self.state.lock().await;
+        state.admin_archive_unrecoverable_runtime(input)
     }
 
     pub async fn admin_request_runtime_restart(
@@ -1678,6 +1738,28 @@ impl PostgresCoreStore {
         Ok(result)
     }
 
+    pub async fn renew_runtime_control_request(
+        &self,
+        input: RenewRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_renew_runtime_control_request(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn retry_runtime_control_request(
+        &self,
+        input: RetryRuntimeControlRequestInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_retry_runtime_control_request(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
     pub async fn complete_agent_creation_request(
         &self,
         input: CompleteAgentCreationRequestInput,
@@ -1916,6 +1998,17 @@ impl PostgresCoreStore {
         postgres_admin_runtime_overviews(&*client).await
     }
 
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let receipt = postgres_admin_archive_unrecoverable_runtime(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(receipt)
+    }
+
     pub async fn admin_request_runtime_restart(
         &self,
         input: AdminRuntimeControlInput,
@@ -2047,7 +2140,26 @@ fn visible_projects_for_workos_user(
                 .find(|link| link.project_id == project.id && link.active)
                 .and_then(|link| state.agent_runtimes.get(&link.agent_runtime_id))
                 .cloned();
-            VisibleProject { project, runtime }
+            let active_runtime_control = runtime.as_ref().and_then(|runtime| {
+                state
+                    .runtime_control_requests
+                    .values()
+                    .filter(|request| {
+                        request.agent_runtime_id == runtime.id
+                            && matches!(
+                                request.status,
+                                RuntimeControlRequestStatus::Requested
+                                    | RuntimeControlRequestStatus::Running
+                            )
+                    })
+                    .min_by_key(|request| (request.created_at.clone(), request.id.clone()))
+                    .cloned()
+            });
+            VisibleProject {
+                project,
+                runtime,
+                active_runtime_control,
+            }
         })
         .collect()
 }
@@ -3760,13 +3872,35 @@ where
                     runtime.provider_runtime_handle, runtime.provider_runtime_handle_history,
                     runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, runtime.created_at::text AS runtime_created_at,
-                    runtime.updated_at::text AS runtime_updated_at
+                    runtime.updated_at::text AS runtime_updated_at,
+                    control.id AS control_id, control.project_id AS control_project_id,
+                    control.agent_runtime_id AS control_agent_runtime_id,
+                    control.source_host_id AS control_source_host_id,
+                    control.source_machine_id AS control_source_machine_id,
+                    control.requested_by_user_id AS control_requested_by_user_id,
+                    control.kind AS control_kind,
+                    control.target_runtime_artifact_id AS control_target_runtime_artifact_id,
+                    control.status AS control_status, control.runner_id AS control_runner_id,
+                    control.lease_token AS control_lease_token,
+                    control.lease_expires_at::text AS control_lease_expires_at,
+                    control.failure_message AS control_failure_message,
+                    control.created_at::text AS control_created_at,
+                    control.updated_at::text AS control_updated_at,
+                    control.completed_at::text AS control_completed_at
              FROM project_room_memberships AS membership
              JOIN chat_identities AS identity ON identity.id = membership.chat_identity_id
              JOIN projects AS project ON project.id = membership.project_id
              LEFT JOIN project_runtime_links AS link
                ON link.project_id = project.id AND link.active
              LEFT JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
+             LEFT JOIN LATERAL (
+               SELECT request.*
+               FROM runtime_control_requests AS request
+               WHERE request.agent_runtime_id = runtime.id
+                 AND request.status IN ('requested', 'running')
+               ORDER BY request.created_at, request.id
+               LIMIT 1
+             ) AS control ON TRUE
              WHERE identity.user_id = $1
                AND membership.archived_at IS NULL
                AND NOT EXISTS (
@@ -3840,7 +3974,40 @@ where
                     })
                 })
                 .transpose()?;
-            Ok(VisibleProject { project, runtime })
+            let active_runtime_control = row
+                .get::<_, Option<String>>("control_id")
+                .map(|id| {
+                    Ok::<RuntimeControlRequest, CoreError>(RuntimeControlRequest {
+                        id,
+                        project_id: row.get("control_project_id"),
+                        agent_runtime_id: row.get("control_agent_runtime_id"),
+                        source_host_id: row.get("control_source_host_id"),
+                        source_machine_id: row.get("control_source_machine_id"),
+                        requested_by_user_id: row.get("control_requested_by_user_id"),
+                        kind: parse_runtime_control_kind(&row.get::<_, String>("control_kind"))
+                            .ok_or_else(|| {
+                                CoreError::Store("invalid runtime control kind".into())
+                            })?,
+                        target_runtime_artifact_id: row.get("control_target_runtime_artifact_id"),
+                        status: parse_runtime_control_request_status(
+                            &row.get::<_, String>("control_status"),
+                        )
+                        .ok_or_else(|| CoreError::Store("invalid runtime control status".into()))?,
+                        runner_id: row.get("control_runner_id"),
+                        lease_token: row.get("control_lease_token"),
+                        lease_expires_at: row.get("control_lease_expires_at"),
+                        failure_message: row.get("control_failure_message"),
+                        created_at: row.get("control_created_at"),
+                        updated_at: row.get("control_updated_at"),
+                        completed_at: row.get("control_completed_at"),
+                    })
+                })
+                .transpose()?;
+            Ok(VisibleProject {
+                project,
+                runtime,
+                active_runtime_control,
+            })
         })
         .collect()
 }
@@ -5803,6 +5970,136 @@ where
     .await
 }
 
+async fn postgres_admin_archive_unrecoverable_runtime<C>(
+    client: &C,
+    input: AdminArchiveUnrecoverableRuntimeInput,
+) -> CoreResult<UnrecoverableRuntimeArchiveReceipt>
+where
+    C: GenericClient + Sync,
+{
+    if !input.operator_observed_compute_absent
+        || !input.operator_observed_durable_state_absent
+        || !input.owner_acknowledged_unrecoverable
+    {
+        return Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired);
+    }
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+    if admin_workos_user_id.is_empty() {
+        return Err(CoreError::MissingWorkosUserId);
+    }
+    let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let row = client
+        .query_opt(
+            "SELECT runtime.id AS agent_runtime_id, runtime.source_host_id,
+                    runtime.source_machine_id, owner.normalized_email AS owner_email,
+                    (
+                      runtime.provider_runtime_handle IS NOT NULL
+                      OR COALESCE(jsonb_array_length(runtime.provider_runtime_handle_history), 0) > 0
+                      OR runtime.contact_endpoint IS NOT NULL
+                    ) AS has_provider_metadata
+             FROM projects AS project
+             JOIN users AS owner ON owner.id = project.owner_user_id
+             JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.active = TRUE
+             JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
+             WHERE project.id = $1
+             FOR UPDATE OF project, link, runtime",
+            &[&input.project_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    let agent_runtime_id: String = row.get("agent_runtime_id");
+    let source_host_id: String = row.get("source_host_id");
+    let source_machine_id: String = row.get("source_machine_id");
+    let owner_email: String = row.get("owner_email");
+    if owner_email != expected_owner_email {
+        return Err(CoreError::UnrecoverableRuntimeArchiveOwnerMismatch);
+    }
+    if agent_runtime_id != input.expected_agent_runtime_id
+        || source_host_id != input.expected_source_host_id
+        || source_machine_id != input.expected_source_machine_id
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if row.get::<_, bool>("has_provider_metadata") {
+        return Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_control_requests
+             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    if client
+        .query_opt(
+            "SELECT 1 FROM runtime_retirement_snapshots WHERE agent_runtime_id = $1 LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeRetirementSnapshotConflict);
+    }
+
+    ensure_grandfathered_linked_user(client, &admin_email, &admin_workos_user_id, &now).await?;
+    let revoked_api_key_ids = postgres_offboard_runtime(
+        client,
+        &input.project_id,
+        &agent_runtime_id,
+        &now,
+        "finite_private.runtime.archive_unrecoverable_revoke_keys",
+        Some(&admin_email),
+    )
+    .await?;
+    let revoked_finite_private_key_count = revoked_api_key_ids.len();
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "runtime.admin_archive_unrecoverable",
+            target_type: "agent_runtime",
+            target_id: &agent_runtime_id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": input.project_id,
+                "ownerEmail": owner_email,
+                "sourceHostId": source_host_id,
+                "sourceMachineId": source_machine_id,
+                "operatorObservedComputeAbsent": true,
+                "operatorObservedDurableStateAbsent": true,
+                "ownerAcknowledgedUnrecoverable": true,
+                "revokedApiKeyIds": revoked_api_key_ids,
+            }),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(UnrecoverableRuntimeArchiveReceipt {
+        project_id: input.project_id,
+        agent_runtime_id,
+        source_host_id,
+        source_machine_id,
+        owner_email,
+        archived_at: now,
+        revoked_finite_private_key_count,
+    })
+}
+
 async fn postgres_admin_request_runtime_control_bound<C>(
     client: &C,
     input: AdminRuntimeControlInput,
@@ -6203,6 +6500,32 @@ fn verify_runtime_control_lease(
     Ok(())
 }
 
+async fn verify_postgres_runtime_control_lease_at<C>(
+    client: &C,
+    request: &RuntimeControlRequest,
+    runner_id: &str,
+    lease_token: &str,
+    now: &str,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    verify_runtime_control_lease(request, runner_id, lease_token)?;
+    let active: bool = client
+        .query_one(
+            "SELECT COALESCE(lease_expires_at >= $2::text::timestamptz, FALSE)
+             FROM runtime_control_requests WHERE id = $1",
+            &[&request.id, &now],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0);
+    if !active {
+        return Err(CoreError::RuntimeControlRequestLeaseConflict);
+    }
+    Ok(())
+}
+
 /// Apply the completed runtime status to both the runtime's host facts and its
 /// status snapshot (if one exists), touching only that runtime's two rows.
 struct RuntimeUpgradeCompletion {
@@ -6212,6 +6535,55 @@ struct RuntimeUpgradeCompletion {
     published_app_urls: Vec<String>,
     runtime_spec: Option<RuntimeSpecEnvelope>,
     runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
+}
+
+async fn postgres_runtime_retirement_snapshot<C>(
+    client: &C,
+    request_id: &str,
+) -> CoreResult<Option<RuntimeRetirementSnapshot>>
+where
+    C: GenericClient + Sync,
+{
+    let sql = format!(
+        "SELECT request_id, project_id, agent_runtime_id, durable_state_id,
+                runtime_artifact_id, schema_version, backend, locator,
+                zip_bytes, zip_sha256, manifest_sha256,
+                created_at, verified_at,
+                recovery_authority_id, retention_policy, {stored_at} AS stored_at
+         FROM runtime_retirement_snapshots
+         WHERE request_id = $1",
+        stored_at = rfc3339_col("stored_at"),
+    );
+    let Some(row) = client
+        .query_opt(&sql, &[&request_id])
+        .await
+        .map_err(store_error)?
+    else {
+        return Ok(None);
+    };
+    let zip_bytes: i64 = row.get("zip_bytes");
+    let zip_bytes =
+        u64::try_from(zip_bytes).map_err(|_| CoreError::RuntimeRetirementSnapshotMismatch)?;
+    Ok(Some(RuntimeRetirementSnapshot {
+        receipt: RuntimeRetirementSnapshotReceipt {
+            schema: row.get("schema_version"),
+            request_id: row.get("request_id"),
+            project_id: row.get("project_id"),
+            agent_runtime_id: row.get("agent_runtime_id"),
+            durable_state_id: row.get("durable_state_id"),
+            runtime_artifact_id: row.get("runtime_artifact_id"),
+            backend: row.get("backend"),
+            locator: row.get("locator"),
+            zip_bytes,
+            zip_sha256: row.get("zip_sha256"),
+            manifest_sha256: row.get("manifest_sha256"),
+            created_at: row.get("created_at"),
+            verified_at: row.get("verified_at"),
+            recovery_authority_id: row.get("recovery_authority_id"),
+            retention_policy: row.get("retention_policy"),
+        },
+        stored_at: row.get("stored_at"),
+    }))
 }
 
 async fn apply_runtime_control_completion<C>(
@@ -6293,9 +6665,67 @@ where
     C: GenericClient + Sync,
 {
     runtime_spec_secret_references(runtime_secret_references)?;
-    let now = input.now.unwrap_or(current_time_iso()?);
+    let now = input.now.clone().unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
-    verify_runtime_control_lease(&locked, &input.runner_id, &input.lease_token)?;
+    if locked.status == RuntimeControlRequestStatus::Succeeded {
+        let stored = postgres_runtime_retirement_snapshot(client, &input.request_id).await?;
+        if locked.kind == RuntimeControlKind::Destroy
+            && stored.as_ref().map(|snapshot| &snapshot.receipt)
+                == input.retirement_snapshot.as_ref()
+            && crate::runtime_control_completion_has_no_upgrade_facts(&input)
+        {
+            return Ok(locked);
+        }
+        return Err(CoreError::RuntimeRetirementSnapshotConflict);
+    }
+    verify_postgres_runtime_control_lease_at(
+        client,
+        &locked,
+        &input.runner_id,
+        &input.lease_token,
+        &now,
+    )
+    .await?;
+    let retirement_snapshot = if locked.kind == RuntimeControlKind::Destroy {
+        let receipt = input
+            .retirement_snapshot
+            .clone()
+            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+        let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
+            .await?
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        let row = client
+            .query_opt(
+                "SELECT runtime_spec
+                 FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND runtime_spec IS NOT NULL
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                &[&runtime.id],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?;
+        let value: Value = row.get("runtime_spec");
+        let runtime_spec: RuntimeSpecEnvelope =
+            serde_json::from_value(value).map_err(json_error)?;
+        validate_runtime_retirement_snapshot_receipt(
+            &receipt,
+            &locked,
+            &runtime,
+            &runtime_spec,
+            &now,
+        )?;
+        Some(RuntimeRetirementSnapshot {
+            receipt,
+            stored_at: now.clone(),
+        })
+    } else {
+        if input.retirement_snapshot.is_some() {
+            return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+        }
+        None
+    };
     let upgrade = if locked.kind == RuntimeControlKind::Upgrade {
         let target_id = locked
             .target_runtime_artifact_id
@@ -6387,6 +6817,46 @@ where
         }
         None
     };
+    if let Some(snapshot) = retirement_snapshot.as_ref() {
+        let receipt = &snapshot.receipt;
+        let zip_bytes = receipt.zip_bytes as i64;
+        let inserted = client
+            .execute(
+                "INSERT INTO runtime_retirement_snapshots (
+                   request_id, project_id, agent_runtime_id, durable_state_id,
+                   runtime_artifact_id, schema_version, backend, locator,
+                   zip_bytes, zip_sha256, manifest_sha256, created_at,
+                   verified_at, recovery_authority_id, retention_policy, stored_at
+                 ) VALUES (
+                   $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                   $10, $11, $12, $13,
+                   $14, $15, $16::text::timestamptz
+                 ) ON CONFLICT (request_id) DO NOTHING",
+                &[
+                    &receipt.request_id,
+                    &receipt.project_id,
+                    &receipt.agent_runtime_id,
+                    &receipt.durable_state_id,
+                    &receipt.runtime_artifact_id,
+                    &receipt.schema,
+                    &receipt.backend,
+                    &receipt.locator,
+                    &zip_bytes,
+                    &receipt.zip_sha256,
+                    &receipt.manifest_sha256,
+                    &receipt.created_at,
+                    &receipt.verified_at,
+                    &receipt.recovery_authority_id,
+                    &receipt.retention_policy,
+                    &snapshot.stored_at,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        if inserted != 1 {
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+    }
     let row = client
         .query_one(
             "UPDATE runtime_control_requests
@@ -6499,6 +6969,103 @@ where
     Ok(request)
 }
 
+async fn postgres_renew_runtime_control_request<C>(
+    client: &C,
+    input: RenewRuntimeControlRequestInput,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let now_time = parse_time(&now)?;
+    let lease_seconds = input
+        .lease_seconds
+        .unwrap_or(crate::DEFAULT_AGENT_CREATION_LEASE_SECONDS);
+    if !(1..=crate::MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
+        return Err(CoreError::InvalidAgentCreationLeaseDuration);
+    }
+    let locked = locked_runtime_control_request(client, &input.request_id).await?;
+    verify_postgres_runtime_control_lease_at(
+        client,
+        &locked,
+        &input.runner_id,
+        &input.lease_token,
+        &now,
+    )
+    .await?;
+    let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
+    let row = client
+        .query_one(
+            "UPDATE runtime_control_requests
+             SET lease_expires_at = $2::text::timestamptz,
+                 updated_at = $3::text::timestamptz
+             WHERE id = $1
+             RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                       requested_by_user_id, kind, target_runtime_artifact_id, status,
+                       runner_id, lease_token, lease_expires_at::text, failure_message,
+                       created_at::text, updated_at::text, completed_at::text",
+            &[&input.request_id, &lease_expires_at, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    runtime_control_request_from_row(&row)
+}
+
+async fn postgres_retry_runtime_control_request<C>(
+    client: &C,
+    input: RetryRuntimeControlRequestInput,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let failure_message = trim_to_option(Some(&input.failure_message))
+        .ok_or(CoreError::MissingRuntimeControlFailureMessage)?;
+    let locked = locked_runtime_control_request(client, &input.request_id).await?;
+    verify_postgres_runtime_control_lease_at(
+        client,
+        &locked,
+        &input.runner_id,
+        &input.lease_token,
+        &now,
+    )
+    .await?;
+    if locked.kind != RuntimeControlKind::Destroy {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    let row = client
+        .query_one(
+            "UPDATE runtime_control_requests
+             SET status = 'requested', runner_id = NULL, lease_token = NULL,
+                 lease_expires_at = NULL, failure_message = $2,
+                 updated_at = $3::text::timestamptz, completed_at = NULL
+             WHERE id = $1
+             RETURNING id, project_id, agent_runtime_id, source_host_id, source_machine_id,
+                       requested_by_user_id, kind, target_runtime_artifact_id, status,
+                       runner_id, lease_token, lease_expires_at::text, failure_message,
+                       created_at::text, updated_at::text, completed_at::text",
+            &[&input.request_id, &failure_message, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    let request = runtime_control_request_from_row(&row)?;
+    if let Some(mut runtime) = select_agent_runtime(client, &request.agent_runtime_id).await? {
+        runtime.host_facts.runtime_status = RuntimeSummaryStatus::Stale;
+        runtime.updated_at = now.clone();
+        upsert_agent_runtime_row(client, &runtime).await?;
+    }
+    client
+        .execute(
+            "UPDATE runtime_status_snapshots
+             SET status = 'stale', updated_at = $2::text::timestamptz
+             WHERE agent_runtime_id = $1",
+            &[&request.agent_runtime_id, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(request)
+}
+
 /// Row-scoped `offboard_destroyed_runtime`: hide the normal project from its
 /// room members, deactivate the runtime's links, drop its relay credential,
 /// revoke every active Finite Private key bound to the runtime or its project,
@@ -6509,6 +7076,29 @@ async fn postgres_offboard_destroyed_runtime<C>(
     request: &RuntimeControlRequest,
     now: &str,
 ) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    postgres_offboard_runtime(
+        client,
+        &request.project_id,
+        &request.agent_runtime_id,
+        now,
+        "finite_private.runtime.destroy_revoke_keys",
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn postgres_offboard_runtime<C>(
+    client: &C,
+    project_id: &str,
+    agent_runtime_id: &str,
+    now: &str,
+    revocation_action: &'static str,
+    actor: Option<&str>,
+) -> CoreResult<Vec<String>>
 where
     C: GenericClient + Sync,
 {
@@ -6524,21 +7114,21 @@ where
                  WHERE project.id = $1
                    AND project.import_candidate_id IS NULL
                )",
-            &[&request.project_id, &now],
+            &[&project_id, &now],
         )
         .await
         .map_err(store_error)?;
     client
         .execute(
             "UPDATE project_runtime_links SET active = FALSE WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id],
+            &[&agent_runtime_id],
         )
         .await
         .map_err(store_error)?;
     client
         .execute(
             "DELETE FROM runtime_relay_credentials WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id],
+            &[&agent_runtime_id],
         )
         .await
         .map_err(store_error)?;
@@ -6549,7 +7139,7 @@ where
              WHERE status = 'active'
                AND (agent_runtime_id = $1 OR project_id = $2)
              RETURNING id",
-            &[&request.agent_runtime_id, &request.project_id, &now],
+            &[&agent_runtime_id, &project_id, &now],
         )
         .await
         .map_err(store_error)?;
@@ -6558,14 +7148,14 @@ where
         insert_finite_private_admin_audit_event(
             client,
             FinitePrivateAdminAuditInsert {
-                action: "finite_private.runtime.destroy_revoke_keys",
+                action: revocation_action,
                 target_type: "agent_runtime",
-                target_id: &request.agent_runtime_id,
+                target_id: agent_runtime_id,
                 grant_id: None,
                 api_key_id: None,
-                actor: None,
+                actor,
                 metadata: json!({
-                    "projectId": request.project_id.clone(),
+                    "projectId": project_id,
                     "revokedApiKeyIds": revoked_api_key_ids,
                 }),
                 now,
@@ -6573,7 +7163,7 @@ where
         )
         .await?;
     }
-    Ok(())
+    Ok(revoked_api_key_ids)
 }
 
 /// Find-or-create a linked user by natural key (email), then ensure their
@@ -9720,6 +10310,7 @@ mod tests {
                     runtime_capabilities: None,
                     runtime_host: None,
                     published_app_urls: None,
+                    retirement_snapshot: None,
                     now: None,
                 })
                 .await
@@ -9806,6 +10397,52 @@ mod tests {
                     "missing Postgres audit action {expected}"
                 );
             }
+
+            let archive_input = |compute_absent| AdminArchiveUnrecoverableRuntimeInput {
+                admin_verified_email: admin_email.clone(),
+                admin_workos_user_id: format!("workos_admin_ops_admin_{run}"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "admin-ops-host".to_string(),
+                expected_source_machine_id: machine_id.clone(),
+                expected_owner_email: owner_email.clone(),
+                operator_observed_compute_absent: compute_absent,
+                operator_observed_durable_state_absent: true,
+                owner_acknowledged_unrecoverable: true,
+                now: None,
+            };
+            assert!(matches!(
+                store
+                    .admin_archive_unrecoverable_runtime(archive_input(false))
+                    .await
+                    .unwrap_err(),
+                CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired
+            ));
+            let archive = store
+                .admin_archive_unrecoverable_runtime(archive_input(true))
+                .await
+                .unwrap();
+            assert_eq!(archive.agent_runtime_id, runtime_id);
+            let archived_overview = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert!(!archived_overview.runtime_link_active);
+            assert!(
+                store
+                    .finite_private_admin_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| {
+                        event.action == "runtime.admin_archive_unrecoverable"
+                            && event.actor == admin_email
+                            && event.target_id == runtime_id
+                    })
+            );
         })
         .await;
     }
@@ -10086,6 +10723,7 @@ mod tests {
                     runtime_capabilities: None,
                     runtime_host: None,
                     published_app_urls: None,
+                    retirement_snapshot: None,
                     now: None,
                 })
                 .await
@@ -10324,11 +10962,13 @@ mod tests {
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             recover_known_good_chat: true,
+                            runtime_retirement: true,
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
                     runtime_host: Some("http://127.0.0.1:41002".to_string()),
                     published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".to_string()]),
+                    retirement_snapshot: None,
                     now: None,
                 })
                 .await
@@ -10387,9 +11027,10 @@ mod tests {
                 .unwrap();
             assert_eq!(key_before_destroy.status, FinitePrivateApiKeyStatus::Active);
 
-            // Retirement remains outside the authorized product surface even
-            // after a capability-refreshing Upgrade.
-            let destroy_error = store
+            // Retirement requires a receipt bound to this exact request and
+            // RuntimeSpec. Postgres stores that receipt and performs the
+            // target-scoped offboarding in the same transaction.
+            let destroy = store
                 .request_runtime_destroy(RequestRuntimeDestroyInput {
                     verified_email: email.clone(),
                     workos_user_id: workos.clone(),
@@ -10397,11 +11038,107 @@ mod tests {
                     now: Some("2026-07-10T12:04:00Z".to_string()),
                 })
                 .await
-                .unwrap_err();
-            assert!(matches!(
-                destroy_error,
-                CoreError::RuntimeControlUnsupported
-            ));
+                .unwrap();
+            let destroy_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    lease_token: format!("ctl-destroy-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                            RuntimeCapabilitiesV1 {
+                                runtime_retirement: true,
+                                ..*kata_runtime_capabilities().v1()
+                            },
+                        )),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-07-10T12:04:10Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .expect("retirement should lease to a capable Kata runner");
+            assert_eq!(destroy_lease.request.id, destroy.id);
+            let destroy_spec = runtime_spec_v1(destroy_lease.runtime_spec.as_ref().unwrap());
+            let receipt = RuntimeRetirementSnapshotReceipt {
+                schema: crate::RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+                request_id: destroy.id.clone(),
+                project_id: project_id.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                durable_state_id: destroy_spec.durable_state_id.clone(),
+                runtime_artifact_id: destroy_spec.runtime_artifact_id.clone(),
+                backend: crate::RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+                locator: crate::runtime_retirement_archive_locator(&destroy.id),
+                zip_bytes: 8192,
+                zip_sha256: "a".repeat(64),
+                manifest_sha256: "b".repeat(64),
+                created_at: "2026-07-10T12:04:20Z".to_string(),
+                verified_at: "2026-07-10T12:04:30Z".to_string(),
+                recovery_authority_id: "finite-assisted-test".to_string(),
+                retention_policy: crate::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+            };
+            let completion = CompleteRuntimeControlRequestInput {
+                request_id: destroy.id.clone(),
+                runner_id: format!("runner-{run}"),
+                lease_token: format!("ctl-destroy-{run}"),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: None,
+                runtime_host: None,
+                published_app_urls: None,
+                retirement_snapshot: Some(receipt.clone()),
+                now: Some("2026-07-10T12:04:40Z".to_string()),
+            };
+            store
+                .complete_runtime_control_request(completion.clone())
+                .await
+                .unwrap();
+            store
+                .complete_runtime_control_request(completion)
+                .await
+                .expect("identical Postgres completion replay must be idempotent");
+
+            let (raw, raw_connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_connection = tokio::spawn(async move {
+                let _ = raw_connection.await;
+            });
+            let stored_snapshot = postgres_runtime_retirement_snapshot(&raw, &destroy.id)
+                .await
+                .unwrap()
+                .expect("retirement receipt must be stored");
+            assert_eq!(stored_snapshot.receipt, receipt);
+            let active_link_count: i64 = raw
+                .query_one(
+                    "SELECT COUNT(*) FROM project_runtime_links
+                     WHERE project_id = $1 AND agent_runtime_id = $2 AND active = TRUE",
+                    &[&project_id, &runtime_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(active_link_count, 0);
+            drop(raw);
+            raw_connection.abort();
+
+            let visible_after = store
+                .visible_projects_for_workos_user(&workos)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|visible| visible.project.id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(visible_after, BTreeSet::from([unrelated_project_id]));
+            let key_after_destroy = store
+                .finite_private_admin_state()
+                .await
+                .unwrap()
+                .api_keys
+                .into_iter()
+                .find(|key| key.id == provisioned.api_key.id)
+                .unwrap();
+            assert_eq!(key_after_destroy.status, FinitePrivateApiKeyStatus::Revoked);
         })
         .await;
     }

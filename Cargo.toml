@@ -59,6 +59,7 @@ finite-nostr = { path = "finite-nostr" }
 finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
 flate2 = "1"
+fs4 = "0.13"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 getrandom = "0.3"
@@ -95,6 +96,7 @@ tar = "0.4"
 uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }
 walkdir = "2"
+zip = { version = "4.6.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

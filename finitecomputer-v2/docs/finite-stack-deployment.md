@@ -1,6 +1,14 @@
 # Finite Stack Deployment Lanes
 
-Status: v2 deploy authority.
+Status: HISTORICAL DESIGN — not current deploy authority as of 2026-07-09.
+
+Current host/service truth lives in [`infra/README.md`](../../infra/README.md)
+and current procedures live in [`infra/runbooks/`](../../infra/runbooks/).
+In particular, Finite Sites, Search, Core, Dashboard, Chat, Brain, Postgres,
+and the existing Kata Runner are consolidated on `finite-lat-1`; the table
+below still describes the superseded lat2 Sites topology. Retain its
+provider-neutral Runner and independently deployable-artifact reasoning only
+as design background, and revalidate every operational claim before reuse.
 
 This document describes the deployment shape for the Finite SaaS stack as we
 move Core, dashboard, hosted Finite Chat, Finite Sites integration, and Agent

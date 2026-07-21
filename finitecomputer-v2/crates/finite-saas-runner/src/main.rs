@@ -7,11 +7,12 @@ use finite_saas_runner::{
     DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL,
     DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig,
     DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
-    KataLauncher, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
-    RuntimeLauncher, SpecializationBundleRuntimeDefaults,
+    KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
+    RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
 };
 use std::collections::BTreeMap;
 use std::env;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -235,6 +236,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     DEFAULT_FINITE_AGENT_PICTURE_URL,
                 ),
                 name_prefix: optional_env("FC_RUNNER_KATA_NAME_PREFIX", "finite-kata"),
+                host_address: optional_ip_addr("FC_RUNNER_KATA_HOST_ADDRESS", "127.0.0.1")?,
                 container_port: optional_u16("FC_RUNNER_KATA_CONTAINER_PORT", 8080)?,
                 cpus: optional_u32_value("FC_RUNNER_KATA_CPUS")?.or(Some(4)),
                 memory: optional_env_value("FC_RUNNER_KATA_MEMORY")
@@ -255,6 +257,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
                 stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 30)?,
+                retirement: optional_kata_retirement_config()?,
             });
             run_once_with_launcher(
                 queue,
@@ -558,6 +561,28 @@ fn optional_env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn optional_kata_retirement_config() -> Result<Option<KataRetirementConfig>> {
+    if !optional_bool("FC_RUNNER_KATA_RETIREMENT_ENABLED", false)? {
+        return Ok(None);
+    }
+    Ok(Some(KataRetirementConfig {
+        borg_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_BORG_BIN", "borg"),
+        ctr_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_CTR_BIN", "ctr"),
+        repository: required_env("FC_RUNNER_KATA_RETIREMENT_BORG_REPOSITORY")?,
+        remote_path: required_path("FC_RUNNER_KATA_RETIREMENT_BORG_REMOTE_PATH")?,
+        ssh_key_file: required_path("FC_RUNNER_KATA_RETIREMENT_SSH_KEY_FILE")?,
+        known_hosts_file: required_path("FC_RUNNER_KATA_RETIREMENT_KNOWN_HOSTS_FILE")?,
+        passphrase_file: required_path("FC_RUNNER_KATA_RETIREMENT_PASSPHRASE_FILE")?,
+        staging_root: required_path("FC_RUNNER_KATA_RETIREMENT_STAGING_ROOT")?,
+        recovery_authority_id: required_env("FC_RUNNER_KATA_RETIREMENT_AUTHORITY_ID")?,
+        poll_interval: Duration::from_secs(optional_u64("FC_RUNNER_KATA_RETIREMENT_POLL_SECS", 2)?),
+        convergence_timeout: Duration::from_secs(optional_u64(
+            "FC_RUNNER_KATA_RETIREMENT_CONVERGENCE_TIMEOUT_SECS",
+            120,
+        )?),
+    }))
+}
+
 fn immutable_oci_descriptor_digest(reference: &str) -> Result<String> {
     let Some((repository, hex)) = reference.trim().rsplit_once("@sha256:") else {
         bail!("Core runtime artifact reference is not immutable: {reference}");
@@ -596,6 +621,12 @@ fn optional_u16(name: &str, default: u16) -> Result<u16> {
     value
         .parse::<u16>()
         .with_context(|| format!("{name} must be an integer between 1 and 65535"))
+}
+
+fn optional_ip_addr(name: &str, default: &str) -> Result<IpAddr> {
+    optional_env(name, default)
+        .parse::<IpAddr>()
+        .with_context(|| format!("{name} must be an IP address"))
 }
 
 fn optional_u32_value(name: &str) -> Result<Option<u32>> {

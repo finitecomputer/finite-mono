@@ -15,8 +15,9 @@ sites/search/tunnel migration).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
   7.0.0-15-generic, x86-64.
-- Disks: /dev/md0 439G root (24% used); /dev/md1 1.8T at `/data`
-  (essentially empty — earmarked as the backup target, see `backups.md`).
+- Disks at the dated capture: /dev/md0 439G root (24% used); /dev/md1 1.8T at
+  `/data` (essentially empty). `/data` is not an Agent placement or recovery
+  target; the historical proposal in `backups.md` is superseded.
 - Network: 64.34.80.19/31 + IPv6. Public exposure is exactly 22 (sshd) and
   80/443 (Caddy); everything else binds loopback. `/tmp` is a 94G tmpfs
   (matters for backups — see appendix).
