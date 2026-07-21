@@ -14,6 +14,12 @@ is historical, not current authority.
   boundary.
 - [x] Run the one-writer AEON Canary 0714 restore drill and require two fresh,
   interactive post-restore chats.
+- [x] Provision the restricted retirement Borg authority; deploy and accept
+  Runtime Retirement with AEON's independent empty-target restore.
+- [x] Retire Agent Camp Demo and Sites Canary 0715, then preserve and retire
+  stranded Waffle without touching Upgrade Canary 0715 or Waffle Prime.
+- [ ] Resolve Sol 2 only if its missing durable-state location can be proved;
+  its Core records are untouched meanwhile.
 
 ## Before the lat1 RAID maintenance window
 
@@ -33,8 +39,8 @@ is historical, not current authority.
   Agents working and tell new users to contact Paul.
 - [x] Activate and implement the bounded, default-off repository and synthetic
   [`Runtime Retirement`](runtime-retirement-readiness.md) plan.
-- [ ] Separately provision its restricted Borg authority, deploy with all gates
-  off, and pass a disposable canary plus independent restore before broad enablement.
+- [x] Provision its restricted Borg authority, deploy the independent gates,
+  and pass a disposable canary plus independent restore before broader use.
 
 ## Parked / later
 
