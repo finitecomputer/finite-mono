@@ -27,6 +27,11 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
 )
 
+CANONICAL_WORKFLOW_ANCHORS = (
+    "--report target/runtime-image-durable-smoke/report.json",
+    'open("finitechat/target/runtime-image-durable-smoke/report.json")',
+)
+
 WORKFLOW_BUILD_OR_PUBLISH = (
     re.compile(r"\bdocker\s+(?:build|buildx|push|tag)\b", re.IGNORECASE),
     re.compile(r"\bpodman\s+(?:build|push|tag)\b", re.IGNORECASE),
@@ -144,7 +149,12 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
     file_set = set(files)
     violations: list[str] = []
 
-    for required in (CANONICAL_DOCKERFILE, CANONICAL_BUILDER, CANONICAL_WORKFLOW, PHALA_ADAPTER):
+    for required in (
+        CANONICAL_DOCKERFILE,
+        CANONICAL_BUILDER,
+        CANONICAL_WORKFLOW,
+        PHALA_ADAPTER,
+    ):
         if required not in file_set or not (root / required).is_file():
             violations.append(f"missing canonical contract file: {required}")
 
@@ -159,13 +169,21 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
     if CANONICAL_BUILDER in file_set:
         builder = (root / CANONICAL_BUILDER).read_text(encoding="utf-8")
         expected = (
-            'dockerfile = context / '
+            "dockerfile = context / "
             '"finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"'
         )
         if expected not in builder:
             violations.append(
                 f"{CANONICAL_BUILDER}: must select only {CANONICAL_DOCKERFILE}"
             )
+
+    if CANONICAL_WORKFLOW in file_set:
+        workflow = (root / CANONICAL_WORKFLOW).read_text(encoding="utf-8")
+        for anchor in CANONICAL_WORKFLOW_ANCHORS:
+            if anchor not in workflow:
+                violations.append(
+                    f"{CANONICAL_WORKFLOW}: missing canonical Runtime workflow anchor {anchor!r}"
+                )
 
     if PHALA_ADAPTER in file_set:
         adapter = active_text(
@@ -203,11 +221,17 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
             violations.append(
                 f"{path}: Phala workflows may inspect the canonical digest but cannot build/publish an image"
             )
-        if path != CANONICAL_WORKFLOW and re.search(
-            r"\bagent-runtime\b", text, re.IGNORECASE
-        ) and any(
-            re.search(pattern, execution, re.IGNORECASE)
-            for pattern in (r"\bdocker\s+push\b", r"docker/build-push-action", r"\boras\s+push\b")
+        if (
+            path != CANONICAL_WORKFLOW
+            and re.search(r"\bagent-runtime\b", text, re.IGNORECASE)
+            and any(
+                re.search(pattern, execution, re.IGNORECASE)
+                for pattern in (
+                    r"\bdocker\s+push\b",
+                    r"docker/build-push-action",
+                    r"\boras\s+push\b",
+                )
+            )
         ):
             violations.append(
                 f"{path}: {CANONICAL_WORKFLOW} is the sole Agent Runtime publisher"
@@ -220,7 +244,9 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
             or not (root / path).is_file()
         ):
             continue
-        text = active_text(path, (root / path).read_text(encoding="utf-8", errors="replace"))
+        text = active_text(
+            path, (root / path).read_text(encoding="utf-8", errors="replace")
+        )
         phala = has_phala_context(path, text)
         if PHALA_ENV_OVERRIDE.search(text):
             violations.append(
@@ -257,7 +283,9 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
     args = parser.parse_args()
     violations = check_repository(args.root.resolve())
     if violations:

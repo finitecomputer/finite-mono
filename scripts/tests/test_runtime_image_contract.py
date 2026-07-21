@@ -9,6 +9,7 @@ from scripts.check_runtime_image_contract import (
     CANONICAL_DOCKERFILE,
     CANONICAL_DOCKERFILE_ANCHORS,
     CANONICAL_WORKFLOW,
+    CANONICAL_WORKFLOW_ANCHORS,
     PHALA_ADAPTER,
     check_repository,
 )
@@ -26,7 +27,9 @@ class RuntimeImageContractTests(unittest.TestCase):
         )
         self.write(
             CANONICAL_WORKFLOW,
-            "name: Agent Runtime Image\nrun: docker build . && docker push agent-runtime",
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            + "\n".join(CANONICAL_WORKFLOW_ANCHORS),
         )
         self.write(
             PHALA_ADAPTER,
@@ -52,7 +55,24 @@ class RuntimeImageContractTests(unittest.TestCase):
 
     def test_second_phala_dockerfile_fails(self) -> None:
         self.write("deploy/phala/Dockerfile", "FROM canonical-but-forked")
-        self.assertTrue(any("second Runtime Dockerfile" in item for item in self.violations()))
+        self.assertTrue(
+            any("second Runtime Dockerfile" in item for item in self.violations())
+        )
+
+    def test_runtime_smoke_report_path_contract_fails_closed(self) -> None:
+        self.write(
+            CANONICAL_WORKFLOW,
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            "--report finitechat/target/runtime-image-durable-smoke/report.json\n"
+            'open("finitechat/target/runtime-image-durable-smoke/report.json")',
+        )
+        self.assertTrue(
+            any(
+                "missing canonical Runtime workflow anchor" in item
+                for item in self.violations()
+            )
+        )
 
     def test_phala_readonly_workflow_passes_but_build_lane_fails(self) -> None:
         workflow = Path(".github/workflows/phala-readonly-preflight.yml")
@@ -64,20 +84,29 @@ class RuntimeImageContractTests(unittest.TestCase):
             "run: runner preflight --read-only",
         )
         self.assertEqual(self.violations(), [])
-        self.write(workflow, "name: Phala image\nrun: docker build -f deploy/phala/Dockerfile .")
-        self.assertTrue(any("cannot build/publish" in item for item in self.violations()))
+        self.write(
+            workflow,
+            "name: Phala image\nrun: docker build -f deploy/phala/Dockerfile .",
+        )
+        self.assertTrue(
+            any("cannot build/publish" in item for item in self.violations())
+        )
 
     def test_second_agent_runtime_publisher_fails(self) -> None:
         self.write(
             ".github/workflows/runtime-backup-publisher.yml",
             "name: backup\nrun: docker push ghcr.io/example/agent-runtime:latest",
         )
-        self.assertTrue(any("sole Agent Runtime publisher" in item for item in self.violations()))
+        self.assertTrue(
+            any("sole Agent Runtime publisher" in item for item in self.violations())
+        )
 
     def test_mutable_phala_image_fails_and_digest_passes(self) -> None:
         config = Path("infra/phala-worker.yml")
         self.write(config, "runner: phala\nimage: ghcr.io/example/agent-runtime:latest")
-        self.assertTrue(any("mutable Phala Runtime image" in item for item in self.violations()))
+        self.assertTrue(
+            any("mutable Phala Runtime image" in item for item in self.violations())
+        )
         self.write(
             config,
             f"runner: phala\nimage: ghcr.io/example/agent-runtime@sha256:{'a' * 64}",
@@ -92,7 +121,9 @@ class RuntimeImageContractTests(unittest.TestCase):
         ):
             with self.subTest(setting=setting):
                 self.write("infra/phala-worker.env", setting)
-                self.assertTrue(any("cannot override" in item for item in self.violations()))
+                self.assertTrue(
+                    any("cannot override" in item for item in self.violations())
+                )
 
     def test_missing_digest_guard_fails(self) -> None:
         self.write(PHALA_ADAPTER, "impl PhalaConfig { fn validate(&self) {} }")
