@@ -14,8 +14,8 @@ service key connects the replacement limiter to the same Core API.
 
 | Item | Current production | Target |
 |---|---|---|
-| Limiter source | legacy `finitecomputer`, commit `81f40e8` | this repo, exact merged commit recorded with the image |
-| Limiter image | `ghcr.io/finitecomputer/finite-private-limiter:2026-07-02.glm52.health.1@sha256:f977b238439ff4caa3f416bf1ec8f16ed383640d7417262d26ed4388c8624d5c` | `ghcr.io/finitecomputer/private-limiter:<version>@<digest>`; fill from mono CI |
+| Limiter source | legacy `finitecomputer`, commit `81f40e8` | this repo, `cafe85246bce88201c23a46ec7b33c8e28cc25e4` |
+| Limiter image | `ghcr.io/finitecomputer/finite-private-limiter:2026-07-02.glm52.health.1@sha256:f977b238439ff4caa3f416bf1ec8f16ed383640d7417262d26ed4388c8624d5c` | `ghcr.io/finitecomputer/private-limiter:2026-07-21.1@sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b` |
 | GLM image | upstream v0.0.14, `sha256:8cc690cf5b1c26b0bc14894a7ca27890386b536930b69172678560220572648b` | upstream v0.0.17 (`84b2e80`), `sha256:0a73ccd09e52d63ef101ac2911e54760b58ca6e0596cadfd219e096d54b1a396` |
 | CVM | `0.10.4` | `0.10.8` |
 | Satellite | `finitecomputer/confidential-kimi-k2-6` | same repo and outer deployment |
@@ -39,11 +39,11 @@ multi-GPU model starts. Announce a wider window and do not claim zero downtime.
    therefore an explicit, quota-consuming test inside the approved downtime
    window below, against a dedicated synthetic canary grant. This is not a
    reason to waive the latency gate.
-5. In mono only, replace the invalid limiter digest placeholder in
-   `infra/tinfoil/confidential-kimi-k2-6/tinfoil-config.candidate.yml` with the
-   mono CI digest and review a local diff against both the currently deployed
-   satellite config and upstream v0.0.17. Do not create or update a satellite
-   branch before the approval boundary below.
+5. Confirm the mono candidate still pins limiter digest
+   `sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b`
+   and review a local diff against both the currently deployed satellite config
+   and upstream v0.0.17. Do not create or update a satellite branch before the
+   approval boundary below.
 6. Confirm the topology remains `glm-5-2:8001` (private) →
    `finite-private-limiter:8002` → public shim; `shim.upstream-port` is 8002;
    only the limiter joins the `core-api` allowlist network.
