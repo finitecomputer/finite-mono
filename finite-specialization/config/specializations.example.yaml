@@ -26,6 +26,7 @@ spark_backing:
         - responses_capable_text_routes
         - image_text_routes_when_admitted
         - audio_speech_routes_when_admitted
+        - embedding_routes_when_admitted
       verification_required:
         - front_door_model_available_metrics
         - route_health_healthy
@@ -64,6 +65,37 @@ agent_profiles:
       model ID against the live Hermes install before materializing.
 
 capabilities:
+  - id: semantic-embedding
+    priority: service_first
+    hermes_surface: memory_or_retrieval_adapter
+    request_kinds:
+      - retrieval_query_embedding
+      - retrieval_document_embedding
+      - semantic_deduplication
+      - text_classification_features
+    input_contract: task_prefixed_text_or_text_array
+    output_contract: l2_normalized_float_vector_array
+    use_moa: false
+    spark_backing: active_verified_specialization
+    spark_endpoint_ref: spark-public-beta
+    working_instantiations:
+      - id: semantic-embedding.spark-nomic-v1-5
+        status: active_verified_specialization
+        verified_at: "2026-07-21"
+        model: nomic-embed-text-v1-5
+        endpoint: /v1/embeddings
+        dimensions: 768
+        max_input_tokens_per_item: 2048
+        task_prefixes:
+          - search_query
+          - search_document
+          - clustering
+          - classification
+        checkpoint: docs/checkpoints/2026-07-21-nomic-embedding-specialization.md
+    notes: The calling retrieval or memory adapter selects the task prefix;
+      Front Door does not infer one. This is an embedding service capability,
+      not MoA and not a chat model.
+
   - id: speech-to-text
     priority: config_first
     hermes_surface: stt
