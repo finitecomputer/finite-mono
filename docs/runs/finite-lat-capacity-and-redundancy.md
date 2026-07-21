@@ -149,6 +149,12 @@ The pinned lat3 nixpkgs revision is
   limit of 32.
 - Result: both halves of the private bridge and both Runner schedules are now
   reboot-persistent and declarative.
+- PR [#153](https://github.com/finitecomputer/finite-mono/pull/153) was deployed
+  from merged revision `8bb4e47b991f675eb84b47b7331d23809da5c241` after the
+  pre-deploy recovery snapshot `20260721T190542Z`. Both the system profile and
+  `/run/current-system` resolve to
+  `/nix/store/2pr6p55l9wjwcv8as6kai91kg6vvlnkd-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
+  Core and the public dashboard edge passed health checks after the switch.
 
 ### finite-lat-3 storage truth
 

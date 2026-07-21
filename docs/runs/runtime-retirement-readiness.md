@@ -79,10 +79,16 @@ and the concise
   and Core flow. The temporary repair copies were removed only after the
   immutable receipt existed; the original retained state and Borg archive
   remain.
-- Sol 2 remains untouched. Core records an active Runtime, but finite-lat-1 has
-  neither its canonical container metadata nor its expected durable-state
-  directory. That is an unresolved storage ambiguity, not authority to retire
-  or rewrite its records.
+- PR [#153](https://github.com/finitecomputer/finite-mono/pull/153) added the
+  generic operator-only unrecoverable-legacy archive boundary. Immediately
+  before using it for Sol 2, Core still had the exact expected Project,
+  Runtime, source host, source machine, and owner binding, with no provider
+  metadata, active lifecycle request, or retirement receipt; every containerd
+  namespace lacked its compute and its exact durable-state directory was
+  absent. Paul acknowledged this disposable pre-launch test Agent was
+  unrecoverable. The audited transaction archived its membership, deactivated
+  its Runtime link, removed relay access, revoked its one scoped Finite Private
+  key, and retained all Core history. It did not create or claim a backup.
 - Upgrade Canary 0715 and Waffle Prime remained linked, receipt-free, and
   healthy. The three healthy-batch retirements reduced running Kata sandboxes
   from 26 to 23 exactly; the temporary Waffle repair returned the count to 23.
