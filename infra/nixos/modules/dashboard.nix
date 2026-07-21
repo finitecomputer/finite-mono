@@ -4,8 +4,8 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-07-16.4, source 92dad53934463d0c56655a745b84300375ca77d6.
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:9786fdb2fec39fd97d859c39709ba85756d4eb792281548406a718b4e6018247";
+    # 2026-07-21.1, source 4960f052b214903df5054b726e494fb2dbb126b8.
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:043fb2d8506c2e76cb0dc1e8a50925aba2ad9c460c3887811925169eda99681c";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -22,9 +22,9 @@
       FC_DASHBOARD_RUNTIME_MODE = "customer";
       FC_DASHBOARD_DEFAULT_RUNNER_CLASS = "kata";
       FC_DASHBOARD_RUNNER_CLASSES = "kata";
-      # Owner-facing retirement stays hidden until the same deployment opens
-      # Core's independent request gate and configures the Kata archive path.
-      FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT = "false";
+      # The Core request gate remains the independent authority; the lat1 Kata
+      # Runner has a dedicated restricted retirement archive path.
+      FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT = "true";
       FC_CORE_BASE_URL = "http://127.0.0.1:4200";
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
