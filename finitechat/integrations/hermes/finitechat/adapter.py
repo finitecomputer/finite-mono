@@ -328,7 +328,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             metadata=metadata,
         )
         if not result.success:
-            logger.warning("[finitechat] could not deliver Finite Private usage notice: %s", result.error)
+            logger.warning(
+                "[finitechat] could not deliver Finite Private usage notice: %s", result.error
+            )
 
     async def send(
         self,
@@ -1570,8 +1572,7 @@ def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | 
     if not api_key:
         return None
     base_url = (
-        os.getenv("FINITE_PRIVATE_CONTROL_URL", "").strip()
-        or DEFAULT_FINITE_PRIVATE_CONTROL_URL
+        os.getenv("FINITE_PRIVATE_CONTROL_URL", "").strip() or DEFAULT_FINITE_PRIVATE_CONTROL_URL
     ).rstrip("/")
     request = urllib.request.Request(
         f"{base_url}/{path.lstrip('/')}",
@@ -1584,7 +1585,9 @@ def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | 
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=FINITE_PRIVATE_CONTROL_TIMEOUT_SECS) as response:
+        with urllib.request.urlopen(
+            request, timeout=FINITE_PRIVATE_CONTROL_TIMEOUT_SECS
+        ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         logger.debug("[finitechat] Finite Private control request failed: %s", exc)

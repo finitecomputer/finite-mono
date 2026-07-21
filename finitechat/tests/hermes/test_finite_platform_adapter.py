@@ -182,16 +182,16 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
 
     def test_post_turn_notice_uses_the_exact_inbound_conversation_and_chat(self):
+        module = cast(Any, self.module)
         adapter = self.adapter()
         calls = []
         adapter._finitechat_json = self._record_json(calls)
-        original = self.module._finite_private_control_request
-        self.module._finite_private_control_request = lambda path, method: {
+        original = module._finite_private_control_request
+        module._finite_private_control_request = lambda path, method: {
             "notice": {
                 "thresholdRemainingPercent": 25,
                 "message": (
-                    "You have 25% remaining. Your usage resets at "
-                    "2026-07-21T18:00:00Z (in 5h)."
+                    "You have 25% remaining. Your usage resets at 2026-07-21T18:00:00Z (in 5h)."
                 ),
             }
         }
@@ -212,7 +212,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 )
             )
         finally:
-            self.module._finite_private_control_request = original
+            module._finite_private_control_request = original
         self.assertEqual([call[0] for call in calls], ["send"])
         payload = calls[0][1]
         self.assertEqual(payload["conversation_id"], "topic-build")
@@ -220,12 +220,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertIn("2026-07-21T18:00:00Z", payload["text"])
 
     def test_failed_or_cancelled_turn_does_not_claim_a_usage_notice(self):
+        module = cast(Any, self.module)
         adapter = self.adapter()
         called = []
-        original = self.module._finite_private_control_request
-        self.module._finite_private_control_request = lambda path, method: called.append(
-            (path, method)
-        )
+        original = module._finite_private_control_request
+        module._finite_private_control_request = lambda path, method: called.append((path, method))
         event = MessageEvent(text="hello", source=types.SimpleNamespace(chat_id="room-agent-1"))
         try:
             for outcome in ("failure", "cancelled"):
@@ -236,7 +235,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     )
                 )
         finally:
-            self.module._finite_private_control_request = original
+            module._finite_private_control_request = original
         self.assertEqual(called, [])
 
     def test_check_requirements_uses_finitechat_bin_not_finitecomputer(self):
