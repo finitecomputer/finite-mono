@@ -106,7 +106,7 @@ jobs:
           fi
           finitechat/scripts/hermes-durable-home-docker-smoke.py \
             --image "$LOCAL_IMAGE_ID" \
-            --report finitechat/target/runtime-image-durable-smoke/report.json
+            --report target/runtime-image-durable-smoke/report.json
           test "$(docker image inspect "$VERSION_REF" --format '{{.Id}}')" = "$LOCAL_IMAGE_ID"
           test "$(python3 -c 'import json; print(json.load(open("finitechat/target/runtime-image-durable-smoke/report.json"))["facts"]["image_id"])')" = "$LOCAL_IMAGE_ID"
 
