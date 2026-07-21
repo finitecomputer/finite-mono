@@ -18,8 +18,9 @@ is historical, not current authority.
   Runtime Retirement with AEON's independent empty-target restore.
 - [x] Retire Agent Camp Demo and Sites Canary 0715, then preserve and retire
   stranded Waffle without touching Upgrade Canary 0715 or Waffle Prime.
-- [ ] Resolve Sol 2 only if its missing durable-state location can be proved;
-  its Core records are untouched meanwhile.
+- [x] Confirm Sol 2 has neither compute nor its exact durable-state directory;
+  archive the acknowledged unrecoverable pre-launch test Runtime through the
+  generic audited legacy boundary while retaining Core history.
 
 ## Before the lat1 RAID maintenance window
 
