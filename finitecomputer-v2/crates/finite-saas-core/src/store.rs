@@ -4,25 +4,25 @@ use crate::launch_codes::{
     prepare_launch_code_batch,
 };
 use crate::{
-    AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
-    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
-    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
-    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
-    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
-    AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
-    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
-    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
-    FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateApiKeyStatus, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
+    AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
+    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeExactInput,
+    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
+    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
+    ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass, BillingOverview,
+    BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
+    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
@@ -37,15 +37,16 @@ use crate::{
     RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
     RuntimeStatusSnapshot, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
-    agent_creation_entitlement_id_for, append_provider_operation_transition,
-    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
-    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
+    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
+    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
+    normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
@@ -607,6 +608,16 @@ impl CoreStore {
         }
     }
 
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        match self {
+            Self::Memory(store) => store.admin_archive_unrecoverable_runtime(input).await,
+            Self::Postgres(store) => store.admin_archive_unrecoverable_runtime(input).await,
+        }
+    }
+
     pub async fn admin_request_runtime_restart(
         &self,
         input: AdminRuntimeControlInput,
@@ -1149,6 +1160,14 @@ impl MemoryCoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let state = self.state.lock().await;
         Ok(state.admin_runtime_overviews())
+    }
+
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        let mut state = self.state.lock().await;
+        state.admin_archive_unrecoverable_runtime(input)
     }
 
     pub async fn admin_request_runtime_restart(
@@ -1910,6 +1929,17 @@ impl PostgresCoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.client.lock().await;
         postgres_admin_runtime_overviews(&*client).await
+    }
+
+    pub async fn admin_archive_unrecoverable_runtime(
+        &self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let receipt = postgres_admin_archive_unrecoverable_runtime(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(receipt)
     }
 
     pub async fn admin_request_runtime_restart(
@@ -5873,6 +5903,136 @@ where
     .await
 }
 
+async fn postgres_admin_archive_unrecoverable_runtime<C>(
+    client: &C,
+    input: AdminArchiveUnrecoverableRuntimeInput,
+) -> CoreResult<UnrecoverableRuntimeArchiveReceipt>
+where
+    C: GenericClient + Sync,
+{
+    if !input.operator_observed_compute_absent
+        || !input.operator_observed_durable_state_absent
+        || !input.owner_acknowledged_unrecoverable
+    {
+        return Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired);
+    }
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+    if admin_workos_user_id.is_empty() {
+        return Err(CoreError::MissingWorkosUserId);
+    }
+    let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let row = client
+        .query_opt(
+            "SELECT runtime.id AS agent_runtime_id, runtime.source_host_id,
+                    runtime.source_machine_id, owner.normalized_email AS owner_email,
+                    (
+                      runtime.provider_runtime_handle IS NOT NULL
+                      OR COALESCE(jsonb_array_length(runtime.provider_runtime_handle_history), 0) > 0
+                      OR runtime.contact_endpoint IS NOT NULL
+                    ) AS has_provider_metadata
+             FROM projects AS project
+             JOIN users AS owner ON owner.id = project.owner_user_id
+             JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.active = TRUE
+             JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
+             WHERE project.id = $1
+             FOR UPDATE OF project, link, runtime",
+            &[&input.project_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    let agent_runtime_id: String = row.get("agent_runtime_id");
+    let source_host_id: String = row.get("source_host_id");
+    let source_machine_id: String = row.get("source_machine_id");
+    let owner_email: String = row.get("owner_email");
+    if owner_email != expected_owner_email {
+        return Err(CoreError::UnrecoverableRuntimeArchiveOwnerMismatch);
+    }
+    if agent_runtime_id != input.expected_agent_runtime_id
+        || source_host_id != input.expected_source_host_id
+        || source_machine_id != input.expected_source_machine_id
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if row.get::<_, bool>("has_provider_metadata") {
+        return Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_control_requests
+             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    if client
+        .query_opt(
+            "SELECT 1 FROM runtime_retirement_snapshots WHERE agent_runtime_id = $1 LIMIT 1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeRetirementSnapshotConflict);
+    }
+
+    ensure_grandfathered_linked_user(client, &admin_email, &admin_workos_user_id, &now).await?;
+    let revoked_api_key_ids = postgres_offboard_runtime(
+        client,
+        &input.project_id,
+        &agent_runtime_id,
+        &now,
+        "finite_private.runtime.archive_unrecoverable_revoke_keys",
+        Some(&admin_email),
+    )
+    .await?;
+    let revoked_finite_private_key_count = revoked_api_key_ids.len();
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "runtime.admin_archive_unrecoverable",
+            target_type: "agent_runtime",
+            target_id: &agent_runtime_id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": input.project_id,
+                "ownerEmail": owner_email,
+                "sourceHostId": source_host_id,
+                "sourceMachineId": source_machine_id,
+                "operatorObservedComputeAbsent": true,
+                "operatorObservedDurableStateAbsent": true,
+                "ownerAcknowledgedUnrecoverable": true,
+                "revokedApiKeyIds": revoked_api_key_ids,
+            }),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(UnrecoverableRuntimeArchiveReceipt {
+        project_id: input.project_id,
+        agent_runtime_id,
+        source_host_id,
+        source_machine_id,
+        owner_email,
+        archived_at: now,
+        revoked_finite_private_key_count,
+    })
+}
+
 async fn postgres_admin_request_runtime_control_bound<C>(
     client: &C,
     input: AdminRuntimeControlInput,
@@ -6852,6 +7012,29 @@ async fn postgres_offboard_destroyed_runtime<C>(
 where
     C: GenericClient + Sync,
 {
+    postgres_offboard_runtime(
+        client,
+        &request.project_id,
+        &request.agent_runtime_id,
+        now,
+        "finite_private.runtime.destroy_revoke_keys",
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn postgres_offboard_runtime<C>(
+    client: &C,
+    project_id: &str,
+    agent_runtime_id: &str,
+    now: &str,
+    revocation_action: &'static str,
+    actor: Option<&str>,
+) -> CoreResult<Vec<String>>
+where
+    C: GenericClient + Sync,
+{
     client
         .execute(
             "UPDATE project_room_memberships AS membership
@@ -6864,21 +7047,21 @@ where
                  WHERE project.id = $1
                    AND project.import_candidate_id IS NULL
                )",
-            &[&request.project_id, &now],
+            &[&project_id, &now],
         )
         .await
         .map_err(store_error)?;
     client
         .execute(
             "UPDATE project_runtime_links SET active = FALSE WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id],
+            &[&agent_runtime_id],
         )
         .await
         .map_err(store_error)?;
     client
         .execute(
             "DELETE FROM runtime_relay_credentials WHERE agent_runtime_id = $1",
-            &[&request.agent_runtime_id],
+            &[&agent_runtime_id],
         )
         .await
         .map_err(store_error)?;
@@ -6889,7 +7072,7 @@ where
              WHERE status = 'active'
                AND (agent_runtime_id = $1 OR project_id = $2)
              RETURNING id",
-            &[&request.agent_runtime_id, &request.project_id, &now],
+            &[&agent_runtime_id, &project_id, &now],
         )
         .await
         .map_err(store_error)?;
@@ -6898,14 +7081,14 @@ where
         insert_finite_private_admin_audit_event(
             client,
             FinitePrivateAdminAuditInsert {
-                action: "finite_private.runtime.destroy_revoke_keys",
+                action: revocation_action,
                 target_type: "agent_runtime",
-                target_id: &request.agent_runtime_id,
+                target_id: agent_runtime_id,
                 grant_id: None,
                 api_key_id: None,
-                actor: None,
+                actor,
                 metadata: json!({
-                    "projectId": request.project_id.clone(),
+                    "projectId": project_id,
                     "revokedApiKeyIds": revoked_api_key_ids,
                 }),
                 now,
@@ -6913,7 +7096,7 @@ where
         )
         .await?;
     }
-    Ok(())
+    Ok(revoked_api_key_ids)
 }
 
 /// Find-or-create a linked user by natural key (email), then ensure their
@@ -10147,6 +10330,52 @@ mod tests {
                     "missing Postgres audit action {expected}"
                 );
             }
+
+            let archive_input = |compute_absent| AdminArchiveUnrecoverableRuntimeInput {
+                admin_verified_email: admin_email.clone(),
+                admin_workos_user_id: format!("workos_admin_ops_admin_{run}"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "admin-ops-host".to_string(),
+                expected_source_machine_id: machine_id.clone(),
+                expected_owner_email: owner_email.clone(),
+                operator_observed_compute_absent: compute_absent,
+                operator_observed_durable_state_absent: true,
+                owner_acknowledged_unrecoverable: true,
+                now: None,
+            };
+            assert!(matches!(
+                store
+                    .admin_archive_unrecoverable_runtime(archive_input(false))
+                    .await
+                    .unwrap_err(),
+                CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired
+            ));
+            let archive = store
+                .admin_archive_unrecoverable_runtime(archive_input(true))
+                .await
+                .unwrap();
+            assert_eq!(archive.agent_runtime_id, runtime_id);
+            let archived_overview = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert!(!archived_overview.runtime_link_active);
+            assert!(
+                store
+                    .finite_private_admin_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| {
+                        event.action == "runtime.admin_archive_unrecoverable"
+                            && event.actor == admin_email
+                            && event.target_id == runtime_id
+                    })
+            );
         })
         .await;
     }

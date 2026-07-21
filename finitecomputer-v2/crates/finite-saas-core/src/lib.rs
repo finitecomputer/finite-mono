@@ -547,6 +547,12 @@ pub enum CoreError {
     RuntimeRetirementSnapshotConflict,
     #[error("runtime retirement is not enabled for this Core generation")]
     RuntimeRetirementNotEnabled,
+    #[error("all unrecoverable runtime archive acknowledgements are required")]
+    UnrecoverableRuntimeArchiveAcknowledgementRequired,
+    #[error("unrecoverable runtime archive owner does not match")]
+    UnrecoverableRuntimeArchiveOwnerMismatch,
+    #[error("runtime has provider metadata and cannot use unrecoverable legacy archival")]
+    UnrecoverableRuntimeArchiveProviderMetadataPresent,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not running")]
@@ -1423,6 +1429,36 @@ pub struct AdminRuntimeControlInput {
     pub admin_workos_user_id: String,
     pub project_id: String,
     pub now: Option<String>,
+}
+
+/// Exact, operator-attested boundary for removing an unrecoverable legacy
+/// Runtime from active inventory. This path never deletes retained Core rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminArchiveUnrecoverableRuntimeInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub expected_owner_email: String,
+    pub operator_observed_compute_absent: bool,
+    pub operator_observed_durable_state_absent: bool,
+    pub owner_acknowledged_unrecoverable: bool,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnrecoverableRuntimeArchiveReceipt {
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub source_host_id: String,
+    pub source_machine_id: String,
+    pub owner_email: String,
+    pub archived_at: String,
+    pub revoked_finite_private_key_count: usize,
 }
 
 /// One provisioned box as seen by dashboard operators.
@@ -2424,6 +2460,108 @@ impl BridgeCoreState {
             Some(input.target_runtime_artifact_id),
             Some(&expected),
         )
+    }
+
+    pub fn admin_archive_unrecoverable_runtime(
+        &mut self,
+        input: AdminArchiveUnrecoverableRuntimeInput,
+    ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
+        if !input.operator_observed_compute_absent
+            || !input.operator_observed_durable_state_absent
+            || !input.owner_acknowledged_unrecoverable
+        {
+            return Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired);
+        }
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+        if admin_workos_user_id.is_empty() {
+            return Err(CoreError::MissingWorkosUserId);
+        }
+        let expected_owner_email = normalize_owner_email(Some(&input.expected_owner_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let project = self
+            .projects
+            .get(&input.project_id)
+            .cloned()
+            .ok_or(CoreError::ProjectNotFound)?;
+        let owner_email = self
+            .users
+            .get(&project.owner_user_id)
+            .map(|user| user.email.clone())
+            .ok_or(CoreError::ProjectNotFound)?;
+        if owner_email != expected_owner_email {
+            return Err(CoreError::UnrecoverableRuntimeArchiveOwnerMismatch);
+        }
+        let runtime = self
+            .active_runtime_for_project(&project.id)
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if runtime.id != input.expected_agent_runtime_id
+            || runtime.source_host_id != input.expected_source_host_id
+            || runtime.source_machine_id != input.expected_source_machine_id
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        if runtime.provider_runtime_handle.is_some()
+            || !runtime.provider_runtime_handle_history.is_empty()
+            || runtime.contact_endpoint.is_some()
+        {
+            return Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent);
+        }
+        if self.runtime_control_requests.values().any(|request| {
+            request.agent_runtime_id == runtime.id
+                && matches!(
+                    request.status,
+                    RuntimeControlRequestStatus::Requested | RuntimeControlRequestStatus::Running
+                )
+        }) {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        if self
+            .runtime_retirement_snapshots
+            .values()
+            .any(|snapshot| snapshot.receipt.agent_runtime_id == runtime.id)
+        {
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+
+        self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
+        let revoked_api_key_ids = self.offboard_runtime(
+            &project.id,
+            &runtime.id,
+            &now,
+            "finite_private.runtime.archive_unrecoverable_revoke_keys",
+            Some(&admin_email),
+        );
+        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
+            action: "runtime.admin_archive_unrecoverable",
+            target_type: "agent_runtime",
+            target_id: &runtime.id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": project.id,
+                "ownerEmail": owner_email,
+                "sourceHostId": runtime.source_host_id,
+                "sourceMachineId": runtime.source_machine_id,
+                "operatorObservedComputeAbsent": true,
+                "operatorObservedDurableStateAbsent": true,
+                "ownerAcknowledgedUnrecoverable": true,
+                "revokedApiKeyIds": revoked_api_key_ids,
+            }),
+            created_at: &now,
+        });
+        Ok(UnrecoverableRuntimeArchiveReceipt {
+            project_id: project.id,
+            agent_runtime_id: runtime.id,
+            source_host_id: runtime.source_host_id,
+            source_machine_id: runtime.source_machine_id,
+            owner_email,
+            archived_at: now,
+            revoked_finite_private_key_count: revoked_api_key_ids.len(),
+        })
     }
 
     /// Admin variant of `request_runtime_control`: the acting user does not
@@ -4609,56 +4747,73 @@ impl BridgeCoreState {
     }
 
     fn offboard_destroyed_runtime(&mut self, request: &RuntimeControlRequest) {
+        self.offboard_runtime(
+            &request.project_id,
+            &request.agent_runtime_id,
+            &request.updated_at,
+            "finite_private.runtime.destroy_revoke_keys",
+            None,
+        );
+    }
+
+    fn offboard_runtime(
+        &mut self,
+        project_id: &str,
+        agent_runtime_id: &str,
+        now: &str,
+        revocation_action: &'static str,
+        actor: Option<&str>,
+    ) -> Vec<String> {
         if self
             .projects
-            .get(&request.project_id)
+            .get(project_id)
             .is_some_and(|project| project.import_candidate_id.is_none())
         {
             for membership in self
                 .project_room_memberships
                 .values_mut()
-                .filter(|membership| membership.project_id == request.project_id)
+                .filter(|membership| membership.project_id == project_id)
             {
                 if membership.archived_at.is_none() {
-                    membership.archived_at = Some(request.updated_at.clone());
+                    membership.archived_at = Some(now.to_string());
                 }
             }
         }
         for link in self
             .project_runtime_links
             .values_mut()
-            .filter(|link| link.agent_runtime_id == request.agent_runtime_id)
+            .filter(|link| link.agent_runtime_id == agent_runtime_id)
         {
             link.active = false;
         }
-        self.runtime_relay_credentials
-            .remove(&request.agent_runtime_id);
+        self.runtime_relay_credentials.remove(agent_runtime_id);
         let mut revoked_api_key_ids = Vec::new();
         for key in self.finite_private_api_keys.values_mut().filter(|key| {
-            key.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
-                || key.project_id.as_deref() == Some(request.project_id.as_str())
+            key.agent_runtime_id.as_deref() == Some(agent_runtime_id)
+                || key.project_id.as_deref() == Some(project_id)
         }) {
             if key.status == FinitePrivateApiKeyStatus::Active {
                 key.status = FinitePrivateApiKeyStatus::Revoked;
-                key.updated_at = request.updated_at.clone();
+                key.updated_at = now.to_string();
                 revoked_api_key_ids.push(key.id.clone());
             }
         }
         if !revoked_api_key_ids.is_empty() {
             self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
-                action: "finite_private.runtime.destroy_revoke_keys",
+                action: revocation_action,
                 target_type: "agent_runtime",
-                target_id: &request.agent_runtime_id,
+                target_id: agent_runtime_id,
                 grant_id: None,
                 api_key_id: None,
-                actor: None,
+                actor,
                 metadata: json!({
-                    "projectId": request.project_id,
+                    "projectId": project_id,
                     "revokedApiKeyIds": revoked_api_key_ids,
                 }),
-                created_at: &request.updated_at,
+                created_at: now,
             });
         }
+        revoked_api_key_ids
     }
 
     pub fn source_host_relay_endpoint(
@@ -11114,6 +11269,103 @@ mod tests {
             !actions
                 .iter()
                 .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+        );
+    }
+
+    #[test]
+    fn unrecoverable_runtime_archive_is_exact_fail_closed_and_retains_history() {
+        let mut base = BridgeCoreState::default();
+        promote_runtime_artifact(&mut base);
+        let runtime_id = complete_self_serve_agent(
+            &mut base,
+            "owner@finite.vip",
+            "user_workos_owner_archive",
+            "archive-submit",
+            "legacy-agent-001",
+            "artifact-v1",
+            "2026-07-21T20:00:00Z",
+        );
+        let project_id = base.agent_runtimes[&runtime_id].project_id.clone();
+        let input = |compute_absent: bool| AdminArchiveUnrecoverableRuntimeInput {
+            admin_verified_email: "admin@finite.vip".to_string(),
+            admin_workos_user_id: "user_workos_admin_archive".to_string(),
+            project_id: project_id.clone(),
+            expected_agent_runtime_id: runtime_id.clone(),
+            expected_source_host_id: "oslo-host-1".to_string(),
+            expected_source_machine_id: "legacy-agent-001".to_string(),
+            expected_owner_email: "owner@finite.vip".to_string(),
+            operator_observed_compute_absent: compute_absent,
+            operator_observed_durable_state_absent: true,
+            owner_acknowledged_unrecoverable: true,
+            now: Some("2026-07-21T20:10:00Z".to_string()),
+        };
+
+        let mut missing_acknowledgement = base.clone();
+        assert!(matches!(
+            missing_acknowledgement.admin_archive_unrecoverable_runtime(input(false)),
+            Err(CoreError::UnrecoverableRuntimeArchiveAcknowledgementRequired)
+        ));
+        assert!(
+            missing_acknowledgement
+                .active_runtime_for_project(&project_id)
+                .is_some()
+        );
+
+        let mut wrong_binding = base.clone();
+        let mut wrong_binding_input = input(true);
+        wrong_binding_input.expected_source_machine_id = "replacement-agent".to_string();
+        assert!(matches!(
+            wrong_binding.admin_archive_unrecoverable_runtime(wrong_binding_input),
+            Err(CoreError::RuntimeSpecMismatch)
+        ));
+
+        let mut provider_managed = base.clone();
+        provider_managed
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .contact_endpoint = Some("https://legacy-agent.example.test/contact".to_string());
+        assert!(matches!(
+            provider_managed.admin_archive_unrecoverable_runtime(input(true)),
+            Err(CoreError::UnrecoverableRuntimeArchiveProviderMetadataPresent)
+        ));
+
+        let mut control_in_flight = base.clone();
+        control_in_flight
+            .admin_request_runtime_restart(AdminRuntimeControlInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_archive".to_string(),
+                project_id: project_id.clone(),
+                now: Some("2026-07-21T20:05:00Z".to_string()),
+            })
+            .unwrap();
+        assert!(matches!(
+            control_in_flight.admin_archive_unrecoverable_runtime(input(true)),
+            Err(CoreError::RuntimeControlOperationConflict)
+        ));
+
+        let receipt = base
+            .admin_archive_unrecoverable_runtime(input(true))
+            .unwrap();
+        assert_eq!(receipt.project_id, project_id);
+        assert_eq!(receipt.agent_runtime_id, runtime_id);
+        assert_eq!(receipt.owner_email, "owner@finite.vip");
+        assert_eq!(receipt.revoked_finite_private_key_count, 0);
+        assert!(base.active_runtime_for_project(&project_id).is_none());
+        assert!(base.projects.contains_key(&project_id));
+        assert!(base.agent_runtimes.contains_key(&runtime_id));
+        assert!(base.project_room_memberships.values().any(|membership| {
+            membership.project_id == project_id
+                && membership.archived_at.as_deref() == Some("2026-07-21T20:10:00Z")
+        }));
+        assert!(
+            base.finite_private_admin_audit_events
+                .values()
+                .any(|event| {
+                    event.action == "runtime.admin_archive_unrecoverable"
+                        && event.target_id == runtime_id
+                        && event.actor == "admin@finite.vip"
+                })
         );
     }
 

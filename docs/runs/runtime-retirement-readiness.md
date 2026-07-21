@@ -258,6 +258,7 @@ the deployed [`backups.nix`](../../infra/nixos/modules/backups.nix), and the
    durable state root. Cleanup is a required retryable phase: a failure returns
    the same request to the queue, and a retry re-verifies the remote archive
    from its persisted receipt before trying cleanup again.
+
 6. Only after staging cleanup succeeds, the Runner completes the leased control
    with the typed snapshot receipt.
    One Core transaction stores the immutable receipt, marks the Runtime
@@ -279,6 +280,22 @@ request and RuntimeSpec; absent compute without that evidence fails closed.
 No path may create a second conflicting snapshot for one request, silently
 select another durable directory, manually rewrite Core rows, or turn an absent
 container into generic relaunch work.
+
+### Unrecoverable legacy inventory
+
+Do not special-case pre-launch Agent names or identifiers. When both canonical
+compute and the expected durable-state directory are independently confirmed
+absent, the owner may acknowledge that the legacy Runtime is unrecoverable. An
+operator can then use `finite-saas-core runtime-archive-unrecoverable` with the
+exact Project, Runtime, source host, source machine, and owner email plus all
+three required acknowledgement flags.
+
+The Core transaction fails closed if that binding changed, provider metadata
+exists, a lifecycle control is active, or a retirement snapshot exists. On
+success it reuses the normal offboarding boundary: archive dashboard
+membership, deactivate the Runtime link, remove relay credentials, revoke
+scoped Finite Private keys, and retain all Project, Runtime, link, and audit
+history. This releases inventory; it does not claim or create a backup.
 
 ### Product surface
 
