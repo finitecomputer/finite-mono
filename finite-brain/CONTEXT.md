@@ -347,6 +347,35 @@ define who can read it. Folder-local `_index.md`, `config.md`, and `log.md`
 describe only that Folder. Root/global indexes must not leak private Folder
 titles, summaries, sources, or activity.
 
+### Hybrid Wiki Search
+
+The agent-facing local retrieval capability over the readable Markdown in a
+Vault Working Tree. It combines lexical and semantic relevance when available,
+falls back to lexical relevance alone, and returns one merged result list from
+the acting Member Identity's readable Folders. It returns locations in the
+original Pages rather than creating another knowledge authority.
+
+### Markdown Section
+
+The canonical Hybrid Wiki Search retrieval unit: the readable content under a
+Markdown heading together with its Page path, Page title, and heading ancestry.
+A Page without headings is one Markdown Section, and bounded subdivisions of a
+long section retain the same document context.
+
+### Embedding Provider
+
+The replaceable capability that converts a Markdown Section or search query
+into a semantic vector for Hybrid Wiki Search. Provider model identity and
+version belong to the derived index lifecycle; the provider does not become a
+knowledge authority or modify the underlying Page.
+
+### Search Evidence
+
+A ranked Hybrid Wiki Search result that identifies an original Markdown
+Section, its location, a short excerpt, local-sync disposition, and contributing
+retrieval signals. Search Evidence guides an agent to source Pages; it is not a
+generated answer or a new durable knowledge artifact.
+
 ### Asset
 
 An encrypted non-Markdown source file stored inside a Folder, such as a PDF,

@@ -38,6 +38,7 @@ fbrain open <brain-id> [path]
 fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
+fbrain search <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
@@ -97,6 +98,7 @@ fbrain sync now --summary
 fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
+fbrain search "credential rotation" --json
 fbrain activity
 fbrain wiki check --json
 ```
@@ -118,6 +120,18 @@ values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, an
 
 Each `remoteChanges` entry produced from a signed sync record includes
 `actorNpub`; `--summary` renders it as `actor=<npub>`.
+
+## Search Evidence
+
+`fbrain search` returns ranked Markdown Sections from every currently readable
+Folder in one result list. Repeat `--folder` to deliberately narrow the scope;
+an unknown or unreadable Folder fails closed. Results identify the Folder,
+Page path and title, heading ancestry, excerpt, sync disposition, and lexical
+signal. The default is ten results and the maximum explicit limit is fifty.
+
+The lexical index is private disposable state under `.finitebrain/`. It is
+maintained from live daemon saves, startup reconciliation, and sync, but it is
+not synced content, authoritative knowledge, a backup, or a Recovery Set.
 
 `wiki check` scans Markdown Pages in materialized readable Folders only. It
 resolves exact Page titles, unique filenames, and Folder-root-relative Page

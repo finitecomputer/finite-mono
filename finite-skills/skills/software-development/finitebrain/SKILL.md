@@ -245,8 +245,11 @@ Core wiki rules:
 - Prefer updating an existing topic over deleting it. When the user asks for
   permanent deletion, briefly double-check once in ordinary language, then
   delete on a clear yes; do not silently substitute an archive.
-- When querying, answer from curated wiki pages first. If the wiki lacks enough
-  evidence, say what is missing and suggest what source to ingest.
+- When querying, use `fbrain search "<query>" --json` for ranked evidence
+  across every readable Folder, then open the original Pages with ordinary file
+  tools. Use repeatable `--folder` only when the user deliberately narrows the
+  scope. If the wiki lacks enough evidence, say what is missing and suggest
+  what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do
   not stall.
 

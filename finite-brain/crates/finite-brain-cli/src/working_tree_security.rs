@@ -435,7 +435,7 @@ fn create_private_directory_all(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn create_private_directory_if_missing(path: &Path) -> Result<(), CliError> {
+pub(crate) fn create_private_directory_if_missing(path: &Path) -> Result<(), CliError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             reject_symlink_or_wrong_kind(path, &metadata, true)?;
@@ -483,7 +483,7 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
+pub(crate) fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -491,7 +491,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), CliError> {
+pub(crate) fn set_private_file_permissions(_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 

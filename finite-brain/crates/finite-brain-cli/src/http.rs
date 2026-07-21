@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::{
     CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport, find_agent_state,
-    load_signer, option_value, read_agent_state, run_working_tree_sync, signed_http_auth_header,
+    load_signer, mutate_agent_state, option_value, read_agent_state, reconcile_search_indexes,
+    run_working_tree_sync, signed_http_auth_header,
 };
 
 pub(crate) const FINITE_BRAIN_SERVER_URL_ENV: &str = "FINITE_BRAIN_SERVER_URL";
@@ -31,7 +32,21 @@ pub(crate) fn sync_once(
     args: &[String],
     activity_kind: &str,
 ) -> Result<SyncOnceReport, CliError> {
-    run_working_tree_sync(env, args, activity_kind)
+    let report = run_working_tree_sync(env, args, activity_kind);
+    if let Ok(Some(root)) = find_agent_state(&env.cwd)
+        && let Err(error) = reconcile_search_indexes(&root)
+    {
+        let message = error.to_string();
+        let _ = mutate_agent_state(env, |state, now| {
+            state.add_activity(
+                now,
+                "search.index.blocked",
+                format!("Search index reconciliation failed: {message}"),
+            );
+            Ok(())
+        });
+    }
+    report
 }
 
 pub(crate) fn signed_json_request(

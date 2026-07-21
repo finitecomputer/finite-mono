@@ -21,6 +21,8 @@ use tokio::sync::Semaphore;
 
 pub const DEFAULT_SPARK_BASE_URL: &str = "https://inference.finite.computer/v1";
 pub const DEFAULT_VISION_MODEL: &str = "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast";
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v1-5";
+pub const DEFAULT_EMBEDDING_MODEL_VERSION: &str = "nomic-embed-text-v1-5/2026-07-21";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
 pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
 pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
@@ -35,8 +37,11 @@ const DEFAULT_MAX_IMAGES: usize = 8;
 const DEFAULT_MAX_AUDIO_DURATION_SECONDS: u64 = 900;
 const DEFAULT_MAX_VIDEO_DURATION_SECONDS: u64 = 600;
 const DEFAULT_MAX_VIDEO_FRAMES: usize = 4;
+const DEFAULT_MAX_EMBEDDING_BATCH: usize = 64;
+const DEFAULT_MAX_EMBEDDING_INPUT_CHARS: usize = 32 * 1024;
+const DEFAULT_MAX_EMBEDDING_DIMENSIONS: usize = 8192;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WorkerConfig {
     pub bind_host: String,
     pub bind_port: u16,
@@ -44,6 +49,8 @@ pub struct WorkerConfig {
     pub spark_base_url: String,
     pub spark_bearer_token: Option<String>,
     pub vision_model: String,
+    pub embedding_model: Option<String>,
+    pub embedding_model_version: Option<String>,
     pub max_image_bytes: u64,
     pub max_inline_image_bytes: u64,
     pub max_output_chars: usize,
@@ -73,6 +80,14 @@ impl WorkerConfig {
             spark_bearer_token: non_empty_env("SPARK_GATEWAY_BEARER_TOKEN"),
             vision_model: non_empty_env("FINITE_SPECIALIZATION_VISION_MODEL")
                 .unwrap_or_else(|| DEFAULT_VISION_MODEL.to_string()),
+            embedding_model: Some(
+                non_empty_env("FINITE_SPECIALIZATION_EMBEDDING_MODEL")
+                    .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_owned()),
+            ),
+            embedding_model_version: Some(
+                non_empty_env("FINITE_SPECIALIZATION_EMBEDDING_MODEL_VERSION")
+                    .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_VERSION.to_owned()),
+            ),
             max_image_bytes: non_empty_env("FINITE_SPECIALIZATION_MAX_IMAGE_BYTES")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
@@ -152,7 +167,6 @@ impl WorkerConfig {
     }
 }
 
-#[derive(Debug)]
 struct WorkerState {
     config: WorkerConfig,
     client: Client,
@@ -420,6 +434,43 @@ pub enum ChatContent {
     Parts(Vec<Value>),
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingBatchRequest {
+    pub inputs: Vec<EmbeddingInput>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EmbeddingInput {
+    pub id: String,
+    pub kind: EmbeddingInputKind,
+    #[serde(default)]
+    pub page_title: Option<String>,
+    #[serde(default)]
+    pub heading_ancestry: Vec<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingInputKind {
+    Section,
+    Query,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamEmbeddingResponse {
+    model: Option<String>,
+    data: Vec<UpstreamEmbeddingVector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamEmbeddingVector {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
 pub fn app(config: WorkerConfig) -> Router {
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
@@ -453,8 +504,197 @@ pub fn app_with_client(config: WorkerConfig, client: Client) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
         .layer(DefaultBodyLimit::max(48 * 1024 * 1024))
         .with_state(state)
+}
+
+async fn embeddings(
+    State(state): State<Arc<WorkerState>>,
+    headers: HeaderMap,
+    Json(input): Json<EmbeddingBatchRequest>,
+) -> Result<Json<Value>, WorkerError> {
+    authenticate_worker_request(&state.config, &headers)?;
+    let model = state
+        .config
+        .embedding_model
+        .as_deref()
+        .ok_or_else(|| WorkerError::unavailable("embedding model is not configured"))?;
+    let model_version = state
+        .config
+        .embedding_model_version
+        .as_deref()
+        .ok_or_else(|| WorkerError::unavailable("embedding model version is not configured"))?;
+    let spark_token = state
+        .config
+        .spark_bearer_token
+        .as_deref()
+        .ok_or_else(|| WorkerError::unavailable("Spark gateway token is not configured"))?;
+    let normalized = validate_embedding_batch(&input)?;
+    let request_id = correlation_request_id(&headers);
+    let response = tokio::time::timeout(
+        Duration::from_secs(state.config.request_deadline_seconds),
+        state
+            .client
+            .post(format!(
+                "{}/embeddings",
+                state.config.spark_base_url.trim_end_matches('/')
+            ))
+            .bearer_auth(spark_token)
+            .header("x-request-id", &request_id)
+            .json(&json!({ "model": model, "input": normalized }))
+            .send(),
+    )
+    .await
+    .map_err(|_| WorkerError::request_timeout("embedding request deadline expired"))?
+    .map_err(|error| {
+        if error.is_timeout() {
+            WorkerError::request_timeout("embedding request timed out")
+        } else {
+            WorkerError::bad_gateway("embedding upstream request failed")
+        }
+    })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| WorkerError::bad_gateway("embedding response was not readable"))?;
+    if !status.is_success() {
+        return Err(WorkerError::bad_gateway(format!(
+            "embedding upstream returned status {}",
+            status.as_u16()
+        )));
+    }
+    let upstream: UpstreamEmbeddingResponse = serde_json::from_str(&body)
+        .map_err(|_| WorkerError::bad_gateway("embedding response was not valid"))?;
+    let (dimensions, embeddings) = validate_upstream_embeddings(&input, model, upstream)?;
+    let vectors = input
+        .inputs
+        .iter()
+        .zip(embeddings)
+        .map(|(input, embedding)| json!({ "id": input.id, "embedding": embedding }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "model": model,
+        "modelVersion": model_version,
+        "dimensions": dimensions,
+        "vectors": vectors,
+        "requestId": request_id,
+    })))
+}
+
+fn validate_embedding_batch(input: &EmbeddingBatchRequest) -> Result<Vec<String>, WorkerError> {
+    if input.inputs.is_empty() || input.inputs.len() > DEFAULT_MAX_EMBEDDING_BATCH {
+        return Err(WorkerError::bad_request(format!(
+            "embedding batch must contain 1 to {DEFAULT_MAX_EMBEDDING_BATCH} inputs"
+        )));
+    }
+    let mut identifiers = std::collections::BTreeSet::new();
+    input
+        .inputs
+        .iter()
+        .map(|input| {
+            if input.id.is_empty()
+                || input.id.len() > 128
+                || !input
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                || !identifiers.insert(input.id.as_str())
+            {
+                return Err(WorkerError::bad_request(
+                    "embedding input IDs must be unique safe opaque identifiers",
+                ));
+            }
+            if input.text.trim().is_empty()
+                || input.text.chars().count() > DEFAULT_MAX_EMBEDDING_INPUT_CHARS
+            {
+                return Err(WorkerError::bad_request(format!(
+                    "embedding text must contain 1 to {DEFAULT_MAX_EMBEDDING_INPUT_CHARS} characters"
+                )));
+            }
+            match input.kind {
+                EmbeddingInputKind::Section => {
+                    let title = input
+                        .page_title
+                        .as_deref()
+                        .filter(|title| !title.trim().is_empty() && title.chars().count() <= 512)
+                        .ok_or_else(|| {
+                            WorkerError::bad_request(
+                                "section embeddings require a bounded Page title",
+                            )
+                        })?;
+                    if input.heading_ancestry.len() > 12
+                        || input.heading_ancestry.iter().any(|heading| {
+                            heading.trim().is_empty() || heading.chars().count() > 512
+                        })
+                    {
+                        return Err(WorkerError::bad_request(
+                            "section heading ancestry exceeds its bounds",
+                        ));
+                    }
+                    let mut context = format!("search_document: Title: {title}");
+                    if !input.heading_ancestry.is_empty() {
+                        context.push_str("\nHeadings: ");
+                        context.push_str(&input.heading_ancestry.join(" > "));
+                    }
+                    context.push_str("\n\n");
+                    context.push_str(&input.text);
+                    Ok(context)
+                }
+                EmbeddingInputKind::Query => {
+                    if input.page_title.is_some() || !input.heading_ancestry.is_empty() {
+                        return Err(WorkerError::bad_request(
+                            "query embeddings may contain only query text",
+                        ));
+                    }
+                    Ok(format!("search_query: {}", input.text))
+                }
+            }
+        })
+        .collect()
+}
+
+fn validate_upstream_embeddings(
+    input: &EmbeddingBatchRequest,
+    expected_model: &str,
+    upstream: UpstreamEmbeddingResponse,
+) -> Result<(usize, Vec<Vec<f32>>), WorkerError> {
+    if upstream.model.as_deref() != Some(expected_model) {
+        return Err(WorkerError::bad_gateway(
+            "embedding response model did not match the configured model",
+        ));
+    }
+    if upstream.data.len() != input.inputs.len() {
+        return Err(WorkerError::bad_gateway(
+            "embedding response cardinality did not match the request",
+        ));
+    }
+    let mut by_index = vec![None; input.inputs.len()];
+    for vector in upstream.data {
+        if vector.index >= by_index.len() || by_index[vector.index].is_some() {
+            return Err(WorkerError::bad_gateway(
+                "embedding response contained an unknown or duplicate index",
+            ));
+        }
+        by_index[vector.index] = Some(vector.embedding);
+    }
+    let vectors = by_index
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| WorkerError::bad_gateway("embedding response omitted an input"))?;
+    let dimensions = vectors.first().map(Vec::len).unwrap_or_default();
+    if dimensions == 0
+        || dimensions > DEFAULT_MAX_EMBEDDING_DIMENSIONS
+        || vectors.iter().any(|vector| {
+            vector.len() != dimensions || vector.iter().any(|value| !value.is_finite())
+        })
+    {
+        return Err(WorkerError::bad_gateway(
+            "embedding response dimensions or values were invalid",
+        ));
+    }
+    Ok((dimensions, vectors))
 }
 
 async fn health(State(state): State<Arc<WorkerState>>) -> Json<Value> {
@@ -3088,6 +3328,104 @@ mod tests {
         assert_eq!(captured.1["input"][1]["content"][1]["type"], "input_image");
     }
 
+    #[tokio::test]
+    async fn authenticated_embedding_batch_calls_spark_and_returns_provider_contract() {
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let upstream_url = spawn_spark_mock(
+            captured.clone(),
+            StatusCode::OK,
+            json!({
+                "model": "embed-test",
+                "data": [
+                    { "index": 0, "embedding": [0.25, 0.5, 0.75] },
+                    { "index": 1, "embedding": [0.1, 0.2, 0.3] }
+                ]
+            }),
+        )
+        .await;
+        let worker = spawn_worker(test_config(&upstream_url)).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{worker}/v1/embeddings"))
+            .bearer_auth("worker-secret")
+            .json(&json!({
+                "inputs": [
+                    {
+                        "id": "section-1",
+                        "kind": "section",
+                        "pageTitle": "Runbook",
+                        "headingAncestry": ["Operations", "Rotation"],
+                        "text": "Rotate the token after removing a device."
+                    },
+                    {
+                        "id": "query-1",
+                        "kind": "query",
+                        "text": "How do I rotate credentials?"
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["model"], "embed-test");
+        assert_eq!(body["modelVersion"], "embed-test-v1");
+        assert_eq!(body["dimensions"], 3);
+        assert_eq!(body["vectors"][0]["id"], "section-1");
+        assert_eq!(body["vectors"][0]["embedding"], json!([0.25, 0.5, 0.75]));
+        assert_eq!(body["vectors"][1]["id"], "query-1");
+
+        let captured = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            captured.0.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer spark-secret"
+        );
+        assert_eq!(captured.1["model"], "embed-test");
+        assert_eq!(
+            captured.1["input"][0],
+            "search_document: Title: Runbook\nHeadings: Operations > Rotation\n\nRotate the token after removing a device."
+        );
+        assert_eq!(
+            captured.1["input"][1],
+            "search_query: How do I rotate credentials?"
+        );
+        assert!(captured.1.get("folderId").is_none());
+        assert!(captured.1.get("path").is_none());
+    }
+
+    #[tokio::test]
+    async fn embedding_batch_rejects_prohibited_folder_metadata() {
+        let response = app(test_config("http://127.0.0.1:9"))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("authorization", "Bearer worker-secret")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "inputs": [{
+                                "id": "section-1",
+                                "kind": "section",
+                                "pageTitle": "Runbook",
+                                "headingAncestry": [],
+                                "text": "safe text",
+                                "folderId": "must-not-cross-boundary"
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     #[test]
     fn malformed_success_is_rejected_for_every_capability() {
         for capability in [Capability::Image, Capability::Audio, Capability::Video] {
@@ -3452,6 +3790,8 @@ mod tests {
             spark_base_url: spark_base_url.to_string(),
             spark_bearer_token: Some("spark-secret".to_string()),
             vision_model: "qwopus-test".to_string(),
+            embedding_model: Some("embed-test".to_string()),
+            embedding_model_version: Some("embed-test-v1".to_string()),
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_inline_image_bytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
             max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
@@ -3542,6 +3882,8 @@ mod tests {
     ) -> String {
         let responses_captured = captured.clone();
         let responses_body = response.clone();
+        let embeddings_captured = captured.clone();
+        let embeddings_body = response.clone();
         let app = Router::new()
             .route(
                 "/responses",
@@ -3560,6 +3902,18 @@ mod tests {
                 post(move |headers: HeaderMap, body: Bytes| {
                     let captured = captured.clone();
                     let response = response.clone();
+                    async move {
+                        let payload = serde_json::from_slice::<Value>(&body).unwrap();
+                        *captured.lock().unwrap() = Some((headers, payload));
+                        (status, Json(response))
+                    }
+                }),
+            )
+            .route(
+                "/embeddings",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let captured = embeddings_captured.clone();
+                    let response = embeddings_body.clone();
                     async move {
                         let payload = serde_json::from_slice::<Value>(&body).unwrap();
                         *captured.lock().unwrap() = Some((headers, payload));

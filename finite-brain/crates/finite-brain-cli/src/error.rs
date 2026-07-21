@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub enum CliError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    SearchIndex(String),
+    EmbeddingProvider(String),
     InvalidCommand(String),
     InvalidSigner(String),
     InvalidInput(String),
@@ -46,6 +48,8 @@ impl fmt::Display for CliError {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
+            Self::SearchIndex(reason) => write!(f, "search index error: {reason}"),
+            Self::EmbeddingProvider(reason) => write!(f, "embedding provider error: {reason}"),
             Self::InvalidCommand(command) => write!(f, "unknown command: {command}"),
             Self::InvalidSigner(reason) => write!(f, "invalid local signer: {reason}"),
             Self::InvalidInput(reason) => write!(f, "invalid input: {reason}"),

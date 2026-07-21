@@ -20,6 +20,7 @@ finite-identity.workspace = true
 finite-nostr.workspace = true
 nostr = { version = "0.45.0-alpha.2", features = ["nip44", "os-rng"] }
 pulldown-cmark.workspace = true
+rusqlite.workspace = true
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

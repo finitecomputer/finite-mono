@@ -3,18 +3,24 @@
 mod admin;
 mod args;
 mod clock;
+mod embedding_provider;
 mod environment;
 mod error;
 mod http;
 mod identity_authority;
 mod models;
 mod output;
+mod search;
 mod signer;
 mod state;
 mod sync_engine;
 mod wiki;
 mod working_tree_security;
 
+pub use embedding_provider::{
+    EmbeddingProviderAdapter, EmbeddingProviderConfig, EmbeddingProviderInput,
+    EmbeddingProviderResponse, EmbeddingProviderVector,
+};
 pub use environment::CliEnvironment;
 pub use error::CliError;
 pub use models::{ActivityEntry, ConflictEntry, ConflictState};
@@ -26,6 +32,7 @@ pub(crate) use http::*;
 pub(crate) use identity_authority::*;
 pub(crate) use models::*;
 pub(crate) use output::*;
+pub(crate) use search::*;
 pub(crate) use signer::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
@@ -110,6 +117,7 @@ where
         "unlock" => unlock(&args[1..], &env, json, output),
         "conflicts" => conflicts(&env, json, output),
         "resolve" => resolve(&args[1..], &env, json, output),
+        "search" => search(&args[1..], &env, json, output),
         "activity" => activity(&env, json, output),
         "wiki" => wiki(&args[1..], &env, json, output),
         "access" => access(&args[1..], &env, json, output),
@@ -126,7 +134,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\nwiki check\naccess explain|list|grant|revoke\nbrain list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --brain <brain-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nactivity\nwiki check\naccess explain|list|grant|revoke\nbrain list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --brain <brain-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -6208,6 +6216,568 @@ mod tests {
     }
 
     #[test]
+    fn search_returns_ranked_markdown_section_evidence_across_readable_folders() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        fs::create_dir_all(tree.join("Research")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "general".to_owned(),
+                        source_brain_id: None,
+                        path: "General".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "research".to_owned(),
+                        source_brain_id: None,
+                        path: "Research".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                ],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/authentication.md"),
+            "# Authentication\n\n## Quartz protocol\n\nRotate the quartz token after a device is removed.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("Research/minerals.md"),
+            "# Mineral notes\n\nQuartz is a crystalline mineral used in timing hardware.\n",
+        )
+        .unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree.join("General");
+        let mut output = Vec::new();
+        run_with_env(
+            ["search", "quartz token", "--json"],
+            env.clone(),
+            &mut output,
+        )
+        .unwrap();
+
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["query"], "quartz token");
+        assert_eq!(report["mode"], "lexical");
+        assert_eq!(
+            report["searchedFolders"],
+            serde_json::json!(["general", "research"])
+        );
+        assert_eq!(report["results"][0]["rank"], 1);
+        assert_eq!(report["results"][0]["folderId"], "general");
+        assert_eq!(report["results"][0]["pagePath"], "authentication.md");
+        assert_eq!(report["results"][0]["pageTitle"], "Authentication");
+        assert_eq!(
+            report["results"][0]["headingAncestry"],
+            serde_json::json!(["Authentication", "Quartz protocol"])
+        );
+        assert_eq!(report["results"][0]["disposition"], "local_only");
+        assert_eq!(
+            report["results"][0]["signals"],
+            serde_json::json!(["lexical"])
+        );
+
+        let mut human = Vec::new();
+        run_with_env(["search", "quartz token"], env, &mut human).unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(human.contains("General/authentication.md > Quartz protocol"));
+        assert!(human.contains("[local_only; lexical]"));
+        assert!(human.contains("Rotate the quartz token"));
+    }
+
+    #[test]
+    fn search_indexes_persist_reconcile_saved_edits_and_rebuild_corrupt_state() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "General".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/runbook.md"),
+            "# Runbook\n\n## Stable procedure\n\nKeep the violet recovery note.\n\n## Active procedure\n\nRestart the amber service.\n",
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+
+        let mut output = Vec::new();
+        run_with_env(["search", "amber", "--json"], env.clone(), &mut output).unwrap();
+        let first: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(first["results"][0]["pagePath"], "runbook.md");
+        let index_paths = fs::read_dir(tree.join(".finitebrain/search-indexes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(index_paths.len(), 1);
+        let stable_rowid = rusqlite::Connection::open(&index_paths[0])
+            .unwrap()
+            .query_row(
+                "SELECT rowid FROM sections WHERE heading = 'Stable procedure'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+
+        fs::write(
+            tree.join("General/runbook.md"),
+            "# Runbook\n\n## Stable procedure\n\nKeep the violet recovery note.\n\n## Active procedure\n\nRestart the cobalt service.\n",
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        run_with_env(["search", "cobalt", "--json"], env.clone(), &mut output).unwrap();
+        let changed: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(changed["results"][0]["pagePath"], "runbook.md");
+        let stable_rowid_after_edit = rusqlite::Connection::open(&index_paths[0])
+            .unwrap()
+            .query_row(
+                "SELECT rowid FROM sections WHERE heading = 'Stable procedure'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stable_rowid_after_edit, stable_rowid,
+            "an unrelated Section should not be rewritten"
+        );
+        let mut output = Vec::new();
+        run_with_env(["search", "amber", "--json"], env.clone(), &mut output).unwrap();
+        let stale: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(stale["results"], serde_json::json!([]));
+
+        fs::write(&index_paths[0], b"not a sqlite database").unwrap();
+        let mut output = Vec::new();
+        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        let rebuilt: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(rebuilt["results"][0]["pagePath"], "runbook.md");
+
+        let mut state = read_working_tree_state(&tree).unwrap();
+        state.folder_roots[0].can_read = false;
+        state.folder_roots[0].metadata_only = true;
+        write_json_file(&tree.join(".finitebrain/working-tree-state.json"), &state).unwrap();
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        let after_revocation: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(after_revocation["results"], serde_json::json!([]));
+        assert_eq!(
+            fs::read_dir(tree.join(".finitebrain/search-indexes"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn search_filters_folders_marks_sync_state_and_excludes_generated_or_outside_markdown() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        for folder in ["General", "Research", "Locked"] {
+            fs::create_dir_all(tree.join(folder)).unwrap();
+        }
+        fs::create_dir_all(tree.join("General/_wiki")).unwrap();
+        let general_markdown = "# General\n\nA heliotrope marker is synced.\n";
+        fs::write(tree.join("General/synced.md"), general_markdown).unwrap();
+        fs::write(
+            tree.join("Research/conflicted.md"),
+            "# Research\n\nA heliotrope marker is conflicted.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/_wiki/generated.md"),
+            "# Generated\n\nheliotrope should not surface\n",
+        )
+        .unwrap();
+        let mut agent = AgentState::new("brain", "2026-06-24T20:46:36Z");
+        agent.conflicts.push(ConflictEntry {
+            id: "conflict-search".to_owned(),
+            folder_id: Some("research".to_owned()),
+            path: Some("Research/conflicted.md".to_owned()),
+            reason: "test conflict".to_owned(),
+            state: ConflictState::Open,
+            created_at: "2026-06-24T20:46:36Z".to_owned(),
+            resolved_at: None,
+        });
+        write_agent_state(&tree, &agent).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "general".to_owned(),
+                        source_brain_id: None,
+                        path: "General".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "research".to_owned(),
+                        source_brain_id: None,
+                        path: "Research".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "locked".to_owned(),
+                        source_brain_id: None,
+                        path: "Locked".to_owned(),
+                        can_read: false,
+                        metadata_only: true,
+                    },
+                ],
+                objects: vec![WorkingTreeObjectManifestEntry {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "synced.md".to_owned(),
+                    object_id: "obj_synced000001".to_owned(),
+                    revision: 1,
+                    key_version: 1,
+                    content_type: "text/markdown".to_owned(),
+                    content_hash: finite_brain_core::sha256_hex(general_markdown.as_bytes()),
+                }],
+                sync: WorkingTreeSyncState { latest_sequence: 1 },
+            },
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let outside = tmp.path().join("outside.md");
+            fs::write(&outside, "# Outside\n\nheliotrope outside\n").unwrap();
+            symlink(&outside, tree.join("General/outside.md")).unwrap();
+        }
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let mut output = Vec::new();
+        run_with_env(["search", "heliotrope", "--json"], env.clone(), &mut output).unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["results"].as_array().unwrap().len(), 2);
+        let dispositions = report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["disposition"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(dispositions, BTreeSet::from(["conflicted", "synced"]));
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["search", "heliotrope", "--folder", "General", "--json"],
+            env.clone(),
+            &mut output,
+        )
+        .unwrap();
+        let filtered: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(filtered["searchedFolders"], serde_json::json!(["general"]));
+        assert_eq!(filtered["results"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["results"][0]["disposition"], "synced");
+
+        let error = run_with_env(
+            ["search", "heliotrope", "--folder", "Locked", "--json"],
+            env,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown or not readable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_refuses_a_folder_root_symlink_instead_of_indexing_outside_content() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join("secret.md"),
+            "# Secret\n\nexternal heliotrope\n",
+        )
+        .unwrap();
+        symlink(&outside, tree.join("Mounted")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "mounted".to_owned(),
+                    source_brain_id: None,
+                    path: "Mounted".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+
+        let error =
+            run_with_env(["search", "heliotrope", "--json"], env, &mut Vec::new()).unwrap_err();
+
+        assert!(matches!(error, CliError::InsecureWorkingTree { .. }));
+    }
+
+    #[test]
+    fn embedding_provider_adapter_owns_authentication_and_validates_vectors() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, headers, body) = read_http_request_with_headers(&mut stream);
+            let response_body = serde_json::json!({
+                "model": "embed-test",
+                "modelVersion": "embed-test-v1",
+                "dimensions": 3,
+                "vectors": [
+                    { "id": "section-1", "embedding": [0.25, 0.5, 0.75] },
+                    { "id": "query-1", "embedding": [0.1, 0.2, 0.3] }
+                ],
+                "requestId": "req-test"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            (request_line, headers, body)
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let response = adapter
+            .embed(&[
+                EmbeddingProviderInput::section(
+                    "section-1",
+                    "Runbook",
+                    vec!["Operations".to_owned(), "Rotation".to_owned()],
+                    "Rotate the token after removing a device.",
+                ),
+                EmbeddingProviderInput::query("query-1", "How do I rotate credentials?"),
+            ])
+            .unwrap();
+
+        assert_eq!(response.model, "embed-test");
+        assert_eq!(response.model_version, "embed-test-v1");
+        assert_eq!(response.dimensions, 3);
+        assert_eq!(response.vectors[0].id, "section-1");
+        assert_eq!(response.vectors[0].embedding, vec![0.25, 0.5, 0.75]);
+        let (request_line, headers, body) = server.join().unwrap();
+        assert_eq!(request_line, "POST /v1/embeddings HTTP/1.1");
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer adapter-secret")
+        );
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["inputs"][0]["id"], "section-1");
+        assert_eq!(body["inputs"][0]["pageTitle"], "Runbook");
+        assert_eq!(
+            body["inputs"][1],
+            serde_json::json!({
+                "id": "query-1",
+                "kind": "query",
+                "text": "How do I rotate credentials?"
+            })
+        );
+        assert!(body["inputs"][0].get("folderId").is_none());
+        assert!(body["inputs"][0].get("path").is_none());
+    }
+
+    #[test]
+    fn embedding_provider_adapter_rejects_wrong_dimension_vectors() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            let response_body = serde_json::json!({
+                "model": "embed-test",
+                "modelVersion": "embed-test-v1",
+                "dimensions": 3,
+                "vectors": [{ "id": "query-1", "embedding": [0.1, 0.2] }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let error = adapter
+            .embed(&[EmbeddingProviderInput::query("query-1", "test query")])
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert!(error.to_string().contains("wrong-dimension"));
+    }
+
+    #[test]
+    fn embedding_provider_debug_output_never_exposes_credentials() {
+        let token = "internal-beta-provider-secret";
+        let config = EmbeddingProviderConfig {
+            endpoint: "https://specialization.example".to_owned(),
+            bearer_token: token.to_owned(),
+            timeout: Duration::from_secs(5),
+        };
+        assert!(!format!("{config:?}").contains(token));
+
+        let adapter = EmbeddingProviderAdapter::new(config).unwrap();
+        assert!(!format!("{adapter:?}").contains(token));
+    }
+
+    #[test]
+    fn embedding_provider_adapter_batches_and_rejects_mixed_generations() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let started = Instant::now();
+            let mut batch_sizes = Vec::new();
+            while batch_sizes.len() < 2 && started.elapsed() < Duration::from_secs(3) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (_, _, body) = read_http_request_with_headers(&mut stream);
+                let request: Value = serde_json::from_str(&body).unwrap();
+                let inputs = request["inputs"].as_array().unwrap();
+                batch_sizes.push(inputs.len());
+                let model_version = if batch_sizes.len() == 1 {
+                    "embed-test-v1"
+                } else {
+                    "embed-test-v2"
+                };
+                let vectors = inputs
+                    .iter()
+                    .map(|input| {
+                        serde_json::json!({
+                            "id": input["id"],
+                            "embedding": [0.25, 0.5, 0.75]
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let response_body = serde_json::json!({
+                    "model": "embed-test",
+                    "modelVersion": model_version,
+                    "dimensions": 3,
+                    "vectors": vectors
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            batch_sizes
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let inputs = (0..65)
+            .map(|index| EmbeddingProviderInput::query(format!("query-{index}"), "find it"))
+            .collect::<Vec<_>>();
+
+        let error = adapter.embed(&inputs).unwrap_err();
+
+        assert!(error.to_string().contains("model contract between batches"));
+        assert_eq!(server.join().unwrap(), vec![64, 1]);
+    }
+
+    fn read_http_request_with_headers(stream: &mut TcpStream) -> (String, String, String) {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => bytes.extend_from_slice(&buffer[..size]),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(_) => break,
+            }
+            let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            if bytes.len() >= body_start + content_length {
+                return (
+                    headers.lines().next().unwrap_or_default().to_owned(),
+                    headers,
+                    String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
+                        .to_string(),
+                );
+            }
+        }
+        panic!("embedding adapter test server did not receive a complete request");
+    }
+
+    #[test]
     fn daemon_watch_once_records_blocked_sync_without_crashing() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -6265,6 +6835,49 @@ mod tests {
                 .unwrap()
                 .contains("server URL")
         );
+    }
+
+    #[test]
+    fn daemon_watch_reconciles_search_indexes_when_remote_sync_is_blocked() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "General".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        fs::write(
+            tree.join("General/local.md"),
+            "# Local\n\nIndex this saved change while offline.\n",
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let mut output = Vec::new();
+
+        run_with_env(["daemon", "watch", "--once", "--json"], env, &mut output).unwrap();
+
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["failures"], 1);
+        let indexes = fs::read_dir(tree.join(".finitebrain/search-indexes"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(indexes.len(), 1);
     }
 
     #[test]

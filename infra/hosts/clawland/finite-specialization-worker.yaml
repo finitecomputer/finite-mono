@@ -76,6 +76,10 @@ spec:
           env:
             - name: FINITE_SPECIALIZATION_VISION_MODEL
               value: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
+            - name: FINITE_SPECIALIZATION_EMBEDDING_MODEL
+              value: nomic-embed-text-v1-5
+            - name: FINITE_SPECIALIZATION_EMBEDDING_MODEL_VERSION
+              value: nomic-embed-text-v1-5/2026-07-21
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
               value: "300"
             - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS
